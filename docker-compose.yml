@@ -1,0 +1,39 @@
+services:
+  analytics:
+    container_name: analytics-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # Mount the Google service-account key read-only (path must match GOOGLE_APPLICATION_CREDENTIALS in .env).
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set ANALYTICS_DOMAIN in .env, e.g. analytics.zunkireelabs.com
+      - "traefik.http.routers.analytics.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics.entrypoints=websecure"
+      - "traefik.http.routers.analytics.tls=true"
+      - "traefik.http.routers.analytics.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-http.entrypoints=web"
+      - "traefik.http.routers.analytics-http.middlewares=analytics-redirect"
+      - "traefik.http.middlewares.analytics-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics.loadbalancer.server.port=3002"
+
+networks:
+  hosting:
+    external: true

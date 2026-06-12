@@ -1,0 +1,41 @@
+import pg from 'pg';
+import 'dotenv/config';
+
+// Neon serverless Postgres: use the POOLED connection string and keep max small.
+// Serverless Postgres limits concurrent connections, so a tiny pool is correct.
+const { Pool } = pg;
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is not set. Copy .env.example to .env and fill it in.');
+}
+
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 3,
+  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 10_000,
+  ssl: { rejectUnauthorized: false },
+});
+
+export const query = (text, params) => pool.query(text, params);
+
+// Fetch the configured site row, creating it from env on first run if absent.
+export async function getOrCreateSite() {
+  const gsc = process.env.GSC_PROPERTY;
+  const ga4 = process.env.GA4_PROPERTY_ID;
+  if (!gsc || !ga4) {
+    throw new Error('GSC_PROPERTY and GA4_PROPERTY_ID must be set in .env.');
+  }
+  const found = await query(
+    'SELECT * FROM sites WHERE gsc_property = $1 AND ga4_property_id = $2',
+    [gsc, ga4]
+  );
+  if (found.rows.length) return found.rows[0];
+
+  const inserted = await query(
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone)
+     VALUES ($1, $2, $3, $4) RETURNING *`,
+    [process.env.SITE_NAME || 'My Website', gsc, ga4, process.env.TZ || 'Asia/Kolkata']
+  );
+  return inserted.rows[0];
+}

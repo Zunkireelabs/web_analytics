@@ -1,0 +1,18 @@
+# Secrets — never commit
+.env
+.env.local
+secrets/
+*.json.key
+service-account*.json
+
+# Dependencies / build
+node_modules/
+dist/
+.vite/
+
+# Logs / OS
+*.log
+.DS_Store
+
+# Local macOS launchd deployment files (machine-specific paths)
+deploy/*.plist
