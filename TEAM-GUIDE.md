@@ -19,7 +19,7 @@ Before this, the numbers were only checked **once a week, by hand**. Now they're
 ## How do I open the dashboard?
 
 1. Go to the dashboard link: **https://analytics.zunkireelabs.com** *(your real link may differ)*
-2. Enter the **team password** (ask whoever set this up).
+2. Enter the password: **zunkiree2026**
 3. You're in. 🎉
 
 ---
