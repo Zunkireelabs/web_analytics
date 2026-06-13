@@ -1,6 +1,8 @@
 import cron from 'node-cron';
 import { runDailyJob, runWeeklyIfDue } from './job.js';
 import { getOrCreateSite } from './db.js';
+import { getNarrative } from './store/read.js';
+import { daysAgoInTz } from './util/dates.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -52,4 +54,29 @@ export function startCron() {
     );
     console.log(`[cron] weekly doc report scheduled "${weekly}" (${tz})`);
   }
+
+  // Hourly catch-up guard: fires every hour and runs the daily job if it should
+  // have run today (past 07:00 IST) but the report is still missing. This recovers
+  // from Mac-sleep-induced missed cron jobs without needing a server restart.
+  cron.schedule('5 * * * *', async () => {
+    try {
+      const now = new Date();
+      const nowInTz = new Date(now.toLocaleString('en-US', { timeZone: tz }));
+      const hourInTz = nowInTz.getHours();
+      if (hourInTz < 7) return; // before scheduled time — nothing to recover
+
+      const site = await getOrCreateSite();
+      const reportDate = daysAgoInTz(tz, 3); // same as runDailyJob
+      const existing = await getNarrative(site.id, reportDate);
+      if (existing?.narrative) return; // already done
+
+      console.log(`[cron] hourly guard: daily report for ${reportDate} missing — running catch-up`);
+      const { reportDate: done } = await runDailyJob();
+      console.log(`[cron] hourly guard: catch-up done — report date ${done}`);
+      await runWeeklyIfDue(site);
+    } catch (err) {
+      console.error('[cron] hourly guard error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
 }
