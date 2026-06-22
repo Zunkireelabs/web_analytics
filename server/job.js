@@ -1,11 +1,12 @@
 import { getOrCreateSite, query } from './db.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
-import { upsertGsc, upsertGa4, saveNarrative } from './store/upsert.js';
+import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone } from './store/upsert.js';
 import { getDay, getNarrative } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
 import { sendDailyEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
+import { runDailyDocReport } from './report/daily-doc.js';
 import { daysAgoInTz, dateRange, previousWeek } from './util/dates.js';
 
 // GSC finalizes with a lag; GA4 is near real-time.
@@ -63,18 +64,32 @@ export async function runDailyJob() {
     console.error('[report] narrative failed:', err.message);
   }
 
+  const day = await getDay(site.id, reportDate);
+  const existing = await getNarrative(site.id, reportDate);
+
   try {
     // Email idempotency: only send once per report date, even across restarts/catch-ups.
-    const existing = await getNarrative(site.id, reportDate);
     if (existing?.emailed_at) {
       console.log(`[report] email already sent for ${reportDate} — skipping.`);
     } else {
-      const day = await getDay(site.id, reportDate);
       const sent = await sendDailyEmail(site, reportDate, day, narrative);
       if (sent) await saveNarrative(site.id, reportDate, narrative, new Date().toISOString());
     }
   } catch (err) {
     console.error('[report] email failed:', err.message);
+  }
+
+  try {
+    // Daily doc idempotency: only write once per report date.
+    if (existing?.daily_doc_done) {
+      console.log(`[report] daily doc already written for ${reportDate} — skipping.`);
+    } else {
+      const r = await runDailyDocReport(site, reportDate);
+      await markDailyDocDone(site.id, reportDate);
+      console.log(`[report] daily doc entry written → ${r.url}`);
+    }
+  } catch (err) {
+    console.error('[report] daily doc failed:', err.message);
   }
 
   return { site, reportDate, narrative };

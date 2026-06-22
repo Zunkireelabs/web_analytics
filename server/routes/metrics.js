@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
   listSites, getDailySeries, getDay, getBreakdown,
-  getChannels, getNarrative, getMonthlyTotals, getRangeTotals, getWeeklyDocUrl,
+  getChannels, getNarrative, getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getDataRange, getChannelsRange,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
@@ -77,6 +77,12 @@ router.get('/sites', async (req, res, next) => {
 router.get('/doc-link', async (req, res, next) => {
   try {
     res.json({ url: await getWeeklyDocUrl(Number(req.query.site)) });
+  } catch (e) { next(e); }
+});
+
+router.get('/daily-doc-link', async (req, res, next) => {
+  try {
+    res.json({ url: await getDailyDocUrl(Number(req.query.site)) });
   } catch (e) { next(e); }
 });
 

@@ -17,6 +17,7 @@ export const api = {
   sites: () => req('/sites'),
   range: (site) => req(`/range?site=${site}`),
   docLink: (site) => req(`/doc-link?site=${site}`),
+  dailyDocLink: (site) => req(`/daily-doc-link?site=${site}`),
   series: (site, start, end) => req(`/series?site=${site}&start=${start}&end=${end}`),
   day: (site, date) => req(`/day?site=${site}&date=${date}`),
   compare: (site, a, b) => req(`/compare?site=${site}&a=${a}&b=${b}`),

@@ -9,6 +9,7 @@
     "get-token": "node server/scripts/get-oauth-token.js",
     "ingest": "node server/scripts/ingest.js",
     "weekly": "node server/scripts/weekly.js",
+    "daily-doc": "node server/scripts/daily-doc.js",
     "start": "node server/index.js",
     "dev:server": "node --watch server/index.js",
     "dev:web": "vite",

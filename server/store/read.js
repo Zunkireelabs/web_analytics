@@ -84,7 +84,7 @@ export async function getChannels(siteId, date) {
 
 export async function getNarrative(siteId, date) {
   const { rows } = await query(
-    'SELECT narrative, emailed_at FROM daily_reports WHERE site_id = $1 AND date = $2',
+    'SELECT narrative, emailed_at, daily_doc_done FROM daily_reports WHERE site_id = $1 AND date = $2',
     [siteId, date]
   );
   return rows[0] || null;
@@ -166,6 +166,13 @@ export async function getTopMovers(siteId, recent, prior, limit = 8) {
 export async function getWeeklyDocUrl(siteId) {
   const { rows } = await query('SELECT weekly_doc_id FROM sites WHERE id = $1', [siteId]);
   const id = rows[0]?.weekly_doc_id;
+  return id ? `https://docs.google.com/document/d/${id}/edit` : null;
+}
+
+// The daily report doc URL for a site, or null if not created yet.
+export async function getDailyDocUrl(siteId) {
+  const { rows } = await query('SELECT daily_doc_id FROM sites WHERE id = $1', [siteId]);
+  const id = rows[0]?.daily_doc_id;
   return id ? `https://docs.google.com/document/d/${id}/edit` : null;
 }
 

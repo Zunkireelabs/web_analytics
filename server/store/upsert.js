@@ -87,3 +87,12 @@ export async function saveNarrative(siteId, date, narrative, emailedAt = null) {
     [siteId, date, narrative, emailedAt]
   );
 }
+
+export async function markDailyDocDone(siteId, date) {
+  await query(
+    `INSERT INTO daily_reports (site_id, date, daily_doc_done)
+     VALUES ($1, $2, now())
+     ON CONFLICT (site_id, date) DO UPDATE SET daily_doc_done = now()`,
+    [siteId, date]
+  );
+}
