@@ -7,9 +7,10 @@ import { previousWeek, weekOf } from '../util/dates.js';
 const n = (v) => (v == null ? 0 : Number(v));
 const fmt = (v) => n(v).toLocaleString();
 const pad = (s, w) => String(s).padEnd(w);
+const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
 
 // Friendly "Jun 2 – Jun 8, 2026" label.
-function weekLabel(start, end) {
+export function weekLabel(start, end) {
   const opt = { month: 'short', day: 'numeric', timeZone: 'UTC' };
   const s = new Date(`${start}T00:00:00Z`).toLocaleDateString('en-US', opt);
   const e = new Date(`${end}T00:00:00Z`).toLocaleDateString('en-US', { ...opt, year: 'numeric' });
@@ -25,7 +26,7 @@ const sum = (rows, k) => rows.reduce((a, r) => a + n(r[k]), 0);
 // Create the doc once and store its id on the site row; reuse it thereafter.
 async function ensureDoc(site) {
   if (site.weekly_doc_id) return site.weekly_doc_id;
-  const docs = getDocs();
+  const docs = getDocs(site);
   const res = await docs.documents.create({
     requestBody: { title: `${site.name} — Weekly Analytics Report` },
   });
@@ -144,6 +145,13 @@ export async function runWeeklyDocReport(site, anchorDate) {
       clicks: sum(prevSeries, 'clicks'), impressions: sum(prevSeries, 'impressions'),
       users: sum(prevSeries, 'users'), sessions: sum(prevSeries, 'sessions'),
     },
+    // Precomputed so the model never has to do its own arithmetic (and risk getting it wrong).
+    vsPriorWeekPct: {
+      clicks: pct(sum(series, 'clicks'), sum(prevSeries, 'clicks')),
+      impressions: pct(sum(series, 'impressions'), sum(prevSeries, 'impressions')),
+      users: pct(sum(series, 'users'), sum(prevSeries, 'users')),
+      sessions: pct(sum(series, 'sessions'), sum(prevSeries, 'sessions')),
+    },
     topQueries: topQueries.map((q) => ({ query: q.dim_value, clicks: n(q.clicks) })),
   };
 
@@ -152,14 +160,16 @@ export async function runWeeklyDocReport(site, anchorDate) {
     'non-technical business owner. 3–4 sentences. State the week\'s real totals (clicks, impressions, ' +
     'users, sessions), compare to the prior week in plain terms, and name the top query if useful. ' +
     'A lower average Search position is BETTER. This is a low-traffic site, so small/zero numbers are ' +
-    'normal — report them plainly without alarm. No preamble, no bullet symbols, no markdown headers.';
+    'normal — report them plainly without alarm. If you cite a percent change, use ONLY the precomputed ' +
+    'vsPriorWeekPct values given — never calculate your own percentage. null means no prior-week baseline; ' +
+    'do not invent one. No preamble, no bullet symbols, no markdown headers.';
   const overview = await callLLM(system, `Weekly digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 400 });
 
   const { text: sectionText, bold, summary, weekHeading, tableHeader, tableRows } =
     buildSection(label, overview, series, prevSeries);
 
   const docId = await ensureDoc(site);
-  const docs = getDocs();
+  const docs = getDocs(site);
   // Insert at index 1 (top of body) so the newest week is first.
   const base = 1;
   const requests = [{ insertText: { location: { index: base }, text: sectionText } }];

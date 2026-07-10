@@ -1,8 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJob, runWeeklyIfDue } from './job.js';
-import { getOrCreateSite } from './db.js';
-import { getNarrative } from './store/read.js';
-import { daysAgoInTz } from './util/dates.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runHourlyCatchupForAllSites } from './job.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -22,8 +19,8 @@ export function startCron() {
       const startedAt = new Date().toISOString();
       console.log(`[cron] daily job started ${startedAt}`);
       try {
-        const { reportDate } = await runDailyJob();
-        console.log(`[cron] daily job finished — report date ${reportDate}`);
+        const results = await runDailyJobForAllSites();
+        console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
       }
@@ -43,11 +40,22 @@ export function startCron() {
       async () => {
         console.log(`[cron] weekly doc report started ${new Date().toISOString()}`);
         try {
-          const site = await getOrCreateSite();
-          const r = await runWeeklyIfDue(site);
-          if (r) console.log(`[cron] weekly doc report finished — ${r.start}..${r.end} → ${r.url}`);
+          const results = await runWeeklyIfDueForAllSites();
+          const written = results.filter(Boolean);
+          console.log(`[cron] weekly doc report finished — ${written.length} site(s) written`);
         } catch (err) {
           console.error('[cron] weekly doc report error:', err.message);
+        }
+
+        // AI Executive Report runs right after, on the same weekly cron
+        // trigger — not a separate schedule.
+        console.log(`[cron] weekly AI executive report started ${new Date().toISOString()}`);
+        try {
+          const results = await runExecutiveIfDueForAllSites();
+          const written = results.filter(Boolean);
+          console.log(`[cron] weekly AI executive report finished — ${written.length} site(s) written`);
+        } catch (err) {
+          console.error('[cron] weekly AI executive report error:', err.message);
         }
       },
       { timezone: tz }
@@ -55,9 +63,10 @@ export function startCron() {
     console.log(`[cron] weekly doc report scheduled "${weekly}" (${tz})`);
   }
 
-  // Hourly catch-up guard: fires every hour and runs the daily job if it should
-  // have run today (past 07:00 IST) but the report is still missing. This recovers
-  // from Mac-sleep-induced missed cron jobs without needing a server restart.
+  // Hourly catch-up guard: fires every hour and, for every connected site,
+  // runs the daily job if it should have run today (past 07:00 local) but
+  // the report is still missing. This recovers from sleep-induced missed
+  // cron jobs without needing a server restart — independently per site.
   cron.schedule('5 * * * *', async () => {
     try {
       const now = new Date();
@@ -65,15 +74,7 @@ export function startCron() {
       const hourInTz = nowInTz.getHours();
       if (hourInTz < 7) return; // before scheduled time — nothing to recover
 
-      const site = await getOrCreateSite();
-      const reportDate = daysAgoInTz(tz, 3); // same as runDailyJob
-      const existing = await getNarrative(site.id, reportDate);
-      if (existing?.narrative) return; // already done
-
-      console.log(`[cron] hourly guard: daily report for ${reportDate} missing — running catch-up`);
-      const { reportDate: done } = await runDailyJob();
-      console.log(`[cron] hourly guard: catch-up done — report date ${done}`);
-      await runWeeklyIfDue(site);
+      await runHourlyCatchupForAllSites(tz);
     } catch (err) {
       console.error('[cron] hourly guard error:', err.message);
     }

@@ -4,6 +4,7 @@ import { callLLM } from '../llm.js';
 import { getDailySeries } from '../store/read.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
+const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
 const fmt = (v) => n(v).toLocaleString();
 
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -16,7 +17,7 @@ function dayLabel(ymd) {
 
 async function ensureDoc(site) {
   if (site.daily_doc_id) return site.daily_doc_id;
-  const docs = getDocs();
+  const docs = getDocs(site);
   const res = await docs.documents.create({
     requestBody: { title: `${site.name} — Daily Analytics Report` },
   });
@@ -36,15 +37,20 @@ export async function runDailyDocReport(site, date) {
   const prevDate = prev.toISOString().slice(0, 10);
   const [prevRow] = await getDailySeries(site.id, prevDate, prevDate);
 
+  const clicks = n(row?.clicks), impressions = n(row?.impressions), users = n(row?.users), sessions = n(row?.sessions);
+  const prevClicks = n(prevRow?.clicks), prevImpressions = n(prevRow?.impressions), prevUsers = n(prevRow?.users), prevSessions = n(prevRow?.sessions);
+
   const digest = {
     date,
     site: site.name,
-    clicks: n(row?.clicks), impressions: n(row?.impressions),
+    clicks, impressions,
     position: row?.position == null ? null : Number(row.position),
-    users: n(row?.users), sessions: n(row?.sessions),
-    prevDay: {
-      clicks: n(prevRow?.clicks), impressions: n(prevRow?.impressions),
-      users: n(prevRow?.users), sessions: n(prevRow?.sessions),
+    users, sessions,
+    prevDay: { clicks: prevClicks, impressions: prevImpressions, users: prevUsers, sessions: prevSessions },
+    // Precomputed so the model never has to do its own arithmetic (and risk getting it wrong).
+    vsPriorDayPct: {
+      clicks: pct(clicks, prevClicks), impressions: pct(impressions, prevImpressions),
+      users: pct(users, prevUsers), sessions: pct(sessions, prevSessions),
     },
   };
 
@@ -53,6 +59,8 @@ export async function runDailyDocReport(site, date) {
     'business owner. State the day\'s real numbers (clicks, impressions, users, sessions), note ' +
     'anything notable vs the prior day in plain terms. A lower average Search position is BETTER. ' +
     'This is a low-traffic site so small/zero numbers are normal — report them plainly without alarm. ' +
+    'If you cite a percent change, use ONLY the precomputed vsPriorDayPct values given — never calculate ' +
+    'your own percentage. null means no prior-day baseline; do not invent one. ' +
     'No preamble, no bullet symbols, no markdown headers. Under 80 words.';
   const overview = await callLLM(system, `Daily digest:\n\n${JSON.stringify(digest, null, 2)}`, { maxTokens: 150 });
 
@@ -79,7 +87,7 @@ export async function runDailyDocReport(site, date) {
   add('\n');
 
   const docId = await ensureDoc({ ...site, daily_doc_id: site.daily_doc_id });
-  const docs = getDocs();
+  const docs = getDocs(site);
   const base = 1;
 
   const requests = [{ insertText: { location: { index: base }, text } }];

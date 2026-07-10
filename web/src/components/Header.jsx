@@ -5,10 +5,11 @@ import Logo from './Logo.jsx';
 
 const PURPLE = '#6C63FF';
 
-export default function Header({ sites, siteId, onSite, onLogout }) {
+export default function Header({ sites, siteId, isInternal, onSite, onLogout }) {
   const loc = useLocation();
   const [docUrl, setDocUrl] = useState(null);
   const [dailyDocUrl, setDailyDocUrl] = useState(null);
+  const [monthlyDocUrl, setMonthlyDocUrl] = useState(null);
   const [reportsOpen, setReportsOpen] = useState(false);
   const reportsRef = useRef(null);
 
@@ -16,6 +17,7 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
     if (!siteId) return;
     api.docLink(siteId).then((r) => setDocUrl(r.url)).catch(() => setDocUrl(null));
     api.dailyDocLink(siteId).then((r) => setDailyDocUrl(r.url)).catch(() => setDailyDocUrl(null));
+    api.monthlyDocLink(siteId).then((r) => setMonthlyDocUrl(r.url)).catch(() => setMonthlyDocUrl(null));
   }, [siteId]);
 
   // Close dropdown when clicking outside.
@@ -42,7 +44,7 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
     );
   };
 
-  const hasReports = docUrl || dailyDocUrl;
+  const hasReports = docUrl || dailyDocUrl || monthlyDocUrl;
 
   return (
     <header className="sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-slate-100">
@@ -50,7 +52,7 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
         <div className="flex items-center gap-2">
           <Logo />
           <span className="font-bold tracking-tight text-slate-900">
-            Zunkiree&nbsp;Labs <span style={{ color: PURPLE }}>Analytics</span>
+            Search <span style={{ color: PURPLE }}>Analytics AI</span>
           </span>
         </div>
 
@@ -59,6 +61,8 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
           {tab('/overview', 'Overview')}
           {tab('/insights', 'Insights')}
           {tab('/compare', 'Compare')}
+          {isInternal && tab('/ai-growth', 'AI Growth')}
+          {isInternal && tab('/action-center', 'Action Center')}
 
           {hasReports && (
             <div className="relative" ref={reportsRef}>
@@ -88,6 +92,13 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
                       <span>📄</span> Weekly
                     </a>
                   )}
+                  {monthlyDocUrl && (
+                    <a href={monthlyDocUrl} target="_blank" rel="noreferrer"
+                       onClick={() => setReportsOpen(false)}
+                       className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                      <span>🗓️</span> Monthly
+                    </a>
+                  )}
                 </div>
               )}
             </div>
@@ -101,9 +112,16 @@ export default function Header({ sites, siteId, onSite, onLogout }) {
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           )}
+          {sites?.[0]?.logo_data_url ? (
+            <img src={sites[0].logo_data_url} alt={sites[0].name}
+                 style={{ display: 'block', height: 40, width: 'auto', maxWidth: 160 }} />
+          ) : (
+            <Logo size={40} />
+          )}
+          {sites?.[0]?.name && (
+            <span className="text-base font-medium text-slate-600 max-w-[160px] truncate">{sites[0].name}</span>
+          )}
           <button onClick={onLogout} className="text-sm text-slate-500 hover:text-slate-800">Log out</button>
-          <div className="w-8 h-8 rounded-full grid place-items-center text-xs font-semibold text-white"
-               style={{ background: PURPLE }} title="Zunkiree Labs">ZL</div>
         </div>
       </div>
     </header>

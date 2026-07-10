@@ -5,7 +5,8 @@ import nodemailer from 'nodemailer';
 // pipeline still succeeds.
 export async function sendDailyEmail(site, reportDate, day, narrative) {
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, REPORT_EMAIL_TO } = process.env;
-  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !REPORT_EMAIL_TO) {
+  const recipient = site.report_email_to || REPORT_EMAIL_TO;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !recipient) {
     console.log('[email] SMTP not fully configured — skipping email.');
     return false;
   }
@@ -40,10 +41,10 @@ export async function sendDailyEmail(site, reportDate, day, narrative) {
 
   await transporter.sendMail({
     from: process.env.REPORT_EMAIL_FROM || SMTP_USER,
-    to: REPORT_EMAIL_TO,
+    to: recipient,
     subject: `${site.name}: ${n(day?.clicks)} clicks, ${n(day?.users)} users — ${reportDate}`,
     html,
   });
-  console.log(`[email] sent to ${REPORT_EMAIL_TO}`);
+  console.log(`[email] sent to ${recipient}`);
   return true;
 }

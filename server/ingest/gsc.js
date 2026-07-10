@@ -1,10 +1,13 @@
 import { getSearchConsole } from '../auth/google.js';
 
-// Fetch GSC Search Analytics for a single date.
-// Returns { totals, queries, pages } shaped for upsert.
+// Fetch GSC Search Analytics for a single date, using `site`'s own Google
+// credentials if it has a dedicated file (secrets/clients/<site.id>/), else
+// the shared app-wide credentials.
+// Returns { totals, queries, pages, queryPages } shaped for upsert.
 // GSC finalizes data with a ~2-3 day lag, so callers fetch date = today-3 (and backfill).
-export async function fetchGscForDate(gscProperty, date) {
-  const sc = await getSearchConsole();
+export async function fetchGscForDate(site, date) {
+  const gscProperty = site.gsc_property;
+  const sc = await getSearchConsole(site);
 
   const queryApi = async (dimensions, rowLimit) => {
     const res = await sc.searchanalytics.query({
@@ -41,5 +44,20 @@ export async function fetchGscForDate(gscProperty, date) {
   const devices = mapRows(await queryApi(['device'], 10));   // DESKTOP / MOBILE / TABLET
   const countries = mapRows(await queryApi(['country'], 25)); // ISO-3 country codes
 
-  return { date, totals, queries, pages, devices, countries };
+  // query+page combined rows, so a single-click query can be traced to its exact
+  // landing page (the single-dimension 'queries'/'pages' rows above share no key).
+  // Also includes device + country for circumstantial context on that click.
+  const queryPageRows = await queryApi(['query', 'page', 'device', 'country'], 250);
+  const queryPages = queryPageRows.map((r) => ({
+    query: r.keys?.[0] ?? '',
+    page: r.keys?.[1] ?? '',
+    device: r.keys?.[2] ?? '',
+    country: r.keys?.[3] ?? '',
+    clicks: r.clicks ?? 0,
+    impressions: r.impressions ?? 0,
+    ctr: r.ctr ?? 0,
+    position: r.position ?? 0,
+  }));
+
+  return { date, totals, queries, pages, devices, countries, queryPages };
 }

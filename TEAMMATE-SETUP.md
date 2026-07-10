@@ -8,8 +8,12 @@
 
 | What | Value |
 |------|-------|
-| Dashboard password | `zunkiree2026` |
 | Dashboard URL (local) | http://localhost:3002 |
+
+Dashboard login is now per-person (email + password), not a shared password.
+Ask Yukta to run `npm run create-client -- <your-email> <password> --site-id 1`
+once to create your login, or ask her directly for credentials if she's
+already done this for you.
 
 You will also need from Yukta (ask her directly — not in this file):
 - The filled-in `.env` file (has DB URL, API keys, Google OAuth tokens, email password)
@@ -111,7 +115,8 @@ This compiles the React dashboard into `web/dist/`. The Node server then serves 
 node server/index.js
 ```
 
-Open http://localhost:3002 — log in with password `zunkiree2026`.
+Open http://localhost:3002 — log in with the email and password Yukta gave you
+(see the Credentials section above if you don't have one yet).
 You should see the dashboard. Press Ctrl+C to stop.
 
 ---
@@ -199,7 +204,7 @@ curl http://localhost:3002/api/health
 tail -f deploy/analytics.log
 ```
 
-Open http://localhost:3002 → log in with `zunkiree2026` ✓
+Open http://localhost:3002 → log in with your email and password ✓
 
 ---
 

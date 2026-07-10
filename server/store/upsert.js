@@ -3,7 +3,7 @@ import { query } from '../db.js';
 // All upserts use ON CONFLICT DO UPDATE keyed on the primary key, so re-running
 // the ingest for the same day overwrites with fresh values (never duplicates).
 
-export async function upsertGsc(siteId, { date, totals, queries, pages, devices = [], countries = [] }) {
+export async function upsertGsc(siteId, { date, totals, queries, pages, devices = [], countries = [], queryPages = [] }) {
   await query(
     `INSERT INTO gsc_daily (site_id, date, clicks, impressions, ctr, position)
      VALUES ($1, $2, $3, $4, $5, $6)
@@ -32,9 +32,22 @@ export async function upsertGsc(siteId, { date, totals, queries, pages, devices 
       [siteId, date, r.dim_type, r.dim_value, r.clicks, r.impressions, r.ctr, r.position]
     );
   }
+
+  // Replace the day's query+page rows so stale entries don't linger.
+  await query('DELETE FROM gsc_query_page WHERE site_id = $1 AND date = $2', [siteId, date]);
+  for (const r of queryPages) {
+    await query(
+      `INSERT INTO gsc_query_page (site_id, date, query, page, device, country, clicks, impressions, ctr, position)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (site_id, date, query, page, device, country) DO UPDATE SET
+         clicks = EXCLUDED.clicks, impressions = EXCLUDED.impressions,
+         ctr = EXCLUDED.ctr, position = EXCLUDED.position`,
+      [siteId, date, r.query, r.page, r.device, r.country, r.clicks, r.impressions, r.ctr, r.position]
+    );
+  }
 }
 
-export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [] }) {
+export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [] }) {
   await query(
     `INSERT INTO ga4_daily
        (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions)
@@ -60,11 +73,13 @@ export async function upsertGa4(siteId, { date, totals, channels, devices = [], 
     );
   }
 
-  // GA4 device + country breakdowns → ga4_breakdown (replace the day's rows).
+  // GA4 device + country + city + language breakdowns → ga4_breakdown (replace the day's rows).
   await query('DELETE FROM ga4_breakdown WHERE site_id = $1 AND date = $2', [siteId, date]);
   const ga4Rows = [
     ...devices.map((r) => ({ ...r, dim_type: 'device' })),
     ...countries.map((r) => ({ ...r, dim_type: 'country' })),
+    ...cities.map((r) => ({ ...r, dim_type: 'city' })),
+    ...languages.map((r) => ({ ...r, dim_type: 'language' })),
   ];
   for (const r of ga4Rows) {
     await query(

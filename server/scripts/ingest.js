@@ -1,13 +1,27 @@
 import 'dotenv/config';
 import { pool, getOrCreateSite } from '../db.js';
+import { getSiteById } from '../store/read.js';
 import { ingestDate, runDailyIngest } from '../job.js';
 
-// Manual ingest.
-//   npm run ingest                 → run the standard daily window (GSC backfill + GA4 yesterday)
-//   npm run ingest -- 2026-06-08   → ingest one explicit date for both sources
-//   npm run ingest -- 2026-06-01 2026-06-08  → ingest an inclusive date range
+// Manual ingest. Defaults to the original env-configured site
+// (getOrCreateSite()) unless --site-id is passed, so an onboarded client's
+// site can be backfilled without touching this instance's own site.
+//   npm run ingest                              → run the standard daily window (GSC backfill + GA4 yesterday)
+//   npm run ingest -- 2026-06-08                 → ingest one explicit date for both sources
+//   npm run ingest -- 2026-06-01 2026-06-08      → ingest an inclusive date range
+//   npm run ingest -- 2026-06-01 2026-06-08 --site-id 3  → same, for a specific site
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--site-id') flags.siteId = Number(argv[++i]);
+    else positional.push(argv[i]);
+  }
+  return { positional, ...flags };
+}
+
 async function main() {
-  const args = process.argv.slice(2);
+  const { positional: args, siteId } = parseArgs(process.argv.slice(2));
 
   if (args.length === 0) {
     await runDailyIngest();
@@ -15,7 +29,8 @@ async function main() {
     return;
   }
 
-  const site = await getOrCreateSite();
+  const site = siteId ? await getSiteById(siteId) : await getOrCreateSite();
+  if (siteId && !site) throw new Error(`No site found with id ${siteId}.`);
   const [start, end = start] = args;
 
   const dates = [];

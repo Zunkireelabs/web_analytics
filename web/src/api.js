@@ -12,12 +12,16 @@ async function req(path, opts = {}) {
 
 export const api = {
   me: () => req('/me'),
-  login: (password) => req('/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  login: (email, password) => req('/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => req('/logout', { method: 'POST' }),
   sites: () => req('/sites'),
+  agents: () => req('/agents'),
+  runAgent: (id, start, end, params) => req(`/agents/${id}/run`, { method: 'POST', body: JSON.stringify({ start, end, params }) }),
+  agentRuns: (id, limit = 10) => req(`/agents/${id}/runs?limit=${limit}`),
   range: (site) => req(`/range?site=${site}`),
   docLink: (site) => req(`/doc-link?site=${site}`),
   dailyDocLink: (site) => req(`/daily-doc-link?site=${site}`),
+  monthlyDocLink: (site) => req(`/monthly-doc-link?site=${site}`),
   series: (site, start, end) => req(`/series?site=${site}&start=${start}&end=${end}`),
   day: (site, date) => req(`/day?site=${site}&date=${date}`),
   compare: (site, a, b) => req(`/compare?site=${site}&a=${a}&b=${b}`),
@@ -27,9 +31,22 @@ export const api = {
   aiCompare: (site, a, b) => req('/ai-compare', { method: 'POST', body: JSON.stringify({ site, a, b }) }),
   aiAsk: (site, date, question) => req('/ai-ask', { method: 'POST', body: JSON.stringify({ site, date, question }) }),
   channels: (site, start, end) => req(`/channels?site=${site}&start=${start}&end=${end}`),
+  breakdownRange: (site, start, end, dim, limit = 10) => req(`/breakdown-range?site=${site}&start=${start}&end=${end}&dim=${dim}&limit=${limit}`),
   device: (site, start, end) => req(`/device?site=${site}&start=${start}&end=${end}`),
   country: (site, start, end) => req(`/country?site=${site}&start=${start}&end=${end}`),
   movers: (site) => req(`/movers?site=${site}`),
+  translate: (q) => req(`/translate?query=${encodeURIComponent(q)}`),
+
+  actionCenter: {
+    recommendations: () => req('/action-center/recommendations'),
+    refresh: (start, end) => req('/action-center/recommendations/refresh', { method: 'POST', body: JSON.stringify({ start, end }) }),
+    generators: () => req('/action-center/generators'),
+    generate: (generatorId, params, source) => req('/action-center/generate', { method: 'POST', body: JSON.stringify({ generatorId, params, source }) }),
+    drafts: (filters = {}) => req(`/action-center/drafts?${new URLSearchParams(filters)}`),
+    draft: (id) => req(`/action-center/drafts/${id}`),
+    saveDraft: (id, content) => req(`/action-center/drafts/${id}`, { method: 'PUT', body: JSON.stringify({ content }) }),
+    deleteDraft: (id) => req(`/action-center/drafts/${id}`, { method: 'DELETE' }),
+  },
 };
 
 // YYYY-MM-DD for `n` days before today (browser-local; fine for UI defaults).

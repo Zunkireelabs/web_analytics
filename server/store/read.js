@@ -7,6 +7,11 @@ export async function listSites() {
   return rows;
 }
 
+export async function getSiteById(id) {
+  const { rows } = await query('SELECT * FROM sites WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
 // Combined GSC + GA4 daily series for a site over an inclusive date range.
 export async function getDailySeries(siteId, start, end) {
   const { rows } = await query(
@@ -137,6 +142,58 @@ export async function getGa4BreakdownRange(siteId, start, end, dimType, limit = 
   return rows;
 }
 
+// Top landing page per query over a date range — one row per query, picking the
+// page with the most clicks. Lets the UI answer "which page did this query land on?"
+export async function getTopPagePerQuery(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (query) query, page, clicks
+       FROM (
+         SELECT query, page, SUM(clicks) AS clicks
+           FROM gsc_query_page
+          WHERE site_id = $1 AND date BETWEEN $2 AND $3
+          GROUP BY query, page
+       ) t
+      ORDER BY query, clicks DESC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
+// Top queries driving traffic to a single landing page over a date range —
+// the reverse of getTopPagePerQuery, used by the Content Gap Agent to know
+// which real query to check a page's content against (e.g. does it signal
+// comparison intent).
+export async function getQueriesForPage(siteId, start, end, page, limit = 3) {
+  const { rows } = await query(
+    `SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions
+       FROM gsc_query_page
+      WHERE site_id = $1 AND page = $2 AND date BETWEEN $3 AND $4
+      GROUP BY query
+      ORDER BY clicks DESC, impressions DESC
+      LIMIT $5`,
+    [siteId, page, start, end, limit]
+  );
+  return rows;
+}
+
+// Top device+country for each query over a date range — one row per query,
+// picking the device/country combo with the most clicks. Lets the UI show
+// "mostly mobile · Indonesia" alongside the landing page for that query.
+export async function getTopDeviceCountryPerQuery(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (query) query, device, country, clicks
+       FROM (
+         SELECT query, device, country, SUM(clicks) AS clicks
+           FROM gsc_query_page
+          WHERE site_id = $1 AND date BETWEEN $2 AND $3
+          GROUP BY query, device, country
+       ) t
+      ORDER BY query, clicks DESC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 // Top movers: change in query clicks, recent week vs the week before.
 // Returns gainers (biggest increase) and droppers (biggest decrease).
 export async function getTopMovers(siteId, recent, prior, limit = 8) {
@@ -162,6 +219,58 @@ export async function getTopMovers(siteId, recent, prior, limit = 8) {
   return { gainers, droppers };
 }
 
+// Per-dim_value search performance aggregated over a date range: clicks,
+// impressions, an impression-weighted average position, and CTR computed
+// from the summed clicks/impressions (not an average of daily CTRs, which
+// would over-weight low-traffic days). Used by agents that need real
+// position/CTR — unlike getGscBreakdownRange, which only sums clicks/impressions.
+export async function getSearchPerformanceRange(siteId, start, end, dimType, limit = 50) {
+  const { rows } = await query(
+    `SELECT dim_value,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN 0
+                 ELSE ROUND(SUM(clicks)::numeric / SUM(impressions), 5) END AS ctr,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS avg_position
+       FROM gsc_breakdown
+      WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4
+      GROUP BY dim_value
+     HAVING SUM(impressions) > 0
+      ORDER BY impressions DESC
+      LIMIT $5`,
+    [siteId, dimType, start, end, limit]
+  );
+  return rows;
+}
+
+// Top movers for a ga4_breakdown dimension (e.g. 'country'): change in
+// sessions, recent period vs an equal-length prior period. Same gainers/
+// droppers shape as getTopMovers, but against GA4 visitor data instead of
+// GSC query clicks.
+export async function getGa4BreakdownDelta(siteId, dimType, recent, prior, limit = 8) {
+  const { rows } = await query(
+    `WITH r AS (
+        SELECT dim_value, SUM(sessions) sessions FROM ga4_breakdown
+         WHERE site_id=$1 AND dim_type=$2 AND date BETWEEN $3 AND $4
+         GROUP BY dim_value),
+      p AS (
+        SELECT dim_value, SUM(sessions) sessions FROM ga4_breakdown
+         WHERE site_id=$1 AND dim_type=$2 AND date BETWEEN $5 AND $6
+         GROUP BY dim_value)
+     SELECT COALESCE(r.dim_value, p.dim_value) AS dim_value,
+            COALESCE(r.sessions,0) AS recent,
+            COALESCE(p.sessions,0) AS prior,
+            COALESCE(r.sessions,0) - COALESCE(p.sessions,0) AS delta
+       FROM r FULL OUTER JOIN p ON r.dim_value = p.dim_value`,
+    [siteId, dimType, recent.start, recent.end, prior.start, prior.end]
+  );
+  const moved = rows.filter((x) => Number(x.delta) !== 0);
+  const gainers = moved.filter((x) => x.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, limit);
+  const droppers = moved.filter((x) => x.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, limit);
+  return { gainers, droppers };
+}
+
 // The weekly report doc URL for a site, or null if not created yet.
 export async function getWeeklyDocUrl(siteId) {
   const { rows } = await query('SELECT weekly_doc_id FROM sites WHERE id = $1', [siteId]);
@@ -173,6 +282,13 @@ export async function getWeeklyDocUrl(siteId) {
 export async function getDailyDocUrl(siteId) {
   const { rows } = await query('SELECT daily_doc_id FROM sites WHERE id = $1', [siteId]);
   const id = rows[0]?.daily_doc_id;
+  return id ? `https://docs.google.com/document/d/${id}/edit` : null;
+}
+
+// The monthly report doc URL for a site, or null if not created yet.
+export async function getMonthlyDocUrl(siteId) {
+  const { rows } = await query('SELECT monthly_doc_id FROM sites WHERE id = $1', [siteId]);
+  const id = rows[0]?.monthly_doc_id;
   return id ? `https://docs.google.com/document/d/${id}/edit` : null;
 }
 

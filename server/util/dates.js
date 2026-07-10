@@ -40,6 +40,14 @@ export function previousWeek(timezone, now = new Date()) {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+// The most recent fully-completed calendar month before today (in the given TZ).
+// Returns { year, month } (month is 1-12).
+export function previousMonth(timezone, now = new Date()) {
+  const ymd = todayInTz(timezone, now);
+  const [y, m] = ymd.split('-').map(Number);
+  return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
+}
+
 // The Mon–Sun week containing a given YYYY-MM-DD anchor date.
 export function weekOf(anchorYmd) {
   const [y, m, d] = anchorYmd.split('-').map(Number);
@@ -50,6 +58,22 @@ export function weekOf(anchorYmd) {
   const end = new Date(start);
   end.setUTCDate(start.getUTCDate() + 6);
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+// The equal-length period immediately before [start, end] (both YYYY-MM-DD,
+// inclusive). E.g. priorPeriod('2026-07-01', '2026-07-07') (7 days) →
+// { start: '2026-06-24', end: '2026-06-30' }. Used by agents to compare a
+// caller-supplied range against "the same-length period right before it",
+// mirroring previousWeek()'s recent-vs-prior pattern for arbitrary ranges.
+export function priorPeriod(start, end) {
+  const s = new Date(`${start}T00:00:00Z`);
+  const e = new Date(`${end}T00:00:00Z`);
+  const days = Math.round((e - s) / 86400000) + 1;
+  const priorEnd = new Date(s);
+  priorEnd.setUTCDate(priorEnd.getUTCDate() - 1);
+  const priorStart = new Date(priorEnd);
+  priorStart.setUTCDate(priorStart.getUTCDate() - (days - 1));
+  return { start: priorStart.toISOString().slice(0, 10), end: priorEnd.toISOString().slice(0, 10) };
 }
 
 // Inclusive list of YYYY-MM-DD strings from start..end (both YYYY-MM-DD).

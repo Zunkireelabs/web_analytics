@@ -19,7 +19,7 @@ Before this, the numbers were only checked **once a week, by hand**. Now they're
 ## How do I open the dashboard?
 
 1. Go to the dashboard link: **https://analytics.zunkireelabs.com** *(your real link may differ)*
-2. Enter the password: **zunkiree2026**
+2. Log in with the email and password you were given by whoever set up your access.
 3. You're in. 🎉
 
 ---
@@ -77,5 +77,5 @@ glance at it without opening the dashboard. The dashboard always has the full pi
 
 ## Who to ask
 
-For access, the password, or questions about the numbers, contact the person who maintains
-this tool (see `README.md` for the technical setup).
+For access, your login credentials, or questions about the numbers, contact the person who
+maintains this tool (see `README.md` for the technical setup).

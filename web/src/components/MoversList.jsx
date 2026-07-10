@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { api } from '../api.js';
 
 const GREEN = '#16A34A';
 const RED = '#EF4444';
@@ -79,41 +80,56 @@ function Metric({ icon, tint, value, label, badge, badgeUp, sub }) {
 
 /* ───────── AI Insights band ───────── */
 function AiInsights({ gainers, droppers }) {
-  const topGain = gainers[0];
-  const newQ = gainers.find((g) => Number(g.prior) === 0) || gainers[1];
-  const vsQ = [...gainers, ...droppers].find((q) => / vs /i.test(q.query));
-  const topDrop = droppers[0];
+  const used = new Set();
+  const take = (q) => { if (q) used.add(q.query); return q; };
+
+  const topGain = take(gainers[0]);
+  const newQ = take(gainers.find((g) => !used.has(g.query) && Number(g.prior) === 0));
+  const vsQ = take([...gainers, ...droppers].find((q) => !used.has(q.query) && / vs /i.test(q.query)));
+  const topDrop = take(droppers[0]);
+
+  // Auto-translate the handful of highlighted queries here (bounded to ≤4 calls,
+  // cached server-side so repeat loads are instant).
+  const highlighted = [topGain, newQ, vsQ, topDrop].filter(Boolean).map((q) => q.query);
+  const [translations, setTranslations] = useState({});
+  useEffect(() => {
+    highlighted.forEach((q) => {
+      api.translate(q).then((t) => {
+        if (t.language !== 'English') setTranslations((prev) => ({ ...prev, [q]: t.translation }));
+      }).catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlighted.join('|')]);
+  const withTranslation = (q, text) => translations[q] ? `${text} (“${translations[q]}”)` : text;
 
   const blocks = [];
   if (topGain) {
     const c = changePct(topGain.prior, topGain.delta);
-    blocks.push({ icon: <TrendUp />, color: GREEN, head: `“${topGain.query}”`, text: `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}` });
+    blocks.push({ icon: <TrendUp />, color: GREEN, tag: 'Gainer', head: `“${topGain.query}”`, text: withTranslation(topGain.query, `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}`) });
   }
-  if (newQ) blocks.push({ icon: <Sparkle />, color: GREEN, head: `New interest: “${newQ.query}”`, text: `+${newQ.recent} new clicks this week` });
-  if (vsQ) blocks.push({ icon: <Activity />, color: GREEN, head: `“${vsQ.query}”`, text: 'Comparison searches gaining momentum' });
-  if (topDrop) blocks.push({ icon: <TrendDown />, color: RED, head: `“${topDrop.query}”`, text: 'Lost the most visibility — refresh content' });
+  if (newQ) blocks.push({ icon: <Sparkle />, color: GREEN, tag: 'New', head: `“${newQ.query}”`, text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks this week`) });
+  if (vsQ) blocks.push({ icon: <Activity />, color: GREEN, tag: 'Trending', head: `“${vsQ.query}”`, text: withTranslation(vsQ.query, 'Comparison searches gaining momentum') });
+  if (topDrop) blocks.push({ icon: <TrendDown />, color: RED, tag: 'Drop', head: `“${topDrop.query}”`, text: withTranslation(topDrop.query, 'Lost the most visibility — refresh content') });
 
   if (blocks.length === 0) return null;
 
   return (
     <div className="rounded-2xl border p-5" style={{ borderColor: '#E5F5EC', background: 'linear-gradient(135deg,#f0fdf4,#ffffff 85%)' }}>
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-bold" style={{ color: GREEN }}>✨ AI Insights</span>
-          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: '#dcfce7', color: GREEN }}>Beta</span>
-        </div>
-        <button className="text-xs font-medium px-3 py-1.5 rounded-lg border hover:bg-emerald-50 transition"
-          style={{ borderColor: '#bbf7d0', color: GREEN }}
-          onClick={() => document.getElementById('movers-section')?.scrollIntoView({ behavior: 'smooth' })}>
-          View full insights
-        </button>
+      <div className="flex items-center gap-2 mb-4">
+        <span className="text-sm font-bold" style={{ color: GREEN }}>✨ AI Insights</span>
+        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: '#dcfce7', color: GREEN }}>Beta</span>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="flex flex-wrap gap-3">
         {blocks.map((b, i) => (
-          <div key={i} className="flex flex-col gap-1.5">
-            <span className="w-8 h-8 rounded-full grid place-items-center" style={{ background: `${b.color}1a`, color: b.color }}>{b.icon}</span>
-            <div className="text-sm font-semibold text-[#0F172A] leading-snug">{b.head}</div>
-            <div className="text-[12px] text-[#64748B] leading-snug">{b.text}</div>
+          <div key={i} className="flex items-start gap-3 flex-1 min-w-[220px] rounded-xl bg-white/80 border border-white p-3.5 shadow-sm">
+            <span className="w-9 h-9 rounded-full grid place-items-center shrink-0" style={{ background: `${b.color}1a`, color: b.color }}>{b.icon}</span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full" style={{ background: `${b.color}1a`, color: b.color }}>{b.tag}</span>
+              </div>
+              <div className="text-sm font-semibold text-[#0F172A] leading-snug mt-1 truncate" title={b.head}>{b.head}</div>
+              <div className="text-[12px] text-[#64748B] leading-snug">{b.text}</div>
+            </div>
           </div>
         ))}
       </div>
@@ -155,7 +171,17 @@ function MoverCard({ kind, rows, total }) {
           return (
             <div key={i} className="grid grid-cols-[24px_1fr_64px_64px_64px] items-center gap-2 px-3 py-2.5 rounded-lg hover:bg-slate-50 transition">
               <span className="w-6 h-6 rounded-md grid place-items-center text-[11px] font-bold" style={{ background: soft, color }}>{i + 1}</span>
-              <span className="text-sm text-[#0F172A] truncate" title={r.query}>{r.query}</span>
+              <span className="min-w-0">
+                <span className="flex items-center gap-1 min-w-0">
+                  <span className="text-sm text-[#0F172A] truncate" title={r.query}>{r.query}</span>
+                  <TranslateButton query={r.query} />
+                </span>
+                {r.page && (
+                  <span className="block text-[10px] text-slate-400 truncate" title={r.page}>
+                    → {r.page}{(r.device || r.country) && ` (${[r.device?.toLowerCase(), r.country].filter(Boolean).join(' · ')})`}
+                  </span>
+                )}
+              </span>
               <span className="text-right text-sm font-semibold" style={{ color }}>{fmtSigned(r.delta)}</span>
               <span className="text-right">
                 <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md"
@@ -175,6 +201,33 @@ function MoverCard({ kind, rows, total }) {
         </button>
       )}
     </div>
+  );
+}
+
+/* ───────── Click-to-reveal translation ───────── */
+function TranslateButton({ query }) {
+  const [state, setState] = useState(null); // null | 'loading' | { language, translation }
+  if (state && state !== 'loading' && (state.language === 'English' || !state.translation)) return null;
+  return (
+    <span className="shrink-0">
+      {!state && (
+        <button
+          type="button"
+          className="text-[10px] text-slate-400 hover:text-slate-600 leading-none"
+          title="Translate query"
+          onClick={async (e) => {
+            e.stopPropagation();
+            setState('loading');
+            try { setState(await api.translate(query)); }
+            catch { setState({ language: 'unknown', translation: '' }); }
+          }}
+        >🌐</button>
+      )}
+      {state === 'loading' && <span className="text-[10px] text-slate-300">…</span>}
+      {state && state !== 'loading' && state.translation && (
+        <span className="text-[10px] text-slate-400 italic" title={state.language}> “{state.translation}”</span>
+      )}
+    </span>
   );
 }
 

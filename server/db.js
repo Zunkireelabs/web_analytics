@@ -39,3 +39,43 @@ export async function getOrCreateSite() {
   );
   return inserted.rows[0];
 }
+
+// Create a brand-new client site with no GSC/GA4 connected yet. Distinct
+// from getOrCreateSite(), which is env-driven and used only by the
+// cron/job/ingest pipeline for the one site configured in this instance's
+// .env — this is for provisioning additional clients (see
+// server/scripts/create-client.js).
+export async function createClientSite({ name, websiteDomain, timezone }) {
+  const inserted = await query(
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain)
+     VALUES ($1, NULL, NULL, $2, $3) RETURNING *`,
+    [name, timezone || 'Asia/Kolkata', websiteDomain || null]
+  );
+  return inserted.rows[0];
+}
+
+// Attach GSC/GA4 (and optionally email recipient / logo) to a site created
+// via createClientSite() — only the fields actually passed are updated.
+// Once both gsc_property and ga4_property_id are set, job.js's
+// listConnectedSites() picks the site up automatically on the next cron tick.
+export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId, reportEmailTo, logoDataUrl }) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+
+  if (gscProperty !== undefined) set('gsc_property', gscProperty);
+  if (ga4PropertyId !== undefined) set('ga4_property_id', ga4PropertyId);
+  if (reportEmailTo !== undefined) set('report_email_to', reportEmailTo);
+  if (logoDataUrl !== undefined) set('logo_data_url', logoDataUrl);
+
+  if (!fields.length) throw new Error('updateSiteConnection: nothing to update.');
+
+  values.push(siteId);
+  const { rows } = await query(
+    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+    values
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
