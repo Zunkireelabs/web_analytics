@@ -1,6 +1,6 @@
 services:
   analytics:
-    container_name: analytics-app-prod
+    container_name: analytics-app-stage
     build:
       context: .
       dockerfile: Dockerfile
@@ -24,16 +24,16 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=hosting"
-      # Set ANALYTICS_DOMAIN in .env, e.g. analytics.zunkireelabs.com
-      - "traefik.http.routers.analytics-prod.rule=Host(`${ANALYTICS_DOMAIN}`)"
-      - "traefik.http.routers.analytics-prod.entrypoints=websecure"
-      - "traefik.http.routers.analytics-prod.tls=true"
-      - "traefik.http.routers.analytics-prod.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.analytics-prod-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
-      - "traefik.http.routers.analytics-prod-http.entrypoints=web"
-      - "traefik.http.routers.analytics-prod-http.middlewares=analytics-prod-redirect"
-      - "traefik.http.middlewares.analytics-prod-redirect.redirectscheme.scheme=https"
-      - "traefik.http.services.analytics-prod.loadbalancer.server.port=3002"
+      # Set ANALYTICS_DOMAIN in .env, e.g. dev-analytics.zunkireelabs.com
+      - "traefik.http.routers.analytics-stage.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-stage.entrypoints=websecure"
+      - "traefik.http.routers.analytics-stage.tls=true"
+      - "traefik.http.routers.analytics-stage.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-stage-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-stage-http.entrypoints=web"
+      - "traefik.http.routers.analytics-stage-http.middlewares=analytics-stage-redirect"
+      - "traefik.http.middlewares.analytics-stage-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-stage.loadbalancer.server.port=3002"
 
 networks:
   hosting:

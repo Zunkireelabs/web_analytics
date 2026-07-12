@@ -1,0 +1,124 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [stage]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Pre-deploy Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build dashboard
+        run: npm run build:web
+
+  deploy:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: checks
+    environment: staging
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+
+            # First-push bootstrap: create directory and clone if missing
+            if [ ! -d "$DIR" ]; then
+              echo "First deployment — bootstrapping $DIR"
+              mkdir -p "$DIR"
+              git clone -b stage git@github.com:${{ github.repository }}.git "$DIR"
+            fi
+
+            cd "$DIR"
+            git fetch origin
+            git checkout stage
+            git pull origin stage
+
+            cat > .env << 'ENVEOF'
+            # ── Database (staging) ──────────────────────────────────────────
+            DATABASE_URL=${{ secrets.STAGING_DATABASE_URL }}
+
+            # ── Google credentials (shared with production, OAuth method) ──
+            GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+            GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+            GOOGLE_OAUTH_REFRESH_TOKEN=${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+            GSC_PROPERTY=${{ vars.GSC_PROPERTY }}
+            GA4_PROPERTY_ID=${{ vars.GA4_PROPERTY_ID }}
+
+            # ── AI narrative (shared) ───────────────────────────────────────
+            REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
+            REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
+
+            # ── Email (shared) ──────────────────────────────────────────────
+            SMTP_HOST=${{ vars.SMTP_HOST }}
+            SMTP_PORT=${{ vars.SMTP_PORT }}
+            SMTP_SECURE=${{ vars.SMTP_SECURE }}
+            SMTP_USER=${{ vars.SMTP_USER }}
+            SMTP_PASS=${{ secrets.SMTP_PASS }}
+            REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
+            REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
+
+            # ── Dashboard auth (staging) ────────────────────────────────────
+            SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
+            COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
+
+            # ── Site identity ───────────────────────────────────────────────
+            SITE_NAME=${{ vars.SITE_NAME }}
+            TZ=${{ vars.TZ }}
+
+            # ── Cron — disabled on staging to avoid duplicate emails/ingests ─
+            CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
+            DISABLE_CRON=true
+
+            # ── Deployment ───────────────────────────────────────────────────
+            ANALYTICS_DOMAIN=${{ vars.STAGING_DOMAIN }}
+            ENVEOF
+
+            docker compose -f docker-compose.dev.yml up -d --build
+
+            echo "Waiting for container to be healthy..."
+            sleep 10
+            CONTAINER="analytics-app-stage"
+            for i in $(seq 1 12); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+              if [ "$STATUS" = "healthy" ]; then
+                echo "Container is healthy!"
+                exit 0
+              fi
+              echo "Attempt $i/12: Status is $STATUS, waiting..."
+              sleep 10
+            done
+            echo "Container did not become healthy within 2 minutes"
+            docker logs "$CONTAINER" --tail 50
+            exit 1
+
+      - name: Verify Health
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_DOMAIN }}")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Staging health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "Staging health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi

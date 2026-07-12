@@ -1,0 +1,82 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to roll back to"
+        required: true
+        type: string
+      environment:
+        description: "Environment to roll back"
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+      reason:
+        description: "Reason for rollback"
+        required: false
+        type: string
+        default: "Production issue"
+
+jobs:
+  rollback:
+    name: Rollback to ${{ inputs.commit_sha }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Rollback via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            if [ "${{ inputs.environment }}" = "production" ]; then
+              DIR="/home/zunkireelabs/devprojects/analytics-app-prod"
+              COMPOSE_FILE="docker-compose.yml"
+              CONTAINER="analytics-app-prod"
+            else
+              DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+              COMPOSE_FILE="docker-compose.dev.yml"
+              CONTAINER="analytics-app-stage"
+            fi
+
+            echo "Rolling back ${{ inputs.environment }} to ${{ inputs.commit_sha }}"
+            echo "Reason: ${{ inputs.reason }}"
+
+            cd "$DIR"
+            git fetch origin
+            git checkout ${{ inputs.commit_sha }}
+            docker compose -f "$COMPOSE_FILE" up -d --build
+
+            echo "Waiting for container to be healthy..."
+            sleep 10
+            for i in $(seq 1 12); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+              if [ "$STATUS" = "healthy" ]; then
+                echo "Rollback successful — container is healthy!"
+                exit 0
+              fi
+              echo "Attempt $i/12: Status is $STATUS, waiting..."
+              sleep 10
+            done
+            echo "Rollback failed — container did not become healthy"
+            docker logs "$CONTAINER" --tail 50
+            exit 1
+
+      - name: Verify Health
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            DOMAIN="${{ vars.PROD_DOMAIN }}"
+          else
+            DOMAIN="${{ vars.STAGING_DOMAIN }}"
+          fi
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Rollback verified — $DOMAIN returned HTTP $HTTP_CODE"
+          else
+            echo "Health check failed after rollback — $DOMAIN returned HTTP $HTTP_CODE"
+            exit 1
+          fi
