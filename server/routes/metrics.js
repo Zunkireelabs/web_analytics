@@ -5,9 +5,10 @@ import {
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
 } from '../store/read.js';
+import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { requireAuth } from './login.js';
 import { countryName } from '../util/countries.js';
-import { previousWeek } from '../util/dates.js';
+import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 import { translateQuery } from '../report/translate.js';
 
@@ -88,22 +89,116 @@ router.get('/sites', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Weekly report Google Doc link for the caller's site (null until first generated).
-router.get('/doc-link', async (req, res, next) => {
-  try {
-    res.json({ url: await getWeeklyDocUrl(req.siteId) });
-  } catch (e) { next(e); }
-});
+// vs-previous-entry percent change, newest-first arrays (entry i vs entry i+1).
+function withDeltaPct(entries) {
+  return entries.map((h, i) => {
+    const older = entries[i + 1];
+    const deltaPct = older && older.clicks ? Math.round(((h.clicks - older.clicks) / older.clicks) * 1000) / 10 : null;
+    return { ...h, deltaPct };
+  });
+}
 
-router.get('/daily-doc-link', async (req, res, next) => {
+// Inline report content for the dashboard's Reports page: live metrics, a
+// trend chart series, query-level movers, a short recent-report-history rail,
+// and the AI narrative — preferring the latest persisted executive-report
+// agent run (richer: what/why/what's-next) and falling back to the lighter
+// per-period narrative already generated for the matching Google Doc report.
+// This route only ever READS already-persisted results (agent_runs, the
+// narrative columns) — it never triggers a run, a page-scrape, or a live LLM
+// call. Plus a link to the full Doc for export. ?period=daily|weekly|monthly
+router.get('/report-summary', async (req, res, next) => {
   try {
-    res.json({ url: await getDailyDocUrl(req.siteId) });
-  } catch (e) { next(e); }
-});
+    const { period } = req.query;
+    if (!['daily', 'weekly', 'monthly'].includes(period)) {
+      return res.status(400).json({ error: 'period must be daily, weekly, or monthly.' });
+    }
+    const site = await getSiteById(req.siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found.' });
 
-router.get('/monthly-doc-link', async (req, res, next) => {
-  try {
-    res.json({ url: await getMonthlyDocUrl(req.siteId) });
+    const [execRun] = await getLatestAgentRuns(site.id, ['executive-report']);
+    const resolveNarrative = (periodNarrative, periodMatches) => {
+      if (execRun?.status === 'ok' && execRun.narrative) {
+        return { narrative: execRun.narrative, narrativeSource: 'executive-report', narrativeGeneratedAt: execRun.created_at };
+      }
+      if (periodMatches && periodNarrative) {
+        return { narrative: periodNarrative, narrativeSource: 'period', narrativeGeneratedAt: null };
+      }
+      return { narrative: null, narrativeSource: null, narrativeGeneratedAt: null };
+    };
+
+    if (period === 'daily') {
+      const { freshest: date } = await getDataRange(site.id);
+      if (!date) {
+        return res.json({ period, date: null, metrics: null, series: [], movers: { gainers: [], droppers: [] }, history: [], ...resolveNarrative(null, false), docUrl: await getDailyDocUrl(site.id) });
+      }
+      const row = await getDay(site.id, date);
+      const matches = site.daily_report_narrative_date === date;
+      const series = await getDailySeries(site.id, shiftYmd(date, -7), date); // 8 days, oldest→newest
+      const { gainers, droppers } = await getTopMovers(site.id, { start: date, end: date }, { start: shiftYmd(date, -1), end: shiftYmd(date, -1) }, 8);
+      const history = withDeltaPct(series.slice(1).map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse());
+      return res.json({
+        period, date,
+        metrics: row && {
+          clicks: row.clicks, impressions: row.impressions, position: row.position,
+          users: row.users, sessions: row.sessions,
+        },
+        series, movers: { gainers, droppers }, history,
+        ...resolveNarrative(site.daily_report_narrative, matches),
+        docUrl: await getDailyDocUrl(site.id),
+      });
+    }
+
+    if (period === 'weekly') {
+      const { start, end } = previousWeek(site.timezone);
+      const totals = await getRangeTotals(site.id, start, end);
+      const matches = site.weekly_report_narrative_start === start && site.weekly_report_narrative_end === end;
+      const series = await getDailySeries(site.id, start, end);
+      const { gainers, droppers } = await getTopMovers(site.id, { start, end }, { start: shiftYmd(start, -7), end: shiftYmd(end, -7) }, 8);
+      const weeklyTotals = [];
+      for (let i = 0; i < 4; i++) {
+        const wStart = shiftYmd(start, -7 * i);
+        const wEnd = shiftYmd(end, -7 * i);
+        const t = await getRangeTotals(site.id, wStart, wEnd);
+        weeklyTotals.push({ label: `${wStart} – ${wEnd}`, clicks: Number(t.clicks || 0) });
+      }
+      return res.json({
+        period, start, end,
+        metrics: {
+          clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
+          users: totals.users, sessions: totals.sessions,
+        },
+        series, movers: { gainers, droppers }, history: withDeltaPct(weeklyTotals),
+        ...resolveNarrative(site.weekly_report_narrative, matches),
+        docUrl: await getWeeklyDocUrl(site.id),
+      });
+    }
+
+    // monthly
+    const { year, month } = previousMonth(site.timezone);
+    const ym = `${year}-${String(month).padStart(2, '0')}`;
+    const { start, end } = monthBounds(year, month);
+    const totals = await getMonthlyTotals(site.id, year, month);
+    const matches = site.monthly_report_narrative_ym === ym;
+    const series = await getDailySeries(site.id, start, end);
+    const priorYm = shiftMonth(year, month, -1);
+    const priorBounds = monthBounds(priorYm.year, priorYm.month);
+    const { gainers, droppers } = await getTopMovers(site.id, { start, end }, priorBounds, 8);
+    const monthlyTotals = [];
+    for (let i = 0; i < 6; i++) {
+      const sm = shiftMonth(year, month, -i);
+      const t = await getMonthlyTotals(site.id, sm.year, sm.month);
+      monthlyTotals.push({ label: `${sm.year}-${String(sm.month).padStart(2, '0')}`, clicks: Number(t.clicks || 0) });
+    }
+    res.json({
+      period, ym,
+      metrics: {
+        clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
+        users: totals.users, sessions: totals.sessions,
+      },
+      series, movers: { gainers, droppers }, history: withDeltaPct(monthlyTotals),
+      ...resolveNarrative(site.monthly_report_narrative, matches),
+      docUrl: await getMonthlyDocUrl(site.id),
+    });
   } catch (e) { next(e); }
 });
 

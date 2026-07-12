@@ -33,6 +33,28 @@ export async function getLatestAgentRuns(siteId, agentIds) {
   return rows;
 }
 
+// Agent-agnostic read of each agent's latest persisted structured findings
+// (see agents/types.js `Finding`) — the single shared path the orchestrator
+// (live runs) and lib/insights.js (cached reads for Reports) both call, so
+// "how to read a finding out of the DB" exists exactly once.
+export async function getLatestFindings(siteId, agentIds) {
+  const runs = await getLatestAgentRuns(siteId, agentIds);
+  return runs
+    .filter((r) => r.status === 'ok')
+    .map((r) => ({
+      agentId: r.agent_id,
+      agentVersion: r.agent_version,
+      summary: r.narrative,
+      findings: r.facts?.findings || [],
+      // The date range that produced this run — callers that need to ground
+      // a finding's recommendedAction (e.g. looking up a page's real query
+      // before drafting a meta-title) need this, not just the findings.
+      start: r.input?.start ?? null,
+      end: r.input?.end ?? null,
+      createdAt: r.created_at,
+    }));
+}
+
 export async function getAgentRunHistory(siteId, agentId, limit = 10) {
   const { rows } = await query(
     `SELECT id, agent_id, agent_version, status, facts, narrative, error, took_ms, created_at

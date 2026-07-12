@@ -2,6 +2,7 @@ import { getDocs } from '../auth/google.js';
 import { query } from '../db.js';
 import { callLLM } from '../llm.js';
 import { getDailySeries } from '../store/read.js';
+import { saveDailyReportNarrative } from '../store/upsert.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
 const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : null);
@@ -123,6 +124,8 @@ export async function runDailyDocReport(site, date) {
   });
 
   await docs.documents.batchUpdate({ documentId: docId, requestBody: { requests } });
+
+  await saveDailyReportNarrative(site.id, date, overview);
 
   console.log(`[daily-doc] wrote entry for ${date} to doc ${docId}`);
   return { docId, date, url: `https://docs.google.com/document/d/${docId}/edit` };

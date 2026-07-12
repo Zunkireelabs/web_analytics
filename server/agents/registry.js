@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // and it is immediately listed and runnable; nothing here needs editing.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const NON_AGENT_FILES = new Set(['types.js', 'registry.js', 'runner.js']);
+const NON_AGENT_FILES = new Set(['types.js', 'registry.js', 'runner.js', 'orchestrator.js']);
 
 let cache = null;
 

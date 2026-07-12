@@ -1,5 +1,7 @@
 import { getGa4BreakdownRange, getGa4BreakdownDelta, getSearchPerformanceRange } from '../store/read.js';
 import { flagLowCtr } from './lib/ctr-anomaly.js';
+import { effortForGenerator } from './lib/page-content.js';
+import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { priorPeriod } from '../util/dates.js';
 import { countryName } from '../util/countries.js';
 import { callLLM } from '../llm.js';
@@ -51,36 +53,59 @@ export async function run({ siteId, start, end }) {
   }));
   const lowCtrCountries = flagLowCtr(gscCountries);
 
-  // Structured, generator-mappable recommendations for the Action Center —
-  // grounded only in the real growth deltas/session counts above, never a
-  // claim about what content currently exists. Kept to the top 1-2 real
-  // signals of each kind to avoid flooding the Action Center with noise.
-  const recommendations = [];
+  // Structured, generator-mappable recommendation candidates — grounded only
+  // in the real growth deltas/session counts above, never a claim about what
+  // content currently exists. Kept to the top 1-2 real signals of each kind
+  // to avoid flooding the Action Center with noise. `magnitude`/`evidence`
+  // are transient (used only to rank findings below), stripped from the
+  // public `recommendations` facts field.
+  const recCandidates = [];
   const topMarket = growingMarkets[0];
   if (topMarket) {
-    recommendations.push({
+    recCandidates.push({
       tag: 'Generate Landing Page', generatorId: 'landing-page',
       reason: `${topMarket.country} grew from ${topMarket.prior} to ${topMarket.recent} sessions this period.`,
       params: { market: topMarket.country, context: `Sessions grew from ${topMarket.prior} to ${topMarket.recent} (${start} to ${end}).` },
+      magnitude: topMarket.delta,
+      evidence: { country: topMarket.country, prior: topMarket.prior, recent: topMarket.recent, delta: topMarket.delta },
     });
   }
   const topCity = growingCities[0];
   if (topCity) {
-    recommendations.push({
+    recCandidates.push({
       tag: 'Generate Landing Page', generatorId: 'landing-page',
       reason: `${topCity.city} grew from ${topCity.prior} to ${topCity.recent} sessions this period.`,
       params: { city: topCity.city, context: `Sessions grew from ${topCity.prior} to ${topCity.recent} (${start} to ${end}).` },
+      magnitude: topCity.delta,
+      evidence: { city: topCity.city, prior: topCity.prior, recent: topCity.recent, delta: topCity.delta },
     });
   }
   // Secondary languages (beyond the #1 by session volume) with any real
   // traffic — a real signal of an audience segment worth localizing for.
   for (const lang of topLanguages.slice(1, 3).filter((l) => l.sessions > 0)) {
-    recommendations.push({
+    recCandidates.push({
       tag: 'Generate Translation', generatorId: 'translation',
       reason: `${lang.language} had ${lang.sessions} real session(s) this period.`,
       params: { targetLanguage: lang.language },
+      magnitude: lang.sessions,
+      evidence: { language: lang.language, sessions: lang.sessions },
     });
   }
+  const recommendations = recCandidates.map(({ magnitude, evidence, ...r }) => r);
+
+  const rankedCandidates = [...recCandidates].sort((a, b) => b.magnitude - a.magnitude);
+  const priorityByCandidate = new Map(rankedCandidates.map((c, i) => [c, priorityByRank(rankedCandidates)[i]]));
+  const findings = recCandidates.map((c) => {
+    const priority = priorityByCandidate.get(c);
+    return makeFinding({
+      id: `country-intelligence:${c.tag}:${c.params.market || c.params.city || c.params.targetLanguage}`,
+      evidence: c.evidence,
+      whyItMatters: c.reason,
+      priority,
+      recommendedAction: { label: c.tag, generatorId: c.generatorId, params: c.params, effort: effortForGenerator(c.generatorId) },
+      expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: c.magnitude },
+    });
+  });
 
   const facts = {
     rangeStart: start, rangeEnd: end, priorStart: prior.start, priorEnd: prior.end,
@@ -89,6 +114,7 @@ export async function run({ siteId, start, end }) {
     topLanguages,
     lowCtrCountries,
     recommendations,
+    findings,
   };
 
   const system = 'You are a growth strategist writing for a non-technical site owner, analyzing geography and ' +

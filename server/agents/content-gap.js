@@ -1,5 +1,6 @@
 import { getSearchPerformanceRange, getQueriesForPage } from '../store/read.js';
-import { analyzePageUrl, contentGapsFor } from './lib/page-content.js';
+import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerator } from './lib/page-content.js';
+import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -104,11 +105,47 @@ export async function run({ siteId, start, end }) {
     };
   });
 
+  // Priority = rank by real impressions among pages that actually have a gap
+  // — the same relative-comparison approach used everywhere else in this
+  // agent family, never an absolute impressions cutoff (which would be
+  // meaningless across sites of very different traffic scale).
+  const pagesWithGaps = pages.filter((p) => p.gaps?.length).sort((a, b) => b.impressions - a.impressions);
+  const priorityByPage = new Map(priorityByRank(pagesWithGaps).map((pr, i) => [pagesWithGaps[i].page, pr]));
+
+  const findings = pages.flatMap((p) => {
+    const priority = priorityByPage.get(p.page) || 'low';
+    const gapFindings = (p.gaps || []).map((g) => {
+      const generatorId = GAP_TYPE_TO_GENERATOR[g.type] ?? null;
+      return makeFinding({
+        id: `content-gap:${p.page}:${g.type}`,
+        evidence: { page: p.page, impressions: p.impressions, gapType: g.type, detail: g.detail },
+        whyItMatters: g.detail,
+        priority,
+        recommendedAction: generatorId
+          ? { label: g.type, generatorId, params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: 'Article' }, effort: effortForGenerator(generatorId) }
+          : null,
+        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: p.impressions },
+      });
+    });
+    const aiFindings = (p.aiSuggestions || []).map((s) => makeFinding({
+      id: `content-gap:${p.page}:entity:${s.entity}`,
+      evidence: { page: p.page, entity: s.entity, confidence: s.confidence },
+      whyItMatters: `${s.rationale} (AI-suggested, confidence: ${s.confidence})`,
+      // AI-inferred suggestions are never boosted past their own confidence
+      // — a low-confidence guess on a high-traffic page stays low priority.
+      priority: s.confidence === 'high' ? priority : 'low',
+      recommendedAction: { label: `Cover: ${s.entity}`, generatorId: 'blog-outline', params: { topic: s.entity, context: `Related to existing page ${p.page}. ${s.rationale}` }, effort: effortForGenerator('blog-outline') },
+      expectedImpact: { label: 'Low', basis: 'estimate', value: null },
+    }));
+    return [...gapFindings, ...aiFindings];
+  });
+
   const facts = {
     rangeStart: start,
     rangeEnd: end,
     pages,
     count: pages.length,
+    findings,
     note: 'gaps are deterministic checks against each page\'s real fetched HTML. aiSuggestions are LLM ' +
       'inferences from reading the page text, confidence-labeled, NOT verified facts — treat as a starting ' +
       'hypothesis. This agent only recommends; it never modifies any page.',

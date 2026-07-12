@@ -164,6 +164,45 @@ function recommendActions(analysis, query) {
   return tags;
 }
 
+// Exact tag -> generator map, source of truth for the finite vocabulary
+// `recommendActions()`/`contentGapChecks()` produce. Replaces the old
+// downstream substring-guessing (mapToGenerator in action-center.js): every
+// agent that emits one of these tags sets `recommendedAction.generatorId`
+// directly from here instead of a caller re-inferring it from free text —
+// so a recommendation can never silently vanish because wording didn't
+// match a keyword. `null` = a real, worthwhile finding with no matching
+// generator today (e.g. "expand content" has no draft-generation flow) —
+// left null rather than forced onto a generator that doesn't fit.
+export const TAG_TO_GENERATOR = {
+  'Improve title': 'meta-title',
+  'Improve meta': 'meta-title',
+  'Add FAQ': 'faq',
+  'Add schema': 'schema',
+  'Add internal links': 'internal-links',
+  'Expand content': null,
+};
+
+export const GAP_TYPE_TO_GENERATOR = {
+  'Missing FAQ': 'faq',
+  'Missing schema': 'schema',
+  'Missing headings': null,
+  'Missing comparisons': null,
+  'Missing alt text': null,
+  'Missing canonical tag': null,
+  'Missing Open Graph tags': null,
+  'Missing structured lists': null,
+  'Missing question-style headings': null,
+};
+
+// Effort is a property of the action itself (structural config fix vs
+// net-new content), not of how important the finding is — kept as one
+// honest, documented lookup instead of a per-agent guessed constant.
+const GENERATOR_EFFORT = {
+  'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low',
+  'blog-outline': 'High', 'landing-page': 'High', translation: 'High',
+};
+export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
+
 // Deterministic on-page completeness gaps for the Content Gap Agent — every
 // item here is verified directly from the page's real fetched HTML (unlike
 // the AI-inferred entity suggestions the agent adds separately). `queryTexts`

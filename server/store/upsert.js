@@ -103,6 +103,28 @@ export async function saveNarrative(siteId, date, narrative, emailedAt = null) {
   );
 }
 
+export async function saveDailyReportNarrative(siteId, date, narrative) {
+  await query(
+    'UPDATE sites SET daily_report_narrative = $1, daily_report_narrative_date = $2 WHERE id = $3',
+    [narrative, date, siteId]
+  );
+}
+
+export async function saveWeeklyReportNarrative(siteId, start, end, narrative) {
+  await query(
+    `UPDATE sites SET weekly_report_narrative = $1,
+       weekly_report_narrative_start = $2, weekly_report_narrative_end = $3 WHERE id = $4`,
+    [narrative, start, end, siteId]
+  );
+}
+
+export async function saveMonthlyReportNarrative(siteId, ym, narrative) {
+  await query(
+    'UPDATE sites SET monthly_report_narrative = $1, monthly_report_narrative_ym = $2 WHERE id = $3',
+    [narrative, ym, siteId]
+  );
+}
+
 export async function markDailyDocDone(siteId, date) {
   await query(
     `INSERT INTO daily_reports (site_id, date, daily_doc_done)

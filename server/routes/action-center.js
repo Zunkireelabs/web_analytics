@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { requireAuth, requireInternalSite } from './login.js';
-import { runAgent } from '../agents/runner.js';
-import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { runOrchestration } from '../agents/orchestrator.js';
+import { getLatestFindings } from '../store/agent-runs.js';
+import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { getQueriesForPage } from '../store/read.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { createDraft, listDrafts, getDraft, updateDraft, deleteDraft } from '../store/drafts.js';
@@ -9,31 +10,10 @@ import { createDraft, listDrafts, getDraft, updateDraft, deleteDraft } from '../
 const router = Router();
 router.use(requireAuth, requireInternalSite);
 
-// The 4 agents whose output contains real, generator-mappable
-// recommendations. query-intelligence/device-intelligence/executive-report
-// are excluded — they have no findings that map to any of the 7 draftable
-// action types (see the product review's per-agent trace).
-const RECOMMENDATION_AGENT_IDS = ['opportunity', 'content-gap', 'ai-visibility', 'country-intelligence'];
-
-// Maps a recommendation/gap string (short tags like "Add FAQ", full
-// sentences like "Add an FAQ section.", or gap types like "Missing FAQ")
-// to a generator id via keyword matching — handles every source agent's
-// differently-shaped text with one function instead of three lookup tables.
-// Recommendations with no mapping (e.g. "Missing alt text") are filtered
-// out rather than forced onto a generator that doesn't fit.
-function mapToGenerator(text) {
-  const t = (text || '').toLowerCase();
-  if (t.includes('title')) return 'meta-title';
-  if (t.includes('meta')) return 'meta-title';
-  if (t.includes('faq') || t.includes('question-style') || t.includes('question style')) return 'faq';
-  if (t.includes('entity schema') || t.includes('schema')) return 'schema';
-  if (t.includes('internal link')) return 'internal-links';
-  return null;
-}
-
 // Real top query for a page, looked up on demand and cached per call — only
-// needed for sources (ai-visibility) whose facts don't already carry a
-// query, so a meta-title/faq draft is never generated ungrounded.
+// needed when a finding's recommendedAction wants a query param but the
+// source agent's facts don't already carry one (e.g. ai-visibility), so a
+// meta-title/faq draft is never generated ungrounded.
 function makeQueryLookup(siteId) {
   const cache = new Map();
   return async (start, end, page) => {
@@ -46,86 +26,31 @@ function makeQueryLookup(siteId) {
   };
 }
 
+// Every recommendation-bearing agent sets `recommendedAction.generatorId`
+// directly (agents/lib/page-content.js's TAG_TO_GENERATOR/GAP_TYPE_TO_
+// GENERATOR, or an agent's own generatorId like country-intelligence) — this
+// just reads it. No more downstream keyword-guessing (the old mapToGenerator)
+// that could silently drop a recommendation if its wording didn't match.
 async function buildRecommendations(siteId) {
-  const runs = await getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS);
-  const byId = new Map(runs.map((r) => [r.agent_id, r]));
+  const runs = await getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS);
   const lookupQuery = makeQueryLookup(siteId);
   const items = [];
+  const lastAnalyzedAt = {};
 
-  const opp = byId.get('opportunity');
-  if (opp?.status === 'ok') {
-    for (const o of opp.facts.opportunities || []) {
-      for (const tag of o.recommendations || []) {
-        const generatorId = mapToGenerator(tag);
-        if (!generatorId) continue;
-        items.push({
-          id: `opportunity:${o.page}:${o.query}:${tag}`,
-          source: 'opportunity', tag, generatorId,
-          reason: `"${o.query}" ranks #${Number(o.avgPosition).toFixed(1)}, ${o.impressions} impressions — est. +${o.estimatedTrafficGain} clicks if improved.`,
-          params: { page: o.page, query: o.query, schemaType: 'Article' },
-        });
+  for (const run of runs) {
+    lastAnalyzedAt[run.agentId] = run.createdAt;
+    for (const f of run.findings) {
+      const action = f.recommendedAction;
+      if (!action?.generatorId) continue;
+      const params = { ...action.params };
+      if ((action.generatorId === 'meta-title' || action.generatorId === 'faq') && !params.query) {
+        if (!params.page || !run.start || !run.end) continue; // no grounding possible
+        params.query = await lookupQuery(run.start, run.end, params.page);
+        if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
+      items.push({ id: f.id, source: run.agentId, tag: action.label, generatorId: action.generatorId, reason: f.whyItMatters, params });
     }
   }
-
-  const gap = byId.get('content-gap');
-  if (gap?.status === 'ok') {
-    for (const p of gap.facts.pages || []) {
-      for (const g of p.gaps || []) {
-        const generatorId = mapToGenerator(g.type);
-        if (!generatorId) continue;
-        items.push({
-          id: `content-gap:${p.page}:${g.type}`,
-          source: 'content-gap', tag: g.type, generatorId,
-          reason: g.detail,
-          params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: 'Article' },
-        });
-      }
-      for (const s of p.aiSuggestions || []) {
-        items.push({
-          id: `content-gap:${p.page}:entity:${s.entity}`,
-          source: 'content-gap', tag: `Cover: ${s.entity}`, generatorId: 'blog-outline',
-          reason: `${s.rationale} (AI-suggested, confidence: ${s.confidence})`,
-          params: { topic: s.entity, context: `Related to existing page ${p.page}. ${s.rationale}` },
-        });
-      }
-    }
-  }
-
-  const vis = byId.get('ai-visibility');
-  if (vis?.status === 'ok') {
-    const { start, end } = vis.input || {};
-    for (const p of vis.facts.pages || []) {
-      for (const rec of p.recommendations || []) {
-        const generatorId = mapToGenerator(rec);
-        if (!generatorId) continue;
-        const params = { page: p.page, schemaType: 'Article' };
-        if (generatorId === 'meta-title' || generatorId === 'faq') {
-          params.query = start && end ? await lookupQuery(start, end, p.page) : '';
-          if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
-        }
-        items.push({
-          id: `ai-visibility:${p.page}:${rec}`,
-          source: 'ai-visibility', tag: rec, generatorId,
-          reason: `AI Visibility score ${p.score?.overall ?? '—'}/100 for this page.`,
-          params,
-        });
-      }
-    }
-  }
-
-  const country = byId.get('country-intelligence');
-  if (country?.status === 'ok') {
-    for (const r of country.facts.recommendations || []) {
-      items.push({
-        id: `country-intelligence:${r.tag}:${r.params.market || r.params.city || r.params.targetLanguage}`,
-        source: 'country-intelligence', tag: r.tag, generatorId: r.generatorId,
-        reason: r.reason, params: r.params,
-      });
-    }
-  }
-
-  const lastAnalyzedAt = Object.fromEntries(runs.map((r) => [r.agent_id, r.created_at]));
   return { items, lastAnalyzedAt };
 }
 
@@ -137,18 +62,15 @@ router.get('/action-center/recommendations', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Re-runs the 4 recommendation-bearing agents fresh (each several seconds —
-// real page fetches + LLM calls) for the given range, persists them like any
-// other agent run, then rebuilds the recommendation list from the fresh data.
+// Re-runs the 6 recommendation-bearing agents fresh (each several seconds —
+// real page fetches + LLM calls) for the given range via the shared
+// orchestrator (persisting each sub-agent run like any other agent run),
+// then rebuilds the recommendation list from the fresh data.
 router.post('/action-center/recommendations/refresh', async (req, res, next) => {
   try {
     const { start, end } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end are required' });
-    await Promise.all(RECOMMENDATION_AGENT_IDS.map((id) =>
-      runAgent(id, { siteId: req.siteId, start, end }).catch((err) => {
-        console.error(`[action-center] refresh failed for agent "${id}":`, err.message);
-      })
-    ));
+    await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
     res.json(await buildRecommendations(req.siteId));
   } catch (e) { next(e); }
 });

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api, daysAgo } from '../api.js';
 
-const CATEGORY = {
+export const CATEGORY = {
   seo:     { label: 'SEO',       icon: '🎯', color: '#6C63FF' },
   geo:     { label: 'Geo',       icon: '🌐', color: '#0ea5e9' },
   content: { label: 'Content',   icon: '📝', color: '#14b8a6' },

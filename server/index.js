@@ -10,6 +10,7 @@ import loginRouter from './routes/login.js';
 import metricsRouter from './routes/metrics.js';
 import agentsRouter from './routes/agents.js';
 import actionCenterRouter from './routes/action-center.js';
+import reportsRouter from './routes/reports.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
 import { pool } from './db.js';
@@ -46,6 +47,7 @@ app.use('/api', loginRouter);
 app.use('/api', metricsRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
+app.use('/api', reportsRouter);
 
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);

@@ -1,5 +1,6 @@
 import { getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
-import { analyzePageUrl, recommendationsFor } from './lib/page-content.js';
+import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR } from './lib/page-content.js';
+import { priorityByRank, impactFromValue, effortFromDifficulty, makeFinding } from './lib/findings.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -85,11 +86,35 @@ export async function run({ siteId, start, end }) {
     return { ...o, recommendations: recommendationsFor(fetched.analysis, o.query), recommendationsNote: null };
   });
 
+  // `opportunities` is already sorted best-first by opportunityScore (see
+  // `top` above) — priorityByRank reuses that real ranking directly, one
+  // finding per recommended tag on each opportunity.
+  const priorities = priorityByRank(opportunities);
+  const findings = opportunities.flatMap((o, i) => {
+    if (!o.recommendations?.length) return [];
+    const priority = priorities[i];
+    const expectedImpact = {
+      label: impactFromValue(o.estimatedTrafficGain, { high: 20, medium: 5 }) || 'Low',
+      basis: 'estimate', // estimatedTrafficGain is a labeled projection, not a measured value
+      value: o.estimatedTrafficGain,
+    };
+    const effort = effortFromDifficulty(o.estimatedDifficulty);
+    return o.recommendations.map((tag) => makeFinding({
+      id: `opportunity:${o.page}:${o.query}:${tag}`,
+      evidence: { query: o.query, page: o.page, avgPosition: o.avgPosition, impressions: o.impressions, clicks: o.clicks, opportunityScore: o.opportunityScore },
+      whyItMatters: `"${o.query}" ranks #${o.avgPosition.toFixed(1)}, ${o.impressions} impressions — est. +${o.estimatedTrafficGain} clicks if improved.`,
+      priority,
+      recommendedAction: { label: tag, generatorId: TAG_TO_GENERATOR[tag] ?? null, params: { page: o.page, query: o.query, schemaType: 'Article' }, effort },
+      expectedImpact,
+    }));
+  });
+
   const facts = {
     rangeStart: start,
     rangeEnd: end,
     opportunities,
     count: opportunities.length,
+    findings,
     assumptions: {
       targetPosition: TARGET_POSITION,
       trafficGainNote: `estimatedTrafficGain assumes the query reaches position ${TARGET_POSITION} and applies an ` +

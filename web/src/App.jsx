@@ -6,6 +6,7 @@ import Home from './pages/Home.jsx';
 import Overview from './pages/Overview.jsx';
 import Insights from './pages/Insights.jsx';
 import Compare from './pages/Compare.jsx';
+import Reports from './pages/Reports.jsx';
 import AiGrowth from './pages/AiGrowth.jsx';
 import ActionCenter from './pages/ActionCenter.jsx';
 import Header from './components/Header.jsx';
@@ -58,6 +59,7 @@ export default function App() {
           <Route path="/overview" element={<Overview siteId={siteId} />} />
           <Route path="/insights" element={<Insights siteId={siteId} />} />
           <Route path="/compare" element={<Compare siteId={siteId} />} />
+          <Route path="/reports" element={<Reports siteId={siteId} />} />
           {isInternal && <Route path="/ai-growth" element={<AiGrowth />} />}
           {isInternal && <Route path="/action-center" element={<ActionCenter />} />}
         </Routes>

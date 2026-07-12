@@ -2,6 +2,7 @@ import { getDocs } from '../auth/google.js';
 import { query } from '../db.js';
 import { callLLM } from '../llm.js';
 import { getDailySeries, getRangeTopQueries } from '../store/read.js';
+import { saveWeeklyReportNarrative } from '../store/upsert.js';
 import { previousWeek, weekOf } from '../util/dates.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
@@ -246,6 +247,8 @@ export async function runWeeklyDocReport(site, anchorDate) {
 
   // Requests apply in order, so styling references the just-inserted text's indices.
   await docs.documents.batchUpdate({ documentId: docId, requestBody: { requests } });
+
+  await saveWeeklyReportNarrative(site.id, start, end, overview);
 
   console.log(`[weekly] wrote section for ${label} to doc ${docId}`);
   return { docId, start, end, url: `https://docs.google.com/document/d/${docId}/edit` };

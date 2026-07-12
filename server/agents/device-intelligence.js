@@ -1,5 +1,6 @@
 import { getSearchPerformanceRange, getGa4BreakdownDelta } from '../store/read.js';
 import { flagLowCtr } from './lib/ctr-anomaly.js';
+import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { priorPeriod } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 
@@ -35,9 +36,40 @@ export async function run({ siteId, start, end }) {
   const growingDevices = delta.gainers.map((r) => ({ device: r.dim_value.toUpperCase(), recent: Number(r.recent), prior: Number(r.prior), delta: Number(r.delta) }));
   const decliningDevices = delta.droppers.map((r) => ({ device: r.dim_value.toUpperCase(), recent: Number(r.recent), prior: Number(r.prior), delta: Number(r.delta) }));
 
+  // No draft generator exists for device/UX fixes (mobile speed, responsive
+  // layout, tap targets) — recommendedAction is honestly left null rather
+  // than forced onto a content generator that doesn't fit. Findings still
+  // carry real evidence/priority/impact; they just aren't draftable today.
+  const candidates = [
+    ...lowCtrDevices.map((d) => ({
+      id: `device-intelligence:low-ctr:${d.device}`,
+      evidence: { device: d.device, ctr: d.ctr, ctrDeviationPct: d.ctrDeviationPct, clicks: d.clicks, impressions: d.impressions },
+      whyItMatters: `${d.device} CTR is ${Math.abs(d.ctrDeviationPct)}% below this site's own cross-device average.`,
+      magnitude: Math.abs(d.ctrDeviationPct),
+    })),
+    ...decliningDevices.map((d) => ({
+      id: `device-intelligence:declining:${d.device}`,
+      evidence: { device: d.device, recent: d.recent, prior: d.prior, delta: d.delta },
+      whyItMatters: `${d.device} sessions dropped from ${d.prior} to ${d.recent} (${start} to ${end} vs the prior period).`,
+      magnitude: Math.abs(d.delta),
+    })),
+  ];
+  const ranked = [...candidates].sort((a, b) => b.magnitude - a.magnitude);
+  const priorities = priorityByRank(ranked);
+  const priorityById = new Map(ranked.map((c, i) => [c.id, priorities[i]]));
+  const findings = candidates.map((c) => {
+    const priority = priorityById.get(c.id);
+    return makeFinding({
+      id: c.id, evidence: c.evidence, whyItMatters: c.whyItMatters, priority,
+      recommendedAction: null,
+      expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: c.magnitude },
+    });
+  });
+
   const facts = {
     rangeStart: start, rangeEnd: end, priorStart: prior.start, priorEnd: prior.end,
     devices, lowCtrDevices, growingDevices, decliningDevices,
+    findings,
   };
 
   const system = 'You are an SEO/UX strategist writing for a non-technical site owner. Given device-split search ' +
