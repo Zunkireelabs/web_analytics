@@ -55,6 +55,22 @@ export async function getLatestFindings(siteId, agentIds) {
     }));
 }
 
+// Most recent runs across ALL given agents, newest first — the AI Command
+// Center's "AI Activity" feed. Every row here is a real completed run
+// (agent_id, took_ms, created_at already persisted by runner.js) — nothing
+// is synthesized to make the feed look busier than it actually is.
+export async function getRecentActivity(siteId, agentIds, limit = 12) {
+  const { rows } = await query(
+    `SELECT agent_id, agent_version, status, took_ms, created_at
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2)
+      ORDER BY created_at DESC
+      LIMIT $3`,
+    [siteId, agentIds, limit]
+  );
+  return rows;
+}
+
 export async function getAgentRunHistory(siteId, agentId, limit = 10) {
   const { rows } = await query(
     `SELECT id, agent_id, agent_version, status, facts, narrative, error, took_ms, created_at

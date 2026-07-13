@@ -105,9 +105,12 @@
  * @property {string} [start]
  * @property {string} [end]
  * @property {string[]} [agentIds]  which agents to run — omit to run every non-meta registered agent
- * @property {string} [question]    reserved, unused today — the seam a future AI chat plugs into
- *                                   (an LLM would pick agentIds from listAgentMeta() descriptions
- *                                   instead of the caller hardcoding them)
+ * @property {string} [question]    when set, conditions the synthesis narrative to answer this
+ *                                   specific question instead of writing a generic briefing (see
+ *                                   synthesizeFindings in orchestrator.js). agentIds is still the
+ *                                   caller's job to resolve — the AI Copilot (agents/lib/copilot.js)
+ *                                   does that resolution itself before calling runOrchestration,
+ *                                   rather than orchestrator.js parsing the question itself.
  * @property {boolean} [persistSubAgentRuns]  default false — matches executive-report's existing
  *                                             behavior of not writing N redundant agent_runs rows
  *                                             when composing; callers that want each sub-agent run

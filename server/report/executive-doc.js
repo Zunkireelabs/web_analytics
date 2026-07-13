@@ -8,7 +8,7 @@ import { weekLabel } from './weekly-doc.js';
 // The Weekly AI Executive Report is NOT another metrics report — it has no
 // tables of clicks/impressions. It's a narrative summary built entirely on
 // top of the executive-report AGENT's already-computed, already-verified
-// output (all 6 specialist agents), so it never re-queries raw metrics or
+// output (every specialist agent), so it never re-queries raw metrics or
 // invents new numbers of its own.
 
 const SECTION_KEYS = ['whatImproved', 'whatDeclined', 'whyItHappened', 'highestOpportunities', 'highestRisks', 'recommendedActions', 'estimatedImpact'];
@@ -82,8 +82,8 @@ function buildSection(label, sections) {
 export async function runExecutiveDocReport(site, anchorDate) {
   const { start, end } = anchorDate ? weekOf(anchorDate) : previousWeek(site.timezone);
 
-  // Reuses the existing executive-report agent's full run — all 6 specialist
-  // agents' real facts — instead of re-querying any raw metrics here. This
+  // Reuses the existing executive-report agent's full run — every specialist
+  // agent's real facts — instead of re-querying any raw metrics here. This
   // also persists to agent_runs via the normal runner, same as any other
   // agent invocation.
   const agentOutput = await runAgent('executive-report', { siteId: site.id, start, end });
@@ -92,10 +92,10 @@ export async function runExecutiveDocReport(site, anchorDate) {
   const digest = { week: label, site: site.name, sections: agentOutput.facts.sections };
 
   const system = 'You are a growth strategist writing a WEEKLY AI Executive Report for a non-technical site ' +
-    'owner\'s leadership team. You are given `sections`, the real, already-computed output of six specialist ' +
+    'owner\'s leadership team. You are given `sections`, the real, already-computed output of seven specialist ' +
     'agents (query intelligence, opportunity, country intelligence, device intelligence, AI visibility, content ' +
-    'gap) for this week — every number in it is real, already-verified data. Some sections may have status ' +
-    '"insufficient-data" or "error" — name that plainly as a gap, never guess around it.\n\n' +
+    'gap, competitor intelligence) for this week — every number in it is real, already-verified data. Some ' +
+    'sections may have status "insufficient-data" or "error" — name that plainly as a gap, never guess around it.\n\n' +
     'Return ONLY a JSON object (no prose, no markdown fences) with exactly these seven string fields, each 2-4 ' +
     'plain-text sentences (no markdown, no bullet symbols):\n' +
     '- whatImproved: real gains pulled from the given sections (gainers, growing markets, etc.)\n' +
@@ -104,9 +104,10 @@ export async function runExecutiveDocReport(site, anchorDate) {
     'named in the data) — if no clear cause is evident, say so plainly instead of speculating\n' +
     '- highestOpportunities: the highest-value real opportunities from the opportunity/content-gap/ai-visibility ' +
     'sections, prioritized\n' +
-    '- highestRisks: risks evidenced by real declining metrics, low-CTR flags, or low AI-visibility scores in the ' +
-    'given data — never an invented business risk with no data support (e.g. never claim a competitive threat, ' +
-    'there is no competitor data here)\n' +
+    '- highestRisks: risks evidenced by real declining metrics, low-CTR flags, low AI-visibility scores, or (only ' +
+    'if the competitor_intelligence section has status "ok" with real findings) a named competitor outranking this ' +
+    'site on a real query — never an invented business risk with no data support, and never claim a competitive ' +
+    'threat when that section is missing/insufficient-data\n' +
     '- recommendedActions: aggregate the specialist agents\' own already-computed recommendations for the coming ' +
     'week — do not invent new ones\n' +
     '- estimatedImpact: cite ONLY the opportunity section\'s own estimatedTrafficGain figures if present, framed ' +

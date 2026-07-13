@@ -5,7 +5,6 @@ import {
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
 } from '../store/read.js';
-import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { requireAuth } from './login.js';
 import { countryName } from '../util/countries.js';
 import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
@@ -100,12 +99,16 @@ function withDeltaPct(entries) {
 
 // Inline report content for the dashboard's Reports page: live metrics, a
 // trend chart series, query-level movers, a short recent-report-history rail,
-// and the AI narrative — preferring the latest persisted executive-report
-// agent run (richer: what/why/what's-next) and falling back to the lighter
-// per-period narrative already generated for the matching Google Doc report.
-// This route only ever READS already-persisted results (agent_runs, the
-// narrative columns) — it never triggers a run, a page-scrape, or a live LLM
-// call. Plus a link to the full Doc for export. ?period=daily|weekly|monthly
+// and the AI narrative for THIS specific period — the same narrative already
+// generated for the matching Google Doc report (daily/weekly/monthly-doc.js),
+// so it's always about the exact date/week/month being displayed, never a
+// different period's data relabeled. No narrative is returned if the
+// matching period hasn't been generated yet (periodMatches false) — an
+// unrelated agent run is never substituted in, since that would show a
+// narrative describing different dates than the ones on screen.
+// This route only ever READS already-persisted results (the narrative
+// columns) — it never triggers a run, a page-scrape, or a live LLM call.
+// Plus a link to the full Doc for export. ?period=daily|weekly|monthly
 router.get('/report-summary', async (req, res, next) => {
   try {
     const { period } = req.query;
@@ -115,11 +118,7 @@ router.get('/report-summary', async (req, res, next) => {
     const site = await getSiteById(req.siteId);
     if (!site) return res.status(404).json({ error: 'Site not found.' });
 
-    const [execRun] = await getLatestAgentRuns(site.id, ['executive-report']);
     const resolveNarrative = (periodNarrative, periodMatches) => {
-      if (execRun?.status === 'ok' && execRun.narrative) {
-        return { narrative: execRun.narrative, narrativeSource: 'executive-report', narrativeGeneratedAt: execRun.created_at };
-      }
       if (periodMatches && periodNarrative) {
         return { narrative: periodNarrative, narrativeSource: 'period', narrativeGeneratedAt: null };
       }

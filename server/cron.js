@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runHourlyCatchupForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runHourlyCatchupForAllSites } from './job.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -45,6 +45,18 @@ export function startCron() {
           console.log(`[cron] weekly doc report finished — ${written.length} site(s) written`);
         } catch (err) {
           console.error('[cron] weekly doc report error:', err.message);
+        }
+
+        // Competitor rankings check runs before the executive report, on the
+        // same weekly cron trigger, so the week's executive briefing already
+        // has fresh competitor data when it synthesizes — not a separate schedule.
+        console.log(`[cron] weekly competitor check started ${new Date().toISOString()}`);
+        try {
+          const results = await runCompetitorCheckIfDueForAllSites();
+          const checked = results.filter(Boolean);
+          console.log(`[cron] weekly competitor check finished — ${checked.length} site(s) checked`);
+        } catch (err) {
+          console.error('[cron] weekly competitor check error:', err.message);
         }
 
         // AI Executive Report runs right after, on the same weekly cron

@@ -1,0 +1,184 @@
+import { getAgent } from '../registry.js';
+import { getLatestFindings, getLatestAgentRuns, getRecentActivity } from '../../store/agent-runs.js';
+import { getHealthScoreOnOrBefore } from '../../store/read.js';
+import { saveHealthScoreSnapshot } from '../../store/upsert.js';
+import { computeHealthScore } from './health-score.js';
+import { RECOMMENDATION_AGENT_IDS, OPPORTUNITY_AGENT_IDS } from './insights.js';
+import { buildRecommendations } from './recommendations.js';
+import { getFindingsDiff, healthChangeEntry } from './changes.js';
+import { listWatchlist } from '../../store/watchlist.js';
+
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+const OPEN_WATCHLIST_STATUSES = new Set(['new', 'in_progress']);
+
+// Every line in the AI Activity feed is real, worked-completed text — no
+// "competitor monitoring" or anything not actually built (see
+// dataSources: not-connected on ai-visibility/content-gap's own meta).
+const ACTIVITY_LABEL = {
+  'query-intelligence': 'Analyzed search queries for gainers and droppers',
+  opportunity: 'Detected striking-distance ranking opportunities',
+  'country-intelligence': 'Reviewed geographic performance for anomalies',
+  'device-intelligence': 'Reviewed device-split performance for anomalies',
+  'ai-visibility': 'Crawled ranking pages for AI-readiness signals',
+  'content-gap': 'Scored ranking pages for content completeness gaps',
+  'competitor-intelligence': 'Checked real competitor rankings on tracked queries',
+  'executive-report': 'Generated executive briefing across all specialist agents',
+};
+
+const shiftYmd = (ymd, days) => {
+  const d = new Date(`${ymd}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+let categoryByAgentIdCache = null;
+async function categoryByAgentId() {
+  if (categoryByAgentIdCache) return categoryByAgentIdCache;
+  const map = new Map();
+  for (const id of [...RECOMMENDATION_AGENT_IDS, 'executive-report']) {
+    const agent = await getAgent(id);
+    map.set(id, { category: agent?.meta?.category || 'seo', name: agent?.meta?.name || id });
+  }
+  categoryByAgentIdCache = map;
+  return map;
+}
+
+// Caps how many items from the same source contribute before the final
+// slice, so one agent with many similar findings (e.g. the same missing-FAQ
+// gap across a dozen pages) can't crowd out every other agent — a briefing
+// should read as multi-agent and curated, not a dump from whichever agent
+// happened to have the most findings this run. Same pattern already used in
+// lib/insights.js's getPriorityRecommendations.
+function capPerSource(items, sourceKey, perSourceCap, total) {
+  const bySource = new Map();
+  for (const item of items) {
+    const key = item[sourceKey];
+    if (!bySource.has(key)) bySource.set(key, []);
+    bySource.get(key).push(item);
+  }
+  return [...bySource.values()].flatMap((arr) => arr.slice(0, perSourceCap)).slice(0, total);
+}
+
+// `groundedById` = recommendations.items keyed by finding id (buildRecommendations'
+// already-grounded params — e.g. a real query resolved for a meta-title/faq
+// draft). A raw finding.recommendedAction can name a generatorId whose
+// params were never grounded (buildRecommendations silently skips ones it
+// couldn't ground, "never generate title/FAQ drafts without a real
+// grounding query") — surfacing that ungrounded action here would let a
+// user click a real "Fix" button straight into a 400. Every shaped finding
+// that reaches the frontend with a live generatorId is guaranteed grounded.
+function shapeFinding(f, meta, groundedById) {
+  let recommendedAction = f.recommendedAction;
+  if (recommendedAction?.generatorId) {
+    const grounded = groundedById.get(f.id);
+    recommendedAction = grounded ? { ...recommendedAction, params: grounded.params } : null;
+  }
+  return {
+    id: f.id, agentId: f.agentId, agentName: meta?.name, category: meta?.category || 'seo',
+    priority: f.priority, evidence: f.evidence, whyItMatters: f.whyItMatters,
+    // Only content-gap's AI-suggested entities carry a real confidence tier
+    // today (low/medium/high, set by the LLM that inferred them) — every
+    // other finding is deterministic (computed from real fetched data, not
+    // inferred), so there's nothing honest to label as a confidence score.
+    confidence: f.evidence?.confidence ?? null,
+    recommendedAction, expectedImpact: f.expectedImpact,
+  };
+}
+
+// Everything the AI Command Center's primary view needs, in one call. Reads
+// only already-persisted data (like Reports/Action Center's cached path) —
+// never triggers a live agent run; use the /command-center/refresh route for
+// that, same split as Action Center's recommendations vs recommendations/refresh.
+export async function getCommandCenterData(siteId) {
+  const [findingRuns, execRuns, activityRows, recommendations, catByAgent, watchlistRows] = await Promise.all([
+    getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
+    getLatestAgentRuns(siteId, ['executive-report']),
+    getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
+    buildRecommendations(siteId),
+    categoryByAgentId(),
+    listWatchlist(siteId),
+  ]);
+
+  const allFindings = findingRuns.flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })));
+  const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+  const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
+
+  const { score, penalty, findingsConsidered } = computeHealthScore(allFindings);
+  const today = new Date().toISOString().slice(0, 10);
+  await saveHealthScoreSnapshot(siteId, today, score)
+    .catch((e) => console.error('[command-center] failed to save health score snapshot:', e.message));
+  const [weekAgoScore, monthAgoScore] = await Promise.all([
+    getHealthScoreOnOrBefore(siteId, shiftYmd(today, -7)),
+    getHealthScoreOnOrBefore(siteId, shiftYmd(today, -30)),
+  ]);
+
+  const execRun = execRuns[0] || null;
+  const analysisStatus = !execRun ? 'never-run' : execRun.status === 'ok' ? 'complete' : execRun.status === 'insufficient-data' ? 'partial' : 'error';
+
+  const generatedAt = new Date().toISOString();
+  const trendWeek = weekAgoScore != null ? score - weekAgoScore : null;
+  const findingChanges = await getFindingsDiff(siteId, RECOMMENDATION_AGENT_IDS, 10);
+  const healthEntry = healthChangeEntry(trendWeek, generatedAt);
+  const recentChanges = (healthEntry ? [healthEntry, ...findingChanges] : findingChanges).slice(0, 10);
+
+  // Waterfall dedup: Critical Issues is the page's headline, so each section
+  // below only shows findings that haven't already been surfaced above it —
+  // otherwise the same finding (e.g. one AI-visibility gap) could appear as
+  // a Critical Issue, a Discovery, a Growth Opportunity, AND a Recommended
+  // Action all on one page, which reads as duplicated content, not curation.
+  const criticalIssuesRaw = capPerSource(sortedFindings.filter((f) => f.priority === 'high'), 'agentId', 1, 3);
+  const shownIds = new Set(criticalIssuesRaw.map((f) => f.id));
+
+  const discoveriesRaw = capPerSource(sortedFindings.filter((f) => !shownIds.has(f.id)), 'agentId', 2, 8);
+  discoveriesRaw.forEach((f) => shownIds.add(f.id));
+
+  const growthOpportunitiesRaw = capPerSource(
+    sortedFindings.filter((f) => OPPORTUNITY_AGENT_IDS.includes(f.agentId) && !shownIds.has(f.id)),
+    'agentId', 3, 6
+  );
+  growthOpportunitiesRaw.forEach((f) => shownIds.add(f.id));
+
+  const recommendedActionsRaw = capPerSource(recommendations.items.filter((item) => !shownIds.has(item.id)), 'source', 2, 6);
+
+  // Open items only (new/in_progress) — the persistent queue itself. Closed
+  // items (completed/no_longer_applicable) are real history, not part of
+  // "what's still worth tracking," so they're left for a future history
+  // view rather than cluttering the primary section.
+  const watchlist = watchlistRows
+    .filter((r) => OPEN_WATCHLIST_STATUSES.has(r.status))
+    .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority])
+    .map((r) => ({
+      id: r.id, opportunityType: r.opportunity_type, findingId: r.finding_id, agentId: r.agent_id,
+      agentName: catByAgent.get(r.agent_id)?.name, category: catByAgent.get(r.agent_id)?.category || 'seo',
+      title: r.title, reason: r.reason, priority: r.priority, expectedImpact: r.expected_impact,
+      confidence: r.confidence, evidence: r.evidence, recommendedAction: r.recommended_action,
+      status: r.status, discoveredAt: r.discovered_at, statusChangedAt: r.status_changed_at,
+    }));
+
+  return {
+    generatedAt,
+    health: {
+      score, penalty, findingsConsidered, trendWeek,
+      trendMonth: monthAgoScore != null ? score - monthAgoScore : null,
+    },
+    executiveSummary: { narrative: execRun?.narrative || null, generatedAt: execRun?.created_at || null },
+    stats: {
+      criticalIssues: allFindings.filter((f) => f.priority === 'high').length,
+      newOpportunities: allFindings.filter((f) => f.recommendedAction).length,
+      analysisStatus,
+      lastAnalyzedAt: execRun?.created_at || null,
+    },
+    // Curated top-of-briefing callout — a small, distinct-agent subset of the
+    // highest-priority findings. This is the page's headline; everything
+    // below excludes whatever's already shown here.
+    criticalIssues: criticalIssuesRaw.map((f) => shapeFinding(f, catByAgent.get(f.agentId), groundedById)),
+    discoveries: discoveriesRaw.map((f) => shapeFinding(f, catByAgent.get(f.agentId), groundedById)),
+    growthOpportunities: growthOpportunitiesRaw.map((f) => shapeFinding(f, catByAgent.get(f.agentId), groundedById)),
+    recommendedActions: recommendedActionsRaw,
+    watchlist,
+    activity: activityRows.map((r) => ({
+      agentId: r.agent_id, status: r.status, tookMs: r.took_ms, createdAt: r.created_at,
+      label: ACTIVITY_LABEL[r.agent_id] || `Ran ${catByAgent.get(r.agent_id)?.name || r.agent_id}`,
+    })),
+    recentChanges,
+  };
+}

@@ -95,6 +95,58 @@ export async function getNarrative(siteId, date) {
   return rows[0] || null;
 }
 
+// Website Health score as it stood on a given date (or the closest earlier
+// day we have one for) — used for the Command Center's trend chip ("+3 this
+// week"). Nullable: a site with no snapshot yet simply shows no trend.
+export async function getHealthScoreOnOrBefore(siteId, date) {
+  const { rows } = await query(
+    `SELECT website_health_score, date FROM daily_reports
+      WHERE site_id = $1 AND date <= $2 AND website_health_score IS NOT NULL
+      ORDER BY date DESC LIMIT 1`,
+    [siteId, date]
+  );
+  return rows[0]?.website_health_score ?? null;
+}
+
+// Every persisted integration_health row relevant to a site — both rows
+// scoped to this site and system-wide rows (site_id IS NULL, e.g. the shared
+// Google OAuth connection every site currently uses). Keyed by integration_id
+// so the route can join against the registry's meta for anything never
+// checked yet (no row = 'unknown', not an error).
+export async function getIntegrationHealth(siteId) {
+  const { rows } = await query(
+    `SELECT integration_id, status, auth_status, last_success_at, last_failure_at,
+            last_checked_at, error_message, recovery_action
+       FROM integration_health
+      WHERE site_id = $1 OR site_id IS NULL
+      ORDER BY integration_id`,
+    [siteId]
+  );
+  return rows;
+}
+
+// Most recent distinct dates competitor rankings were checked, newest first
+// — rankings are fetched weekly (not daily), so "recent vs prior" for the
+// competitor-intelligence agent means the last two checked dates, not a
+// fixed day offset like every other agent's period comparison.
+export async function getCompetitorRankingDates(siteId, limit = 2) {
+  const { rows } = await query(
+    'SELECT DISTINCT date FROM competitor_rankings WHERE site_id = $1 ORDER BY date DESC LIMIT $2',
+    [siteId, limit]
+  );
+  return rows.map((r) => r.date.toISOString().slice(0, 10));
+}
+
+export async function getCompetitorRankingsOn(siteId, date) {
+  const { rows } = await query(
+    `SELECT query, domain, url, position, is_own_domain
+       FROM competitor_rankings WHERE site_id = $1 AND date = $2
+      ORDER BY query, position`,
+    [siteId, date]
+  );
+  return rows;
+}
+
 // Available data date range for a site.
 // `freshest` = newest day with FINAL search data (the best "complete" day to show).
 // `earliest` = oldest day we have. `latestVisitor` = newest GA4 day (a bit fresher).

@@ -1,6 +1,7 @@
-// AI Executive Summary — upgrade of NarrativePanel styling with a source
-// label (executive-report synthesis vs the lighter per-period narrative) and
-// a generated-at timestamp, so it's clear how fresh/rich the summary is.
+// AI Executive Summary — upgrade of NarrativePanel styling. `text` is always
+// the narrative generated specifically for the selected Daily/Weekly/Monthly
+// period (never a different period's narrative relabeled), or blank if that
+// period's report hasn't been generated yet.
 export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
   const label = source === 'executive-report' ? 'AI Executive Summary' : 'AI Summary';
   const sub = generatedAt
@@ -9,8 +10,7 @@ export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
 
   return (
     <div className="relative card overflow-hidden fade-up">
-      <div className="absolute inset-x-0 top-0 h-1"
-        style={{ background: 'linear-gradient(90deg,#6C63FF,#8b5cf6,#0ea5e9)' }} />
+      <div className="absolute inset-x-0 top-0 h-1" style={{ background: '#6C63FF' }} />
       <div className="p-6">
         <div className="flex items-center gap-3 mb-3">
           <div className="w-10 h-10 rounded-xl grid place-items-center text-white shrink-0 shadow-md shadow-indigo-500/30"

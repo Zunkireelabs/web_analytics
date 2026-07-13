@@ -5,14 +5,14 @@ export const meta = {
   name: 'Executive Report Agent',
   description: 'Synthesizes every specialist agent into one growth summary.',
   category: 'meta',
-  version: 3,
-  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap'],
+  version: 4,
+  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence'],
 };
 
 // Thin config over the shared orchestrator (orchestrator.js) — this agent no
 // longer hand-rolls its own fan-out + synthesis; it just tells the
-// orchestrator which 6 agents to run. persistSubAgentRuns stays false so
-// running the executive report still doesn't write 6 redundant agent_runs
+// orchestrator which agents to run. persistSubAgentRuns stays false so
+// running the executive report still doesn't write redundant agent_runs
 // rows, same intent as the original direct agent.run() calls.
 export async function run(input) {
   const result = await runOrchestration({ ...input, agentIds: meta.requires, persistSubAgentRuns: false });

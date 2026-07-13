@@ -49,7 +49,7 @@ export default function MoversList({ gainers = [], droppers = [] }) {
       </div>
 
       {/* 2 ─ AI Insights band */}
-      <AiInsights gainers={gainers} droppers={droppers} />
+      <Highlights gainers={gainers} droppers={droppers} />
 
       {/* 3 ─ Two-column gainers / drops */}
       <div id="movers-section" className="grid md:grid-cols-2 gap-6">
@@ -78,8 +78,8 @@ function Metric({ icon, tint, value, label, badge, badgeUp, sub }) {
   );
 }
 
-/* ───────── AI Insights band ───────── */
-function AiInsights({ gainers, droppers }) {
+/* ───────── Highlights band — local heuristics over gainers/droppers, not an LLM call ───────── */
+function Highlights({ gainers, droppers }) {
   const used = new Set();
   const take = (q) => { if (q) used.add(q.query); return q; };
 
@@ -116,8 +116,7 @@ function AiInsights({ gainers, droppers }) {
   return (
     <div className="rounded-2xl border p-5" style={{ borderColor: '#E5F5EC', background: 'linear-gradient(135deg,#f0fdf4,#ffffff 85%)' }}>
       <div className="flex items-center gap-2 mb-4">
-        <span className="text-sm font-bold" style={{ color: GREEN }}>✨ AI Insights</span>
-        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: '#dcfce7', color: GREEN }}>Beta</span>
+        <span className="text-sm font-bold" style={{ color: GREEN }}>Highlights</span>
       </div>
       <div className="flex flex-wrap gap-3">
         {blocks.map((b, i) => (

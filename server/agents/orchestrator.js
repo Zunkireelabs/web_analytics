@@ -8,19 +8,41 @@ import { callLLM } from '../llm.js';
 // differently-configured callers of this — none of them re-implements its
 // own fan-out + synthesis loop. See agents/types.js OrchestratorInput/Output.
 
-const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+export const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
-const SYNTHESIS_SYSTEM = 'You are a growth strategist synthesizing structured findings from multiple specialist ' +
-  'analytics agents into one combined answer for a non-technical site owner. Each finding carries real evidence, ' +
-  'a priority (high/medium/low), why it matters, and a recommended action where one exists. Write 4-6 sentences ' +
-  'covering the highest-priority findings first. If an agent errored or returned insufficient data, name it ' +
-  'plainly as a gap rather than omitting it. Use ONLY the evidence given, never invent numbers. A lower average ' +
-  'Search position is BETTER. Plain text, no markdown, no bullets.';
+const BRIEFING_SYSTEM = 'You are a senior growth analyst writing a short morning briefing for an executive who ' +
+  'has not looked at the data themselves — write as if you already did the analysis overnight and are now ' +
+  'reporting back, not as if you are describing a report. Given structured findings from multiple specialist ' +
+  'agents (each with real evidence, a priority of high/medium/low, why it matters, and a recommended action where ' +
+  'one exists), write 4-6 sentences in this exact order: (1) what changed, using the specific real evidence, (2) ' +
+  'why the most significant change actually matters for the business, not just that it happened, (3) what the ' +
+  'single highest-priority item is, (4) end with one concrete imperative sentence telling the reader what to do ' +
+  'next. If an agent errored or returned insufficient data, name it plainly as a gap rather than omitting it. Use ' +
+  'ONLY the evidence given, never invent numbers. A lower average Search position is BETTER. Plain text, no ' +
+  'markdown, no bullets, no generic openers like "the findings indicate."';
+
+const QUESTION_SYSTEM = 'You are a senior growth analyst answering a specific question from a non-technical site ' +
+  'owner, using structured findings from specialist agents (each with real evidence, a priority, why it matters, ' +
+  'and a recommended action where one exists). Answer the question directly and concisely — do not write a ' +
+  'generic briefing, address exactly what was asked. If the findings don\'t contain enough to answer honestly, say ' +
+  'so plainly rather than guessing or padding with unrelated findings. Use ONLY the evidence given, never invent ' +
+  'numbers. A lower average Search position is BETTER. Plain text, no markdown, no bullets.';
+
+// Shared by runOrchestration (fresh runs, generic briefing) and the AI
+// Copilot's cached-read path (agents/lib/copilot.js) — one synthesis
+// implementation regardless of whether the findings came from a live run or
+// a DB read, and regardless of whether it's a briefing or an answer to a
+// specific question.
+export async function synthesizeFindings(findings, perAgent, question) {
+  if (!findings.length) return null;
+  const system = question ? QUESTION_SYSTEM : BRIEFING_SYSTEM;
+  const user = (question ? `Question: ${question}\n` : '') +
+    `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`;
+  return callLLM(system, user, { maxTokens: 450 })
+    .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; });
+}
 
 export async function runOrchestration({ siteId, start, end, agentIds, question, persistSubAgentRuns = false } = {}) {
-  // `question` is reserved for a future AI chat (would pick agentIds from
-  // listAgentMeta() descriptions instead of the caller hardcoding them) —
-  // unused today, not implemented this phase.
   const ids = agentIds?.length
     ? agentIds
     : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
@@ -52,10 +74,7 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
   }
   findings.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
 
-  const narrative = findings.length
-    ? await callLLM(SYNTHESIS_SYSTEM, `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`, { maxTokens: 450 })
-      .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; })
-    : null;
+  const narrative = await synthesizeFindings(findings, perAgent, question);
 
   return { ranAgentIds: ids, generatedAt: new Date().toISOString(), findings, perAgent, narrative };
 }

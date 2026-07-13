@@ -1,13 +1,22 @@
 import { getAgent } from '../registry.js';
 import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js';
 
-// The 6 specialist agents whose output carries real, per-item structured
+// The 7 specialist agents whose output carries real, per-item structured
 // findings (agents/types.js `Finding`) — shared by Action Center (draft
 // generation, internal-only) and the client-facing Reports page (read-only
-// display). executive-report is excluded: it synthesizes these same 6
+// display). executive-report is excluded: it synthesizes these same 7
 // agents' findings into its own topFindings, so including it here would
 // double-count every finding under two agent ids.
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap'];
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence'];
+
+// Findings from these agents are inherently upside-framed (growth,
+// striking-distance, localization), as opposed to problem-framed. Shared by
+// the Command Center's Growth Opportunities section and the Opportunity
+// Watchlist (agents/lib/watchlist.js) — the single place that defines what
+// "an opportunity" means today. A future seasonal-opportunity agent (see
+// watchlist.js's `opportunity_type` column) extends this list, not a
+// parallel one — one growth taxonomy, not two.
+export const OPPORTUNITY_AGENT_IDS = ['opportunity', 'country-intelligence'];
 
 const firstSentence = (text) => (text || '').trim().split(/(?<=[.!?])\s+/)[0] || '';
 

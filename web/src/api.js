@@ -25,9 +25,7 @@ export const api = {
   day: (site, date) => req(`/day?site=${site}&date=${date}`),
   compare: (site, a, b) => req(`/compare?site=${site}&a=${a}&b=${b}`),
   compareRange: (site, aS, aE, bS, bE) => req(`/compare-range?site=${site}&a_start=${aS}&a_end=${aE}&b_start=${bS}&b_end=${bE}`),
-  aiCompareRange: (site, aS, aE, bS, bE) => req('/ai-compare-range', { method: 'POST', body: JSON.stringify({ site, a_start: aS, a_end: aE, b_start: bS, b_end: bE }) }),
   aiSummary: (site, date) => req(`/ai-summary?site=${site}&date=${date}`),
-  aiCompare: (site, a, b) => req('/ai-compare', { method: 'POST', body: JSON.stringify({ site, a, b }) }),
   aiAsk: (site, date, question) => req('/ai-ask', { method: 'POST', body: JSON.stringify({ site, date, question }) }),
   channels: (site, start, end) => req(`/channels?site=${site}&start=${start}&end=${end}`),
   breakdownRange: (site, start, end, dim, limit = 10) => req(`/breakdown-range?site=${site}&start=${start}&end=${end}&dim=${dim}&limit=${limit}`),
@@ -35,6 +33,33 @@ export const api = {
   country: (site, start, end) => req(`/country?site=${site}&start=${start}&end=${end}`),
   movers: (site) => req(`/movers?site=${site}`),
   translate: (q) => req(`/translate?query=${encodeURIComponent(q)}`),
+
+  copilot: {
+    ask: (conversationId, message) => req('/copilot/ask', { method: 'POST', body: JSON.stringify({ conversationId, message }) }),
+    conversations: () => req('/copilot/conversations'),
+    messages: (conversationId) => req(`/copilot/conversations/${conversationId}/messages`),
+  },
+
+  watchlist: {
+    list: (status) => req(`/watchlist${status ? `?status=${status}` : ''}`),
+    setStatus: (id, status) => req(`/watchlist/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  },
+
+  commandCenter: {
+    get: () => req('/command-center'),
+    refresh: (start, end) => req('/command-center/refresh', { method: 'POST', body: JSON.stringify({ start, end }) }),
+  },
+
+  notifications: {
+    list: () => req('/notifications'),
+    markRead: (id) => req(`/notifications/${id}/read`, { method: 'POST' }),
+    markAllRead: () => req('/notifications/read-all', { method: 'POST' }),
+  },
+
+  integrations: {
+    health: () => req('/integrations/health'),
+    check: (id) => req(`/integrations/${id}/check`, { method: 'POST' }),
+  },
 
   actionCenter: {
     recommendations: () => req('/action-center/recommendations'),
@@ -53,4 +78,17 @@ export function daysAgo(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString().slice(0, 10);
+}
+
+// Compact "Xm/Xh/Xd ago" for a timestamp — shared by any page showing
+// freshness of a persisted run (Action Center, AI Command Center).
+export function timeAgo(iso) {
+  if (!iso) return 'never';
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
 }

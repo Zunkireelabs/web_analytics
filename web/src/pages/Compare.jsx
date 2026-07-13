@@ -58,13 +58,10 @@ export default function Compare({ siteId }) {
 
   const [data, setData] = useState(null);
   const [series, setSeries] = useState([]);
-  const [plan, setPlan] = useState('');
-  const [planBusy, setPlanBusy] = useState(false);
 
   // Fetch comparison totals
   useEffect(() => {
     if (!siteId) return;
-    setPlan('');
     setData(null);
     if (mode === 'month') {
       api.compare(siteId, a, b).then(setData).catch(() => setData(null));
@@ -94,17 +91,6 @@ export default function Compare({ siteId }) {
 
   const labelA = mode === 'week' ? weekLabel(wA) : a;
   const labelB = mode === 'week' ? weekLabel(wB) : b;
-
-  const genPlan = async () => {
-    setPlanBusy(true); setPlan('');
-    try {
-      const result = mode === 'month'
-        ? await api.aiCompare(siteId, a, b)
-        : await api.aiCompareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6));
-      setPlan(result.plan);
-    } catch { setPlan('Could not generate a plan right now — try again.'); }
-    finally { setPlanBusy(false); }
-  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
@@ -150,23 +136,22 @@ export default function Compare({ siteId }) {
         </>}
       />
 
-      {/* ── AI summary card ── */}
-      <div className="relative card overflow-hidden">
-        <div className="absolute inset-x-0 top-0 h-1" style={{ background: 'linear-gradient(90deg,#6C63FF,#8b5cf6,#0ea5e9)' }} />
+      {/* Computed summary, not an LLM call — biggestDrop/biggestGain below are
+          plain JS over real numbers, template-filled into a sentence. Styled
+          plainly on purpose, not with the AI-panel treatment (flat accent,
+          spark icon, "AI" badge) that ExecutiveSummaryPanel/the Copilot use,
+          since those are all real model calls and this isn't — the visual
+          language should tell the two apart honestly. */}
+      <div className="card overflow-hidden">
         <div className="p-5">
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl grid place-items-center text-white shadow-md shadow-indigo-500/30" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>✨</div>
+              <div className="w-9 h-9 rounded-xl grid place-items-center text-slate-500 bg-slate-100">📊</div>
               <div className="leading-tight">
-                <div className="text-sm font-semibold text-slate-800">AI Performance Summary</div>
+                <div className="text-sm font-semibold text-slate-800">Performance Summary</div>
                 <div className="text-[11px] text-slate-400">{labelA} vs {labelB}</div>
               </div>
             </div>
-            <button onClick={genPlan} disabled={planBusy || !data}
-              className="text-sm font-semibold text-white rounded-xl px-4 py-2 shadow-md shadow-indigo-500/25 disabled:opacity-50"
-              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-              {planBusy ? 'Generating…' : '⚡ Generate Action Plan'}
-            </button>
           </div>
 
           {!data ? <div className="h-4 w-2/3 bg-slate-100 rounded animate-pulse" /> : (
@@ -177,16 +162,6 @@ export default function Compare({ siteId }) {
                 : <>Nearly every metric softened this period. </>}
               To recover, refresh your top-performing pages and improve titles on queries with high impressions but low clicks.
             </p>
-          )}
-
-          {(planBusy || plan) && (
-            <div className="flex items-start gap-2.5 mt-4">
-              <div className="w-7 h-7 rounded-lg grid place-items-center text-white text-xs shrink-0" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>AI</div>
-              <div className="flex-1 rounded-2xl rounded-tl-sm bg-slate-50 border border-slate-100 px-4 py-3 text-sm leading-relaxed text-slate-800 whitespace-pre-line">
-                <div className="text-[11px] font-semibold text-indigo-500 mb-1">Action plan</div>
-                {planBusy ? <span className="text-slate-400">Thinking…</span> : plan}
-              </div>
-            </div>
           )}
         </div>
       </div>

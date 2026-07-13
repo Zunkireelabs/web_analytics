@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, daysAgo } from '../api.js';
+import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import DraftModal from '../components/DraftModal.jsx';
 
@@ -13,15 +13,64 @@ const GENERATOR_LABELS = {
   translation: { label: 'Translation', icon: '🌐' },
 };
 
-function timeAgo(iso) {
-  if (!iso) return 'never';
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.round(ms / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+const VISIBLE_PER_GROUP = 5;
+
+// A group of N near-identical recommendations (e.g. "Add an FAQ section" on
+// 19 different pages) used to render as an undifferentiated 19-row wall —
+// same real repetition problem the Command Center's Discoveries feed had,
+// fixed here the way that page's density calls for: priority-sorted,
+// collapsed to the top 5 by default, with everything still reachable behind
+// "Show all" rather than hidden — a worklist shouldn't lose capability, just
+// noise.
+function RecommendationGroup({ generatorId, items, generatingId, onGenerate }) {
+  const [expanded, setExpanded] = useState(false);
+  const sorted = [...items].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
+  const visible = expanded ? sorted : sorted.slice(0, VISIBLE_PER_GROUP);
+  const hidden = sorted.length - visible.length;
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-50">
+        <span>{GENERATOR_LABELS[generatorId]?.icon}</span>
+        <h3 className="font-bold text-sm text-slate-900">{GENERATOR_LABELS[generatorId]?.label || generatorId}</h3>
+        <span className="text-xs text-slate-400">({items.length})</span>
+      </div>
+      <div className="divide-y divide-slate-50">
+        {visible.map((item) => (
+          <div key={item.id} className="flex items-center justify-between gap-3 px-5 py-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                {item.priority === 'high' && <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" title="High priority" />}
+                <div className="text-sm font-medium text-slate-800 truncate">{item.tag}</div>
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{item.reason}</div>
+              {item.params.page && <div className="text-[10px] text-slate-400 mt-0.5 truncate">{item.params.page}</div>}
+            </div>
+            <button
+              onClick={() => onGenerate(item)}
+              disabled={generatingId === item.id}
+              className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 disabled:opacity-60"
+            >
+              {generatingId === item.id ? 'Generating…' : 'Generate Draft'}
+            </button>
+          </div>
+        ))}
+      </div>
+      {hidden > 0 && (
+        <button onClick={() => setExpanded(true)}
+          className="w-full text-xs font-semibold text-indigo-600 hover:bg-indigo-50/60 px-5 py-2.5 border-t border-slate-50 transition">
+          Show all {sorted.length} →
+        </button>
+      )}
+      {expanded && sorted.length > VISIBLE_PER_GROUP && (
+        <button onClick={() => setExpanded(false)}
+          className="w-full text-xs font-semibold text-slate-400 hover:bg-slate-50 px-5 py-2 border-t border-slate-50 transition">
+          Show fewer ↑
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function ActionCenter() {
@@ -120,31 +169,8 @@ export default function ActionCenter() {
           )}
 
           {Object.entries(grouped).map(([generatorId, items]) => (
-            <div key={generatorId} className="card overflow-hidden">
-              <div className="flex items-center gap-2 px-5 py-3 border-b border-slate-50">
-                <span>{GENERATOR_LABELS[generatorId]?.icon}</span>
-                <h3 className="font-bold text-sm text-slate-900">{GENERATOR_LABELS[generatorId]?.label || generatorId}</h3>
-                <span className="text-xs text-slate-400">({items.length})</span>
-              </div>
-              <div className="divide-y divide-slate-50">
-                {items.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between gap-3 px-5 py-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-slate-800 truncate">{item.tag}</div>
-                      <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{item.reason}</div>
-                      {item.params.page && <div className="text-[10px] text-slate-400 mt-0.5 truncate">{item.params.page}</div>}
-                    </div>
-                    <button
-                      onClick={() => generate(item)}
-                      disabled={generatingId === item.id}
-                      className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 disabled:opacity-60"
-                    >
-                      {generatingId === item.id ? 'Generating…' : 'Generate Draft'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <RecommendationGroup key={generatorId} generatorId={generatorId} items={items}
+              generatingId={generatingId} onGenerate={generate} />
           ))}
         </>
       )}

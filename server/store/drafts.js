@@ -45,3 +45,15 @@ export async function deleteDraft(siteId, id) {
   const { rowCount } = await query('DELETE FROM drafts WHERE site_id = $1 AND id = $2', [siteId, id]);
   return rowCount > 0;
 }
+
+// Real evidence a recommendation was actually acted on, not just that it
+// disappeared — used by the Opportunity Watchlist (agents/lib/watchlist.js)
+// to distinguish "completed" (a draft exists for this exact action) from
+// "no longer applicable" (it just stopped being relevant).
+export async function hasDraftSince(siteId, source, actionType, since) {
+  const { rows } = await query(
+    'SELECT 1 FROM drafts WHERE site_id = $1 AND source = $2 AND action_type = $3 AND created_at >= $4 LIMIT 1',
+    [siteId, source, actionType, since]
+  );
+  return rows.length > 0;
+}

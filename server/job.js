@@ -1,14 +1,63 @@
 import { getOrCreateSite, query } from './db.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
-import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone } from './store/upsert.js';
-import { getDay, getNarrative, listSites } from './store/read.js';
+import { fetchCompetitorRankings } from './ingest/competitors.js';
+import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
+import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
 import { sendDailyEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
+import { isGoogleAuthError } from './integrations/google-oauth.js';
 import { daysAgoInTz, dateRange, previousWeek } from './util/dates.js';
+import { runOrchestration } from './agents/orchestrator.js';
+import { saveAgentRun } from './store/agent-runs.js';
+import { meta as execReportMeta } from './agents/executive-report.js';
+import { computeHealthScore } from './agents/lib/health-score.js';
+import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
+import { detectNotificationEvents } from './notifications/detect.js';
+import { deliverToAllChannels } from './notifications/channels/index.js';
+import { buildRecommendations } from './agents/lib/recommendations.js';
+import { syncWatchlist } from './agents/lib/watchlist.js';
+
+// Daily-cadence agents only — competitor-intelligence stays weekly (see
+// runCompetitorCheckIfDue below), it's cost-bounded on purpose.
+const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => id !== 'competitor-intelligence');
+
+// Records the shared Google OAuth connection's health from organic pipeline
+// outcomes (not just the on-demand "Test connection" check), so Integration
+// Health reflects real job results. A success clears any prior error; a
+// failure only gets recorded when it's actually auth-shaped (isGoogleAuthError)
+// — a transient network blip or rate limit shouldn't read as "connection broken."
+// site_id is null (this connection is shared across all sites, not per-site).
+async function noteGoogleAuthOutcome(ok, err) {
+  if (ok) {
+    await recordIntegrationCheck('google-oauth', null, {
+      ok: true, authStatus: 'valid', errorMessage: null, recoveryAction: null,
+    }).catch(() => {});
+    return;
+  }
+  if (!isGoogleAuthError(err)) return;
+  await recordIntegrationCheck('google-oauth', null, {
+    ok: false, authStatus: 'revoked',
+    errorMessage: err.response?.data?.error_description || err.response?.data?.error || err.message,
+    recoveryAction: 'Run `npm run get-token` to re-authenticate the shared Google OAuth connection.',
+  }).catch(() => {});
+}
+
+// Records the daily pipeline's own success/failure — same shared/global
+// pattern as noteGoogleAuthOutcome (site_id null), so a broken automation
+// run surfaces through the existing Integration Health card instead of only
+// living in server logs. The platform's whole pitch is "we notice things
+// and tell you" — this is that same promise applied to itself.
+async function notePipelineOutcome(ok, err) {
+  await recordIntegrationCheck('daily-pipeline', null, {
+    ok, authStatus: null,
+    errorMessage: ok ? null : (err?.message || String(err)),
+    recoveryAction: ok ? null : 'Check server logs for the failing step (ingest, narrative, agents, or notifications) for this site, fix it, then re-run the daily job manually.',
+  }).catch(() => {});
+}
 
 // GSC finalizes with a lag; GA4 is near real-time.
 const GSC_LAG_DAYS = 3;   // freshest fully-final GSC date = today - 3
@@ -59,11 +108,62 @@ export async function runDailyIngest() {
   return runDailyIngestForSite(site);
 }
 
+// Runs the 6 daily-cadence specialist agents fresh via the shared
+// orchestrator, persists an executive-report row from that same result
+// (same pattern as routes/command-center.js's refresh route — avoids a
+// second call to executive-report.js re-running all 6 agents again), then
+// detects and delivers any notification-worthy events from what changed.
+// This is what makes the Command Center's "Daily Morning Brief" and Recent
+// Changes genuinely daily instead of only as fresh as the last manual
+// refresh or Copilot question.
+export async function runDailyAgentAnalysisForSite(site) {
+  const end = daysAgoInTz(site.timezone, 0);
+  const start = daysAgoInTz(site.timezone, 7);
+
+  const result = await runOrchestration({ siteId: site.id, start, end, agentIds: DAILY_AGENT_IDS, persistSubAgentRuns: true });
+  await saveAgentRun({
+    siteId: site.id, agentId: 'executive-report', agentVersion: execReportMeta.version,
+    input: { siteId: site.id, start, end }, status: 'ok',
+    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
+    narrative: result.narrative, error: null, tookMs: null,
+  });
+
+  const { score } = computeHealthScore(result.findings);
+  const today = new Date().toISOString().slice(0, 10);
+  await saveHealthScoreSnapshot(site.id, today, score)
+    .catch((err) => console.error(`[job] site ${site.id} health score snapshot failed:`, err.message));
+  const weekAgoDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const weekAgoScore = await getHealthScoreOnOrBefore(site.id, weekAgoDate);
+  const trendWeek = weekAgoScore != null ? score - weekAgoScore : null;
+
+  const events = await detectNotificationEvents(site.id, { trendWeek });
+  await deliverToAllChannels(site.id, events);
+
+  const recommendations = await buildRecommendations(site.id);
+  const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
+  const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
+    .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });
+
+  return {
+    ranAgentIds: result.ranAgentIds, findingsCount: result.findings.length, notificationsEmitted: events.length,
+    watchlistAdded: watchlistSync.added, watchlistClosed: watchlistSync.closed,
+  };
+}
+
 // Full daily pipeline for one already-resolved site: ingest → AI narrative →
-// email → daily doc. Idempotent and safe to re-run — identical logic to the
-// original single-site runDailyJob(), just parameterized by `site`.
+// email → daily doc → agent analysis → notifications. Idempotent and safe
+// to re-run — identical logic to the original single-site runDailyJob(),
+// just parameterized by `site`.
 export async function runDailyJobForSite(site) {
   const { reportDate } = await runDailyIngestForSite(site);
+
+  // Each step below already tolerates its own failure (logs and moves on,
+  // so one broken step doesn't take down the rest of the pipeline) — but
+  // that also means a partial failure would otherwise vanish into server
+  // logs with nothing to show for it. stepErrors collects what actually
+  // broke so notePipelineOutcome below can report the real outcome instead
+  // of a false "ok" just because nothing threw all the way out.
+  const stepErrors = [];
 
   let narrative = '';
   try {
@@ -72,6 +172,7 @@ export async function runDailyJobForSite(site) {
     console.log(`[report] site ${site.id} narrative saved for ${reportDate}`);
   } catch (err) {
     console.error(`[report] site ${site.id} narrative failed:`, err.message);
+    stepErrors.push(new Error(`narrative: ${err.message}`));
   }
 
   const day = await getDay(site.id, reportDate);
@@ -87,6 +188,7 @@ export async function runDailyJobForSite(site) {
     }
   } catch (err) {
     console.error(`[report] site ${site.id} email failed:`, err.message);
+    stepErrors.push(new Error(`email: ${err.message}`));
   }
 
   try {
@@ -100,7 +202,18 @@ export async function runDailyJobForSite(site) {
     }
   } catch (err) {
     console.error(`[report] site ${site.id} daily doc failed:`, err.message);
+    stepErrors.push(new Error(`daily doc: ${err.message}`));
   }
+
+  try {
+    const { ranAgentIds, findingsCount, notificationsEmitted, watchlistAdded, watchlistClosed } = await runDailyAgentAnalysisForSite(site);
+    console.log(`[job] site ${site.id} daily agent analysis: ${ranAgentIds.length} agents, ${findingsCount} findings, ${notificationsEmitted} notification(s), watchlist +${watchlistAdded}/-${watchlistClosed}.`);
+  } catch (err) {
+    console.error(`[job] site ${site.id} daily agent analysis failed:`, err.message);
+    stepErrors.push(new Error(`agent analysis: ${err.message}`));
+  }
+
+  await notePipelineOutcome(stepErrors.length === 0, stepErrors[0]);
 
   return { site, reportDate, narrative };
 }
@@ -173,8 +286,11 @@ export async function runDailyJobForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runDailyJobForSite(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] daily job failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
+      await notePipelineOutcome(false, err);
     }
   }
   return results;
@@ -188,8 +304,10 @@ export async function runWeeklyIfDueForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runWeeklyIfDue(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] weekly doc failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   return results;
@@ -197,14 +315,52 @@ export async function runWeeklyIfDueForAllSites() {
 
 // Run the executive-report-if-due check independently for every connected
 // site. A failure for one site is logged and does not stop the others.
+// Weekly, same cadence/idempotency pattern as runExecutiveIfDue above, but
+// its own marker: getCompetitorRankingDates (real persisted check dates)
+// instead of a sites column, since competitor_rankings already records when
+// it last ran. Silently no-ops if DataForSEO isn't configured — the
+// competitor-intelligence agent already reports "insufficient-data" plainly
+// in that case, so there's nothing to force here.
+export async function runCompetitorCheckIfDue(site) {
+  if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
+
+  const { start, end } = previousWeek(site.timezone);
+  const [latestDate] = await getCompetitorRankingDates(site.id, 1);
+  if (latestDate && latestDate >= start) {
+    console.log(`[competitors] site ${site.id} week of ${start} already checked — skipping.`);
+    return null;
+  }
+
+  const checkDate = daysAgoInTz(site.timezone, 0);
+  const rows = await fetchCompetitorRankings(site, checkDate, { start, end });
+  await saveCompetitorRankings(site.id, rows);
+  console.log(`[competitors] site ${site.id}: checked ${rows.length} ranking row(s) for week of ${start}.`);
+  return { checked: rows.length };
+}
+
+export async function runCompetitorCheckIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runCompetitorCheckIfDue(site));
+    } catch (err) {
+      console.error(`[job] competitor check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 export async function runExecutiveIfDueForAllSites() {
   const sites = await listConnectedSites();
   const results = [];
   for (const site of sites) {
     try {
       results.push(await runExecutiveIfDue(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] executive report failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   return results;
@@ -228,8 +384,10 @@ export async function runHourlyCatchupForAllSites(tz) {
       console.log(`[job] hourly guard: catch-up done for site ${site.id} — report date ${done}`);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] hourly guard failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
 }
@@ -250,8 +408,10 @@ export async function runStartupCatchup() {
       await runDailyJobForSite(site);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   console.log('[catchup] done.');
