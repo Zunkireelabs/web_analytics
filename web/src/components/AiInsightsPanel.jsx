@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { TrendingUp, Search, FileText, Lightbulb, Sparkles } from 'lucide-react';
+import { TrendingUp, Search, FileText, Lightbulb } from 'lucide-react';
 
 const num = (v) => Number(v || 0);
 const pathname = (v) => { try { return new URL(v).pathname || '/'; } catch { return v || '/'; } };
@@ -61,15 +61,20 @@ function buildInsights({ channels, queries, pages }) {
   return insights.slice(0, 4);
 }
 
+// Deliberately not labeled "AI" — buildInsights() below is a plain rules
+// engine (threshold checks over real metrics), not an LLM call. Every real
+// AI-generated panel in this app (ExecutiveSummaryPanel, the Copilot) earns
+// that label with an actual model call; this one shouldn't borrow the badge
+// just because it looks similar.
 export default function AiInsightsPanel({ channels, queries, pages, loading }) {
   const insights = buildInsights({ channels, queries, pages });
 
   return (
     <div className="card p-6 flex flex-col">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-[15px] font-semibold text-slate-900 tracking-tight">AI Insights</h3>
-        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full bg-indigo-50 text-indigo-600">
-          <Sparkles size={11} strokeWidth={2.5} /> Smart analysis
+        <h3 className="text-[15px] font-semibold text-slate-900 tracking-tight">Quick Insights</h3>
+        <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full bg-slate-100 text-slate-500">
+          Rules-based
         </span>
       </div>
 

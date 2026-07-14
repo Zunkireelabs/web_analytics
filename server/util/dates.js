@@ -48,6 +48,19 @@ export function previousMonth(timezone, now = new Date()) {
   return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
 }
 
+// [start, end] YYYY-MM-DD bounds of a given calendar month.
+export function monthBounds(year, month) {
+  const start = `${year}-${String(month).padStart(2, '0')}-01`;
+  const end = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+  return { start, end };
+}
+
+// Shift a (year, month) pair by `n` months (positive or negative).
+export function shiftMonth(year, month, n) {
+  const total = year * 12 + (month - 1) + n;
+  return { year: Math.floor(total / 12), month: (total % 12) + 1 };
+}
+
 // The Mon–Sun week containing a given YYYY-MM-DD anchor date.
 export function weekOf(anchorYmd) {
   const [y, m, d] = anchorYmd.split('-').map(Number);

@@ -33,6 +33,44 @@ export async function getLatestAgentRuns(siteId, agentIds) {
   return rows;
 }
 
+// Agent-agnostic read of each agent's latest persisted structured findings
+// (see agents/types.js `Finding`) — the single shared path the orchestrator
+// (live runs) and lib/insights.js (cached reads for Reports) both call, so
+// "how to read a finding out of the DB" exists exactly once.
+export async function getLatestFindings(siteId, agentIds) {
+  const runs = await getLatestAgentRuns(siteId, agentIds);
+  return runs
+    .filter((r) => r.status === 'ok')
+    .map((r) => ({
+      agentId: r.agent_id,
+      agentVersion: r.agent_version,
+      summary: r.narrative,
+      findings: r.facts?.findings || [],
+      // The date range that produced this run — callers that need to ground
+      // a finding's recommendedAction (e.g. looking up a page's real query
+      // before drafting a meta-title) need this, not just the findings.
+      start: r.input?.start ?? null,
+      end: r.input?.end ?? null,
+      createdAt: r.created_at,
+    }));
+}
+
+// Most recent runs across ALL given agents, newest first — the AI Command
+// Center's "AI Activity" feed. Every row here is a real completed run
+// (agent_id, took_ms, created_at already persisted by runner.js) — nothing
+// is synthesized to make the feed look busier than it actually is.
+export async function getRecentActivity(siteId, agentIds, limit = 12) {
+  const { rows } = await query(
+    `SELECT agent_id, agent_version, status, took_ms, created_at
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2)
+      ORDER BY created_at DESC
+      LIMIT $3`,
+    [siteId, agentIds, limit]
+  );
+  return rows;
+}
+
 export async function getAgentRunHistory(siteId, agentId, limit = 10) {
   const { rows } = await query(
     `SELECT id, agent_id, agent_version, status, facts, narrative, error, took_ms, created_at
@@ -41,6 +79,25 @@ export async function getAgentRunHistory(siteId, agentId, limit = 10) {
       ORDER BY created_at DESC
       LIMIT $3`,
     [siteId, agentId, limit]
+  );
+  return rows;
+}
+
+// Per-agent run counts since a given date — a lean aggregate (not full rows)
+// for the Review Report (agents/lib/review-report.js), which needs "how much
+// real activity happened since onboarding" per agent, not every individual
+// run's full facts blob.
+export async function getAgentRunSummarySince(siteId, agentIds, sinceDate) {
+  const { rows } = await query(
+    `SELECT agent_id,
+            COUNT(*)::int AS total_runs,
+            COUNT(*) FILTER (WHERE status = 'ok')::int AS ok_runs,
+            COUNT(*) FILTER (WHERE status != 'ok')::int AS error_runs,
+            MAX(created_at) AS last_run_at
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2) AND created_at >= $3
+      GROUP BY agent_id`,
+    [siteId, agentIds, sinceDate]
   );
   return rows;
 }

@@ -1,55 +1,63 @@
+import { runOrchestration } from './orchestrator.js';
 import { getAgent } from './registry.js';
-import { callLLM } from '../llm.js';
+import { saveAgentRun } from '../store/agent-runs.js';
 
 export const meta = {
   id: 'executive-report',
   name: 'Executive Report Agent',
   description: 'Synthesizes every specialist agent into one growth summary.',
   category: 'meta',
-  version: 2,
-  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap'],
+  version: 5,
+  // competitor-intelligence is deliberately excluded — it now runs on its
+  // own independent MONTHLY cadence (server/job.js's
+  // runCompetitorIntelligenceIfDue), not weekly: real competitor movement
+  // takes real time to show up, and re-crawling competitor sites weekly is
+  // both wasteful and impolite. Its findings still surface everywhere
+  // Command Center/Action Center read RECOMMENDATION_AGENT_IDS — this
+  // narrative just doesn't force a fresh competitor check every week.
+  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo'],
 };
 
-// Calls each sub-agent's run() directly (not runAgent()) so this doesn't write
-// N redundant history rows per exec run, and collects their facts as-is — no
-// re-fetching, no re-aggregation. One LLM call then synthesizes all sections
-// (facts + each sub-agent's own narrative) into one executive summary.
-//
-// Sub-agents run concurrently, not sequentially — they're independent reads
-// of the same site/date-range, so there's no reason to wait on one before
-// starting the next. Each is wrapped in its own try/catch so one agent
-// erroring doesn't fail the others or the whole report.
-export async function run(input) {
-  const entries = await Promise.all(meta.requires.map(async (id) => {
-    const agent = await getAgent(id);
-    if (!agent) return [id, { status: 'error', message: `agent "${id}" is not registered` }];
-    try {
-      const out = await agent.run(input);
-      return [id, {
-        status: out.status, facts: out.facts, narrative: out.narrative ?? null,
-        message: out.message ?? null,
-      }];
-    } catch (err) {
-      return [id, { status: 'error', message: String(err?.message || err) }];
-    }
-  }));
-  const sections = Object.fromEntries(entries);
+// content-gap runs weekly-only (server/job.js's DAILY_AGENT_IDS deliberately
+// excludes it now — real content-completeness gaps don't meaningfully shift
+// day to day, so a weekly check matches the underlying signal instead of
+// re-crawling every candidate page daily). This weekly report is its ONLY
+// chance to persist a real agent_runs row. Every other sub-agent here
+// already persists its own row daily via job.js's runDailyAgentAnalysisForSite,
+// so persisting all 7 here would just create redundant daily-duplicate rows
+// for those 6 — only content-gap gets the explicit write.
+const WEEKLY_ONLY_AGENT_ID = 'content-gap';
 
-  const system = 'You are a growth strategist writing an executive summary for a non-technical site owner, ' +
-    'synthesizing six specialist agents\' findings (query intelligence, opportunity, country intelligence, ' +
-    'device intelligence, AI visibility, content gap) into one 4-6 sentence growth summary. Use ONLY the facts ' +
-    'given, never invent numbers. Any section may have status "insufficient-data" or "error" instead of "ok" — ' +
-    'if one does, name it plainly as a gap rather than omitting or guessing at it. A lower average Search ' +
-    'position is BETTER. Plain text, no markdown, no bullets.';
-  const user = `Sub-agent sections: ${JSON.stringify(sections)}`;
-  const narrative = await callLLM(system, user, { maxTokens: 400 })
-    .catch((err) => { console.warn('[agents] executive-report narrative failed:', err.message); return null; });
+// Thin config over the shared orchestrator (orchestrator.js) — this agent no
+// longer hand-rolls its own fan-out + synthesis; it just tells the
+// orchestrator which agents to run. persistSubAgentRuns stays false so
+// running the executive report still doesn't write redundant agent_runs
+// rows for the 6 daily agents, same intent as the original direct
+// agent.run() calls.
+export async function run(input) {
+  const result = await runOrchestration({ ...input, agentIds: meta.requires, persistSubAgentRuns: false });
+
+  const weeklyOnly = result.perAgent[WEEKLY_ONLY_AGENT_ID];
+  if (weeklyOnly) {
+    const agent = await getAgent(WEEKLY_ONLY_AGENT_ID);
+    await saveAgentRun({
+      siteId: input.siteId, agentId: WEEKLY_ONLY_AGENT_ID, agentVersion: agent?.meta?.version,
+      input, status: weeklyOnly.status, facts: weeklyOnly.facts ?? null, narrative: weeklyOnly.narrative ?? null,
+      error: weeklyOnly.status === 'error' ? (weeklyOnly.message || 'unknown error') : null, tookMs: null,
+    }).catch((err) => console.error(`[agents] failed to persist ${WEEKLY_ONLY_AGENT_ID} run:`, err.message));
+  }
 
   return {
     meta,
     status: 'ok',
-    facts: { rangeStart: input.start, rangeEnd: input.end, sections },
-    narrative,
-    generatedAt: new Date().toISOString(),
+    facts: {
+      rangeStart: input.start,
+      rangeEnd: input.end,
+      sections: result.perAgent,       // per-sub-agent {status, facts, narrative, message} — report/executive-doc.js's weekly synthesis reads this
+      topFindings: result.findings.slice(0, 3),
+      findings: result.findings,
+    },
+    narrative: result.narrative,
+    generatedAt: result.generatedAt,
   };
 }

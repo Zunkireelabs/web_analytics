@@ -1,133 +1,20 @@
 import { Router } from 'express';
 import { requireAuth, requireInternalSite } from './login.js';
-import { runAgent } from '../agents/runner.js';
-import { getLatestAgentRuns } from '../store/agent-runs.js';
-import { getQueriesForPage } from '../store/read.js';
+import { runOrchestration } from '../agents/orchestrator.js';
+import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
+import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
-import { createDraft, listDrafts, getDraft, updateDraft, deleteDraft } from '../store/drafts.js';
+import {
+  createDraft, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  markDraftImplemented, markDraftBranchPushed, markDraftMergedToStage, recordApplyFailure, recordMergeFailure,
+  MERGE_MANDATORY_TYPES,
+} from '../store/drafts.js';
+import { getImplementerForGenerator } from '../implementers/registry.js';
+import { getSiteById } from '../store/read.js';
+import { runSiteDiscoveryIfDue } from '../job.js';
 
 const router = Router();
 router.use(requireAuth, requireInternalSite);
-
-// The 4 agents whose output contains real, generator-mappable
-// recommendations. query-intelligence/device-intelligence/executive-report
-// are excluded — they have no findings that map to any of the 7 draftable
-// action types (see the product review's per-agent trace).
-const RECOMMENDATION_AGENT_IDS = ['opportunity', 'content-gap', 'ai-visibility', 'country-intelligence'];
-
-// Maps a recommendation/gap string (short tags like "Add FAQ", full
-// sentences like "Add an FAQ section.", or gap types like "Missing FAQ")
-// to a generator id via keyword matching — handles every source agent's
-// differently-shaped text with one function instead of three lookup tables.
-// Recommendations with no mapping (e.g. "Missing alt text") are filtered
-// out rather than forced onto a generator that doesn't fit.
-function mapToGenerator(text) {
-  const t = (text || '').toLowerCase();
-  if (t.includes('title')) return 'meta-title';
-  if (t.includes('meta')) return 'meta-title';
-  if (t.includes('faq') || t.includes('question-style') || t.includes('question style')) return 'faq';
-  if (t.includes('entity schema') || t.includes('schema')) return 'schema';
-  if (t.includes('internal link')) return 'internal-links';
-  return null;
-}
-
-// Real top query for a page, looked up on demand and cached per call — only
-// needed for sources (ai-visibility) whose facts don't already carry a
-// query, so a meta-title/faq draft is never generated ungrounded.
-function makeQueryLookup(siteId) {
-  const cache = new Map();
-  return async (start, end, page) => {
-    const key = `${start}|${end}|${page}`;
-    if (cache.has(key)) return cache.get(key);
-    const rows = await getQueriesForPage(siteId, start, end, page, 1);
-    const q = rows[0]?.query || '';
-    cache.set(key, q);
-    return q;
-  };
-}
-
-async function buildRecommendations(siteId) {
-  const runs = await getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS);
-  const byId = new Map(runs.map((r) => [r.agent_id, r]));
-  const lookupQuery = makeQueryLookup(siteId);
-  const items = [];
-
-  const opp = byId.get('opportunity');
-  if (opp?.status === 'ok') {
-    for (const o of opp.facts.opportunities || []) {
-      for (const tag of o.recommendations || []) {
-        const generatorId = mapToGenerator(tag);
-        if (!generatorId) continue;
-        items.push({
-          id: `opportunity:${o.page}:${o.query}:${tag}`,
-          source: 'opportunity', tag, generatorId,
-          reason: `"${o.query}" ranks #${Number(o.avgPosition).toFixed(1)}, ${o.impressions} impressions — est. +${o.estimatedTrafficGain} clicks if improved.`,
-          params: { page: o.page, query: o.query, schemaType: 'Article' },
-        });
-      }
-    }
-  }
-
-  const gap = byId.get('content-gap');
-  if (gap?.status === 'ok') {
-    for (const p of gap.facts.pages || []) {
-      for (const g of p.gaps || []) {
-        const generatorId = mapToGenerator(g.type);
-        if (!generatorId) continue;
-        items.push({
-          id: `content-gap:${p.page}:${g.type}`,
-          source: 'content-gap', tag: g.type, generatorId,
-          reason: g.detail,
-          params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: 'Article' },
-        });
-      }
-      for (const s of p.aiSuggestions || []) {
-        items.push({
-          id: `content-gap:${p.page}:entity:${s.entity}`,
-          source: 'content-gap', tag: `Cover: ${s.entity}`, generatorId: 'blog-outline',
-          reason: `${s.rationale} (AI-suggested, confidence: ${s.confidence})`,
-          params: { topic: s.entity, context: `Related to existing page ${p.page}. ${s.rationale}` },
-        });
-      }
-    }
-  }
-
-  const vis = byId.get('ai-visibility');
-  if (vis?.status === 'ok') {
-    const { start, end } = vis.input || {};
-    for (const p of vis.facts.pages || []) {
-      for (const rec of p.recommendations || []) {
-        const generatorId = mapToGenerator(rec);
-        if (!generatorId) continue;
-        const params = { page: p.page, schemaType: 'Article' };
-        if (generatorId === 'meta-title' || generatorId === 'faq') {
-          params.query = start && end ? await lookupQuery(start, end, p.page) : '';
-          if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
-        }
-        items.push({
-          id: `ai-visibility:${p.page}:${rec}`,
-          source: 'ai-visibility', tag: rec, generatorId,
-          reason: `AI Visibility score ${p.score?.overall ?? '—'}/100 for this page.`,
-          params,
-        });
-      }
-    }
-  }
-
-  const country = byId.get('country-intelligence');
-  if (country?.status === 'ok') {
-    for (const r of country.facts.recommendations || []) {
-      items.push({
-        id: `country-intelligence:${r.tag}:${r.params.market || r.params.city || r.params.targetLanguage}`,
-        source: 'country-intelligence', tag: r.tag, generatorId: r.generatorId,
-        reason: r.reason, params: r.params,
-      });
-    }
-  }
-
-  const lastAnalyzedAt = Object.fromEntries(runs.map((r) => [r.agent_id, r.created_at]));
-  return { items, lastAnalyzedAt };
-}
 
 // Most recent persisted recommendations — instant, may be stale. `Refresh`
 // below re-runs the agents fresh.
@@ -137,18 +24,15 @@ router.get('/action-center/recommendations', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Re-runs the 4 recommendation-bearing agents fresh (each several seconds —
-// real page fetches + LLM calls) for the given range, persists them like any
-// other agent run, then rebuilds the recommendation list from the fresh data.
+// Re-runs the 6 recommendation-bearing agents fresh (each several seconds —
+// real page fetches + LLM calls) for the given range via the shared
+// orchestrator (persisting each sub-agent run like any other agent run),
+// then rebuilds the recommendation list from the fresh data.
 router.post('/action-center/recommendations/refresh', async (req, res, next) => {
   try {
     const { start, end } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end are required' });
-    await Promise.all(RECOMMENDATION_AGENT_IDS.map((id) =>
-      runAgent(id, { siteId: req.siteId, start, end }).catch((err) => {
-        console.error(`[action-center] refresh failed for agent "${id}":`, err.message);
-      })
-    ));
+    await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
     res.json(await buildRecommendations(req.siteId));
   } catch (e) { next(e); }
 });
@@ -163,14 +47,14 @@ router.get('/action-center/generators', async (req, res, next) => {
 // anywhere else — no publish path exists.
 router.post('/action-center/generate', async (req, res, next) => {
   try {
-    const { generatorId, params, source } = req.body || {};
+    const { generatorId, params, source, findingId } = req.body || {};
     if (!generatorId) return res.status(400).json({ error: 'generatorId is required' });
     const generator = await getGenerator(generatorId);
     if (!generator) return res.status(404).json({ error: `Unknown generator "${generatorId}"` });
 
     const { content, summary } = await generator.generate({ siteId: req.siteId, params: params || {} });
     const draft = await createDraft(req.siteId, {
-      actionType: generatorId, source: source || 'manual', input: params || {}, content,
+      actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
     });
     res.json({ ...draft, summary });
   } catch (e) {
@@ -194,8 +78,7 @@ router.get('/action-center/drafts/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Edit + Save Draft — content only. No status other than 'draft'/'edited'
-// exists; there is no publish transition here or anywhere in this router.
+// Edit + Save Draft — content only, valid at any point before approval.
 router.put('/action-center/drafts/:id', async (req, res, next) => {
   try {
     const { content } = req.body || {};
@@ -203,6 +86,147 @@ router.put('/action-center/drafts/:id', async (req, res, next) => {
     const draft = await updateDraft(req.siteId, req.params.id, { content });
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     res.json(draft);
+  } catch (e) { next(e); }
+});
+
+// Approval lifecycle: draft/edited -> submitted_for_approval -> approved ->
+// implemented. Each step 404s if the draft isn't in the state it requires
+// (guards against e.g. approving something never submitted) rather than
+// silently no-op'ing.
+router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
+  try {
+    const draft = await submitDraftForApproval(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found, or not in a submittable state' });
+    res.json(draft);
+  } catch (e) { next(e); }
+});
+
+router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
+  try {
+    const draft = await approveDraft(req.siteId, req.params.id, req.userId);
+    if (!draft) return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
+    res.json(draft);
+  } catch (e) { next(e); }
+});
+
+// Shared by /implemented and /merge-to-stage below: marks a draft
+// implemented, then best-effort triggers a real sitemap/page-inventory
+// refresh (never fails the caller's response — the draft is already
+// correctly marked implemented at this point; runSiteDiscoveryIfDue is
+// already cheap/idempotent when a real discovery isn't due yet).
+async function finalizeImplemented(siteId, draftId, site) {
+  const draft = await markDraftImplemented(siteId, draftId);
+  if (draft) {
+    try {
+      await runSiteDiscoveryIfDue(site);
+    } catch (err) {
+      console.error(`[action-center] post-implement site discovery failed for site ${siteId}:`, err.message);
+    }
+  }
+  return draft;
+}
+
+// Defensive/manual escape hatch only — every real generator type now
+// auto-completes to 'implemented' the moment merge-to-stage succeeds (see
+// below), so this route is only ever reached for a draft type with no real
+// merge strategy at all (MERGE_MANDATORY_TYPES, store/drafts.js) — none
+// exist today, kept for a future generator that might not have one yet.
+router.post('/action-center/drafts/:id/implemented', async (req, res, next) => {
+  try {
+    const existing = await getDraft(req.siteId, req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Draft not found' });
+    if (existing.status === 'approved' && !existing.branch_name && MERGE_MANDATORY_TYPES.includes(existing.action_type)) {
+      return res.status(400).json({
+        error: 'This change type requires a real merge into stage before it can be marked implemented — click "Push Branch" first.',
+      });
+    }
+
+    const site = await getSiteById(req.siteId);
+    const draft = await finalizeImplemented(req.siteId, req.params.id, site);
+    if (!draft) return res.status(404).json({ error: 'Draft not found, or not yet approved' });
+    res.json(draft);
+  } catch (e) { next(e); }
+});
+
+// Zero-write dry run — the real file diff a reviewer sees BEFORE approving,
+// not just the abstract draft content. Available any time a draft isn't
+// implemented yet (not gated to 'approved') since this never touches
+// GitHub. Uses the exact same merge function /apply below does, so what's
+// previewed here and what actually gets written can never diverge.
+router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (draft.status === 'implemented') return res.status(400).json({ error: 'Already implemented — nothing to preview.' });
+
+    const site = await getSiteById(req.siteId);
+    if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — connect one first.' });
+
+    const implementer = await getImplementerForGenerator(draft.action_type);
+    if (!implementer) return res.status(400).json({ error: `No implementer wired for "${draft.action_type}" yet` });
+    if (typeof implementer.preview !== 'function') {
+      return res.status(422).json({ error: `No preview available for "${draft.action_type}" yet.`, reason: 'merge-strategy-not-implemented' });
+    }
+
+    const result = await implementer.preview(site, draft);
+    if (!result.ok) return res.status(422).json({ error: result.error, reason: result.reason });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// approved -> branch_pushed. Routes to whichever implementer (frontend/
+// backend) handles this draft's generator type, pushes a real branch
+// (forked from stage) with the real change, and persists either that real
+// evidence or an honest failure — not merged yet. Staff reviews the real
+// diff (Draft Preview panel — same computation apply() used) before the
+// separate merge-to-stage step below.
+router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft || draft.status !== 'approved') return res.status(404).json({ error: 'Draft not found, or not yet approved' });
+
+    const site = await getSiteById(req.siteId);
+    if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — run `npm run connect-repo` first.' });
+
+    const implementer = await getImplementerForGenerator(draft.action_type);
+    if (!implementer) return res.status(400).json({ error: `No implementer wired for "${draft.action_type}" yet` });
+
+    const result = await implementer.apply(site, draft);
+    if (!result.ok) {
+      await recordApplyFailure(req.siteId, draft.id, result.error);
+      return res.status(422).json({ error: result.error, reason: result.reason });
+    }
+    const updated = await markDraftBranchPushed(req.siteId, draft.id, { branchName: result.branchName, implementerId: implementer.meta.id });
+    res.json(updated);
+  } catch (e) { next(e); }
+});
+
+// branch_pushed -> merged_to_stage -> implemented, in one real action.
+// Merges the branch already pushed above directly into `stage` — no PR
+// (see server/implementers/lib/github-ops.js and
+// ~/Travel/ci-cd-deployment-master-guide: stage has no protection rules and
+// deploys automatically). A real merge into stage IS the real evidence this
+// platform can ever have — promoting stage -> main/production is entirely
+// manual and outside this app's visibility, so there's no further real
+// signal worth waiting on a separate human click for. Auto-completes
+// straight through to 'implemented' the moment the merge succeeds.
+router.post('/action-center/drafts/:id/merge-to-stage', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft || draft.status !== 'branch_pushed') return res.status(404).json({ error: 'Draft not found, or has no pushed branch yet' });
+
+    const site = await getSiteById(req.siteId);
+    const implementer = await getImplementerForGenerator(draft.action_type);
+    if (!implementer || typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No merge step wired for "${draft.action_type}" yet` });
+
+    const result = await implementer.mergeToStage(site, draft);
+    if (!result.ok) {
+      await recordMergeFailure(req.siteId, draft.id, result.error);
+      return res.status(422).json({ error: result.error, reason: result.reason });
+    }
+    await markDraftMergedToStage(req.siteId, draft.id, { mergeSha: result.mergeSha, mergeUrl: result.mergeUrl });
+    const updated = await finalizeImplemented(req.siteId, draft.id, site);
+    res.json(updated);
   } catch (e) { next(e); }
 });
 

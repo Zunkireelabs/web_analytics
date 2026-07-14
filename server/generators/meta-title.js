@@ -19,12 +19,17 @@ export async function generate({ params }) {
     if (fetched.ok) pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
   }
 
-  const system = 'You are an SEO copywriter. Given a real target search query and (if available) the page\'s ' +
-    'current title and real body text, draft 3 candidate <title> tags (50-60 characters, include the query\'s ' +
-    'core terms naturally, no clickbait) and one meta description (140-160 characters). Ground every claim ONLY ' +
-    'in the page content given — never invent a feature, price, or fact not present in the excerpt. If no page ' +
-    'content is given, write generically around the query only. Respond with ONLY a JSON object: ' +
-    '{"titles": ["...", "...", "..."], "metaDescription": "..."}';
+  const system = 'You are a technical SEO specialist who treats title tags and meta descriptions as data-driven, ' +
+    'not creative-writing, exercises: character-length discipline and query-intent match matter more than clever ' +
+    'phrasing. Given a real target search query and (if available) the page\'s current title and real body text, ' +
+    'draft 3 candidate <title> tags (50-60 characters, include the query\'s core terms naturally, no clickbait) ' +
+    'and one meta description (150-160 characters). Stay tightly scoped to ONLY this query\'s core terms — do ' +
+    'not add other head-term keywords the page doesn\'t already rank for, since that risks cannibalizing another ' +
+    'page on the same site that owns a different query. If the body text shows real E-E-A-T signals (author ' +
+    'expertise, credentials, first-hand experience, cited sources), you may reflect them in the meta description ' +
+    '— but ground every claim ONLY in the page content given; never invent a feature, price, credential, or fact ' +
+    'not present in the excerpt. If no page content is given, write generically around the query only. Respond ' +
+    'with ONLY a JSON object: {"titles": ["...", "...", "..."], "metaDescription": "..."}';
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
   const raw = await callLLM(system, user, { maxTokens: 400 });
 

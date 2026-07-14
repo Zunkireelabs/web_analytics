@@ -38,14 +38,30 @@ async function withRetry(fn) {
   }
 }
 
+// `REPORT_MODEL_MONTHLY` has always been documented in .env.example for
+// "the monthly model" (a stronger tier for infrequent, higher-stakes calls)
+// but was never actually read anywhere — every call silently used the cheap
+// daily-tier model. `tier: 'monthly'` completes that: for calls where model
+// world-knowledge matters more than per-call cost (e.g. weekly competitor
+// discovery, where a cheap model reliably misses real, niche local
+// companies), pass tier: 'monthly' to use the stronger default.
+const MODEL_DEFAULTS = {
+  openai: { daily: 'gpt-4o-mini', monthly: 'gpt-4o' },
+  anthropic: { daily: 'claude-haiku-4-5', monthly: 'claude-opus-4-8' },
+};
+
 // Calls the chosen LLM with a system + user prompt and returns plain text.
-// `model` overrides the default for that provider (e.g. the monthly model).
-export async function callLLM(system, user, { model, maxTokens = 500 } = {}) {
+// `model` overrides the resolved default outright; `tier` picks which
+// REPORT_MODEL_* env var / built-in default to fall back to otherwise.
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily' } = {}) {
   const provider = pickProvider();
+  const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
+  const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
+
   if (provider === 'openai') {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const res = await withRetry(() => openai.chat.completions.create({
-      model: model || process.env.REPORT_MODEL_DAILY || 'gpt-4o-mini',
+      model: resolvedModel,
       max_tokens: maxTokens,
       messages: [
         { role: 'system', content: system },
@@ -57,7 +73,7 @@ export async function callLLM(system, user, { model, maxTokens = 500 } = {}) {
 
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const msg = await withRetry(() => anthropic.messages.create({
-    model: model || process.env.REPORT_MODEL_DAILY || 'claude-haiku-4-5',
+    model: resolvedModel,
     max_tokens: maxTokens,
     system,
     messages: [{ role: 'user', content: user }],

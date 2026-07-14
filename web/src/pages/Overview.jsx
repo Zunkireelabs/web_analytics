@@ -8,8 +8,6 @@ import TrafficDistributionCard from '../components/TrafficDistributionCard.jsx';
 import AiInsightsPanel from '../components/AiInsightsPanel.jsx';
 import TopPagesCard from '../components/TopPagesCard.jsx';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
-import NarrativePanel from '../components/NarrativePanel.jsx';
-import AiPanel from '../components/AiPanel.jsx';
 import PageHeader from '../components/PageHeader.jsx';
 
 const fmtInt = (v) => Number(v).toLocaleString();
@@ -31,10 +29,8 @@ export default function Overview({ siteId }) {
   const [range, setRange] = useState(null);
   const [start, setStart] = useState(daysAgo(33));
   const [end, setEnd] = useState(daysAgo(3));
-  const [reportDate, setReportDate] = useState(daysAgo(3));
   const [series, setSeries] = useState([]);
   const [prevSeries, setPrevSeries] = useState([]);
-  const [day, setDay] = useState(null);
   const [channels, setChannels] = useState([]);
   const [rangeQueries, setRangeQueries] = useState([]);
   const [rangePages, setRangePages] = useState([]);
@@ -46,7 +42,6 @@ export default function Overview({ siteId }) {
       setRange(r);
       const latest = r.latest_visitor || r.freshest;
       if (r.freshest) {
-        setReportDate(r.freshest);
         setEnd(latest);
         setStart(shiftYmd(latest, 3));
       }
@@ -56,28 +51,38 @@ export default function Overview({ siteId }) {
   useEffect(() => {
     if (!siteId) return;
     setLoading(true);
+    // On mount this effect fires once with the placeholder default start/end,
+    // then again as soon as the range-fetch effect above corrects them —
+    // two overlapping requests for two different date ranges. Without this
+    // guard, whichever response lands last wins (usually the larger,
+    // slower placeholder-range query), silently overwriting the correct
+    // numbers with stale ones even though the date picker itself (bound
+    // directly to start/end state, not to fetched data) already shows the
+    // right dates. `cancelled` discards a response for a start/end that's
+    // no longer current.
+    let cancelled = false;
     const rangeLen = Math.round((new Date(`${end}T00:00:00Z`) - new Date(`${start}T00:00:00Z`)) / 86400000);
     const priorEnd = shiftYmd(start, 1);
     const priorStart = shiftYmd(priorEnd, rangeLen);
     Promise.all([
       api.series(siteId, start, end),
       api.series(siteId, priorStart, priorEnd),
-      api.day(siteId, reportDate),
       api.channels(siteId, start, end),
       api.breakdownRange(siteId, start, end, 'query', 10),
       api.breakdownRange(siteId, start, end, 'page', 10),
     ])
-      .then(([s, ps, d, c, q, p]) => {
+      .then(([s, ps, c, q, p]) => {
+        if (cancelled) return;
         setSeries(s);
         setPrevSeries(ps);
-        setDay(d);
         setChannels(c);
         setRangeQueries(q);
         setRangePages(p);
       })
       .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [siteId, start, end, reportDate]);
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [siteId, start, end]);
 
   const anchor = range?.latest_visitor || range?.freshest || daysAgo(1);
   const setPreset = (d) => { setStart(shiftYmd(anchor, d)); setEnd(anchor); };
@@ -86,6 +91,13 @@ export default function Overview({ siteId }) {
   const todayRow = series.find((r) => String(r.date).slice(0, 10) === range?.latest_visitor) || {};
   const yesterdayRow = series.find((r) => String(r.date).slice(0, 10) === (range?.latest_visitor ? shiftYmd(range.latest_visitor, 1) : '')) || null;
   const sv = (k) => series.map((r) => Number(r[k] ?? 0));
+  // Position is the one metric where 0 is never a real value (ranks start
+  // at 1) and a day with no finalized GSC data legitimately has no
+  // position yet — `?? 0` above would render that as rank #0, the single
+  // best point on a "lower is better" chart, exactly backwards. Leaving it
+  // `undefined` lets Sparkline's own `Number.isFinite` filter drop the
+  // point instead of plotting a fabricated "perfect" day.
+  const svPosition = () => series.map((r) => (r.position != null ? Number(r.position) : undefined));
 
   const pSum = (arr, k) => arr.reduce((a, r) => a + Number(r[k] ?? 0), 0);
   const posAvg = (arr) => {
@@ -218,12 +230,6 @@ export default function Overview({ siteId }) {
               className="bg-slate-50 border border-slate-200/80 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition" />
           </label>
 
-          <label className="flex flex-col">
-            <span className="text-[10px] font-bold text-slate-400 tracking-wider uppercase mb-1">Report Day</span>
-            <input type="date" value={reportDate} min={range?.earliest} max={range?.latest_visitor}
-              onChange={(e) => setReportDate(e.target.value)}
-              className="bg-slate-50 border border-slate-200/80 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition" />
-          </label>
         </div>
       </div>
 
@@ -252,16 +258,10 @@ export default function Overview({ siteId }) {
 
       {/* Secondary metrics: search position + GA4 audience */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Avg position" hint="lower is better" icon="🏅" color="#f59e0b" data={sv('position')} value={pm.position} prev={pmp.position} lowerIsBetter format={fmtFloat} loading={loading} />
+        <StatCard label="Avg position" hint="lower is better" icon="🏅" color="#f59e0b" data={svPosition()} value={pm.position} prev={pmp.position} lowerIsBetter format={fmtFloat} loading={loading} />
         <StatCard label="Users" icon="👥" color="#10b981" data={sv('users')} value={pm.users} prev={pmp.users} format={fmtInt} loading={loading} />
         <StatCard label="Sessions" icon="⏱" color="#14b8a6" data={sv('sessions')} value={pm.sessions} prev={pmp.sessions} format={fmtInt} loading={loading} />
         <StatCard label="Conversions" icon="✅" color="#d946ef" data={sv('conversions')} value={pm.conversions} prev={pmp.conversions} format={fmtInt} loading={loading} />
-      </div>
-
-      {/* AI command center: daily summary + custom prompt helper side-by-side */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <NarrativePanel date={reportDate} text={day?.narrative} />
-        <AiPanel siteId={siteId} date={reportDate} />
       </div>
 
       {/* Bento row: Top Queries (55%) · Traffic Distribution (25%) · AI Insights (20%) */}

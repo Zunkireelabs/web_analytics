@@ -13,6 +13,18 @@ const shiftYmd = (ymd, days) => {
   return d.toISOString().slice(0, 10);
 };
 
+// The real comparison window /movers uses is "the immediately preceding
+// period of the same length" (server/routes/metrics.js) — this describes
+// that real window instead of a hardcoded "last week," which was wrong
+// for any range that wasn't exactly 7 days (the default here is 30).
+function moverPeriodLabel(start, end) {
+  const days = Math.round((new Date(`${end}T00:00:00Z`) - new Date(`${start}T00:00:00Z`)) / 86400000) + 1;
+  if (days <= 1) return 'the prior day';
+  if (days === 7) return 'the prior week';
+  if (days >= 28 && days <= 31) return 'the prior month';
+  return `the prior ${days} days`;
+}
+
 export default function Insights({ siteId }) {
   const [range, setRange] = useState(null);
   const [start, setStart] = useState(daysAgo(33));
@@ -34,10 +46,17 @@ export default function Insights({ siteId }) {
 
   useEffect(() => {
     if (!siteId) return;
-    api.series(siteId, start, end).then(setSeries).catch(() => {});
-    api.device(siteId, start, end).then(setDevice).catch(() => {});
-    api.country(siteId, start, end).then(setCountry).catch(() => {});
-    api.movers(siteId).then(setMovers).catch(() => {});
+    // Same overlapping-fetch guard as Overview.jsx: this effect fires once
+    // with the placeholder default start/end, then again once the range
+    // effect above corrects them — without discarding the stale response,
+    // whichever of the two requests resolves last wins, regardless of
+    // which date range is actually still selected.
+    let cancelled = false;
+    api.series(siteId, start, end).then((s) => { if (!cancelled) setSeries(s); }).catch(() => {});
+    api.device(siteId, start, end).then((d) => { if (!cancelled) setDevice(d); }).catch(() => {});
+    api.country(siteId, start, end).then((c) => { if (!cancelled) setCountry(c); }).catch(() => {});
+    api.movers(siteId, start, end).then((m) => { if (!cancelled) setMovers(m); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [siteId, start, end]);
 
   const deviceData = device.map((d) => ({ name: cap(d.dim_value), value: Number(d.sessions) }));
@@ -67,7 +86,7 @@ export default function Insights({ siteId }) {
       </div>
 
       {/* Top movers */}
-      <MoversList gainers={movers.gainers} droppers={movers.droppers} />
+      <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
 
       <div className="grid md:grid-cols-2 gap-4">
         {/* Device split */}

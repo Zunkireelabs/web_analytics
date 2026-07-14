@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import Sparkline from './Sparkline.jsx';
 
 // Premium KPI tile: icon + label, big value, trend pill, and a live mini-sparkline.
 export default function StatCard({
@@ -45,40 +45,8 @@ export default function StatCard({
       </div>
 
       <div className="mt-1.5 h-9">
-        <Sparkline data={data} color={color} />
+        <Sparkline data={data} color={color} stretch dot={false} />
       </div>
     </div>
-  );
-}
-
-function Sparkline({ data, color }) {
-  const id = useId().replace(/:/g, '');
-  const vals = (data || []).map((v) => Number(v) || 0);
-  if (vals.length < 2) return null;
-
-  const max = Math.max(...vals);
-  const min = Math.min(...vals);
-  const range = max - min || 1;
-  const n = vals.length;
-  const pts = vals.map((v, i) => {
-    const x = (i / (n - 1)) * 100;
-    const y = 28 - ((v - min) / range) * 26;
-    return [Math.round(x * 100) / 100, Math.round(y * 100) / 100];
-  });
-  const line = pts.map((p) => p.join(',')).join(' ');
-  const area = `0,30 ${line} 100,30`;
-
-  return (
-    <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="w-full h-full">
-      <defs>
-        <linearGradient id={`sp${id}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor={color} stopOpacity="0.22" />
-          <stop offset="1" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon points={area} fill={`url(#sp${id})`} />
-      <polyline points={line} fill="none" stroke={color} strokeWidth="1.6"
-        strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-    </svg>
   );
 }

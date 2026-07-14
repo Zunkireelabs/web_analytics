@@ -41,3 +41,11 @@ body {
 /* Subtle entrance */
 @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .fade-up { animation: fadeUp 0.28s ease-out both; }
+
+/* Flowing connector line (login hero) */
+@keyframes dashFlow { to { stroke-dashoffset: -48; } }
+.dash-flow { animation: dashFlow 2.6s linear infinite; }
+
+/* Indeterminate progress sweep (login hero — "agent running" bars) */
+@keyframes shimmerSweep { from { transform: translateX(-100%); } to { transform: translateX(220%); } }
+.shimmer-sweep { animation: shimmerSweep 1.6s ease-in-out infinite; }

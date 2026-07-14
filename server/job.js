@@ -1,14 +1,75 @@
 import { getOrCreateSite, query } from './db.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
-import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone } from './store/upsert.js';
-import { getDay, getNarrative, listSites } from './store/read.js';
+import { fetchCompetitorRankings } from './ingest/competitors.js';
+import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
+import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
 import { sendDailyEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
-import { daysAgoInTz, dateRange, previousWeek } from './util/dates.js';
+import { isGoogleAuthError } from './integrations/google-oauth.js';
+import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from './util/dates.js';
+import { runOrchestration } from './agents/orchestrator.js';
+import { runAgent } from './agents/runner.js';
+import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
+import { meta as execReportMeta } from './agents/executive-report.js';
+import { computeHealthScore } from './agents/lib/health-score.js';
+import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
+import { detectNotificationEvents } from './notifications/detect.js';
+import { deliverToAllChannels } from './notifications/channels/index.js';
+import { buildRecommendations } from './agents/lib/recommendations.js';
+import { syncWatchlist } from './agents/lib/watchlist.js';
+import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
+import { getSearchPerformanceRange } from './store/read.js';
+import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
+import { runDueVerifications } from './agents/lib/fix-verification.js';
+
+// Daily-cadence agents only. competitor-intelligence, authority, and
+// ai-recommendation all run monthly (see runAgentIfDue below — real
+// competitor movement, backlink profiles, and AI-answer patterns all move
+// too slowly to justify daily/weekly cost, and for authority/ai-
+// recommendation specifically, daily would multiply real DataForSEO/OpenAI
+// spend for no real signal gain). content-gap runs weekly (via
+// executive-report's requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID
+// — real content-completeness gaps don't meaningfully shift day to day).
+const MONTHLY_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !MONTHLY_AGENT_IDS.has(id) && id !== 'content-gap');
+
+// Records the shared Google OAuth connection's health from organic pipeline
+// outcomes (not just the on-demand "Test connection" check), so Integration
+// Health reflects real job results. A success clears any prior error; a
+// failure only gets recorded when it's actually auth-shaped (isGoogleAuthError)
+// — a transient network blip or rate limit shouldn't read as "connection broken."
+// site_id is null (this connection is shared across all sites, not per-site).
+async function noteGoogleAuthOutcome(ok, err) {
+  if (ok) {
+    await recordIntegrationCheck('google-oauth', null, {
+      ok: true, authStatus: 'valid', errorMessage: null, recoveryAction: null,
+    }).catch(() => {});
+    return;
+  }
+  if (!isGoogleAuthError(err)) return;
+  await recordIntegrationCheck('google-oauth', null, {
+    ok: false, authStatus: 'revoked',
+    errorMessage: err.response?.data?.error_description || err.response?.data?.error || err.message,
+    recoveryAction: 'Run `npm run get-token` to re-authenticate the shared Google OAuth connection.',
+  }).catch(() => {});
+}
+
+// Records the daily pipeline's own success/failure — same shared/global
+// pattern as noteGoogleAuthOutcome (site_id null), so a broken automation
+// run surfaces through the existing Integration Health card instead of only
+// living in server logs. The platform's whole pitch is "we notice things
+// and tell you" — this is that same promise applied to itself.
+async function notePipelineOutcome(ok, err) {
+  await recordIntegrationCheck('daily-pipeline', null, {
+    ok, authStatus: null,
+    errorMessage: ok ? null : (err?.message || String(err)),
+    recoveryAction: ok ? null : 'Check server logs for the failing step (ingest, narrative, agents, or notifications) for this site, fix it, then re-run the daily job manually.',
+  }).catch(() => {});
+}
 
 // GSC finalizes with a lag; GA4 is near real-time.
 const GSC_LAG_DAYS = 3;   // freshest fully-final GSC date = today - 3
@@ -27,8 +88,12 @@ export async function ingestDate(site, date) {
 // Core per-site ingest logic — the standard window for one already-resolved
 // site. Both sources are ingested across the same window (gscStart ..
 // yesterday) so every recent day has aligned GSC + GA4 data. The "report
-// date" is the freshest day that has FINAL GSC data (today - 3).
-async function runDailyIngestForSite(site) {
+// date" is the freshest day that has FINAL GSC data (today - 3). Exported
+// (not just used via runDailyJobForSite) so server/routes/clients.js can
+// pull real GSC/GA4 data for a brand-new client's day-0 baseline without
+// also triggering that function's narrative/email/doc side effects, which
+// aren't appropriate before a client relationship is even fully set up.
+export async function runDailyIngestForSite(site) {
   const tz = site.timezone;
 
   const gscEnd = daysAgoInTz(tz, GSC_LAG_DAYS);                 // report date
@@ -59,11 +124,62 @@ export async function runDailyIngest() {
   return runDailyIngestForSite(site);
 }
 
+// Runs the 6 daily-cadence specialist agents fresh via the shared
+// orchestrator, persists an executive-report row from that same result
+// (same pattern as routes/command-center.js's refresh route — avoids a
+// second call to executive-report.js re-running all 6 agents again), then
+// detects and delivers any notification-worthy events from what changed.
+// This is what makes the Command Center's "Daily Morning Brief" and Recent
+// Changes genuinely daily instead of only as fresh as the last manual
+// refresh or Copilot question.
+export async function runDailyAgentAnalysisForSite(site) {
+  const end = daysAgoInTz(site.timezone, 0);
+  const start = daysAgoInTz(site.timezone, 7);
+
+  const result = await runOrchestration({ siteId: site.id, start, end, agentIds: DAILY_AGENT_IDS, persistSubAgentRuns: true });
+  await saveAgentRun({
+    siteId: site.id, agentId: 'executive-report', agentVersion: execReportMeta.version,
+    input: { siteId: site.id, start, end }, status: 'ok',
+    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
+    narrative: result.narrative, error: null, tookMs: null,
+  });
+
+  const { score } = computeHealthScore(result.findings);
+  const today = new Date().toISOString().slice(0, 10);
+  await saveHealthScoreSnapshot(site.id, today, score)
+    .catch((err) => console.error(`[job] site ${site.id} health score snapshot failed:`, err.message));
+  const weekAgoDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const weekAgoScore = await getHealthScoreOnOrBefore(site.id, weekAgoDate);
+  const trendWeek = weekAgoScore != null ? score - weekAgoScore : null;
+
+  const events = await detectNotificationEvents(site.id, { trendWeek });
+  await deliverToAllChannels(site.id, events);
+
+  const recommendations = await buildRecommendations(site.id);
+  const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
+  const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
+    .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });
+
+  return {
+    ranAgentIds: result.ranAgentIds, findingsCount: result.findings.length, notificationsEmitted: events.length,
+    watchlistAdded: watchlistSync.added, watchlistClosed: watchlistSync.closed,
+  };
+}
+
 // Full daily pipeline for one already-resolved site: ingest → AI narrative →
-// email → daily doc. Idempotent and safe to re-run — identical logic to the
-// original single-site runDailyJob(), just parameterized by `site`.
+// email → daily doc → agent analysis → notifications. Idempotent and safe
+// to re-run — identical logic to the original single-site runDailyJob(),
+// just parameterized by `site`.
 export async function runDailyJobForSite(site) {
   const { reportDate } = await runDailyIngestForSite(site);
+
+  // Each step below already tolerates its own failure (logs and moves on,
+  // so one broken step doesn't take down the rest of the pipeline) — but
+  // that also means a partial failure would otherwise vanish into server
+  // logs with nothing to show for it. stepErrors collects what actually
+  // broke so notePipelineOutcome below can report the real outcome instead
+  // of a false "ok" just because nothing threw all the way out.
+  const stepErrors = [];
 
   let narrative = '';
   try {
@@ -72,6 +188,7 @@ export async function runDailyJobForSite(site) {
     console.log(`[report] site ${site.id} narrative saved for ${reportDate}`);
   } catch (err) {
     console.error(`[report] site ${site.id} narrative failed:`, err.message);
+    stepErrors.push(new Error(`narrative: ${err.message}`));
   }
 
   const day = await getDay(site.id, reportDate);
@@ -87,6 +204,7 @@ export async function runDailyJobForSite(site) {
     }
   } catch (err) {
     console.error(`[report] site ${site.id} email failed:`, err.message);
+    stepErrors.push(new Error(`email: ${err.message}`));
   }
 
   try {
@@ -100,7 +218,18 @@ export async function runDailyJobForSite(site) {
     }
   } catch (err) {
     console.error(`[report] site ${site.id} daily doc failed:`, err.message);
+    stepErrors.push(new Error(`daily doc: ${err.message}`));
   }
+
+  try {
+    const { ranAgentIds, findingsCount, notificationsEmitted, watchlistAdded, watchlistClosed } = await runDailyAgentAnalysisForSite(site);
+    console.log(`[job] site ${site.id} daily agent analysis: ${ranAgentIds.length} agents, ${findingsCount} findings, ${notificationsEmitted} notification(s), watchlist +${watchlistAdded}/-${watchlistClosed}.`);
+  } catch (err) {
+    console.error(`[job] site ${site.id} daily agent analysis failed:`, err.message);
+    stepErrors.push(new Error(`agent analysis: ${err.message}`));
+  }
+
+  await notePipelineOutcome(stepErrors.length === 0, stepErrors[0]);
 
   return { site, reportDate, narrative };
 }
@@ -173,8 +302,11 @@ export async function runDailyJobForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runDailyJobForSite(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] daily job failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
+      await notePipelineOutcome(false, err);
     }
   }
   return results;
@@ -188,23 +320,178 @@ export async function runWeeklyIfDueForAllSites() {
   for (const site of sites) {
     try {
       results.push(await runWeeklyIfDue(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] weekly doc failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   return results;
 }
 
-// Run the executive-report-if-due check independently for every connected
-// site. A failure for one site is logged and does not stop the others.
+// Real DataForSEO SERP-ranking ingest — monthly, matching the cadence of
+// the actual competitor-intelligence agent analysis that consumes it (see
+// runCompetitorIntelligenceIfDue below). Its own marker:
+// getCompetitorRankingDates (real persisted check dates) instead of a
+// sites column, since competitor_rankings already records when it last ran.
+// Silently no-ops if DataForSEO isn't configured — the competitor-
+// intelligence agent already reports "insufficient-data" plainly in that
+// case, so there's nothing to force here.
+export async function runCompetitorCheckIfDue(site) {
+  if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
+
+  const { start, end } = previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
+  const { year, month } = previousMonth(site.timezone);
+  const threshold = monthBounds(year, month).start;
+  const [latestDate] = await getCompetitorRankingDates(site.id, 1);
+  if (latestDate && latestDate >= threshold) {
+    console.log(`[competitors] site ${site.id} already checked this month — skipping.`);
+    return null;
+  }
+
+  const checkDate = daysAgoInTz(site.timezone, 0);
+  const rows = await fetchCompetitorRankings(site, checkDate, { start, end });
+  await saveCompetitorRankings(site.id, rows);
+  console.log(`[competitors] site ${site.id}: checked ${rows.length} real SERP ranking row(s).`);
+  return { checked: rows.length };
+}
+
+export async function runCompetitorCheckIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runCompetitorCheckIfDue(site));
+    } catch (err) {
+      console.error(`[job] competitor check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
+// Shared "checked often, acts rarely" guard for any agent that should only
+// really run once a real calendar month has passed — the exact pattern
+// competitor-intelligence proved first (see its comment history), now used
+// by three agents (competitor-intelligence, authority, ai-recommendation)
+// so a fourth doesn't need to hand-roll the same due-check a fourth time.
+// Checked via the weekly cron block, same as everything else here, but only
+// does real work once a month. persist:true since there's no wrapper (like
+// executive-report's orchestration) persisting a row on this agent's behalf.
+async function runAgentIfDue(site, agentId, { start, end } = {}) {
+  const { year, month } = previousMonth(site.timezone);
+  const threshold = monthBounds(year, month).start;
+  const [lastRun] = await getLatestAgentRuns(site.id, [agentId]);
+  if (lastRun && new Date(lastRun.created_at) >= new Date(threshold)) {
+    console.log(`[${agentId}] site ${site.id} already analyzed this month — skipping.`);
+    return null;
+  }
+  const range = start && end ? { start, end } : previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
+  const output = await runAgent(agentId, { siteId: site.id, start: range.start, end: range.end }, { persist: true });
+  console.log(`[${agentId}] site ${site.id}: real monthly analysis complete (status: ${output.status}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+async function runAgentIfDueForAllSites(agentId) {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runAgentIfDue(site, agentId));
+    } catch (err) {
+      console.error(`[job] ${agentId} monthly run failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
+// The real competitor-intelligence AGENT run (crawls competitor homepages,
+// real LLM/SERP discovery) — deliberately monthly, decoupled from
+// executive-report's weekly orchestration (no longer in its meta.requires,
+// see executive-report.js) specifically so it can have this slower cadence
+// without either starving the weekly executive narrative of every OTHER
+// agent's freshness, or forcing competitor-intelligence to re-run weekly
+// just because it used to be bundled in.
+export const runCompetitorIntelligenceIfDue = (site) => runAgentIfDue(site, 'competitor-intelligence');
+export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForAllSites('competitor-intelligence');
+
+// Authority Score — real DataForSEO backlink data doesn't meaningfully
+// shift week to week, so monthly matches the underlying signal (same
+// reasoning as competitor-intelligence above) and keeps DataForSEO
+// Backlinks API cost negligible.
+export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
+export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
+
+// AI Recommendation — real OpenAI prompt probes have a real per-call cost;
+// monthly keeps that cost negligible while still tracking real drift in
+// what ChatGPT recommends over time.
+export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation');
+export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation');
+
+// Real site-wide page discovery (sitemap, and BFS crawl once added) — kept
+// weekly, same reasoning as runCompetitorCheckIfDue: a real crawl of up to
+// a few hundred pages against a live site, run inside every daily cycle,
+// would be both wasteful (a site's page list barely changes day to day) and
+// impolite. Also folds in GSC's own top pages as a third discovery source,
+// tagged 'gsc', so page_inventory becomes the single superset rather than
+// just the sitemap+crawl subset.
+export async function runSiteDiscoveryIfDue(site) {
+  const { start, end } = previousWeek(site.timezone);
+  const lastDiscoveredAt = await getLastDiscoveryAt(site.id);
+  if (lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
+    console.log(`[site-discovery] site ${site.id} week of ${start} already discovered — skipping.`);
+    return null;
+  }
+
+  const [sitemapUrls, crawledUrls, gscPages] = await Promise.all([
+    discoverFromSitemaps(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
+    crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
+    getSearchPerformanceRange(site.id, start, end, 'page', 200),
+  ]);
+
+  await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
+  await upsertPageInventoryBatch(site.id, crawledUrls, 'crawl');
+  await upsertPageInventoryBatch(site.id, gscPages.map((p) => p.dim_value), 'gsc');
+
+  // Real orphaned-page signal: a page the sitemap lists but this run's real
+  // homepage-outward crawl never reached via any actual internal link — the
+  // standard SEO definition, computed here from this run's own two
+  // already-fetched lists (no new fetching). Trailing-slash normalization
+  // only, since both lists are already full absolute URLs (sitemap <loc>
+  // entries, and crawledUrls resolved via `new URL(href, pageUrl)` in
+  // page-content.js) — not a guess at equivalence, just tolerant of the one
+  // real formatting difference sites commonly have between the two sources.
+  const normalize = (u) => u.replace(/\/+$/, '');
+  const crawledSet = new Set(crawledUrls.map(normalize));
+  const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
+  await markOrphanedPages(site.id, orphanedUrls);
+
+  console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
+  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length };
+}
+
+export async function runSiteDiscoveryIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runSiteDiscoveryIfDue(site));
+    } catch (err) {
+      console.error(`[job] site discovery failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 export async function runExecutiveIfDueForAllSites() {
   const sites = await listConnectedSites();
   const results = [];
   for (const site of sites) {
     try {
       results.push(await runExecutiveIfDue(site));
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] executive report failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   return results;
@@ -228,9 +515,26 @@ export async function runHourlyCatchupForAllSites(tz) {
       console.log(`[job] hourly guard: catch-up done for site ${site.id} — report date ${done}`);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] hourly guard failed for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
+  }
+}
+
+// Verify stage: re-checks every due fix_verifications row (real re-fetch of
+// the exact flagged page, real re-run of the exact check that flagged it —
+// see agents/lib/fix-verification.js). Due-ness is per-row (verify_after),
+// not per-site, so this runs once globally rather than per connected site.
+export async function runFixVerificationsForAllSites() {
+  try {
+    const results = await runDueVerifications();
+    if (results.length) console.log(`[job] fix verification: checked ${results.length} due row(s)`);
+    return results;
+  } catch (err) {
+    console.error('[job] fix verification failed:', err.message);
+    return [];
   }
 }
 
@@ -250,8 +554,10 @@ export async function runStartupCatchup() {
       await runDailyJobForSite(site);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
+      await noteGoogleAuthOutcome(false, err);
     }
   }
   console.log('[catchup] done.');

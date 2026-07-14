@@ -101,7 +101,7 @@ export default function CountriesWidget({ rows }) {
               <div className="text-[11px] text-slate-400">Where your search clicks come from</div>
             </div>
           </div>
-          <span className="text-[10px] font-bold px-2 py-1 rounded-full" style={{ background: 'rgba(108,99,255,0.1)', color: '#6C63FF' }}>✨ AI</span>
+          {/* This card is real GSC data + plain threshold checks, not an LLM call — no "AI" badge. */}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
@@ -187,11 +187,11 @@ export default function CountriesWidget({ rows }) {
         </div>
       </div>
 
-      {/* AI insight */}
+      {/* Plain threshold checks over real country rows, not an LLM call — no "AI" badge. */}
       {top && (
         <div className="m-3 mt-2 rounded-2xl border p-4 flex items-start gap-3"
-          style={{ borderColor: '#E5F5EC', background: 'linear-gradient(135deg,#f0fdf4,#ffffff 85%)' }}>
-          <span className="w-8 h-8 rounded-lg grid place-items-center text-white text-xs shrink-0" style={{ background: 'linear-gradient(135deg,#16a34a,#22c55e)' }}>AI</span>
+          style={{ borderColor: '#E5F5EC', background: '#f8fafc' }}>
+          <span className="w-8 h-8 rounded-lg grid place-items-center text-slate-500 text-xs shrink-0 bg-white border border-slate-200">📊</span>
           <p className="text-sm text-slate-700 leading-relaxed">
             <span className="font-semibold">{flag(top.country)} {top.country}</span> generated <b>{topShare}%</b> of total clicks this period.
             {ctrOpp && <> {ctrOpp.country} showed high impression volume relative to clicks — a <b>CTR optimization opportunity</b>.</>}

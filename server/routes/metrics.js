@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import {
-  getSiteById, getDailySeries, getDay, getBreakdown,
-  getChannels, getNarrative, getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
+  getSiteById, getDailySeries, getDay,
+  getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
 import { countryName } from '../util/countries.js';
-import { previousWeek } from '../util/dates.js';
+import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 import { translateQuery } from '../report/translate.js';
 
@@ -26,54 +26,6 @@ function deltasAvsB(a, b, keys) {
   return out;
 }
 
-// Build a grounded text context for the AI: the day's metrics, change vs the prior
-// day, a 7-day average, top queries/pages/channels, and the device split.
-// Returns { ok, text }. ok=false when the chosen day has no data yet.
-async function buildAiContext(site, date) {
-  const start = shiftYmd(date, -7);
-  const [series, queries, pages, channels, devices] = await Promise.all([
-    getDailySeries(site, start, date),
-    getBreakdown(site, date, 'query', 5),
-    getBreakdown(site, date, 'page', 5),
-    getChannels(site, date),
-    getGa4BreakdownRange(site, start, date, 'device', 5),
-  ]);
-  const today = series.find((r) => iso(r.date) === date);
-  const prior = series.find((r) => iso(r.date) === shiftYmd(date, -1)) || {};
-  const num = (v) => (v == null ? 0 : Number(v));
-
-  if (!today || (today.clicks == null && today.users == null)) {
-    return { ok: false, text: '' };
-  }
-
-  const past = series.filter((r) => iso(r.date) !== date);
-  const avg = (k) => {
-    const v = past.map((r) => num(r[k]));
-    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : 0;
-  };
-  const delta = (cur, prev) => {
-    cur = num(cur); prev = num(prev);
-    if (!prev) return `${cur} (no prior-day data)`;
-    const pct = Math.round(((cur - prev) / prev) * 100);
-    return `${cur} (${pct >= 0 ? '+' : ''}${pct}% vs prior day, prior was ${prev})`;
-  };
-
-  const text = `
-Date: ${date}
-Clicks: ${delta(today.clicks, prior.clicks)} | 7-day avg ${avg('clicks')}
-Impressions: ${delta(today.impressions, prior.impressions)} | 7-day avg ${avg('impressions')}
-Avg Search position (lower is better): ${num(today.position).toFixed(1)}
-Users: ${delta(today.users, prior.users)}
-Sessions: ${delta(today.sessions, prior.sessions)}
-Conversions: ${num(today.conversions)}
-Device split (last 7 days, sessions): ${devices.map((d) => `${d.dim_value} ${num(d.sessions)}`).join(', ') || 'n/a'}
-Top queries: ${queries.map((q) => `"${q.dim_value}" (${num(q.clicks)} clicks, ${num(q.impressions)} impressions)`).join(', ') || 'none'}
-Top pages: ${pages.map((p) => `${p.dim_value} (${num(p.clicks)} clicks)`).join(', ') || 'none'}
-Top channels: ${channels.map((c) => `${c.channel} (${num(c.sessions)} sessions)`).join(', ') || 'none'}
-`.trim();
-  return { ok: true, text };
-}
-
 const router = Router();
 router.use(requireAuth);
 
@@ -88,22 +40,116 @@ router.get('/sites', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Weekly report Google Doc link for the caller's site (null until first generated).
-router.get('/doc-link', async (req, res, next) => {
-  try {
-    res.json({ url: await getWeeklyDocUrl(req.siteId) });
-  } catch (e) { next(e); }
-});
+// vs-previous-entry percent change, newest-first arrays (entry i vs entry i+1).
+function withDeltaPct(entries) {
+  return entries.map((h, i) => {
+    const older = entries[i + 1];
+    const deltaPct = older && older.clicks ? Math.round(((h.clicks - older.clicks) / older.clicks) * 1000) / 10 : null;
+    return { ...h, deltaPct };
+  });
+}
 
-router.get('/daily-doc-link', async (req, res, next) => {
+// Inline report content for the dashboard's Reports page: live metrics, a
+// trend chart series, query-level movers, a short recent-report-history rail,
+// and the AI narrative for THIS specific period — the same narrative already
+// generated for the matching Google Doc report (daily/weekly/monthly-doc.js),
+// so it's always about the exact date/week/month being displayed, never a
+// different period's data relabeled. No narrative is returned if the
+// matching period hasn't been generated yet (periodMatches false) — an
+// unrelated agent run is never substituted in, since that would show a
+// narrative describing different dates than the ones on screen.
+// This route only ever READS already-persisted results (the narrative
+// columns) — it never triggers a run, a page-scrape, or a live LLM call.
+// Plus a link to the full Doc for export. ?period=daily|weekly|monthly
+router.get('/report-summary', async (req, res, next) => {
   try {
-    res.json({ url: await getDailyDocUrl(req.siteId) });
-  } catch (e) { next(e); }
-});
+    const { period } = req.query;
+    if (!['daily', 'weekly', 'monthly'].includes(period)) {
+      return res.status(400).json({ error: 'period must be daily, weekly, or monthly.' });
+    }
+    const site = await getSiteById(req.siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found.' });
 
-router.get('/monthly-doc-link', async (req, res, next) => {
-  try {
-    res.json({ url: await getMonthlyDocUrl(req.siteId) });
+    const resolveNarrative = (periodNarrative, periodMatches) => {
+      if (periodMatches && periodNarrative) {
+        return { narrative: periodNarrative, narrativeSource: 'period', narrativeGeneratedAt: null };
+      }
+      return { narrative: null, narrativeSource: null, narrativeGeneratedAt: null };
+    };
+
+    if (period === 'daily') {
+      const { freshest: date } = await getDataRange(site.id);
+      if (!date) {
+        return res.json({ period, date: null, metrics: null, series: [], movers: { gainers: [], droppers: [] }, history: [], ...resolveNarrative(null, false), docUrl: await getDailyDocUrl(site.id) });
+      }
+      const row = await getDay(site.id, date);
+      const matches = site.daily_report_narrative_date === date;
+      const series = await getDailySeries(site.id, shiftYmd(date, -10), date); // 11 days, oldest→newest (first day is the delta baseline for the Recent Report History rail, leaving 10 rows shown)
+      const { gainers, droppers } = await getTopMovers(site.id, { start: date, end: date }, { start: shiftYmd(date, -1), end: shiftYmd(date, -1) }, 8);
+      const history = withDeltaPct(series.slice(1).map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse());
+      return res.json({
+        period, date,
+        metrics: row && {
+          clicks: row.clicks, impressions: row.impressions, position: row.position,
+          users: row.users, sessions: row.sessions,
+        },
+        series, movers: { gainers, droppers }, history,
+        ...resolveNarrative(site.daily_report_narrative, matches),
+        docUrl: await getDailyDocUrl(site.id),
+      });
+    }
+
+    if (period === 'weekly') {
+      const { start, end } = previousWeek(site.timezone);
+      const totals = await getRangeTotals(site.id, start, end);
+      const matches = site.weekly_report_narrative_start === start && site.weekly_report_narrative_end === end;
+      const series = await getDailySeries(site.id, start, end);
+      const { gainers, droppers } = await getTopMovers(site.id, { start, end }, { start: shiftYmd(start, -7), end: shiftYmd(end, -7) }, 8);
+      const weeklyTotals = [];
+      for (let i = 0; i < 4; i++) {
+        const wStart = shiftYmd(start, -7 * i);
+        const wEnd = shiftYmd(end, -7 * i);
+        const t = await getRangeTotals(site.id, wStart, wEnd);
+        weeklyTotals.push({ label: `${wStart} – ${wEnd}`, clicks: Number(t.clicks || 0) });
+      }
+      return res.json({
+        period, start, end,
+        metrics: {
+          clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
+          users: totals.users, sessions: totals.sessions,
+        },
+        series, movers: { gainers, droppers }, history: withDeltaPct(weeklyTotals),
+        ...resolveNarrative(site.weekly_report_narrative, matches),
+        docUrl: await getWeeklyDocUrl(site.id),
+      });
+    }
+
+    // monthly
+    const { year, month } = previousMonth(site.timezone);
+    const ym = `${year}-${String(month).padStart(2, '0')}`;
+    const { start, end } = monthBounds(year, month);
+    const totals = await getMonthlyTotals(site.id, year, month);
+    const matches = site.monthly_report_narrative_ym === ym;
+    const series = await getDailySeries(site.id, start, end);
+    const priorYm = shiftMonth(year, month, -1);
+    const priorBounds = monthBounds(priorYm.year, priorYm.month);
+    const { gainers, droppers } = await getTopMovers(site.id, { start, end }, priorBounds, 8);
+    const monthlyTotals = [];
+    for (let i = 0; i < 6; i++) {
+      const sm = shiftMonth(year, month, -i);
+      const t = await getMonthlyTotals(site.id, sm.year, sm.month);
+      monthlyTotals.push({ label: `${sm.year}-${String(sm.month).padStart(2, '0')}`, clicks: Number(t.clicks || 0) });
+    }
+    res.json({
+      period, ym,
+      metrics: {
+        clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
+        users: totals.users, sessions: totals.sessions,
+      },
+      series, movers: { gainers, droppers }, history: withDeltaPct(monthlyTotals),
+      ...resolveNarrative(site.monthly_report_narrative, matches),
+      docUrl: await getMonthlyDocUrl(site.id),
+    });
   } catch (e) { next(e); }
 });
 
@@ -119,22 +165,6 @@ router.get('/series', async (req, res, next) => {
   try {
     const { start, end } = req.query;
     res.json(await getDailySeries(req.siteId, start, end));
-  } catch (e) { next(e); }
-});
-
-// One day's overview bundle: metrics + top queries/pages + channels + narrative.
-router.get('/day', async (req, res, next) => {
-  try {
-    const site = req.siteId;
-    const date = req.query.date;
-    const [metrics, queries, pages, channels, narrative] = await Promise.all([
-      getDay(site, date),
-      getBreakdown(site, date, 'query', 10),
-      getBreakdown(site, date, 'page', 10),
-      getChannels(site, date),
-      getNarrative(site, date),
-    ]);
-    res.json({ date, metrics, queries, pages, channels, narrative: narrative?.narrative || null });
   } catch (e) { next(e); }
 });
 
@@ -182,15 +212,23 @@ router.get('/country', async (req, res, next) => {
 router.get('/movers', async (req, res, next) => {
   try {
     const site = req.siteId;
-    const siteRow = await getSiteById(site);
-    const tz = siteRow?.timezone || 'Asia/Kolkata';
-    const recent = previousWeek(tz);
-    // The week before `recent`: shift both ends back 7 days.
+    const { start, end } = req.query;
     const shift = (ymd, days) => {
       const d = new Date(`${ymd}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
       return d.toISOString().slice(0, 10);
     };
-    const prior = { start: shift(recent.start, -7), end: shift(recent.end, -7) };
+    let recent;
+    if (start && end) {
+      // Caller (Insights page) picked a real range — compare it against the
+      // immediately preceding period of the same length, not a fixed week.
+      recent = { start, end };
+    } else {
+      const siteRow = await getSiteById(site);
+      const tz = siteRow?.timezone || 'Asia/Kolkata';
+      recent = previousWeek(tz);
+    }
+    const spanDays = Math.round((new Date(`${recent.end}T00:00:00Z`) - new Date(`${recent.start}T00:00:00Z`)) / 86400000) + 1;
+    const prior = { start: shift(recent.start, -spanDays), end: shift(recent.end, -spanDays) };
     const [movers, topPages, topDeviceCountry] = await Promise.all([
       getTopMovers(site, recent, prior, 50),
       getTopPagePerQuery(site, recent.start, recent.end),
@@ -299,32 +337,4 @@ router.get('/compare', async (req, res, next) => {
     res.json({ a: { month: req.query.a, ...a }, b: { month: req.query.b, ...b } });
   } catch (e) { next(e); }
 });
-// On-demand fresh AI insight for a chosen day. ?date
-router.get('/ai-summary', async (req, res, next) => {
-  try {
-    const ctx = await buildAiContext(req.siteId, req.query.date);
-    if (!ctx.ok) return res.json({ summary: 'No finalized data for that day yet — pick an earlier day.' });
-    const system = 'You are a concise SEO/analytics analyst writing for a non-technical owner. ' +
-      'Give sharp, specific, actionable insight in 3 sentences max. Lead with the overall trend, then the ' +
-      'single most notable change, then one action. A lower Search position is BETTER. Plain text, no markdown, no bullets.';
-    const summary = await callLLM(system, ctx.text, { maxTokens: 300 });
-    res.json({ summary });
-  } catch (e) { next(e); }
-});
-
-// Ask a free-text question about a day's data. POST { date, question }
-router.post('/ai-ask', async (req, res, next) => {
-  try {
-    const { date, question } = req.body || {};
-    if (!question || !question.trim()) return res.status(400).json({ error: 'Question is required.' });
-    const ctx = await buildAiContext(req.siteId, date);
-    if (!ctx.ok) return res.json({ answer: 'No finalized data for that day yet — try an earlier day.' });
-    const system = 'You are an SEO/analytics assistant. Answer the user\'s question using ONLY the data provided. ' +
-      'Be concise and specific, cite the real numbers, and suggest an action when relevant. If the data does not ' +
-      'contain the answer, say so plainly. A lower Search position is BETTER. Plain text, no markdown, no bullets.';
-    const answer = await callLLM(system, `${ctx.text}\n\nUser question: ${question}`, { maxTokens: 400 });
-    res.json({ answer });
-  } catch (e) { next(e); }
-});
-
 export default router;

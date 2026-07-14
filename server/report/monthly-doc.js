@@ -2,6 +2,7 @@ import { getDocs } from '../auth/google.js';
 import { query } from '../db.js';
 import { callLLM } from '../llm.js';
 import { getDailySeries, getRangeTopQueries } from '../store/read.js';
+import { saveMonthlyReportNarrative } from '../store/upsert.js';
 import { previousMonth } from '../util/dates.js';
 
 const n = (v) => (v == null ? 0 : Number(v));
@@ -353,6 +354,9 @@ export async function runMonthlyDocReport(site, anchorYm) {
   }
 
   await docs.documents.batchUpdate({ documentId: docId, requestBody: { requests } });
+
+  const ym = `${year}-${String(month).padStart(2, '0')}`;
+  await saveMonthlyReportNarrative(site.id, ym, overview);
 
   console.log(`[monthly] wrote section for ${label} to doc ${docId}`);
   return { docId, start, end, year, month, url: `https://docs.google.com/document/d/${docId}/edit` };

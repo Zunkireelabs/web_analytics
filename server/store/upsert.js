@@ -103,6 +103,96 @@ export async function saveNarrative(siteId, date, narrative, emailedAt = null) {
   );
 }
 
+export async function saveDailyReportNarrative(siteId, date, narrative) {
+  await query(
+    'UPDATE sites SET daily_report_narrative = $1, daily_report_narrative_date = $2 WHERE id = $3',
+    [narrative, date, siteId]
+  );
+}
+
+export async function saveWeeklyReportNarrative(siteId, start, end, narrative) {
+  await query(
+    `UPDATE sites SET weekly_report_narrative = $1,
+       weekly_report_narrative_start = $2, weekly_report_narrative_end = $3 WHERE id = $4`,
+    [narrative, start, end, siteId]
+  );
+}
+
+export async function saveMonthlyReportNarrative(siteId, ym, narrative) {
+  await query(
+    'UPDATE sites SET monthly_report_narrative = $1, monthly_report_narrative_ym = $2 WHERE id = $3',
+    [narrative, ym, siteId]
+  );
+}
+
+// One row per (site, date, query, domain) — see migrations/018 and
+// ingest/competitors.js. Re-running the same week overwrites (never
+// duplicates), same convention as every other upsert in this file.
+export async function saveCompetitorRankings(siteId, rows) {
+  for (const r of rows) {
+    await query(
+      `INSERT INTO competitor_rankings (site_id, date, query, domain, url, position, is_own_domain)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (site_id, date, query, domain) DO UPDATE SET
+         url = EXCLUDED.url, position = EXCLUDED.position, is_own_domain = EXCLUDED.is_own_domain`,
+      [siteId, r.date, r.query, r.domain, r.url, r.position, r.isOwnDomain]
+    );
+  }
+}
+
+// One row per site per day — called each time the Command Center computes a
+// fresh score, so same-day calls just overwrite today's value; the trend
+// only changes once the calendar day does.
+export async function saveHealthScoreSnapshot(siteId, date, score) {
+  await query(
+    `INSERT INTO daily_reports (site_id, date, website_health_score)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (site_id, date) DO UPDATE SET website_health_score = EXCLUDED.website_health_score`,
+    [siteId, date, score]
+  );
+}
+
+// Sets the real "day 0" anchor for a client — called exactly once, right
+// after the first real baseline agent run completes during onboarding
+// (server/routes/clients.js). Idempotent to call again (e.g. a retried
+// connect step) — always reflects the most recent real baseline run, never
+// backfilled or guessed.
+export async function setOnboardingBaseline(siteId, baselineRunId) {
+  await query(
+    `UPDATE sites SET onboarded_at = now(), baseline_run_id = $2 WHERE id = $1`,
+    [siteId, baselineRunId]
+  );
+}
+
+// One row per (integration, site) — see migrations/020 and
+// integrations/registry.js. Called from both the on-demand "Test connection"
+// route and job.js's organic per-site failure handling, so there's a single
+// place recording status regardless of how the check happened. last_success_at
+// / last_failure_at only advance forward (COALESCE keeps the prior value on
+// the branch that didn't just happen), so a failing integration keeps its
+// last real success timestamp instead of losing it on the next failed check.
+export async function recordIntegrationCheck(integrationId, siteId, { ok, authStatus, errorMessage, recoveryAction }) {
+  const now = new Date();
+  await query(
+    `INSERT INTO integration_health
+       (integration_id, site_id, status, auth_status, last_success_at, last_failure_at, last_checked_at, error_message, recovery_action, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7)
+     ON CONFLICT (integration_id, COALESCE(site_id, -1)) DO UPDATE SET
+       status = EXCLUDED.status,
+       auth_status = EXCLUDED.auth_status,
+       last_success_at = COALESCE(EXCLUDED.last_success_at, integration_health.last_success_at),
+       last_failure_at = COALESCE(EXCLUDED.last_failure_at, integration_health.last_failure_at),
+       last_checked_at = EXCLUDED.last_checked_at,
+       error_message = EXCLUDED.error_message,
+       recovery_action = EXCLUDED.recovery_action,
+       updated_at = EXCLUDED.updated_at`,
+    [
+      integrationId, siteId ?? null, ok ? 'ok' : 'error', authStatus ?? null,
+      ok ? now : null, ok ? null : now, now, errorMessage ?? null, recoveryAction ?? null,
+    ]
+  );
+}
+
 export async function markDailyDocDone(siteId, date) {
   await query(
     `INSERT INTO daily_reports (site_id, date, daily_doc_done)
