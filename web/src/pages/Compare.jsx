@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
+import Sparkline from '../components/Sparkline.jsx';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, Radar, Legend, Tooltip } from 'recharts';
 
 const fmtInt = (v) => Number(v).toLocaleString();
@@ -192,7 +193,7 @@ export default function Compare({ siteId }) {
                       <div className="text-sm text-slate-700">{c.label}</div>
                       <div className="text-[11px] text-slate-400">{c.va.toLocaleString()} → {c.vb.toLocaleString()}</div>
                     </div>
-                    <MiniSpark data={c.spark} color={up ? '#16A34A' : '#EF4444'} />
+                    <Sparkline data={c.spark} color={up ? '#16A34A' : '#EF4444'} width={48} height={20} fill={false} dot={false} />
                     <span className={`text-xs font-bold px-2 py-1 rounded-lg w-16 text-center shrink-0 ${up ? 'text-emerald-700 bg-emerald-50' : 'text-rose-600 bg-rose-50'}`}>
                       {up ? '▲' : '▼'} {Math.abs(c.pct)}%
                     </span>
@@ -222,12 +223,4 @@ export default function Compare({ siteId }) {
       </div>
     </div>
   );
-}
-
-function MiniSpark({ data, color }) {
-  const vals = (data || []).map(Number);
-  if (vals.length < 2) return <span className="w-12 shrink-0" />;
-  const max = Math.max(...vals), min = Math.min(...vals), range = max - min || 1;
-  const pts = vals.map((v, i) => `${((i / (vals.length - 1)) * 48).toFixed(1)},${(18 - ((v - min) / range) * 16).toFixed(1)}`).join(' ');
-  return <svg width="48" height="20" className="shrink-0"><polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }

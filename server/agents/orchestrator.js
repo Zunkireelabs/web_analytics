@@ -1,6 +1,7 @@
 import { listAgentMeta } from './registry.js';
 import { runAgent } from './runner.js';
 import { callLLM } from '../llm.js';
+import { createPageCache } from './lib/fetch-cache.js';
 
 // The one shared place that knows how to run N specialist agents and combine
 // their structured findings into one answer. Executive Report, Action
@@ -47,9 +48,13 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
     ? agentIds
     : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
 
+  // One fetch cache shared by every agent in this run — see lib/fetch-cache.js
+  // for why this needs no special handling to stay out of persisted history.
+  const pageCache = createPageCache();
+
   const ran = await Promise.all(ids.map(async (id) => {
     try {
-      const out = await runAgent(id, { siteId, start, end }, { persist: persistSubAgentRuns });
+      const out = await runAgent(id, { siteId, start, end, pageCache }, { persist: persistSubAgentRuns });
       return [id, out];
     } catch (err) {
       console.error(`[orchestrator] agent "${id}" failed:`, err.message);

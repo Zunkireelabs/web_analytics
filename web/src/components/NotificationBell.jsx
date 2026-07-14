@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 
 // In-app notifications — the first (and today, only) subscriber to the
@@ -10,6 +11,7 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null); // { items, unread }
   const ref = useRef(null);
+  const navigate = useNavigate();
 
   const load = () => api.notifications.list().then(setData).catch(() => {});
   useEffect(() => {
@@ -36,6 +38,23 @@ export default function NotificationBell() {
   const markAllRead = async () => {
     setData((d) => d && { unread: 0, items: d.items.map((i) => ({ ...i, read_at: i.read_at || new Date().toISOString() })) });
     await api.notifications.markAllRead().catch(() => {});
+  };
+
+  // Every notification is about something on Command Center — a specific
+  // finding (critical-issue/opportunity, via finding_ids) or, for
+  // health-drop (which has no single finding), the Health Score card
+  // itself. CommandCenter.jsx reads `?highlight=` and scrolls/rings the
+  // matching card (see its data-finding-id wrappers).
+  const targetFor = (n) => {
+    if (n.finding_ids?.length) return `/ai-growth?highlight=${encodeURIComponent(n.finding_ids[0])}`;
+    if (n.type === 'health-drop') return '/ai-growth?highlight=health-score';
+    return null;
+  };
+
+  const openNotification = (n) => {
+    markRead(n);
+    const target = targetFor(n);
+    if (target) { setOpen(false); navigate(target); }
   };
 
   const unread = data?.unread || 0;
@@ -68,7 +87,7 @@ export default function NotificationBell() {
           ) : (
             <div className="divide-y divide-slate-50">
               {data.items.map((n) => (
-                <button key={n.id} onClick={() => markRead(n)}
+                <button key={n.id} onClick={() => openNotification(n)}
                   className={`w-full text-left px-4 py-3 flex gap-2.5 transition hover:bg-slate-50 ${n.read_at ? 'opacity-55' : 'bg-[#6C63FF0d]'}`}>
                   <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: n.severity === 'high' ? '#e11d48' : '#f59e0b' }} />
                   <div className="min-w-0">

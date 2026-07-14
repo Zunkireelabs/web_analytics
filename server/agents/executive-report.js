@@ -1,21 +1,52 @@
 import { runOrchestration } from './orchestrator.js';
+import { getAgent } from './registry.js';
+import { saveAgentRun } from '../store/agent-runs.js';
 
 export const meta = {
   id: 'executive-report',
   name: 'Executive Report Agent',
   description: 'Synthesizes every specialist agent into one growth summary.',
   category: 'meta',
-  version: 4,
-  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence'],
+  version: 5,
+  // competitor-intelligence is deliberately excluded — it now runs on its
+  // own independent MONTHLY cadence (server/job.js's
+  // runCompetitorIntelligenceIfDue), not weekly: real competitor movement
+  // takes real time to show up, and re-crawling competitor sites weekly is
+  // both wasteful and impolite. Its findings still surface everywhere
+  // Command Center/Action Center read RECOMMENDATION_AGENT_IDS — this
+  // narrative just doesn't force a fresh competitor check every week.
+  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo'],
 };
+
+// content-gap runs weekly-only (server/job.js's DAILY_AGENT_IDS deliberately
+// excludes it now — real content-completeness gaps don't meaningfully shift
+// day to day, so a weekly check matches the underlying signal instead of
+// re-crawling every candidate page daily). This weekly report is its ONLY
+// chance to persist a real agent_runs row. Every other sub-agent here
+// already persists its own row daily via job.js's runDailyAgentAnalysisForSite,
+// so persisting all 7 here would just create redundant daily-duplicate rows
+// for those 6 — only content-gap gets the explicit write.
+const WEEKLY_ONLY_AGENT_ID = 'content-gap';
 
 // Thin config over the shared orchestrator (orchestrator.js) — this agent no
 // longer hand-rolls its own fan-out + synthesis; it just tells the
 // orchestrator which agents to run. persistSubAgentRuns stays false so
 // running the executive report still doesn't write redundant agent_runs
-// rows, same intent as the original direct agent.run() calls.
+// rows for the 6 daily agents, same intent as the original direct
+// agent.run() calls.
 export async function run(input) {
   const result = await runOrchestration({ ...input, agentIds: meta.requires, persistSubAgentRuns: false });
+
+  const weeklyOnly = result.perAgent[WEEKLY_ONLY_AGENT_ID];
+  if (weeklyOnly) {
+    const agent = await getAgent(WEEKLY_ONLY_AGENT_ID);
+    await saveAgentRun({
+      siteId: input.siteId, agentId: WEEKLY_ONLY_AGENT_ID, agentVersion: agent?.meta?.version,
+      input, status: weeklyOnly.status, facts: weeklyOnly.facts ?? null, narrative: weeklyOnly.narrative ?? null,
+      error: weeklyOnly.status === 'error' ? (weeklyOnly.message || 'unknown error') : null, tookMs: null,
+    }).catch((err) => console.error(`[agents] failed to persist ${WEEKLY_ONLY_AGENT_ID} run:`, err.message));
+  }
+
   return {
     meta,
     status: 'ok',

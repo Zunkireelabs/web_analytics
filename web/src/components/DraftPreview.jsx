@@ -11,19 +11,40 @@ function Field({ label, children }) {
   );
 }
 
-export default function DraftPreview({ actionType, content }) {
+export default function DraftPreview({ actionType, content, onSelectTitle }) {
   switch (actionType) {
     case 'meta-title':
       return (
         <div className="space-y-3">
           <Field label="Title options">
             <ul className="space-y-1.5">
-              {content.titles.map((t, i) => (
-                <li key={i} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">{t}</li>
-              ))}
+              {content.titles.map((t, i) => {
+                const selected = content.selectedTitle === t;
+                return (
+                  <li key={i}
+                    className={`rounded-lg border px-3 py-2 flex items-center justify-between gap-3 ${selected ? 'border-emerald-300 bg-emerald-50' : 'border-slate-100 bg-slate-50'}`}>
+                    <span className={selected ? 'text-emerald-800 font-medium' : ''}>{t}</span>
+                    {onSelectTitle && (
+                      selected ? (
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-600 shrink-0">Selected ✓</span>
+                      ) : (
+                        <button type="button" onClick={() => onSelectTitle(t)}
+                          className="text-[10px] font-semibold uppercase tracking-wide text-indigo-600 hover:text-indigo-800 shrink-0">
+                          Use this
+                        </button>
+                      )
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </Field>
           <Field label="Meta description">{content.metaDescription}</Field>
+          {!content.selectedTitle && onSelectTitle && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+              Select one title above before this can be applied as a real PR — the real file merge needs exactly one.
+            </p>
+          )}
         </div>
       );
 
@@ -105,6 +126,26 @@ export default function DraftPreview({ actionType, content }) {
           </Field>
           <Field label="CTA">{content.cta}</Field>
           <Field label="Meta title / description">{content.metaTitle} — {content.metaDescription}</Field>
+        </div>
+      );
+
+    case 'llms-txt':
+      return (
+        <div className="space-y-3">
+          {content.placeholderCount > 0 && (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+              ⏳ {content.placeholderCount} field(s) need manual input.
+            </div>
+          )}
+          <Field label="llms.txt"><pre className="text-xs whitespace-pre-wrap bg-slate-50 rounded-lg p-3 overflow-x-auto max-h-64 overflow-y-auto">{content.llmsTxt}</pre></Field>
+          <Field label="robots.txt directives"><pre className="text-xs whitespace-pre-wrap bg-slate-50 rounded-lg p-3 overflow-x-auto max-h-64 overflow-y-auto">{content.robotsDirectives}</pre></Field>
+          {content.keyPages?.length > 0 && (
+            <Field label="Key pages referenced">
+              <ul className="space-y-1">
+                {content.keyPages.map((p, i) => <li key={i} className="truncate">{p.title || p.url}</li>)}
+              </ul>
+            </Field>
+          )}
         </div>
       );
 

@@ -28,6 +28,7 @@ const EVIDENCE_LABEL = {
   score: 'Score', country: 'Country', city: 'City', device: 'Device', query: 'Query',
   language: 'Language', recent: 'Recent', prior: 'Prior', delta: 'Change', ctr: 'CTR',
   ctrDeviationPct: 'CTR vs. average', gapType: 'Gap type', detail: 'Detail', entity: 'Entity',
+  competitorsWithThisFeature: 'Competitors with this', competitorsTracked: 'Competitors tracked',
 };
 
 // Evidence-first, not metric-first — the specific real numbers backing a
@@ -43,13 +44,20 @@ export default function DiscoveryCard({ finding }) {
   const evidenceEntries = Object.entries(finding.evidence || {}).filter(([, v]) => v != null && v !== '');
 
   return (
-    <div className="flex rounded-xl border border-slate-100 bg-white overflow-hidden transition-colors hover:border-slate-200">
-      <div className="w-[3px] shrink-0" style={{ background: pr.color }} />
-      <div className="p-4 flex-1 min-w-0">
+    <div className="rounded-2xl border border-slate-100 bg-white overflow-hidden transition hover:border-slate-200 hover:shadow-[0_4px_16px_-4px_rgba(15,23,42,0.08)] hover:-translate-y-0.5">
+      <div className="h-[3px]" style={{ background: `linear-gradient(90deg, ${pr.color}, ${pr.color}55)` }} />
+      <div className="p-4 flex gap-3">
+        <span className="w-10 h-10 rounded-xl grid place-items-center text-lg shrink-0"
+          style={{ background: `${cat.color}1a`, color: cat.color, border: `1px solid ${cat.color}33` }}>{cat.icon}</span>
+        <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           <span className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
             style={{ color: cat.color, background: `${cat.color}1a` }}>{cat.label}</span>
-          <span className="text-[11px] font-bold" style={{ color: pr.color }}>{pr.label}</span>
+          {finding.agentName && <span className="text-[10px] font-medium text-slate-400">· {finding.agentName}</span>}
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold" style={{ color: pr.color }}>
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: pr.color }} />
+            {pr.label}
+          </span>
           {finding.confidence && (
             <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded"
               style={{ color: CONFIDENCE_COLOR[finding.confidence], background: `${CONFIDENCE_COLOR[finding.confidence]}1a` }}>
@@ -60,14 +68,15 @@ export default function DiscoveryCard({ finding }) {
             <span className="text-[10px] font-medium text-slate-400 border border-slate-200 rounded px-1.5 py-0.5">estimated</span>
           )}
         </div>
-        <p className="text-sm font-semibold text-slate-800 leading-snug">{headlineFor(finding)}</p>
+        <p className="text-[15px] font-bold text-slate-900 leading-snug">{headlineFor(finding)}</p>
         <p className="text-[13px] text-slate-500 leading-snug mt-0.5">{finding.whyItMatters}</p>
 
         {evidenceEntries.length > 0 && (
           <>
             <button type="button" onClick={() => setExpanded((e) => !e)}
-              className="text-[11px] font-semibold text-slate-400 hover:text-[#6C63FF] mt-2 transition-colors
-                         focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF] rounded">
+              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full mt-2.5 transition-colors
+                         text-slate-500 bg-slate-50 hover:bg-indigo-50 hover:text-[#6C63FF]
+                         focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]">
               {expanded ? 'Hide evidence ↑' : 'Show evidence →'}
             </button>
             {expanded && (
@@ -82,6 +91,7 @@ export default function DiscoveryCard({ finding }) {
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );

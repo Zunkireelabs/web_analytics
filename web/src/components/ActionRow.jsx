@@ -3,8 +3,9 @@
 // shape buildRecommendations() returns (routes/action-center.js).
 export default function ActionRow({ item, generating, onGenerate }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-4 py-3">
-      <div className="min-w-0">
+    <div className="flex items-center gap-3 px-4 py-3">
+      <span className="w-8 h-8 rounded-lg grid place-items-center text-sm shrink-0" style={{ background: '#6C63FF14', color: '#6C63FF' }}>⚡</span>
+      <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold text-slate-800 truncate">{item.tag}</p>
         <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{item.reason}</p>
       </div>

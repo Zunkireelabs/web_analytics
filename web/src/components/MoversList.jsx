@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
+import Sparkline from './Sparkline.jsx';
 
 const GREEN = '#16A34A';
 const RED = '#EF4444';
@@ -16,7 +17,7 @@ function changePct(prior, delta) {
   return { text: `${v >= 0 ? '+' : ''}${v}%`, isNew: false };
 }
 
-export default function MoversList({ gainers = [], droppers = [] }) {
+export default function MoversList({ gainers = [], droppers = [], comparisonLabel = 'the prior period' }) {
   const netChange = sum(gainers, 'delta') + sum(droppers, 'delta');
   const recentTotal = sum(gainers, 'recent') + sum(droppers, 'recent');
   const priorTotal = sum(gainers, 'prior') + sum(droppers, 'prior');
@@ -33,13 +34,13 @@ export default function MoversList({ gainers = [], droppers = [] }) {
               <h3 className="text-lg font-bold text-[#0F172A]">Search Query Movement</h3>
               <InfoIcon />
             </div>
-            <p className="text-sm text-[#64748B] mt-1">Clicks performance vs last week</p>
+            <p className="text-sm text-[#64748B] mt-1">Clicks performance vs {comparisonLabel}</p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 flex-1 min-w-[320px] max-w-2xl">
             <Metric icon={<TrendUp />} tint={GREEN} value={fmtSigned(netChange)} label="Net click change"
               badge={pct != null ? `${pct >= 0 ? '+' : ''}${pct}%` : null} badgeUp={netChange >= 0} />
-            <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This week"
-              sub={`vs ${priorTotal.toLocaleString()} last week`} />
+            <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This period"
+              sub={`vs ${priorTotal.toLocaleString()} ${comparisonLabel}`} />
             <Metric icon={<Target />} tint={PURPLE} value={changed} label="Queries changed" />
             <Metric icon={<Swap />} tint={GREEN}
               value={<span><span style={{ color: GREEN }}>{gainers.length}</span> <span className="text-slate-300">/</span> <span style={{ color: RED }}>{droppers.length}</span></span>}
@@ -49,7 +50,7 @@ export default function MoversList({ gainers = [], droppers = [] }) {
       </div>
 
       {/* 2 ─ AI Insights band */}
-      <Highlights gainers={gainers} droppers={droppers} />
+      <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
 
       {/* 3 ─ Two-column gainers / drops */}
       <div id="movers-section" className="grid md:grid-cols-2 gap-6">
@@ -79,7 +80,7 @@ function Metric({ icon, tint, value, label, badge, badgeUp, sub }) {
 }
 
 /* ───────── Highlights band — local heuristics over gainers/droppers, not an LLM call ───────── */
-function Highlights({ gainers, droppers }) {
+function Highlights({ gainers, droppers, comparisonLabel }) {
   const used = new Set();
   const take = (q) => { if (q) used.add(q.query); return q; };
 
@@ -107,7 +108,7 @@ function Highlights({ gainers, droppers }) {
     const c = changePct(topGain.prior, topGain.delta);
     blocks.push({ icon: <TrendUp />, color: GREEN, tag: 'Gainer', head: `“${topGain.query}”`, text: withTranslation(topGain.query, `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}`) });
   }
-  if (newQ) blocks.push({ icon: <Sparkle />, color: GREEN, tag: 'New', head: `“${newQ.query}”`, text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks this week`) });
+  if (newQ) blocks.push({ icon: <Sparkle />, color: GREEN, tag: 'New', head: `“${newQ.query}”`, text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks vs ${comparisonLabel}`) });
   if (vsQ) blocks.push({ icon: <Activity />, color: GREEN, tag: 'Trending', head: `“${vsQ.query}”`, text: withTranslation(vsQ.query, 'Comparison searches gaining momentum') });
   if (topDrop) blocks.push({ icon: <TrendDown />, color: RED, tag: 'Drop', head: `“${topDrop.query}”`, text: withTranslation(topDrop.query, 'Lost the most visibility — refresh content') });
 
@@ -186,7 +187,9 @@ function MoverCard({ kind, rows, total }) {
                 <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md"
                   style={c.isNew ? { background: '#dbeafe', color: BLUE } : { background: soft, color }}>{c.text}</span>
               </span>
-              <span className="flex justify-end"><MiniSpark from={r.prior} to={r.recent} color={color} /></span>
+              <span className="flex justify-end">
+                <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={54} height={20} fill={false} dot={false} />
+              </span>
             </div>
           );
         })}
@@ -230,16 +233,11 @@ function TranslateButton({ query }) {
   );
 }
 
-function MiniSpark({ from, to, color }) {
+// Synthesizes a short eased curve between two real endpoints (prior → recent) for the
+// row-level trend hint — not a real time series, just a shape Sparkline can render.
+function sparkSteps(from, to) {
   const a = Number(from) || 0, b = Number(to) || 0;
-  const steps = [a, a + (b - a) * 0.2, a + (b - a) * 0.45, a + (b - a) * 0.62, a + (b - a) * 0.82, b];
-  const min = Math.min(...steps), max = Math.max(...steps), range = max - min || 1;
-  const pts = steps.map((v, i) => `${((i / (steps.length - 1)) * 54).toFixed(1)},${(17 - ((v - min) / range) * 15).toFixed(1)}`).join(' ');
-  return (
-    <svg width="54" height="20" className="shrink-0">
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+  return [a, a + (b - a) * 0.2, a + (b - a) * 0.45, a + (b - a) * 0.62, a + (b - a) * 0.82, b];
 }
 
 /* ───────── Inline lucide-style icons ───────── */

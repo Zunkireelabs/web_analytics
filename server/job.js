@@ -10,9 +10,10 @@ import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
 import { isGoogleAuthError } from './integrations/google-oauth.js';
-import { daysAgoInTz, dateRange, previousWeek } from './util/dates.js';
+import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
-import { saveAgentRun } from './store/agent-runs.js';
+import { runAgent } from './agents/runner.js';
+import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
 import { meta as execReportMeta } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
@@ -20,10 +21,21 @@ import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
+import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
+import { getSearchPerformanceRange } from './store/read.js';
+import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
+import { runDueVerifications } from './agents/lib/fix-verification.js';
 
-// Daily-cadence agents only — competitor-intelligence stays weekly (see
-// runCompetitorCheckIfDue below), it's cost-bounded on purpose.
-const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => id !== 'competitor-intelligence');
+// Daily-cadence agents only. competitor-intelligence, authority, and
+// ai-recommendation all run monthly (see runAgentIfDue below — real
+// competitor movement, backlink profiles, and AI-answer patterns all move
+// too slowly to justify daily/weekly cost, and for authority/ai-
+// recommendation specifically, daily would multiply real DataForSEO/OpenAI
+// spend for no real signal gain). content-gap runs weekly (via
+// executive-report's requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID
+// — real content-completeness gaps don't meaningfully shift day to day).
+const MONTHLY_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !MONTHLY_AGENT_IDS.has(id) && id !== 'content-gap');
 
 // Records the shared Google OAuth connection's health from organic pipeline
 // outcomes (not just the on-demand "Test connection" check), so Integration
@@ -76,8 +88,12 @@ export async function ingestDate(site, date) {
 // Core per-site ingest logic — the standard window for one already-resolved
 // site. Both sources are ingested across the same window (gscStart ..
 // yesterday) so every recent day has aligned GSC + GA4 data. The "report
-// date" is the freshest day that has FINAL GSC data (today - 3).
-async function runDailyIngestForSite(site) {
+// date" is the freshest day that has FINAL GSC data (today - 3). Exported
+// (not just used via runDailyJobForSite) so server/routes/clients.js can
+// pull real GSC/GA4 data for a brand-new client's day-0 baseline without
+// also triggering that function's narrative/email/doc side effects, which
+// aren't appropriate before a client relationship is even fully set up.
+export async function runDailyIngestForSite(site) {
   const tz = site.timezone;
 
   const gscEnd = daysAgoInTz(tz, GSC_LAG_DAYS);                 // report date
@@ -313,28 +329,30 @@ export async function runWeeklyIfDueForAllSites() {
   return results;
 }
 
-// Run the executive-report-if-due check independently for every connected
-// site. A failure for one site is logged and does not stop the others.
-// Weekly, same cadence/idempotency pattern as runExecutiveIfDue above, but
-// its own marker: getCompetitorRankingDates (real persisted check dates)
-// instead of a sites column, since competitor_rankings already records when
-// it last ran. Silently no-ops if DataForSEO isn't configured — the
-// competitor-intelligence agent already reports "insufficient-data" plainly
-// in that case, so there's nothing to force here.
+// Real DataForSEO SERP-ranking ingest — monthly, matching the cadence of
+// the actual competitor-intelligence agent analysis that consumes it (see
+// runCompetitorIntelligenceIfDue below). Its own marker:
+// getCompetitorRankingDates (real persisted check dates) instead of a
+// sites column, since competitor_rankings already records when it last ran.
+// Silently no-ops if DataForSEO isn't configured — the competitor-
+// intelligence agent already reports "insufficient-data" plainly in that
+// case, so there's nothing to force here.
 export async function runCompetitorCheckIfDue(site) {
   if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
 
-  const { start, end } = previousWeek(site.timezone);
+  const { start, end } = previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
+  const { year, month } = previousMonth(site.timezone);
+  const threshold = monthBounds(year, month).start;
   const [latestDate] = await getCompetitorRankingDates(site.id, 1);
-  if (latestDate && latestDate >= start) {
-    console.log(`[competitors] site ${site.id} week of ${start} already checked — skipping.`);
+  if (latestDate && latestDate >= threshold) {
+    console.log(`[competitors] site ${site.id} already checked this month — skipping.`);
     return null;
   }
 
   const checkDate = daysAgoInTz(site.timezone, 0);
   const rows = await fetchCompetitorRankings(site, checkDate, { start, end });
   await saveCompetitorRankings(site.id, rows);
-  console.log(`[competitors] site ${site.id}: checked ${rows.length} ranking row(s) for week of ${start}.`);
+  console.log(`[competitors] site ${site.id}: checked ${rows.length} real SERP ranking row(s).`);
   return { checked: rows.length };
 }
 
@@ -346,6 +364,119 @@ export async function runCompetitorCheckIfDueForAllSites() {
       results.push(await runCompetitorCheckIfDue(site));
     } catch (err) {
       console.error(`[job] competitor check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
+// Shared "checked often, acts rarely" guard for any agent that should only
+// really run once a real calendar month has passed — the exact pattern
+// competitor-intelligence proved first (see its comment history), now used
+// by three agents (competitor-intelligence, authority, ai-recommendation)
+// so a fourth doesn't need to hand-roll the same due-check a fourth time.
+// Checked via the weekly cron block, same as everything else here, but only
+// does real work once a month. persist:true since there's no wrapper (like
+// executive-report's orchestration) persisting a row on this agent's behalf.
+async function runAgentIfDue(site, agentId, { start, end } = {}) {
+  const { year, month } = previousMonth(site.timezone);
+  const threshold = monthBounds(year, month).start;
+  const [lastRun] = await getLatestAgentRuns(site.id, [agentId]);
+  if (lastRun && new Date(lastRun.created_at) >= new Date(threshold)) {
+    console.log(`[${agentId}] site ${site.id} already analyzed this month — skipping.`);
+    return null;
+  }
+  const range = start && end ? { start, end } : previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
+  const output = await runAgent(agentId, { siteId: site.id, start: range.start, end: range.end }, { persist: true });
+  console.log(`[${agentId}] site ${site.id}: real monthly analysis complete (status: ${output.status}).`);
+  return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
+}
+
+async function runAgentIfDueForAllSites(agentId) {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runAgentIfDue(site, agentId));
+    } catch (err) {
+      console.error(`[job] ${agentId} monthly run failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
+// The real competitor-intelligence AGENT run (crawls competitor homepages,
+// real LLM/SERP discovery) — deliberately monthly, decoupled from
+// executive-report's weekly orchestration (no longer in its meta.requires,
+// see executive-report.js) specifically so it can have this slower cadence
+// without either starving the weekly executive narrative of every OTHER
+// agent's freshness, or forcing competitor-intelligence to re-run weekly
+// just because it used to be bundled in.
+export const runCompetitorIntelligenceIfDue = (site) => runAgentIfDue(site, 'competitor-intelligence');
+export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForAllSites('competitor-intelligence');
+
+// Authority Score — real DataForSEO backlink data doesn't meaningfully
+// shift week to week, so monthly matches the underlying signal (same
+// reasoning as competitor-intelligence above) and keeps DataForSEO
+// Backlinks API cost negligible.
+export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
+export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
+
+// AI Recommendation — real OpenAI prompt probes have a real per-call cost;
+// monthly keeps that cost negligible while still tracking real drift in
+// what ChatGPT recommends over time.
+export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation');
+export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation');
+
+// Real site-wide page discovery (sitemap, and BFS crawl once added) — kept
+// weekly, same reasoning as runCompetitorCheckIfDue: a real crawl of up to
+// a few hundred pages against a live site, run inside every daily cycle,
+// would be both wasteful (a site's page list barely changes day to day) and
+// impolite. Also folds in GSC's own top pages as a third discovery source,
+// tagged 'gsc', so page_inventory becomes the single superset rather than
+// just the sitemap+crawl subset.
+export async function runSiteDiscoveryIfDue(site) {
+  const { start, end } = previousWeek(site.timezone);
+  const lastDiscoveredAt = await getLastDiscoveryAt(site.id);
+  if (lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
+    console.log(`[site-discovery] site ${site.id} week of ${start} already discovered — skipping.`);
+    return null;
+  }
+
+  const [sitemapUrls, crawledUrls, gscPages] = await Promise.all([
+    discoverFromSitemaps(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
+    crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
+    getSearchPerformanceRange(site.id, start, end, 'page', 200),
+  ]);
+
+  await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
+  await upsertPageInventoryBatch(site.id, crawledUrls, 'crawl');
+  await upsertPageInventoryBatch(site.id, gscPages.map((p) => p.dim_value), 'gsc');
+
+  // Real orphaned-page signal: a page the sitemap lists but this run's real
+  // homepage-outward crawl never reached via any actual internal link — the
+  // standard SEO definition, computed here from this run's own two
+  // already-fetched lists (no new fetching). Trailing-slash normalization
+  // only, since both lists are already full absolute URLs (sitemap <loc>
+  // entries, and crawledUrls resolved via `new URL(href, pageUrl)` in
+  // page-content.js) — not a guess at equivalence, just tolerant of the one
+  // real formatting difference sites commonly have between the two sources.
+  const normalize = (u) => u.replace(/\/+$/, '');
+  const crawledSet = new Set(crawledUrls.map(normalize));
+  const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
+  await markOrphanedPages(site.id, orphanedUrls);
+
+  console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
+  return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length };
+}
+
+export async function runSiteDiscoveryIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runSiteDiscoveryIfDue(site));
+    } catch (err) {
+      console.error(`[job] site discovery failed for site ${site.id} "${site.name}":`, err.message);
     }
   }
   return results;
@@ -389,6 +520,21 @@ export async function runHourlyCatchupForAllSites(tz) {
       console.error(`[job] hourly guard failed for site ${site.id} "${site.name}":`, err.message);
       await noteGoogleAuthOutcome(false, err);
     }
+  }
+}
+
+// Verify stage: re-checks every due fix_verifications row (real re-fetch of
+// the exact flagged page, real re-run of the exact check that flagged it —
+// see agents/lib/fix-verification.js). Due-ness is per-row (verify_after),
+// not per-site, so this runs once globally rather than per connected site.
+export async function runFixVerificationsForAllSites() {
+  try {
+    const results = await runDueVerifications();
+    if (results.length) console.log(`[job] fix verification: checked ${results.length} due row(s)`);
+    return results;
+  } catch (err) {
+    console.error('[job] fix verification failed:', err.message);
+    return [];
   }
 }
 

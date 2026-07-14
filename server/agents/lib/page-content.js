@@ -7,10 +7,47 @@ import * as cheerio from 'cheerio';
 
 const FETCH_TIMEOUT_MS = 5000;
 const MIN_META_DESCRIPTION_LEN = 50;
+const MAX_META_DESCRIPTION_LEN = 160;
 const MIN_INTERNAL_LINKS = 3;
 const MIN_WORD_COUNT = 300;
+// Standard SERP-snippet-width-derived range — below this a title is usually
+// thin/generic, above it Google truncates the displayed title in results.
+const MIN_TITLE_LEN = 30;
+const MAX_TITLE_LEN = 60;
+
+// String-level guard against fetching a private/local address — every page
+// this module fetches ultimately comes from real, external data (a site's
+// own GSC page URL, or an LLM-named competitor domain), but nothing
+// previously stopped a same-host redirect from resolving somewhere like
+// 169.254.169.254 (cloud metadata) or localhost. Not a full SSRF defense
+// (doesn't catch DNS rebinding — the hostname string can look public while
+// resolving to a private IP at connect time), but blocks the common,
+// cheap case. Exported so the technical-seo redirect-chain follower
+// (server/agents/lib/technical-seo-analysis.js) applies the same check to
+// every hop, not just the first request.
+const PRIVATE_HOSTNAME_PATTERNS = [/^localhost$/i, /\.local$/i, /\.internal$/i];
+export function isPrivateOrLocalHost(hostname) {
+  if (!hostname) return true;
+  if (PRIVATE_HOSTNAME_PATTERNS.some((re) => re.test(hostname))) return true;
+  const v4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = v4.slice(1, 3).map(Number);
+    if (a === 127 || a === 10 || a === 0) return true;
+    if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata (169.254.169.254)
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  const v6 = hostname.replace(/^\[|\]$/g, '');
+  if (v6 === '::1' || /^fe80:/i.test(v6) || /^f[cd][0-9a-f]{2}:/i.test(v6)) return true;
+  return false;
+}
 
 async function fetchHtml(url) {
+  let hostname;
+  try { hostname = new URL(url).hostname; } catch { return { ok: false, error: 'invalid URL' }; }
+  if (isPrivateOrLocalHost(hostname)) return { ok: false, error: 'blocked: private/local address' };
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -19,6 +56,12 @@ async function fetchHtml(url) {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +opportunity-agent)' },
     });
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    // Harmless when every caller only ever passes a known page URL (from
+    // GSC), but the site-wide crawler (site-discovery.js) follows arbitrary
+    // discovered hrefs — some of which are PDFs/images/etc, not HTML —
+    // and cheerio parsing binary content as HTML is a waste at best.
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('html')) return { ok: false, error: `not HTML: ${contentType || 'unknown content-type'}` };
     return { ok: true, html: await res.text() };
   } catch (err) {
     return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
@@ -51,12 +94,26 @@ function analyzePage(html, pageUrl) {
 
   let host = null;
   try { host = new URL(pageUrl).hostname; } catch { /* leave host null */ }
+  // Every real internal href, resolved to an absolute URL — one entry per
+  // matching anchor tag (not deduped; a page linking the same URL 5 times
+  // still contributes 5 entries here, same as internalLinkCount always
+  // counted before this change — dedup is the crawler's job, not this
+  // function's). Used by the technical-seo agent's broken-link/redirect-
+  // chain crawl (server/agents/lib/technical-seo-analysis.js). Always
+  // resolves via `new URL(href, pageUrl)` and checks the real hostname,
+  // rather than the previous shortcut of trusting any href starting with
+  // '/' — that shortcut incorrectly counted protocol-relative external
+  // links (e.g. "//evil.com/x", which also starts with '/') as internal.
+  const internalLinks = [];
   const internalLinkCount = host
     ? $('a[href]').filter((_, el) => {
       const href = $(el).attr('href');
       if (!href || href.startsWith('#')) return false;
-      if (href.startsWith('/')) return true;
-      try { return new URL(href, pageUrl).hostname === host; } catch { return false; }
+      let resolved;
+      try { resolved = new URL(href, pageUrl); } catch { return false; }
+      if (resolved.hostname !== host) return false;
+      internalLinks.push(resolved.href);
+      return true;
     }).length
     : 0;
 
@@ -89,6 +146,7 @@ function analyzePage(html, pageUrl) {
     listCount: $('ul, ol').length,
     tableCount: $('table').length,
     internalLinkCount,
+    internalLinks, // transient, like bodyText — real hrefs for the technical-seo crawler, not meant for persisted facts on other callers
     wordCount,
     bodyText, // transient — callers should not persist this into stored facts (used only for LLM context)
   };
@@ -96,7 +154,7 @@ function analyzePage(html, pageUrl) {
 
 // Known AI-crawler user-agent tokens checked against robots.txt. Not
 // exhaustive, but covers the major LLM/answer-engine crawlers as of today.
-const AI_CRAWLER_AGENTS = ['GPTBot', 'ChatGPT-User', 'ClaudeBot', 'anthropic-ai', 'PerplexityBot', 'Google-Extended', 'CCBot', 'Bytespider'];
+const AI_CRAWLER_AGENTS = ['GPTBot', 'ChatGPT-User', 'ClaudeBot', 'anthropic-ai', 'PerplexityBot', 'Google-Extended', 'Applebot-Extended', 'CCBot', 'Bytespider'];
 
 // Simplified robots.txt scan (line-based, not a full RFC 9309 parser): for
 // each known AI-crawler user-agent block, treat a bare "Disallow: /" as
@@ -122,7 +180,15 @@ function robotsAllowsAiCrawlers(robotsTxt) {
   return !blockedAny;
 }
 
-async function fetchTextIfExists(url) {
+// Exported for reuse by site-discovery.js (fetching robots.txt for crawl
+// politeness, and each sitemap path) — same generic "fetch text from a URL,
+// honestly report if it doesn't exist" shape those need, rather than a
+// third copy of this fetch-with-timeout-and-guard boilerplate.
+export async function fetchTextIfExists(url) {
+  let hostname;
+  try { hostname = new URL(url).hostname; } catch { return { ok: false }; }
+  if (isPrivateOrLocalHost(hostname)) return { ok: false };
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -192,16 +258,41 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Missing Open Graph tags': null,
   'Missing structured lists': null,
   'Missing question-style headings': null,
+  'Title length': 'meta-title',
+  'Meta description length': 'meta-title',
 };
 
 // Effort is a property of the action itself (structural config fix vs
 // net-new content), not of how important the finding is — kept as one
 // honest, documented lookup instead of a per-agent guessed constant.
 const GENERATOR_EFFORT = {
-  'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low',
+  'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
+
+// Best-effort schema type for an "Add schema markup" recommendation — never
+// blindly 'Article'. Prefers a real signal already on the page (an existing
+// JSON-LD @type from analyzePage's schemaTypes, even if incomplete/partial)
+// over a URL-path guess, and only falls back to 'Article' when neither applies.
+// Boilerplate types (site-wide Organization/WebSite/BreadcrumbList markup)
+// are skipped since they say nothing about this specific page's content type.
+const BOILERPLATE_SCHEMA_TYPES = new Set(['Organization', 'WebSite', 'BreadcrumbList', 'WebPage']);
+const PATH_SCHEMA_HINTS = [
+  [/\/(products?|shop|store)\//i, 'Product'],
+  [/\/(faq|faqs)(\/|$)/i, 'FAQPage'],
+  [/\/(contact|contact-us)(\/|$)/i, 'ContactPage'],
+  [/\/(about|about-us|company)(\/|$)/i, 'AboutPage'],
+  [/\/(blog|articles?|news)\//i, 'Article'],
+];
+export function inferSchemaType(pageUrl, schemaTypes = []) {
+  const existing = (schemaTypes || []).find((t) => t && !BOILERPLATE_SCHEMA_TYPES.has(t));
+  if (existing) return existing;
+  let path = '';
+  try { path = new URL(pageUrl).pathname; } catch { /* leave path empty, fall through to default */ }
+  for (const [re, type] of PATH_SCHEMA_HINTS) if (re.test(path)) return type;
+  return 'Article';
+}
 
 // Deterministic on-page completeness gaps for the Content Gap Agent — every
 // item here is verified directly from the page's real fetched HTML (unlike
@@ -219,6 +310,16 @@ function contentGapChecks(analysis, queryTexts = []) {
 
   if (!analysis.hasFaq) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema or FAQ heading detected.' });
   if (!analysis.hasSchema) gaps.push({ type: 'Missing schema', detail: 'No structured data (JSON-LD) found on the page.' });
+
+  const titleLen = analysis.title?.length || 0;
+  if (titleLen === 0) gaps.push({ type: 'Title length', detail: 'No <title> tag content found.' });
+  else if (titleLen < MIN_TITLE_LEN) gaps.push({ type: 'Title length', detail: `Title is ${titleLen} characters — usually too short/generic (target ${MIN_TITLE_LEN}-${MAX_TITLE_LEN}).` });
+  else if (titleLen > MAX_TITLE_LEN) gaps.push({ type: 'Title length', detail: `Title is ${titleLen} characters — Google typically truncates past ${MAX_TITLE_LEN}.` });
+
+  if (analysis.hasMetaDescription) {
+    const descLen = analysis.metaDescription.length;
+    if (descLen > MAX_META_DESCRIPTION_LEN) gaps.push({ type: 'Meta description length', detail: `Meta description is ${descLen} characters — Google typically truncates past ${MAX_META_DESCRIPTION_LEN}.` });
+  }
 
   const comparisonQuery = queries.find((q) => /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b|\bbest\b/i.test(q));
   if (comparisonQuery && !analysis.hasComparisonContent) {

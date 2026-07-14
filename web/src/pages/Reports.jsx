@@ -23,6 +23,12 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
+// /report-summary's real comparison window per tab (server/routes/metrics.js:
+// daily compares vs yesterday, weekly/monthly vs the immediately preceding
+// week/month) — describes that real window instead of a hardcoded "last week,"
+// which was wrong for the daily and monthly tabs.
+const MOVER_COMPARISON_LABEL = { daily: 'yesterday', weekly: 'the prior week', monthly: 'the prior month' };
+
 function periodLabel(data) {
   if (!data) return '';
   if (data.period === 'daily') return data.date || '';
@@ -102,7 +108,11 @@ export default function Reports({ siteId }) {
         <div className="card p-6 text-sm text-slate-500 text-center">Unable to load this report right now.</div>
       ) : (
         <>
-          <ExecutiveSummaryPanel text={data?.narrative} source={data?.narrativeSource} generatedAt={data?.narrativeGeneratedAt} />
+          {/* source/generatedAt are deliberately omitted — /report-summary
+              never actually returns either (only Command Center's route
+              does), so passing them here would always be null/false and
+              imply a freshness timestamp this page doesn't really have. */}
+          <ExecutiveSummaryPanel text={data?.narrative} />
 
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
             <StatCard label="Clicks" icon="🖱" color="#8b5cf6" value={m?.clicks} format={fmtInt} loading={loading} />
@@ -121,7 +131,7 @@ export default function Reports({ siteId }) {
           </div>
 
           {!loading && data?.movers && (data.movers.gainers.length > 0 || data.movers.droppers.length > 0) && (
-            <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} />
+            <MoversList gainers={data.movers.gainers} droppers={data.movers.droppers} comparisonLabel={MOVER_COMPARISON_LABEL[period]} />
           )}
 
           {findings.length > 0 && (
@@ -139,7 +149,7 @@ export default function Reports({ siteId }) {
           {recommendations.length > 0 && (
             <div>
               <h2 className="text-[15px] font-bold text-slate-900 mb-3">Priority Recommendations</h2>
-              <div className="card p-2 space-y-1">
+              <div className="space-y-2.5">
                 {recommendations.map((r) => (
                   <RecommendationCard key={r.id} title={r.title} reason={r.reason}
                     impact={r.impact} effort={r.effort} category={r.category} />

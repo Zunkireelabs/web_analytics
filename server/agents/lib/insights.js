@@ -7,7 +7,7 @@ import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js
 // display). executive-report is excluded: it synthesizes these same 7
 // agents' findings into its own topFindings, so including it here would
 // double-count every finding under two agent ids.
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence'];
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation'];
 
 // Findings from these agents are inherently upside-framed (growth,
 // striking-distance, localization), as opposed to problem-framed. Shared by
@@ -57,6 +57,20 @@ async function statFor(agentId, facts) {
   }
   if (agentId === 'device-intelligence') {
     return facts.lowCtrDevices?.length ? `${facts.lowCtrDevices.length} low-CTR device${facts.lowCtrDevices.length === 1 ? '' : 's'}` : null;
+  }
+  if (agentId === 'competitor-intelligence') {
+    const n = facts.competitorsIdentified?.length || 0;
+    return n ? `${n} competitor${n === 1 ? '' : 's'} identified` : null;
+  }
+  if (agentId === 'technical-seo') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} technical issue${n === 1 ? '' : 's'} found` : null;
+  }
+  if (agentId === 'authority') {
+    return facts.authorityScore != null ? `${facts.authorityScore}/100 authority` : null;
+  }
+  if (agentId === 'ai-recommendation') {
+    return facts.aiVisibilityPct != null ? `${facts.aiVisibilityPct}% AI recommendation rate` : null;
   }
   return null;
 }

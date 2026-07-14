@@ -10,11 +10,14 @@ const NAV = [
   { to: '/insights', label: 'Insights', icon: '🔍' },
   { to: '/compare', label: 'Compare', icon: '📈' },
   { to: '/reports', label: 'Reports', icon: '🗒️' },
+  { to: '/growth', label: 'Milestones', icon: '🌱' },
 ];
 
 const INTERNAL_NAV = [
   { to: '/ai-growth', label: 'AI Growth', icon: '🤖' },
   { to: '/action-center', label: 'Action Center', icon: '⚡' },
+  { to: '/ai-orchestration', label: 'Orchestration', icon: '🕸️' },
+  { to: '/clients', label: 'Clients', icon: '🏢' },
 ];
 
 // `mobileOpen`/`onCloseMobile` drive a slide-in drawer below the `md`
@@ -24,7 +27,9 @@ const INTERNAL_NAV = [
 // (persistent, sticky, always visible) — nothing changes for desktop.
 export default function Sidebar({ sites, siteId, isInternal, onSite, onLogout, mobileOpen, onCloseMobile }) {
   const loc = useLocation();
-  const isActive = (to) => loc.pathname === to || loc.pathname.startsWith(`${to}/`);
+  // Exact match only — /ai-growth and /ai-orchestration are separate nav
+  // entries now, so a prefix match would light up both at once.
+  const isActive = (to) => loc.pathname === to;
 
   // Close the drawer automatically on navigation — a user tapping a nav
   // link expects the menu to get out of the way, not stay open over the

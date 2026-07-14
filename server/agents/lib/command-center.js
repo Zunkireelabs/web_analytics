@@ -7,6 +7,9 @@ import { RECOMMENDATION_AGENT_IDS, OPPORTUNITY_AGENT_IDS } from './insights.js';
 import { buildRecommendations } from './recommendations.js';
 import { getFindingsDiff, healthChangeEntry } from './changes.js';
 import { listWatchlist } from '../../store/watchlist.js';
+import { listCompetitorProfiles } from '../../store/competitor-profiles.js';
+import { getAuthoritySnapshotHistory } from '../../store/authority.js';
+import { getMentionRateHistory } from '../../store/ai-recommendation.js';
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 const OPEN_WATCHLIST_STATUSES = new Set(['new', 'in_progress']);
@@ -22,6 +25,9 @@ const ACTIVITY_LABEL = {
   'ai-visibility': 'Crawled ranking pages for AI-readiness signals',
   'content-gap': 'Scored ranking pages for content completeness gaps',
   'competitor-intelligence': 'Checked real competitor rankings on tracked queries',
+  'technical-seo': 'Checked index status, Core Web Vitals, and technical page health',
+  authority: 'Computed real backlink-based Authority Score',
+  'ai-recommendation': 'Checked real ChatGPT prompts for AI recommendation visibility',
   'executive-report': 'Generated executive briefing across all specialist agents',
 };
 
@@ -84,19 +90,49 @@ function shapeFinding(f, meta, groundedById) {
   };
 }
 
+// Shared by getCommandCenterData's activity feed and the orchestration
+// diagram's live activity rail (routes/agents.js GET /agents/activity) — one
+// place that turns a raw agent_runs row into a human label + category.
+function shapeActivity(rows, catByAgent) {
+  return rows.map((r) => ({
+    agentId: r.agent_id, status: r.status, tookMs: r.took_ms, createdAt: r.created_at,
+    category: catByAgent.get(r.agent_id)?.category || 'seo',
+    label: ACTIVITY_LABEL[r.agent_id] || `Ran ${catByAgent.get(r.agent_id)?.name || r.agent_id}`,
+  }));
+}
+
+// Real recent runs across every registered agent, newest first — powers the
+// orchestration diagram's "Live Activity" rail. Same shape/source
+// (getRecentActivity + shapeActivity) as Command Center's AI Activity feed,
+// just over every agent id instead of the recommendation-focused subset.
+export async function getAgentActivityFeed(siteId, agentIds, limit = 12) {
+  const [rows, catByAgent] = await Promise.all([
+    getRecentActivity(siteId, agentIds, limit),
+    categoryByAgentId(),
+  ]);
+  return shapeActivity(rows, catByAgent);
+}
+
 // Everything the AI Command Center's primary view needs, in one call. Reads
 // only already-persisted data (like Reports/Action Center's cached path) —
 // never triggers a live agent run; use the /command-center/refresh route for
 // that, same split as Action Center's recommendations vs recommendations/refresh.
 export async function getCommandCenterData(siteId) {
-  const [findingRuns, execRuns, activityRows, recommendations, catByAgent, watchlistRows] = await Promise.all([
+  const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    getLatestAgentRuns(siteId, ['executive-report']),
+    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
     buildRecommendations(siteId),
     categoryByAgentId(),
     listWatchlist(siteId),
+    listCompetitorProfiles(siteId),
+    getAuthoritySnapshotHistory(siteId, 12),
+    getMentionRateHistory(siteId, 12),
   ]);
+  const execRuns = execAndCompetitorRuns.filter((r) => r.agent_id === 'executive-report');
+  const competitorRun = execAndCompetitorRuns.find((r) => r.agent_id === 'competitor-intelligence') || null;
+  const authorityRun = execAndCompetitorRuns.find((r) => r.agent_id === 'authority') || null;
+  const aiRecommendationRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-recommendation') || null;
 
   const allFindings = findingRuns.flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })));
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
@@ -152,6 +188,12 @@ export async function getCommandCenterData(siteId) {
       title: r.title, reason: r.reason, priority: r.priority, expectedImpact: r.expected_impact,
       confidence: r.confidence, evidence: r.evidence, recommendedAction: r.recommended_action,
       status: r.status, discoveredAt: r.discovered_at, statusChangedAt: r.status_changed_at,
+      // Set only when the most recent transition was a sync-driven reopen
+      // (see materialChangeDetected in store/watchlist.js) — lets the UI
+      // show "reopened — {reason}" instead of looking like a brand-new item.
+      reopened: r.last_transition_status === 'new' && r.last_transition_from && r.last_transition_from !== 'new'
+        ? { reason: r.last_transition_reason, at: r.last_transition_at }
+        : null,
     }));
 
   return {
@@ -162,8 +204,18 @@ export async function getCommandCenterData(siteId) {
     },
     executiveSummary: { narrative: execRun?.narrative || null, generatedAt: execRun?.created_at || null },
     stats: {
+      // Both tiles below count the real, un-curated total using the SAME
+      // filter as their matching section (priority === 'high' for Critical
+      // Issues, OPPORTUNITY_AGENT_IDS for Growth Opportunities) — this used
+      // to use a broader, mismatched filter (any finding with a
+      // recommendedAction across all 7 agents) that had no relation to what
+      // the Growth Opportunities section even shows. The section below is
+      // deliberately curated/capped for display ("N shown", same pattern as
+      // Critical Issues) — a tile number larger than the section's "shown"
+      // count is expected once a site has more real findings than fit on
+      // screen, not a bug.
       criticalIssues: allFindings.filter((f) => f.priority === 'high').length,
-      newOpportunities: allFindings.filter((f) => f.recommendedAction).length,
+      newOpportunities: allFindings.filter((f) => OPPORTUNITY_AGENT_IDS.includes(f.agentId)).length,
       analysisStatus,
       lastAnalyzedAt: execRun?.created_at || null,
     },
@@ -175,10 +227,61 @@ export async function getCommandCenterData(siteId) {
     growthOpportunities: growthOpportunitiesRaw.map((f) => shapeFinding(f, catByAgent.get(f.agentId), groundedById)),
     recommendedActions: recommendedActionsRaw,
     watchlist,
-    activity: activityRows.map((r) => ({
-      agentId: r.agent_id, status: r.status, tookMs: r.took_ms, createdAt: r.created_at,
-      label: ACTIVITY_LABEL[r.agent_id] || `Ran ${catByAgent.get(r.agent_id)?.name || r.agent_id}`,
-    })),
+    // AI-identified real competitors + structural comparison (see
+    // agents/lib/competitor-analysis.js) — runs weekly, may be empty until
+    // the first weekly executive report run has completed.
+    competitors: competitorRows.map((r) => ({ id: r.id, domain: r.domain, lastAnalyzedAt: r.last_analyzed_at, comparison: r.comparison })),
+    // Lets the UI tell "not analyzed yet" apart from "analyzed, found
+    // nothing real" apart from "Google-ranking verification isn't
+    // configured" — three honestly different reasons the list above can be
+    // empty, previously collapsed into one generic message. dataForSeoConfigured
+    // mirrors competitor-intelligence.js's own meta.dataSources check.
+    competitorsMeta: {
+      hasRun: !!competitorRun,
+      status: competitorRun?.status ?? null,
+      lastRunAt: competitorRun?.created_at ?? null,
+      dataForSeoConfigured: !!(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD),
+    },
+    // Real backlink-based Authority Score (server/agents/authority.js) —
+    // runs monthly, same empty-state discipline as competitorsMeta above:
+    // "not configured" (no DataForSEO backlink credentials) is a distinct,
+    // honest state from "not yet run" or "ran, no usable data."
+    authority: authorityRun?.status === 'ok' ? {
+      score: authorityRun.facts.authorityScore, priorScore: authorityRun.facts.priorScore,
+      scoreDelta: authorityRun.facts.scoreDelta, breakdown: authorityRun.facts.scoreBreakdown,
+      topLinkedPages: authorityRun.facts.topLinkedPages,
+      history: authorityHistory.map((r) => ({ date: r.snapshot_date, score: r.authority_score })),
+    } : null,
+    authorityMeta: {
+      hasRun: !!authorityRun,
+      status: authorityRun?.status ?? null,
+      lastRunAt: authorityRun?.created_at ?? null,
+      dataForSeoBacklinksConfigured: !!(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD),
+    },
+    // Real AI Recommendation tracking (server/agents/ai-recommendation.js —
+    // distinct from ai-visibility, which only measures structural
+    // readiness) — runs monthly, same empty-state discipline.
+    aiRecommendation: aiRecommendationRun?.status === 'ok' ? {
+      visibilityPct: aiRecommendationRun.facts.aiVisibilityPct,
+      mentionedCount: aiRecommendationRun.facts.mentionedCount,
+      promptsChecked: aiRecommendationRun.facts.promptsChecked,
+      topPrompts: aiRecommendationRun.facts.topPrompts,
+      missedPrompts: aiRecommendationRun.facts.missedPrompts,
+      competitorsAppearingInstead: aiRecommendationRun.facts.competitorsAppearingInstead,
+      history: mentionRateHistory.map((r) => ({
+        date: r.run_date,
+        pct: r.total_count > 0 ? Math.round((r.mentioned_count / r.total_count) * 100) : null,
+      })),
+    } : null,
+    aiRecommendationMeta: {
+      hasRun: !!aiRecommendationRun,
+      status: aiRecommendationRun?.status ?? null,
+      lastRunAt: aiRecommendationRun?.created_at ?? null,
+      // Both must be true — see lib/model-providers/openai.js's configured()
+      // for why a bare OPENAI_API_KEY isn't treated as "on" for this agent.
+      openAiConfigured: !!process.env.OPENAI_API_KEY && process.env.AI_RECOMMENDATION_ENABLED === 'true',
+    },
+    activity: shapeActivity(activityRows, catByAgent),
     recentChanges,
   };
 }

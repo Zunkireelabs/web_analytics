@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
-  getSiteById, getDailySeries, getDay, getBreakdown,
-  getChannels, getNarrative, getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
+  getSiteById, getDailySeries, getDay,
+  getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
 } from '../store/read.js';
@@ -24,54 +24,6 @@ function deltasAvsB(a, b, keys) {
   const out = {};
   for (const k of keys) out[k] = pctDelta(Number(b[k] || 0), Number(a[k] || 0));
   return out;
-}
-
-// Build a grounded text context for the AI: the day's metrics, change vs the prior
-// day, a 7-day average, top queries/pages/channels, and the device split.
-// Returns { ok, text }. ok=false when the chosen day has no data yet.
-async function buildAiContext(site, date) {
-  const start = shiftYmd(date, -7);
-  const [series, queries, pages, channels, devices] = await Promise.all([
-    getDailySeries(site, start, date),
-    getBreakdown(site, date, 'query', 5),
-    getBreakdown(site, date, 'page', 5),
-    getChannels(site, date),
-    getGa4BreakdownRange(site, start, date, 'device', 5),
-  ]);
-  const today = series.find((r) => iso(r.date) === date);
-  const prior = series.find((r) => iso(r.date) === shiftYmd(date, -1)) || {};
-  const num = (v) => (v == null ? 0 : Number(v));
-
-  if (!today || (today.clicks == null && today.users == null)) {
-    return { ok: false, text: '' };
-  }
-
-  const past = series.filter((r) => iso(r.date) !== date);
-  const avg = (k) => {
-    const v = past.map((r) => num(r[k]));
-    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : 0;
-  };
-  const delta = (cur, prev) => {
-    cur = num(cur); prev = num(prev);
-    if (!prev) return `${cur} (no prior-day data)`;
-    const pct = Math.round(((cur - prev) / prev) * 100);
-    return `${cur} (${pct >= 0 ? '+' : ''}${pct}% vs prior day, prior was ${prev})`;
-  };
-
-  const text = `
-Date: ${date}
-Clicks: ${delta(today.clicks, prior.clicks)} | 7-day avg ${avg('clicks')}
-Impressions: ${delta(today.impressions, prior.impressions)} | 7-day avg ${avg('impressions')}
-Avg Search position (lower is better): ${num(today.position).toFixed(1)}
-Users: ${delta(today.users, prior.users)}
-Sessions: ${delta(today.sessions, prior.sessions)}
-Conversions: ${num(today.conversions)}
-Device split (last 7 days, sessions): ${devices.map((d) => `${d.dim_value} ${num(d.sessions)}`).join(', ') || 'n/a'}
-Top queries: ${queries.map((q) => `"${q.dim_value}" (${num(q.clicks)} clicks, ${num(q.impressions)} impressions)`).join(', ') || 'none'}
-Top pages: ${pages.map((p) => `${p.dim_value} (${num(p.clicks)} clicks)`).join(', ') || 'none'}
-Top channels: ${channels.map((c) => `${c.channel} (${num(c.sessions)} sessions)`).join(', ') || 'none'}
-`.trim();
-  return { ok: true, text };
 }
 
 const router = Router();
@@ -132,7 +84,7 @@ router.get('/report-summary', async (req, res, next) => {
       }
       const row = await getDay(site.id, date);
       const matches = site.daily_report_narrative_date === date;
-      const series = await getDailySeries(site.id, shiftYmd(date, -7), date); // 8 days, oldest→newest
+      const series = await getDailySeries(site.id, shiftYmd(date, -10), date); // 11 days, oldest→newest (first day is the delta baseline for the Recent Report History rail, leaving 10 rows shown)
       const { gainers, droppers } = await getTopMovers(site.id, { start: date, end: date }, { start: shiftYmd(date, -1), end: shiftYmd(date, -1) }, 8);
       const history = withDeltaPct(series.slice(1).map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse());
       return res.json({
@@ -216,22 +168,6 @@ router.get('/series', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// One day's overview bundle: metrics + top queries/pages + channels + narrative.
-router.get('/day', async (req, res, next) => {
-  try {
-    const site = req.siteId;
-    const date = req.query.date;
-    const [metrics, queries, pages, channels, narrative] = await Promise.all([
-      getDay(site, date),
-      getBreakdown(site, date, 'query', 10),
-      getBreakdown(site, date, 'page', 10),
-      getChannels(site, date),
-      getNarrative(site, date),
-    ]);
-    res.json({ date, metrics, queries, pages, channels, narrative: narrative?.narrative || null });
-  } catch (e) { next(e); }
-});
-
 // Traffic by channel aggregated over a range. ?start&end
 router.get('/channels', async (req, res, next) => {
   try {
@@ -276,15 +212,23 @@ router.get('/country', async (req, res, next) => {
 router.get('/movers', async (req, res, next) => {
   try {
     const site = req.siteId;
-    const siteRow = await getSiteById(site);
-    const tz = siteRow?.timezone || 'Asia/Kolkata';
-    const recent = previousWeek(tz);
-    // The week before `recent`: shift both ends back 7 days.
+    const { start, end } = req.query;
     const shift = (ymd, days) => {
       const d = new Date(`${ymd}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
       return d.toISOString().slice(0, 10);
     };
-    const prior = { start: shift(recent.start, -7), end: shift(recent.end, -7) };
+    let recent;
+    if (start && end) {
+      // Caller (Insights page) picked a real range — compare it against the
+      // immediately preceding period of the same length, not a fixed week.
+      recent = { start, end };
+    } else {
+      const siteRow = await getSiteById(site);
+      const tz = siteRow?.timezone || 'Asia/Kolkata';
+      recent = previousWeek(tz);
+    }
+    const spanDays = Math.round((new Date(`${recent.end}T00:00:00Z`) - new Date(`${recent.start}T00:00:00Z`)) / 86400000) + 1;
+    const prior = { start: shift(recent.start, -spanDays), end: shift(recent.end, -spanDays) };
     const [movers, topPages, topDeviceCountry] = await Promise.all([
       getTopMovers(site, recent, prior, 50),
       getTopPagePerQuery(site, recent.start, recent.end),
@@ -393,32 +337,4 @@ router.get('/compare', async (req, res, next) => {
     res.json({ a: { month: req.query.a, ...a }, b: { month: req.query.b, ...b } });
   } catch (e) { next(e); }
 });
-// On-demand fresh AI insight for a chosen day. ?date
-router.get('/ai-summary', async (req, res, next) => {
-  try {
-    const ctx = await buildAiContext(req.siteId, req.query.date);
-    if (!ctx.ok) return res.json({ summary: 'No finalized data for that day yet — pick an earlier day.' });
-    const system = 'You are a concise SEO/analytics analyst writing for a non-technical owner. ' +
-      'Give sharp, specific, actionable insight in 3 sentences max. Lead with the overall trend, then the ' +
-      'single most notable change, then one action. A lower Search position is BETTER. Plain text, no markdown, no bullets.';
-    const summary = await callLLM(system, ctx.text, { maxTokens: 300 });
-    res.json({ summary });
-  } catch (e) { next(e); }
-});
-
-// Ask a free-text question about a day's data. POST { date, question }
-router.post('/ai-ask', async (req, res, next) => {
-  try {
-    const { date, question } = req.body || {};
-    if (!question || !question.trim()) return res.status(400).json({ error: 'Question is required.' });
-    const ctx = await buildAiContext(req.siteId, date);
-    if (!ctx.ok) return res.json({ answer: 'No finalized data for that day yet — try an earlier day.' });
-    const system = 'You are an SEO/analytics assistant. Answer the user\'s question using ONLY the data provided. ' +
-      'Be concise and specific, cite the real numbers, and suggest an action when relevant. If the data does not ' +
-      'contain the answer, say so plainly. A lower Search position is BETTER. Plain text, no markdown, no bullets.';
-    const answer = await callLLM(system, `${ctx.text}\n\nUser question: ${question}`, { maxTokens: 400 });
-    res.json({ answer });
-  } catch (e) { next(e); }
-});
-
 export default router;

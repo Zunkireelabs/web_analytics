@@ -1,27 +1,43 @@
-import { getSearchPerformanceRange, getQueriesForPage } from '../store/read.js';
-import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerator } from './lib/page-content.js';
+import { getQueriesForPage } from '../store/read.js';
+import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
+import { listCompetitorProfiles } from '../store/competitor-profiles.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
   id: 'content-gap',
   name: 'Content Gap Agent',
-  description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps and suggests possibly-missing entities.',
+  description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
-  version: 2,
-  // True competitive gap detection (topics competitors cover that this site
-  // doesn't at all) still has no real data source — unchanged from v1. This
-  // version covers a different, buildable question instead: is each of THIS
-  // site's own ranking pages structurally complete on the checks below.
+  version: 3,
+  // True topical/SERP-based gap detection (a specific topic a competitor
+  // ranks for that this site has no page for at all) still has no real data
+  // source — that's a different, still-unbuilt question from what's below.
+  // What v3 adds: real structural-signal cross-referencing against
+  // competitor-intelligence's tracked competitors (FAQ/schema/comparison-
+  // content presence, from their actual crawled homepages) — degrades
+  // honestly to no competitive framing when competitor-intelligence hasn't
+  // run yet or found fewer than 2 reachable competitors.
   dataSources: [
-    { id: 'competitor-analysis', status: 'not-connected', description: 'Competitor content/ranking data — needed to find topics competitors cover that this site does not at all' },
-    { id: 'serp-api', status: 'not-connected', description: 'SERP results for topical gap detection' },
+    { id: 'competitor-analysis', status: 'connected', description: 'Real structural signals (FAQ/schema/comparison-content presence) from competitor-intelligence\'s monthly crawl of tracked competitor homepages — used to note when most tracked competitors have a feature a page lacks. Needs at least 2 reachable competitor profiles to produce a meaningful ratio; degrades to no competitive framing otherwise, never fabricated.' },
+    { id: 'serp-api', status: 'not-connected', description: 'SERP results for true topical gap detection (a specific topic/query a competitor ranks for that this site has no page for at all)' },
   ],
 };
 
+// Only gap types with a directly comparable structural signal from
+// competitor-analysis.js's structuralSignals — headings/alt-text/canonical/
+// OG/lists/question-headings have no competitor-side equivalent captured
+// today, so they stay page-only findings rather than a forced comparison.
+const GAP_TYPE_TO_COMPETITOR_SIGNAL = {
+  'Missing FAQ': 'hasFaq',
+  'Missing schema': 'hasSchema',
+  'Missing comparisons': 'hasComparisonContent',
+};
+const MIN_TRACKED_COMPETITORS = 2; // below this, a "X of Y" ratio isn't a real market signal
+
 const MAX_PAGES = 20;
 const MAX_AI_SUGGESTION_PAGES = 6; // bounds LLM cost — entity suggestions run only for the top-impression pages
-const MIN_IMPRESSIONS = 5;
 const AI_SUGGESTION_MAX_ITEMS = 4;
 
 // Reads the page's own text + its top real ranking query and asks the LLM
@@ -51,25 +67,43 @@ async function suggestMissingEntities(bodyText, queryText) {
   }
 }
 
-export async function run({ siteId, start, end }) {
-  const pagePerf = await getSearchPerformanceRange(siteId, start, end, 'page', 100);
-  const candidates = pagePerf
-    .filter((p) => Number(p.impressions) >= MIN_IMPRESSIONS)
-    .sort((a, b) => Number(b.impressions) - Number(a.impressions))
-    .slice(0, MAX_PAGES);
+export async function run({ siteId, start, end, pageCache }) {
+  // Falls back to a direct (uncached) fetch when run standalone, outside an
+  // orchestrated run — keeps this agent independently runnable/testable
+  // with identical output either way (see lib/fetch-cache.js).
+  const fetchPage = pageCache || analyzePageUrl;
+  // Merges real GSC top pages with the site-wide page inventory (sitemap +
+  // crawl) so a page with real content but no search traffic yet — often
+  // exactly why it has no traffic — still gets checked, rotated in over
+  // time rather than every run. getQueriesForPage legitimately returns []
+  // for a zero-traffic page; suggestMissingEntities already degrades to its
+  // 'no-context' path when that happens, so no special-casing needed here.
+  const [{ batch, impressionsByPage }, competitorProfiles] = await Promise.all([
+    selectCandidatePages(siteId, 'content-gap', { start, end, batchSize: MAX_PAGES }),
+    listCompetitorProfiles(siteId),
+  ]);
 
-  const analyzed = await Promise.all(candidates.map(async (p) => {
-    const page = p.dim_value;
+  // Real aggregate across tracked competitors' actual crawled homepages —
+  // older profiles from before this signal existed simply have no
+  // structuralSignals and are excluded, rather than counted as "doesn't
+  // have it" (that would be fabricating a negative from missing data).
+  const trackedCompetitors = competitorProfiles.filter((p) => p.comparison?.structuralSignals);
+  const competitorStats = trackedCompetitors.length >= MIN_TRACKED_COMPETITORS ? {
+    total: trackedCompetitors.length,
+    hasFaq: trackedCompetitors.filter((p) => p.comparison.structuralSignals.hasFaq).length,
+    hasSchema: trackedCompetitors.filter((p) => p.comparison.structuralSignals.hasSchema).length,
+    hasComparisonContent: trackedCompetitors.filter((p) => p.comparison.structuralSignals.hasComparisonContent).length,
+  } : null;
+
+  const analyzed = await Promise.all(batch.map(async (page) => {
     const [queries, fetched] = await Promise.all([
       getQueriesForPage(siteId, start, end, page, 3),
-      analyzePageUrl(page),
+      fetchPage(page),
     ]);
     const topQueries = queries.map((q) => q.query);
     const base = {
       page,
-      impressions: Number(p.impressions),
-      clicks: Number(p.clicks),
-      avgPosition: p.avg_position != null ? Number(p.avg_position) : null,
+      impressions: impressionsByPage.get(page) || 0,
       topQueries,
     };
     if (!fetched.ok) return { ...base, gaps: null, aiEligible: false, fetchError: fetched.error, _analysis: null };
@@ -83,10 +117,18 @@ export async function run({ siteId, start, end }) {
     };
   }));
 
+  await markPagesChecked(siteId, 'content-gap', batch);
+
   // AI-inferred entity suggestions only for the top-impression pages that
   // fetched successfully — bounds LLM cost while still analyzing every
-  // candidate page's deterministic gaps.
-  const aiCandidates = analyzed.filter((r) => r.aiEligible).slice(0, MAX_AI_SUGGESTION_PAGES);
+  // candidate page's deterministic gaps. `analyzed` is in rotation order,
+  // not impression order (selectCandidatePages sorts by staleness so every
+  // page gets checked over time) — sort by real impressions here so the
+  // "bounded to top pages by impressions" claim below is actually true,
+  // not just rotation order coincidentally correlating with it.
+  const aiCandidates = analyzed.filter((r) => r.aiEligible)
+    .sort((a, b) => b.impressions - a.impressions)
+    .slice(0, MAX_AI_SUGGESTION_PAGES);
   const aiResults = await Promise.all(aiCandidates.map(async (r) => ({
     page: r.page,
     ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery)),
@@ -98,6 +140,7 @@ export async function run({ siteId, start, end }) {
     const ai = aiByPage.get(r.page);
     return {
       ...rest,
+      schemaTypes: _analysis?.schemaTypes || [],
       aiSuggestions: ai ? ai.suggestions : null,
       aiSuggestionsNote: ai?.error
         ? `AI suggestion generation failed (${ai.error}).`
@@ -116,13 +159,27 @@ export async function run({ siteId, start, end }) {
     const priority = priorityByPage.get(p.page) || 'low';
     const gapFindings = (p.gaps || []).map((g) => {
       const generatorId = GAP_TYPE_TO_GENERATOR[g.type] ?? null;
+      // Real competitive framing: only added when at least MIN_TRACKED_COMPETITORS
+      // reachable competitor profiles exist AND most of them actually have
+      // this exact signal — a majority-of-real-competitors bar, not "any
+      // competitor has it" (one outlier shouldn't drive urgency).
+      const signalKey = GAP_TYPE_TO_COMPETITOR_SIGNAL[g.type];
+      const withSignal = signalKey && competitorStats ? competitorStats[signalKey] : null;
+      const competitive = withSignal != null && withSignal / competitorStats.total > 0.5
+        ? { withFeature: withSignal, total: competitorStats.total }
+        : null;
       return makeFinding({
         id: `content-gap:${p.page}:${g.type}`,
-        evidence: { page: p.page, impressions: p.impressions, gapType: g.type, detail: g.detail },
-        whyItMatters: g.detail,
+        evidence: {
+          page: p.page, impressions: p.impressions, gapType: g.type, detail: g.detail,
+          ...(competitive ? { competitorsWithThisFeature: competitive.withFeature, competitorsTracked: competitive.total } : {}),
+        },
+        whyItMatters: competitive
+          ? `${g.detail} ${competitive.withFeature} of ${competitive.total} tracked real competitors already have this.`
+          : g.detail,
         priority,
         recommendedAction: generatorId
-          ? { label: g.type, generatorId, params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: 'Article' }, effort: effortForGenerator(generatorId) }
+          ? { label: g.type, generatorId, params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: inferSchemaType(p.page, p.schemaTypes) }, effort: effortForGenerator(generatorId) }
           : null,
         expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: p.impressions },
       });
@@ -146,19 +203,33 @@ export async function run({ siteId, start, end }) {
     pages,
     count: pages.length,
     findings,
-    note: 'gaps are deterministic checks against each page\'s real fetched HTML. aiSuggestions are LLM ' +
-      'inferences from reading the page text, confidence-labeled, NOT verified facts — treat as a starting ' +
-      'hypothesis. This agent only recommends; it never modifies any page.',
+    // Null when fewer than MIN_TRACKED_COMPETITORS reachable competitor
+    // profiles exist yet — an honest "not enough real data for a market
+    // signal" state, not a zeroed-out stat that would misread as "no
+    // competitors have this."
+    competitorContext: competitorStats,
+    note: 'gaps are deterministic checks against each page\'s real fetched HTML. Where a gap type has a directly ' +
+      'comparable signal from tracked competitors\' own crawled homepages (FAQ/schema/comparison content) and a ' +
+      'real majority of them have it, whyItMatters includes that "X of Y competitors" ratio — never fabricated, ' +
+      'omitted entirely when fewer than 2 competitor profiles exist. aiSuggestions are LLM inferences from ' +
+      'reading the page text, confidence-labeled, NOT verified facts — treat as a starting hypothesis. This ' +
+      'agent only recommends; it never modifies any page.',
   };
 
   const system = 'You are a content strategist writing for a non-technical site owner, summarizing on-page ' +
     'completeness across the site\'s ranking pages. Given each page\'s deterministic gaps (verified from real ' +
     'fetched HTML — headings, FAQ, schema, comparisons, alt text, canonical, Open Graph, lists, question ' +
     'headings) and any confidence-labeled AI-suggested missing entities, write 3-4 sentences naming the highest-' +
-    'impression pages with the most impactful gaps and the single most valuable fix each. If you mention an AI-' +
-    'suggested entity, say plainly that it is a suggestion with its confidence level — never state it as fact. ' +
-    'This agent only recommends, it never modifies any page — don\'t imply otherwise. Use ONLY the numbers/data ' +
-    'given. Plain text, no markdown, no bullets.';
+    'impression pages with the most impactful gaps and the single most valuable fix each. ' +
+    'Competitor mentions: ONLY mention competitors, and ONLY for a specific gap whose own whyItMatters text in ' +
+    'the facts already contains the literal phrase "tracked real competitors already have this" — restate that ' +
+    'exact real ratio (e.g. "3 of 4 tracked competitors") if it helps make the case, and lead with such a gap ' +
+    'when one exists since it is more actionable. If no gap in the facts has that phrase, do not mention ' +
+    'competitors at all — never say "competitors" in the abstract and never invent, name, or imply any specific ' +
+    'competitor (no placeholder names like "X and Y" either) beyond that exact real ratio. ' +
+    'If you mention an AI-suggested entity, say plainly that it is a suggestion with its confidence level — ' +
+    'never state it as fact. This agent only recommends, it never modifies any page — don\'t imply otherwise. ' +
+    'Use ONLY the numbers/data given. Plain text, no markdown, no bullets.';
   const user = `Facts: ${JSON.stringify(facts)}`;
   const narrative = await callLLM(system, user, { maxTokens: 400 })
     .catch((err) => { console.warn('[agents] content-gap narrative failed:', err.message); return null; });

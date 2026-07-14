@@ -152,6 +152,18 @@ export async function saveHealthScoreSnapshot(siteId, date, score) {
   );
 }
 
+// Sets the real "day 0" anchor for a client — called exactly once, right
+// after the first real baseline agent run completes during onboarding
+// (server/routes/clients.js). Idempotent to call again (e.g. a retried
+// connect step) — always reflects the most recent real baseline run, never
+// backfilled or guessed.
+export async function setOnboardingBaseline(siteId, baselineRunId) {
+  await query(
+    `UPDATE sites SET onboarded_at = now(), baseline_run_id = $2 WHERE id = $1`,
+    [siteId, baselineRunId]
+  );
+}
+
 // One row per (integration, site) — see migrations/020 and
 // integrations/registry.js. Called from both the on-demand "Test connection"
 // route and job.js's organic per-site failure handling, so there's a single

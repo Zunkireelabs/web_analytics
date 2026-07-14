@@ -17,6 +17,12 @@ router.get('/watchlist', async (req, res, next) => {
 });
 
 const VALID_STATUSES = new Set(['new', 'in_progress', 'completed', 'no_longer_applicable']);
+const MANUAL_REASON = {
+  in_progress: 'User marked as in progress.',
+  completed: 'User marked as complete.',
+  no_longer_applicable: 'User dismissed.',
+  new: 'User reopened.',
+};
 
 // User-driven status change — e.g. "Mark In Progress" or "Dismiss" — distinct
 // from the automatic transitions syncWatchlist() applies after each run.
@@ -24,7 +30,7 @@ router.patch('/watchlist/:id/status', async (req, res, next) => {
   try {
     const { status } = req.body || {};
     if (!VALID_STATUSES.has(status)) return res.status(400).json({ error: `status must be one of: ${[...VALID_STATUSES].join(', ')}` });
-    const updated = await setWatchlistStatus(req.siteId, req.params.id, status);
+    const updated = await setWatchlistStatus(req.siteId, req.params.id, status, MANUAL_REASON[status]);
     if (!updated) return res.status(404).json({ error: 'Watchlist item not found' });
     res.json(updated);
   } catch (e) { next(e); }

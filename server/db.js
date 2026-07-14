@@ -79,3 +79,32 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
 }
+
+// Attach a GitHub repo (and optionally tech stack / url_file_map) to a site
+// for the Action Center's "apply approved draft as a PR" flow (see
+// server/scripts/connect-repo.js, migration 028). Same partial-update shape
+// as updateSiteConnection above — only fields actually passed are touched.
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap }) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+
+  if (repoOwner !== undefined) set('repo_owner', repoOwner);
+  if (repoName !== undefined) set('repo_name', repoName);
+  if (repoUrl !== undefined) set('repo_url', repoUrl);
+  if (repoDefaultBranch !== undefined) set('repo_default_branch', repoDefaultBranch);
+  if (techStack !== undefined) set('tech_stack', techStack);
+  if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
+  if (urlFileMap !== undefined) set('url_file_map', JSON.stringify(urlFileMap));
+
+  if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');
+
+  values.push(siteId);
+  const { rows } = await query(
+    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+    values
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}

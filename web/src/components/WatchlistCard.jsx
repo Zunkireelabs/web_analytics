@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { CATEGORY } from './AgentCard.jsx';
 import { timeAgo } from '../api.js';
 
-const PRIORITY = {
+export const PRIORITY = {
   high: { color: '#e11d48', label: 'High priority' },
   medium: { color: '#f59e0b', label: 'Medium priority' },
   low: { color: '#94a3b8', label: 'Low priority' },
@@ -33,10 +33,13 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
   const evidenceEntries = Object.entries(item.evidence || {}).filter(([, v]) => v != null && v !== '');
 
   return (
-    <div className="rounded-xl border border-slate-100 bg-white p-4 flex flex-col gap-2.5">
+    <div className="flex rounded-xl border border-slate-100 bg-white overflow-hidden">
+      <div className="w-[3px] shrink-0" style={{ background: pr.color }} />
+      <div className="p-4 flex flex-col gap-2.5 flex-1 min-w-0">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
           style={{ color: cat.color, background: `${cat.color}1a` }}>{cat.label}</span>
+        {item.agentName && <span className="text-[10px] font-medium text-slate-400">· {item.agentName}</span>}
         <span className="text-[11px] font-bold" style={{ color: pr.color }}>{pr.label}</span>
         <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full ml-auto"
           style={{ color: status.color, background: `${status.color}1a` }}>{status.label}</span>
@@ -46,6 +49,15 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
         <p className="text-sm font-bold text-slate-900 leading-snug">{item.title}</p>
         <p className="text-[13px] text-slate-500 leading-snug mt-0.5">{item.reason}</p>
       </div>
+
+      {/* Distinguishes a sync-driven reopen from what would otherwise look
+          like a brand-new item — see materialChangeDetected in
+          server/store/watchlist.js for what counts as "material." */}
+      {item.reopened && (
+        <div className="text-[11px] text-amber-700 bg-amber-50 rounded-lg px-2.5 py-1.5">
+          ↺ Reopened {timeAgo(item.reopened.at)} — {item.reopened.reason}
+        </div>
+      )}
 
       <div className="flex items-center gap-3 text-[11px] text-slate-400">
         {item.expectedImpact?.label && (
@@ -100,6 +112,7 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
           className="text-xs font-semibold px-3 py-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition ml-auto">
           Dismiss
         </button>
+      </div>
       </div>
     </div>
   );

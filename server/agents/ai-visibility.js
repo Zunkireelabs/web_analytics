@@ -1,7 +1,7 @@
-import { getSearchPerformanceRange } from '../store/read.js';
-import { analyzePageUrl, checkLlmsReadiness, effortForGenerator } from './lib/page-content.js';
+import { analyzePageUrl, checkLlmsReadiness, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { scorePageCategories, scoreLlmsReadiness, combineScores } from './lib/visibility-score.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -23,7 +23,6 @@ export const meta = {
 };
 
 const MAX_PAGES = 20;
-const MIN_IMPRESSIONS = 5;
 
 // Each rule's generatorId is set here, at the point the recommendation
 // vocabulary is defined — not guessed downstream from the label text later.
@@ -36,26 +35,33 @@ const RECOMMENDATION_RULES = [
   { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
   { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
   { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: null },
+  { test: (c) => c.llmsReadiness != null && c.llmsReadiness < 50, label: 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).', generatorId: 'llms-txt' },
 ];
 
 function recommendationsFor(categories) {
   return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
 }
 
-export async function run({ siteId, start, end }) {
-  const pagePerf = await getSearchPerformanceRange(siteId, start, end, 'page', 100);
-  const candidates = pagePerf
-    .filter((p) => Number(p.impressions) >= MIN_IMPRESSIONS)
-    .sort((a, b) => Number(b.impressions) - Number(a.impressions))
-    .slice(0, MAX_PAGES);
+export async function run({ siteId, start, end, pageCache }) {
+  // Falls back to a direct (uncached) fetch when run standalone, outside an
+  // orchestrated run — keeps this agent independently runnable/testable
+  // with identical output either way (see lib/fetch-cache.js).
+  const fetchPage = pageCache || analyzePageUrl;
+  // Merges real GSC top pages with the site-wide page inventory (sitemap +
+  // crawl, see agents/lib/site-discovery.js) so this agent isn't limited to
+  // only pages that already have search traffic — a brand-new or orphaned
+  // page gets scored too, just rotated in over time rather than checked
+  // every single run. Scoring itself never depends on GSC metrics (purely
+  // the page's own fetched HTML structure), so a zero-traffic page scores
+  // identically to a high-traffic one.
+  const { batch, impressionsByPage } = await selectCandidatePages(siteId, 'ai-visibility', { start, end, batchSize: MAX_PAGES });
 
-  const fetched = await Promise.all(candidates.map(async (p) => ({
-    page: p.dim_value,
-    impressions: Number(p.impressions),
-    clicks: Number(p.clicks),
-    avgPosition: p.avg_position != null ? Number(p.avg_position) : null,
-    result: await analyzePageUrl(p.dim_value),
+  const fetched = await Promise.all(batch.map(async (page) => ({
+    page,
+    impressions: impressionsByPage.get(page) || 0,
+    result: await fetchPage(page),
   })));
+  await markPagesChecked(siteId, 'ai-visibility', batch);
 
   // Site-level LLMS readiness: one fetch per run, derived from the first
   // page that resolved to a real hostname — not repeated per page.
@@ -69,11 +75,11 @@ export async function run({ siteId, start, end }) {
   const llmsScore = llmsReadiness ? scoreLlmsReadiness(llmsReadiness) : null;
 
   const pages = fetched.map((f) => {
-    const base = { page: f.page, impressions: f.impressions, clicks: f.clicks, avgPosition: f.avgPosition };
+    const base = { page: f.page, impressions: f.impressions, schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [] };
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
-    return { ...base, score: scored, recommendations: recommendationsFor(categories), fetchError: null };
+    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
   });
 
   const scoredPages = pages.filter((p) => p.score?.overall != null);
@@ -104,7 +110,7 @@ export async function run({ siteId, start, end }) {
       evidence: { page: p.page, score: p.score.overall, impressions: p.impressions },
       whyItMatters: `AI Visibility score ${p.score.overall}/100 for this page (${p.impressions} impressions).`,
       priority,
-      recommendedAction: { label: rec.label, generatorId: rec.generatorId, params: { page: p.page, schemaType: 'Article' }, effort: effortForGenerator(rec.generatorId) },
+      recommendedAction: { label: rec.label, generatorId: rec.generatorId, params: { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) }, effort: effortForGenerator(rec.generatorId) },
       expectedImpact,
     }));
   });

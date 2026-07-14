@@ -12,12 +12,16 @@ export default function CriticalIssueCard({ finding, generating, onGenerate }) {
   const action = finding.recommendedAction;
 
   return (
-    <div className="card card-hover p-5 flex flex-col gap-3">
+    <div className="rounded-2xl border border-slate-100 bg-white overflow-hidden transition hover:border-slate-200 hover:shadow-[0_4px_16px_-4px_rgba(225,29,72,0.12)] flex flex-col">
+      <div className="h-[3px] shrink-0 bg-gradient-to-r from-rose-500 to-rose-300" />
+      <div className="p-5 flex flex-col gap-3 flex-1">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 flex-wrap">
+          <span className="w-6 h-6 rounded-lg grid place-items-center text-[12px] shrink-0 bg-rose-50">🚨</span>
           <span className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
             style={{ color: cat.color, background: `${cat.color}1a` }}>{cat.label}</span>
           <span className="text-[11px] font-bold text-rose-600">Critical</span>
+          {finding.agentName && <span className="text-[10px] font-medium text-slate-400">· {finding.agentName}</span>}
         </div>
         {impact && (
           <span className="text-[10px] font-semibold text-slate-400 shrink-0 text-right">
@@ -42,6 +46,7 @@ export default function CriticalIssueCard({ finding, generating, onGenerate }) {
         ) : (
           <span className="text-xs text-slate-400">Needs manual review — no draftable fix for this yet.</span>
         )}
+      </div>
       </div>
     </div>
   );

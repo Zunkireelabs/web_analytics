@@ -82,3 +82,22 @@ export async function getAgentRunHistory(siteId, agentId, limit = 10) {
   );
   return rows;
 }
+
+// Per-agent run counts since a given date — a lean aggregate (not full rows)
+// for the Review Report (agents/lib/review-report.js), which needs "how much
+// real activity happened since onboarding" per agent, not every individual
+// run's full facts blob.
+export async function getAgentRunSummarySince(siteId, agentIds, sinceDate) {
+  const { rows } = await query(
+    `SELECT agent_id,
+            COUNT(*)::int AS total_runs,
+            COUNT(*) FILTER (WHERE status = 'ok')::int AS ok_runs,
+            COUNT(*) FILTER (WHERE status != 'ok')::int AS error_runs,
+            MAX(created_at) AS last_run_at
+       FROM agent_runs
+      WHERE site_id = $1 AND agent_id = ANY($2) AND created_at >= $3
+      GROUP BY agent_id`,
+    [siteId, agentIds, sinceDate]
+  );
+  return rows;
+}

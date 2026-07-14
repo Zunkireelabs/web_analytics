@@ -6,9 +6,11 @@ import Overview from './pages/Overview.jsx';
 import Insights from './pages/Insights.jsx';
 import Compare from './pages/Compare.jsx';
 import Reports from './pages/Reports.jsx';
+import GrowthReport from './pages/GrowthReport.jsx';
 import CommandCenter from './pages/CommandCenter.jsx';
 import AiGrowth from './pages/AiGrowth.jsx';
 import ActionCenter from './pages/ActionCenter.jsx';
+import ClientOnboarding from './pages/ClientOnboarding.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import CopilotPanel from './components/CopilotPanel.jsx';
 
@@ -79,12 +81,15 @@ export default function App() {
             <Route path="/insights" element={<Insights siteId={siteId} />} />
             <Route path="/compare" element={<Compare siteId={siteId} />} />
             <Route path="/reports" element={<Reports siteId={siteId} />} />
-            {/* AI Command Center is now the default /ai-growth landing experience;
-                the original 7-agent grid moves to /ai-growth/advanced — kept,
-                not removed, for anyone who wants to run or inspect one agent. */}
+            <Route path="/growth" element={<GrowthReport />} />
+            {/* AI Command Center is the default /ai-growth landing experience;
+                /ai-orchestration is the orchestration diagram — how the 10
+                specialist agents actually connect (AiGrowth.jsx) — and still
+                the place to run or inspect one agent directly. */}
             {isInternal && <Route path="/ai-growth" element={<CommandCenter />} />}
-            {isInternal && <Route path="/ai-growth/advanced" element={<AiGrowth />} />}
+            {isInternal && <Route path="/ai-orchestration" element={<AiGrowth />} />}
             {isInternal && <Route path="/action-center" element={<ActionCenter />} />}
+            {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
           </Routes>
         ) : (
           <div className="max-w-7xl mx-auto px-4 py-10 text-gray-500">

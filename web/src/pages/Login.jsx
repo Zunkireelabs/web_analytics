@@ -2,19 +2,61 @@ import { useEffect, useState } from 'react';
 import {
   Sparkles, Check, Lock, AlertCircle, ArrowRight, LogIn, X,
   FileText, Eye, FileSearch, Users, TrendingUp, Gauge, ShieldCheck,
+  Plug, Cpu, ClipboardList, CheckCircle2, Globe2, Smartphone, Code2, Link2, MessageSquare, EyeOff,
 } from 'lucide-react';
 import { api } from '../api.js';
 import Logo from '../components/Logo.jsx';
 
 const PILLS = ['AI Agents', 'Google Search Console', 'Google Analytics 4', 'Automated Reports'];
 
+// How It Works — the real onboarding sequence (server/routes/clients.js's
+// connect flow, then server/job.js's daily/weekly agent orchestration),
+// not an invented generic SaaS funnel.
+const STEPS = [
+  { icon: Plug, title: 'Connect your real data', text: 'Grant access to your Google Search Console and Analytics properties — the same data you already have, nothing new to set up.' },
+  { icon: Cpu, title: 'AI agents analyze continuously', text: 'Specialist agents run daily and weekly, each looking at one real slice of your search performance — never a single generic model guessing at everything.' },
+  { icon: ClipboardList, title: 'Get a prioritized, evidence-backed briefing', text: 'Every finding cites the real numbers behind it — an impression count, a ranking delta, a real page — never a vague "you should improve SEO."' },
+  { icon: CheckCircle2, title: 'Review and approve every fix', text: 'Agents draft the fix — a title, an FAQ, a schema block — you approve it. Nothing publishes or changes your site without you clicking approve.' },
+];
+
+// Every entry here names a real agent in server/agents/ — same honesty
+// rule as the AGENTS preview list below (no fabricated capability).
+const AGENT_GRID = [
+  { icon: Gauge, name: 'Query Intelligence', text: 'Finds real search-query gainers and droppers week over week.' },
+  { icon: TrendingUp, name: 'Opportunity Agent', text: 'Surfaces striking-distance keywords close to page one.' },
+  { icon: Globe2, name: 'Country Intelligence', text: 'Flags growing and declining markets from real geography data.' },
+  { icon: Smartphone, name: 'Device Intelligence', text: 'Catches real device-split performance problems.' },
+  { icon: Eye, name: 'AI Visibility', text: 'Checks schema, FAQ, and structural readiness for AI answer engines.' },
+  { icon: FileSearch, name: 'Content Gap', text: 'Scores your ranking pages for real completeness gaps.' },
+  { icon: Users, name: 'Competitor Intelligence', text: 'Identifies real competitors and compares your structure against theirs.' },
+  { icon: Code2, name: 'Technical SEO', text: 'Real Google index status, Core Web Vitals, and broken-link checks.' },
+  { icon: Link2, name: 'Authority Score', text: 'A transparent, real backlink-based authority score — never a black-box number.' },
+  { icon: MessageSquare, name: 'AI Recommendation', text: 'Tests whether ChatGPT actually recommends you for real buyer questions.' },
+  { icon: FileText, name: 'Executive Report', text: 'Synthesizes every agent into one weekly growth narrative.' },
+];
+
+// The product's actual operating discipline — real, not marketing fluff:
+// every agent in this codebase either reports a real number or honestly
+// says "insufficient data," never fills a gap with a guess.
+const HONESTY_POINTS = [
+  { icon: ShieldCheck, title: 'Never a fabricated metric', text: 'If we don\'t have a real data source for something, we say so — "insufficient data," not a made-up number.' },
+  { icon: EyeOff, title: 'No black-box scores', text: 'Every score — Authority, Health, AI Visibility — is a documented formula over real data, and every input is shown.' },
+  { icon: FileText, title: 'Evidence on every finding', text: 'A recommendation always cites the real number behind it — no generic advice with nothing backing it up.' },
+];
+
+// Every entry here must name a real agent in server/agents/ and describe
+// what it actually does — no fabricated specific numbers (this list
+// previously claimed "12 missing content opportunities discovered" / "Found
+// 27 keywords" / a "Technical SEO Agent" that doesn't exist anywhere in the
+// codebase), same honesty rule the product itself enforces on labeled
+// AI output.
 const AGENTS = [
-  { icon: FileText, name: 'Executive Summary Agent', status: 'completed', text: 'Generated weekly business summary.' },
-  { icon: Eye, name: 'AI Visibility Agent', status: 'running', progress: 72, text: 'Analyzing AI Search visibility across ChatGPT, Gemini and Google AI Overview.' },
-  { icon: FileSearch, name: 'Content Gap Agent', status: 'completed', text: '12 missing content opportunities discovered.' },
-  { icon: Users, name: 'Competitor Intelligence', status: 'completed', text: '3 competitors gained visibility this week.' },
-  { icon: TrendingUp, name: 'Ranking Opportunity Agent', status: 'running', text: 'Found 27 keywords that can reach page one.' },
-  { icon: Gauge, name: 'Technical SEO Agent', status: 'completed', text: 'Core Web Vitals passed.' },
+  { icon: FileText, name: 'Executive Summary Agent', status: 'completed', text: 'Synthesizes every specialist agent into one weekly growth summary.' },
+  { icon: Eye, name: 'AI Visibility Agent', status: 'running', progress: 72, text: 'Checks schema, FAQ presence, and structural signals that determine AI-answer-engine readiness.' },
+  { icon: FileSearch, name: 'Content Gap Agent', status: 'completed', text: 'Scores ranking pages for content completeness gaps.' },
+  { icon: Users, name: 'Competitor Intelligence', status: 'running', text: 'Identifies real competitors and compares content, SEO structure, and positioning.' },
+  { icon: TrendingUp, name: 'Ranking Opportunity Agent', status: 'running', text: 'Finds striking-distance keywords close to page one.' },
+  { icon: Gauge, name: 'Query Intelligence Agent', status: 'completed', text: 'Analyzed search queries for gainers and droppers.' },
 ];
 
 const METRICS = [
@@ -25,15 +67,18 @@ const METRICS = [
 ];
 
 export default function Login({ onAuthed }) {
-  const [showLogin, setShowLogin] = useState(false);
+  // null | 'login' | 'request' — two separate, equally visible header
+  // entry points (not one button with a buried link inside it), since a
+  // brand-new visitor has no reason to click "Log In" to discover signup.
+  const [authModal, setAuthModal] = useState(null);
 
-  // Close the login modal on Escape.
+  // Close whichever modal is open on Escape.
   useEffect(() => {
-    if (!showLogin) return;
-    const onKey = (e) => { if (e.key === 'Escape') setShowLogin(false); };
+    if (!authModal) return;
+    const onKey = (e) => { if (e.key === 'Escape') setAuthModal(null); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [showLogin]);
+  }, [authModal]);
 
   return (
     <div className="min-h-screen relative font-sans overflow-hidden"
@@ -70,10 +115,18 @@ export default function Login({ onAuthed }) {
             </span>
           </div>
 
-          <button type="button" onClick={() => setShowLogin(true)}
-            className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.14] backdrop-blur-sm rounded-xl px-4 py-2.5 transition">
-            <LogIn size={15} strokeWidth={2.25} /> Log In
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button type="button" onClick={() => setAuthModal('login')}
+              className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.14] backdrop-blur-sm rounded-xl px-4 py-2.5 transition">
+              <LogIn size={15} strokeWidth={2.25} /> Log In
+            </button>
+            {/* The primary CTA for a brand-new visitor — equally prominent
+                as Log In, not hidden as a link inside it. */}
+            <button type="button" onClick={() => setAuthModal('request')}
+              className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 rounded-xl px-4 py-2.5 shadow-lg shadow-indigo-500/20 transition">
+              Request Access <ArrowRight size={15} strokeWidth={2.5} />
+            </button>
+          </div>
         </header>
 
         {/* hero content — centered; headline/description stay reading-width,
@@ -104,22 +157,101 @@ export default function Login({ onAuthed }) {
             ))}
           </div>
         </div>
+
+        {/* How It Works — the real onboarding + agent-orchestration
+            sequence, so a visitor who lands directly on Request Access
+            (not just the hero) still understands what happens next. */}
+        <section className="w-full px-6 py-20 border-t border-white/[0.06]">
+          <div className="max-w-5xl mx-auto text-center">
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">How It Works</h2>
+            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">From your real data to an approved fix — every step grounded in something real, nothing automated behind your back.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 text-left">
+              {STEPS.map((s, i) => (
+                <div key={s.title} className="relative bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5">
+                  <span className="absolute -top-3 -left-3 w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-xs font-bold grid place-items-center shadow-lg">{i + 1}</span>
+                  <s.icon size={20} strokeWidth={2} className="text-indigo-300 mb-3" />
+                  <h3 className="text-sm font-bold text-white mb-1.5">{s.title}</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">{s.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* What the agents actually do — every name/description matches a
+            real agent in server/agents/, same honesty rule as the hero's
+            live preview list (no fabricated capability). */}
+        <section className="w-full px-6 py-20 border-t border-white/[0.06] bg-white/[0.015]">
+          <div className="max-w-5xl mx-auto text-center">
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">11 Specialist Agents, Not One Generic Model</h2>
+            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">Each agent looks at one real slice of your search performance — here's exactly what each one actually does.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-left">
+              {AGENT_GRID.map((a) => (
+                <div key={a.name} className="flex items-start gap-3 bg-white/[0.03] border border-white/[0.08] rounded-xl p-4">
+                  <span className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 grid place-items-center shrink-0">
+                    <a.icon size={16} strokeWidth={2} className="text-indigo-300" />
+                  </span>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold text-white">{a.name}</h3>
+                    <p className="text-xs text-slate-400 leading-relaxed mt-0.5">{a.text}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Honesty discipline — a genuine, distinctive property of this
+            product (see e.g. server/agents/types.js's insufficient-data
+            contract), not a generic trust badge. */}
+        <section className="w-full px-6 py-20 border-t border-white/[0.06]">
+          <div className="max-w-4xl mx-auto text-center">
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">Not a Black Box</h2>
+            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">Most AI SEO tools show you a confident-looking score with no way to check it. Ours doesn't work that way.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 text-left">
+              {HONESTY_POINTS.map((h) => (
+                <div key={h.title} className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5">
+                  <h.icon size={20} strokeWidth={2} className="text-emerald-400 mb-3" />
+                  <h3 className="text-sm font-bold text-white mb-1.5">{h.title}</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">{h.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Closing CTA — repeats Request Access so a convinced scroller
+            doesn't have to scroll back to the header. */}
+        <section className="w-full px-6 py-20 border-t border-white/[0.06] text-center">
+          <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">Ready to see what's really happening in your search performance?</h2>
+          <p className="text-slate-400 text-sm max-w-md mx-auto mb-8">Requests are reviewed by a real person — not instant signup, but you'll be ready to log in the moment it's approved.</p>
+          <button type="button" onClick={() => setAuthModal('request')}
+            className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 rounded-xl px-6 py-3.5 shadow-lg shadow-indigo-500/20 transition">
+            Request Access <ArrowRight size={15} strokeWidth={2.5} />
+          </button>
+        </section>
       </div>
 
-      {showLogin && <LoginModal onClose={() => setShowLogin(false)} onAuthed={onAuthed} />}
+      {authModal && <LoginModal initialMode={authModal} onClose={() => setAuthModal(null)} onAuthed={onAuthed} />}
     </div>
   );
 }
 
 /* ───────────────────────── LOGIN MODAL ───────────────────────── */
 
-function LoginModal({ onClose, onAuthed }) {
+function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [showForgot, setShowForgot] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  // 'login' | 'request' — a real signup request, never an immediate account
+  // (see server/routes/login.js's POST /signup-requests — staff must
+  // approve it on /clients before this email/password can ever log in).
+  // Opens directly into whichever the header button the visitor actually
+  // clicked, rather than always starting on login.
+  const [mode, setMode] = useState(initialMode);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -134,6 +266,24 @@ function LoginModal({ onClose, onAuthed }) {
       setBusy(false);
     }
   };
+
+  if (mode === 'request') {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
+        <div aria-hidden className="absolute inset-0 bg-[#050810]/75 backdrop-blur-md" />
+        <div onClick={(e) => e.stopPropagation()}
+          className="w-full rounded-[24px] p-8 lg:p-10 shadow-2xl relative overflow-hidden backdrop-blur-xl fade-up"
+          style={{ maxWidth: 430, background: 'rgba(15,21,48,0.92)', border: '1px solid rgba(255,255,255,0.12)' }}>
+          <div className="absolute -top-24 -left-24 w-48 h-48 rounded-full bg-indigo-500/10 blur-3xl pointer-events-none" />
+          <button type="button" onClick={onClose} aria-label="Close"
+            className="absolute top-4 right-4 z-10 w-8 h-8 rounded-lg grid place-items-center text-slate-400 hover:text-white hover:bg-white/[0.08] transition">
+            <X size={16} strokeWidth={2.25} />
+          </button>
+          <RequestAccessForm onBack={() => setMode('login')} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
@@ -219,6 +369,13 @@ function LoginModal({ onClose, onAuthed }) {
               </p>
             )}
 
+            <p className="text-center text-xs text-slate-500">
+              Don't have access yet?{' '}
+              <button type="button" onClick={() => setMode('request')} className="text-indigo-400 hover:text-indigo-300 font-semibold">
+                Request it →
+              </button>
+            </p>
+
             {err && (
               <div className="bg-rose-500/10 border border-rose-500/20 text-rose-300 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
                 <AlertCircle size={16} strokeWidth={2} className="shrink-0" />
@@ -252,6 +409,140 @@ function LoginModal({ onClose, onAuthed }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── REQUEST ACCESS FORM ───────────────────────── */
+
+const inputCls = 'w-full bg-slate-950/60 border border-slate-800/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-xl px-4 py-3.5 text-sm transition-all placeholder-slate-700';
+const labelCls = 'block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2';
+
+// A real submission, never an immediate account — see POST /signup-requests
+// (server/routes/login.js). Staff review and approve/reject it from the
+// existing internal /clients page before any real login exists for this
+// email/password. `honeypot` is a hidden field real users never see or
+// fill in; a bot that fills every input on the page fills this too, and
+// the backend silently no-ops instead of creating a row — no CAPTCHA/
+// third-party dependency needed for this low-traffic B2B form.
+function RequestAccessForm({ onBack }) {
+  const [companyName, setCompanyName] = useState('');
+  const [websiteDomain, setWebsiteDomain] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [message, setMessage] = useState('');
+  const [honeypot, setHoneypot] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr('');
+    if (password.length < 8) return setErr('Password must be at least 8 characters.');
+    if (password !== confirmPassword) return setErr('Passwords don\'t match.');
+    setBusy(true);
+    try {
+      await api.submitSignupRequest({ companyName, websiteDomain, contactEmail, password, message, honeypot });
+      setDone(true);
+    } catch (e2) {
+      setErr(e2.message || 'Could not submit request.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="relative z-[1] text-center py-4">
+        <div className="mb-3 flex justify-center">
+          <div className="bg-white p-4 rounded-2xl shadow-lg"><Logo size={38} /></div>
+        </div>
+        <h2 className="text-xl font-extrabold text-white mb-2">Request submitted</h2>
+        <p className="text-sm text-slate-400 leading-relaxed">
+          We'll review your request and be in touch once it's approved — you'll be able to log in with the email
+          and password you just set.
+        </p>
+        <button type="button" onClick={onBack}
+          className="mt-6 text-sm font-semibold text-indigo-400 hover:text-indigo-300">
+          ← Back to log in
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative z-[1]">
+      <div className="mb-3 flex justify-center">
+        <div className="bg-white p-4 rounded-2xl shadow-lg"><Logo size={38} /></div>
+      </div>
+      <div className="text-center mt-6 mb-8">
+        <h2 className="text-2xl font-extrabold text-white">Request Access</h2>
+        <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+          AI agents that continuously analyze your Google Search Console and Analytics data. Tell us about your
+          company below — a real person reviews every request, so this isn't instant signup, but you'll set your
+          password now and be ready to log in the moment it's approved.
+        </p>
+      </div>
+
+      <form onSubmit={submit} className="space-y-4">
+        {/* Visually hidden from real users, present for bots that fill every field. */}
+        <div aria-hidden="true" style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, overflow: 'hidden' }}>
+          <label htmlFor="company_url">Company URL</label>
+          <input id="company_url" type="text" tabIndex={-1} autoComplete="off"
+            value={honeypot} onChange={(e) => setHoneypot(e.target.value)} />
+        </div>
+
+        <div>
+          <label className={labelCls}>Company name</label>
+          <input type="text" required autoFocus value={companyName} onChange={(e) => setCompanyName(e.target.value)}
+            placeholder="Acme Corp" className={inputCls} />
+        </div>
+        <div>
+          <label className={labelCls}>Website (optional)</label>
+          <input type="text" value={websiteDomain} onChange={(e) => setWebsiteDomain(e.target.value)}
+            placeholder="acme.com" className={inputCls} />
+        </div>
+        <div>
+          <label className={labelCls}>Work email</label>
+          <input type="email" required autoComplete="username" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)}
+            placeholder="you@acme.com" className={inputCls} />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Password</label>
+            <input type="password" required autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 8 characters" className={inputCls} minLength={8} />
+          </div>
+          <div>
+            <label className={labelCls}>Confirm</label>
+            <input type="password" required autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Repeat password" className={inputCls} minLength={8} />
+          </div>
+        </div>
+        <div>
+          <label className={labelCls}>Anything else? (optional)</label>
+          <textarea rows={2} value={message} onChange={(e) => setMessage(e.target.value)}
+            placeholder="What are you hoping to track?" className={inputCls} />
+        </div>
+
+        {err && (
+          <div className="bg-rose-500/10 border border-rose-500/20 text-rose-300 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
+            <AlertCircle size={16} strokeWidth={2} className="shrink-0" />
+            <span>{err}</span>
+          </div>
+        )}
+
+        <button type="submit" disabled={busy}
+          className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold py-3.5 rounded-xl text-sm shadow-lg shadow-indigo-500/20 transition duration-200 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
+          {busy ? 'Submitting…' : 'Submit request'}
+        </button>
+        <button type="button" onClick={onBack}
+          className="w-full text-center text-xs font-semibold text-slate-400 hover:text-slate-200">
+          ← Back to log in
+        </button>
+      </form>
     </div>
   );
 }

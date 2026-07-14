@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import HealthScoreCard from '../components/HealthScoreCard.jsx';
@@ -14,6 +14,22 @@ import ChangesTimeline from '../components/ChangesTimeline.jsx';
 import DraftModal from '../components/DraftModal.jsx';
 import IntegrationHealthCard from '../components/IntegrationHealthCard.jsx';
 import WatchlistCard from '../components/WatchlistCard.jsx';
+import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
+import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
+import AiRecommendationCard from '../components/AiRecommendationCard.jsx';
+import SectionHeader from '../components/SectionHeader.jsx';
+
+// Three honestly different reasons the competitor leaderboard can be empty —
+// collapsing them into one generic "not identified yet" message reads as
+// broken once a site has been live for weeks with nothing showing up.
+function competitorEmptyMessage(meta) {
+  if (!meta?.hasRun) return 'Not analyzed yet — runs weekly alongside the executive report.';
+  if (meta.status === 'error') return 'Last run failed — check Integration Health below.';
+  if (meta.status === 'insufficient-data') {
+    return `Last run (${timeAgo(meta.lastRunAt)}) couldn't identify or reach any real competitor sites — not a configuration issue, discovery genuinely came up empty this time.`;
+  }
+  return `Last run (${timeAgo(meta.lastRunAt)}) completed but found no competitor profiles.`;
+}
 
 const STATUS_INFO = {
   complete: { label: 'Analysis complete', dotClass: 'bg-emerald-500', textClass: 'text-emerald-700', bgClass: 'bg-emerald-50' },
@@ -21,18 +37,6 @@ const STATUS_INFO = {
   error: { label: 'Analysis error', dotClass: 'bg-rose-500', textClass: 'text-rose-700', bgClass: 'bg-rose-50' },
   'never-run': { label: 'Not yet analyzed', dotClass: 'bg-slate-400', textClass: 'text-slate-500', bgClass: 'bg-slate-100' },
 };
-
-function SectionHeader({ title, desc, count }) {
-  return (
-    <div className="mb-3.5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-[17px] font-bold tracking-tight text-slate-900">{title}</h2>
-        {count != null && <span className="text-xs font-mono font-semibold text-slate-400">{count}</span>}
-      </div>
-      {desc && <p className="text-[13px] text-slate-500 mt-1 max-w-2xl">{desc}</p>}
-    </div>
-  );
-}
 
 function CardSkeleton({ h = 'h-24' }) {
   return <div className={`card ${h} animate-pulse`} />;
@@ -49,7 +53,7 @@ function GridSkeleton({ count, className }) {
 // analyst that already did the work," not a menu of 7 tools to run one at a
 // time. Reads only already-persisted agent runs by default (instant); the
 // 7-agent grid this replaced as the primary view still exists at
-// /ai-growth/advanced for anyone who wants to run or inspect one agent.
+// /ai-orchestration for anyone who wants to run or inspect one agent.
 export default function CommandCenter() {
   const [data, setData] = useState(null); // null = loading
   const [refreshing, setRefreshing] = useState(false);
@@ -61,7 +65,44 @@ export default function CommandCenter() {
 
   const load = () => api.commandCenter.get().then(setData).catch((e) => setError(e.message || 'Failed to load'));
   useEffect(() => { load(); }, []);
+
+  // Recent Changes entries (canonical-mismatch text, etc.) can run much
+  // longer than AI Activity's one-line rows, so at equal item counts the two
+  // cards drifted to very different heights. Measuring AI Activity's actual
+  // rendered height and clamping Recent Changes to match (with its own
+  // "Show all" expand, same pattern as ActionCenter's RecommendationGroup)
+  // keeps both cards visually matched instead of a guessed pixel constant
+  // that would drift once either card's content changes.
+  const activityRef = useRef(null);
+  const [activityHeight, setActivityHeight] = useState(null);
+  useEffect(() => {
+    if (!activityRef.current) return;
+    const el = activityRef.current;
+    const measure = () => setActivityHeight(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [data]);
   useEffect(() => { api.integrations.health().then(setIntegrations).catch(() => setIntegrations([])); }, []);
+
+  // Deep-link target from a clicked notification (NotificationBell.jsx) —
+  // e.g. /ai-growth?highlight=opportunity:/pricing:add-faq or
+  // ?highlight=health-score for a health-drop alert, which has no single
+  // finding to point at. Scrolls to and briefly rings the matching card
+  // once the real data (and therefore the DOM node) has loaded.
+  const [searchParams] = useSearchParams();
+  const highlightId = searchParams.get('highlight');
+  const [highlightActive, setHighlightActive] = useState(true);
+  useEffect(() => {
+    if (!highlightId || data === null) return;
+    const el = document.querySelector(`[data-finding-id="${CSS.escape(highlightId)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const t = setTimeout(() => setHighlightActive(false), 4000);
+    return () => clearTimeout(t);
+  }, [highlightId, data]);
+  const highlightClass = (id) => (highlightId === id && highlightActive ? 'ring-2 ring-[#6C63FF] ring-offset-2 rounded-2xl transition-shadow' : '');
 
   const checkIntegration = async (id) => {
     setCheckingId(id);
@@ -93,11 +134,14 @@ export default function CommandCenter() {
   // shape: {id, source, generatorId, params}) and Critical Issue findings
   // ({id, agentId, recommendedAction: {generatorId, params}}) both adapt to
   // this one call so there's a single draft-generation path, not two.
-  const generate = async ({ id, generatorId, params, source }) => {
+  // `id` is only a UI key (spinner state) — `findingId` is the real finding
+  // id sent to the backend so a later "mark implemented" can schedule a real
+  // Verify stage re-check (see server/store/drafts.js's markDraftImplemented).
+  const generate = async ({ id, generatorId, params, source, findingId }) => {
     setGeneratingId(id);
     setError(null);
     try {
-      const draft = await api.actionCenter.generate(generatorId, params, source);
+      const draft = await api.actionCenter.generate(generatorId, params, source, findingId);
       setActiveDraft(draft);
     } catch (e) {
       setError(e.message || 'Generation failed');
@@ -105,14 +149,14 @@ export default function CommandCenter() {
       setGeneratingId(null);
     }
   };
-  const generateFromAction = (item) => generate(item);
+  const generateFromAction = (item) => generate({ ...item, findingId: item.id });
   const generateFromFinding = (finding) => generate({
     id: finding.id, generatorId: finding.recommendedAction?.generatorId,
-    params: finding.recommendedAction?.params, source: finding.agentId,
+    params: finding.recommendedAction?.params, source: finding.agentId, findingId: finding.id,
   });
   const generateFromWatchlistItem = (item) => generate({
     id: `watchlist:${item.id}`, generatorId: item.recommendedAction?.generatorId,
-    params: item.recommendedAction?.params, source: item.agentId,
+    params: item.recommendedAction?.params, source: item.agentId, findingId: item.findingId,
   });
 
   // User-driven status change on a watchlist item (Start / Mark complete /
@@ -165,8 +209,10 @@ export default function CommandCenter() {
       {/* Website Health + Executive AI Briefing — the hero. A number never
           appears without its explanation next to it. */}
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
-        <div className="card overflow-hidden">
-          <HealthScoreCard score={data?.health?.score} trendWeek={data?.health?.trendWeek} loading={data === null} />
+        <div className="card overflow-hidden" data-finding-id="health-score">
+          <div className={highlightClass('health-score')}>
+            <HealthScoreCard score={data?.health?.score} trendWeek={data?.health?.trendWeek} loading={data === null} />
+          </div>
         </div>
         <ExecutiveSummaryPanel
           text={data?.executiveSummary?.narrative}
@@ -176,10 +222,10 @@ export default function CommandCenter() {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile label="Critical Issues" value={data?.stats?.criticalIssues ?? '—'} tone="critical" sub="Needs attention this week" loading={data === null} />
-        <StatTile label="New Opportunities" value={data?.stats?.newOpportunities ?? '—'} tone="accent" sub="Actionable, ready to draft" loading={data === null} />
-        <StatTile label="Analysis Status" value={status.label.split(' ')[0]} sub="7 specialist agents" loading={data === null} />
-        <StatTile label="Last Analysis" value={data?.stats?.lastAnalyzedAt ? timeAgo(data.stats.lastAnalyzedAt) : '—'} sub="Refresh anytime" loading={data === null} />
+        <StatTile icon="⚠️" label="Critical Issues" value={data?.stats?.criticalIssues ?? '—'} tone="critical" sub="Needs attention this week" loading={data === null} />
+        <StatTile icon="✨" label="New Opportunities" value={data?.stats?.newOpportunities ?? '—'} tone="accent" sub="Actionable, ready to draft" loading={data === null} />
+        <StatTile icon="🤖" label="Analysis Status" value={status.label.split(' ')[0]} sub="10 specialist agents · view orchestration →" loading={data === null} to="/ai-orchestration" />
+        <StatTile icon="🕐" label="Last Analysis" value={data?.stats?.lastAnalyzedAt ? timeAgo(data.stats.lastAnalyzedAt) : '—'} sub="Refresh anytime" loading={data === null} />
       </div>
 
       {/* Critical Issues — the top-of-briefing callout, small and curated on
@@ -195,7 +241,9 @@ export default function CommandCenter() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 fade-up">
             {data.criticalIssues.map((f) => (
-              <CriticalIssueCard key={f.id} finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
+              <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
+                <CriticalIssueCard finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
+              </div>
             ))}
           </div>
         )}
@@ -213,7 +261,11 @@ export default function CommandCenter() {
           <div className="card p-8 text-center text-sm text-slate-400">No discoveries yet — run a refresh to analyze your site.</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 fade-up">
-            {data.discoveries.map((f) => <DiscoveryCard key={f.id} finding={f} />)}
+            {data.discoveries.map((f) => (
+              <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
+                <DiscoveryCard finding={f} />
+              </div>
+            ))}
           </div>
         )}
       </section>
@@ -230,9 +282,54 @@ export default function CommandCenter() {
           <div className="card p-8 text-center text-sm text-slate-400">No growth opportunities detected this period.</div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 fade-up">
-            {data.growthOpportunities.map((f) => <OpportunityCard key={f.id} finding={f} />)}
+            {data.growthOpportunities.map((f) => (
+              <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
+                <OpportunityCard finding={f} />
+              </div>
+            ))}
           </div>
         )}
+      </section>
+
+      {/* Top Competitors — AI-identified (no external SEO API required),
+          crawled, and ranked on a real computed score (same structural
+          signals ai-visibility.js scores this site's own pages on). Runs
+          weekly alongside the executive report, so this is empty until the
+          first weekly run completes. */}
+      <section>
+        <SectionHeader
+          title="Who's Ahead"
+          count={data ? `${data.competitors.length} identified` : null}
+          desc="This site ranked against real, AI-identified competitors on a computed structural SEO/AI-readiness score — schema, FAQ, headings, entities."
+        />
+        {data && !data.competitorsMeta?.dataForSeoConfigured && (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-1.5 mb-2 -mt-1">
+            ⚠ Google-ranking verification (DataForSEO) isn't configured — competitors below are AI market-research
+            identified and crawl-verified, but not yet confirmed against real search rankings.
+          </p>
+        )}
+        {data === null ? (
+          <div className="card p-4"><GridSkeleton count={3} className="space-y-2" /></div>
+        ) : data.competitors.length === 0 ? (
+          <div className="card p-8 text-center text-sm text-slate-400">{competitorEmptyMessage(data.competitorsMeta)}</div>
+        ) : (
+          <div className="card p-4 fade-up">
+            <CompetitorLeaderboard profiles={data.competitors} />
+          </div>
+        )}
+      </section>
+
+      {/* Authority Score + AI Recommendation — both real, monthly-cadence
+          checks (backlink data and AI-answer patterns don't shift day to
+          day). Side by side since both are single-number headline metrics
+          with the same big-number-plus-trend shape as Website Health. */}
+      <section>
+        <SectionHeader title="Authority & AI Recommendation"
+          desc="Real backlink-based Authority Score and real ChatGPT recommendation testing — both run monthly." />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <AuthorityScoreCard authority={data?.authority} meta={data?.authorityMeta} loading={data === null} />
+          <AiRecommendationCard aiRecommendation={data?.aiRecommendation} meta={data?.aiRecommendationMeta} loading={data === null} />
+        </div>
       </section>
 
       {/* Opportunity Watchlist — a persistent queue, not a snapshot of this
@@ -265,6 +362,11 @@ export default function CommandCenter() {
           title="Recommended Actions"
           count={data ? `${data.recommendedActions.length} shown` : null}
           desc="One click from insight to draft — nothing here publishes automatically."
+          action={
+            <Link to="/action-center" className={`text-xs font-semibold text-[#6C63FF] hover:underline rounded ${focusRing}`}>
+              View all in Action Center →
+            </Link>
+          }
         />
         {data === null ? (
           <CardSkeleton h="h-48" />
@@ -289,14 +391,23 @@ export default function CommandCenter() {
           desc="Live status of every external connection this platform depends on."
         />
         {integrations === null ? (
-          <GridSkeleton count={1} className="grid grid-cols-1 lg:grid-cols-2 gap-3" />
+          <GridSkeleton count={1} className="grid grid-cols-1 md:grid-cols-3 gap-3" />
         ) : integrations.length === 0 ? (
           <div className="card p-8 text-center text-sm text-slate-400">No integrations registered yet.</div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 fade-up">
+          // flex-wrap + a min/max card width, not a fixed grid-cols count —
+          // the number of registered integrations changes as new ones are
+          // added (server/integrations/*.js is auto-discovered, not a fixed
+          // list), and a grid tuned for exactly N items leaves an orphaned
+          // gap in the last row the moment that count changes. Flex-wrap's
+          // leftover space after the last card just reads as whitespace,
+          // not a grid-shaped hole implying a missing card.
+          <div className="flex flex-wrap gap-3 fade-up items-stretch">
             {integrations.map((i) => (
-              <IntegrationHealthCard key={i.id} integration={i} checking={checkingId === i.id}
-                onCheck={() => checkIntegration(i.id)} />
+              <div key={i.id} className="flex-1 basis-[280px] max-w-[420px]">
+                <IntegrationHealthCard integration={i} checking={checkingId === i.id}
+                  onCheck={() => checkIntegration(i.id)} />
+              </div>
             ))}
           </div>
         )}
@@ -305,19 +416,12 @@ export default function CommandCenter() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>
           <SectionHeader title="AI Activity" desc="What your analyst has been doing in the background — every line is a real completed run." />
-          {data === null ? <CardSkeleton h="h-56" /> : <ActivityFeed items={data.activity} />}
+          {data === null ? <CardSkeleton h="h-56" /> : <div ref={activityRef}><ActivityFeed items={data.activity} /></div>}
         </section>
         <section>
           <SectionHeader title="Recent Changes" desc="What's new since your last visit, and what's already been resolved." />
-          {data === null ? <CardSkeleton h="h-56" /> : <ChangesTimeline items={data.recentChanges} />}
+          {data === null ? <CardSkeleton h="h-56" /> : <ChangesTimeline items={data.recentChanges} matchHeight={activityHeight} />}
         </section>
-      </div>
-
-      <div className="text-center pt-2 border-t border-slate-100">
-        <Link to="/ai-growth/advanced"
-          className={`inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-[#6C63FF] transition rounded ${focusRing}`}>
-          Looking for a specific agent? Open Advanced Analysis →
-        </Link>
       </div>
 
       {activeDraft && <DraftModal draft={activeDraft} onClose={() => setActiveDraft(null)} onSaved={setActiveDraft} onDeleted={() => setActiveDraft(null)} />}

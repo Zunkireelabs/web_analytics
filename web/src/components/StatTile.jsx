@@ -1,13 +1,23 @@
+import { Link } from 'react-router-dom';
 import { useCountUp } from '../useCountUp.js';
 
-const TONE_CLASS = { critical: 'text-rose-600', accent: 'text-[#6C63FF]', default: 'text-slate-900' };
+const TONE = {
+  critical: { text: 'text-rose-600', chipBg: '#fee2e220', chipColor: '#e11d48' },
+  accent: { text: 'text-[#6C63FF]', chipBg: '#6C63FF1a', chipColor: '#6C63FF' },
+  warning: { text: 'text-amber-600', chipBg: '#f59e0b1a', chipColor: '#f59e0b' },
+  success: { text: 'text-emerald-600', chipBg: '#10b9811a', chipColor: '#10b981' },
+  default: { text: 'text-slate-900', chipBg: '#f1f5f9', chipColor: '#64748b' },
+};
 
-// Minimal KPI tile — no chart, no icon. The Command Center deliberately
-// avoids dashboard-filler visuals; a number + one line of context is enough
-// at this altitude (detail lives in the sections below, not here). Numeric
-// values count up on arrival instead of just appearing.
-export default function StatTile({ label, value, sub, tone = 'default', loading }) {
+// A small icon chip gives each tile a distinct identity at a glance instead
+// of four identical text blocks that only differ by their numbers — same
+// "icon chip + tone" language the rest of Command Center's cards use.
+// Optional `to`: renders the whole tile as a nav link (e.g. the Analysis
+// Status tile linking to the orchestration diagram) instead of static div —
+// the one visual entry point from Command Center into /ai-orchestration.
+export default function StatTile({ label, value, sub, tone = 'default', icon, loading, to }) {
   const animated = useCountUp(value);
+  const t = TONE[tone] || TONE.default;
 
   if (loading) {
     return (
@@ -17,13 +27,22 @@ export default function StatTile({ label, value, sub, tone = 'default', loading 
       </div>
     );
   }
+  const Wrapper = to ? Link : 'div';
+  const wrapperProps = to ? { to } : {};
   return (
-    <div className="card card-hover p-4">
-      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">{label}</div>
-      <div className={`text-2xl font-bold tracking-tight tabular-nums ${TONE_CLASS[tone] || TONE_CLASS.default}`}>
+    <Wrapper {...wrapperProps} className={`card card-hover p-4 block ${to ? 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]' : ''}`}>
+      <div className="flex items-center gap-2 mb-2">
+        {icon && (
+          <span className="w-6 h-6 rounded-lg grid place-items-center text-[13px] shrink-0" style={{ background: t.chipBg, color: t.chipColor }}>
+            {icon}
+          </span>
+        )}
+        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
+      </div>
+      <div className={`text-2xl font-bold tracking-tight tabular-nums ${t.text}`}>
         {typeof value === 'number' ? animated : value}
       </div>
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
-    </div>
+    </Wrapper>
   );
 }

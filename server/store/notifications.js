@@ -32,3 +32,14 @@ export async function markRead(siteId, id) {
 export async function markAllRead(siteId) {
   await query('UPDATE notifications SET read_at = now() WHERE site_id = $1 AND read_at IS NULL', [siteId]);
 }
+
+// Cooldown check for event types that can otherwise fire near-daily for the
+// same underlying condition (e.g. health-drop) — a real notification of this
+// type within the window means "already told them," not "tell them again."
+export async function hasRecentNotification(siteId, type, sinceDays) {
+  const { rows } = await query(
+    `SELECT 1 FROM notifications WHERE site_id = $1 AND type = $2 AND created_at >= now() - ($3 || ' days')::interval LIMIT 1`,
+    [siteId, type, sinceDays]
+  );
+  return rows.length > 0;
+}

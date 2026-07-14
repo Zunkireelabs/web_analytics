@@ -1,5 +1,5 @@
 import { getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
-import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR } from './lib/page-content.js';
+import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, inferSchemaType } from './lib/page-content.js';
 import { priorityByRank, impactFromValue, effortFromDifficulty, makeFinding } from './lib/findings.js';
 import { callLLM } from '../llm.js';
 
@@ -31,7 +31,11 @@ const CTR_BY_POSITION = { 1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07, 6: 0.05, 
 const CTR_TAIL = 0.015; // positions 11+
 const ctrAtPosition = (p) => CTR_BY_POSITION[Math.round(p)] ?? CTR_TAIL;
 
-export async function run({ siteId, start, end }) {
+export async function run({ siteId, start, end, pageCache }) {
+  // Falls back to a direct (uncached) fetch when run standalone, outside an
+  // orchestrated run — keeps this agent independently runnable/testable
+  // with identical output either way (see lib/fetch-cache.js).
+  const fetchPage = pageCache || analyzePageUrl;
   const [perf, pages] = await Promise.all([
     getSearchPerformanceRange(siteId, start, end, 'query', 100),
     getTopPagePerQuery(siteId, start, end),
@@ -72,18 +76,19 @@ export async function run({ siteId, start, end }) {
 
   const top = scored.sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, MAX_OPPORTUNITIES);
 
-  // Live-fetch each unique landing page once, shared across queries that land
-  // on the same page.
-  const pageAnalysisCache = new Map();
-  await Promise.all([...new Set(top.map((o) => o.page).filter(Boolean))].map(async (url) => {
-    pageAnalysisCache.set(url, await analyzePageUrl(url));
-  }));
+  // Live-fetch each unique landing page once, shared across queries that
+  // land on the same page — and, when run inside an orchestration cycle,
+  // shared across OTHER agents too via pageCache (see lib/fetch-cache.js),
+  // not just within this one agent's own batch.
+  const pageAnalysisCache = new Map(
+    await Promise.all([...new Set(top.map((o) => o.page).filter(Boolean))].map(async (url) => [url, await fetchPage(url)]))
+  );
 
   const opportunities = top.map((o) => {
     if (!o.page) return { ...o, recommendations: null, recommendationsNote: 'No landing page recorded for this query.' };
     const fetched = pageAnalysisCache.get(o.page);
     if (!fetched.ok) return { ...o, recommendations: null, recommendationsNote: `Page fetch failed (${fetched.error}) — recommendations unavailable.` };
-    return { ...o, recommendations: recommendationsFor(fetched.analysis, o.query), recommendationsNote: null };
+    return { ...o, recommendations: recommendationsFor(fetched.analysis, o.query), recommendationsNote: null, schemaTypes: fetched.analysis.schemaTypes };
   });
 
   // `opportunities` is already sorted best-first by opportunityScore (see
@@ -104,7 +109,7 @@ export async function run({ siteId, start, end }) {
       evidence: { query: o.query, page: o.page, avgPosition: o.avgPosition, impressions: o.impressions, clicks: o.clicks, opportunityScore: o.opportunityScore },
       whyItMatters: `"${o.query}" ranks #${o.avgPosition.toFixed(1)}, ${o.impressions} impressions — est. +${o.estimatedTrafficGain} clicks if improved.`,
       priority,
-      recommendedAction: { label: tag, generatorId: TAG_TO_GENERATOR[tag] ?? null, params: { page: o.page, query: o.query, schemaType: 'Article' }, effort },
+      recommendedAction: { label: tag, generatorId: TAG_TO_GENERATOR[tag] ?? null, params: { page: o.page, query: o.query, schemaType: inferSchemaType(o.page, o.schemaTypes) }, effort },
       expectedImpact,
     }));
   });

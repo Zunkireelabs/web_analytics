@@ -108,6 +108,20 @@ export async function getHealthScoreOnOrBefore(siteId, date) {
   return rows[0]?.website_health_score ?? null;
 }
 
+// Every real snapshot between two dates, oldest first — the Review Report's
+// (agents/lib/review-report.js) health-score trend. Unlike
+// getHealthScoreOnOrBefore (one as-of value), this is the real series a
+// trend needs; honestly sparse/empty if snapshots haven't accumulated yet.
+export async function getHealthScoreSeries(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT date, website_health_score FROM daily_reports
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3 AND website_health_score IS NOT NULL
+      ORDER BY date ASC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 // Every persisted integration_health row relevant to a site — both rows
 // scoped to this site and system-wide rows (site_id IS NULL, e.g. the shared
 // Google OAuth connection every site currently uses). Keyed by integration_id
@@ -211,6 +225,49 @@ export async function getTopPagePerQuery(siteId, start, end) {
   return rows;
 }
 
+// Real query cannibalization: queries where 2+ of the site's OWN pages both
+// genuinely rank (real position, real impressions) for the same real query
+// — getTopPagePerQuery deliberately collapses to one winning page per query
+// (DISTINCT ON), which is exactly why this was invisible before. Grouped in
+// JS rather than a single SQL query since "2+ real-ranking pages for the
+// same query" needs a per-query array, not a flat row set.
+export async function getCannibalizedQueries(siteId, start, end, { minImpressions = 5, maxPosition = 20, limit = 20 } = {}) {
+  const { rows } = await query(
+    `SELECT query, page,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            ROUND(SUM(position * impressions) / NULLIF(SUM(impressions), 0), 2) AS avg_position
+       FROM gsc_query_page
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3
+      GROUP BY query, page
+     HAVING SUM(impressions) >= $4`,
+    [siteId, start, end, minImpressions]
+  );
+
+  const byQuery = new Map();
+  for (const r of rows) {
+    if (!byQuery.has(r.query)) byQuery.set(r.query, []);
+    byQuery.get(r.query).push(r);
+  }
+
+  const conflicts = [];
+  for (const [q, pages] of byQuery) {
+    // Both/all pages must genuinely rank (real position within maxPosition)
+    // — real impression noise from an unranked page shouldn't count as
+    // "competing," matching the source guidance this check is modeled on
+    // ("similar positions, both in top 20, split clicks").
+    const ranking = pages.filter((p) => p.avg_position != null && Number(p.avg_position) <= maxPosition);
+    if (ranking.length < 2) continue;
+    ranking.sort((a, b) => Number(b.clicks) - Number(a.clicks));
+    conflicts.push({ query: q, pages: ranking });
+  }
+
+  conflicts.sort((a, b) =>
+    b.pages.reduce((s, p) => s + Number(p.clicks), 0) - a.pages.reduce((s, p) => s + Number(p.clicks), 0)
+  );
+  return conflicts.slice(0, limit);
+}
+
 // Top queries driving traffic to a single landing page over a date range —
 // the reverse of getTopPagePerQuery, used by the Content Gap Agent to know
 // which real query to check a page's content against (e.g. does it signal
@@ -292,6 +349,26 @@ export async function getSearchPerformanceRange(siteId, start, end, dimType, lim
       ORDER BY impressions DESC
       LIMIT $5`,
     [siteId, dimType, start, end, limit]
+  );
+  return rows;
+}
+
+// Real impressions for a specific, small list of pages — not a top-N cut.
+// getSearchPerformanceRange's `limit` means a page ranked just outside it
+// (e.g. #150 on a site with 100+ actively-trafficked pages) is invisible to
+// callers that only use the top-N result, which previously led candidate-
+// pages.js to treat "not in the top N" as "zero impressions" — false for
+// any such page. This targets exactly the pages asked for, so "no row
+// returned" here really does mean zero real impressions in this range.
+export async function getSearchPerformanceForPages(siteId, start, end, pages) {
+  if (!pages?.length) return [];
+  const { rows } = await query(
+    `SELECT dim_value, SUM(clicks) AS clicks, SUM(impressions) AS impressions
+       FROM gsc_breakdown
+      WHERE site_id = $1 AND dim_type = 'page' AND date BETWEEN $2 AND $3 AND dim_value = ANY($4)
+      GROUP BY dim_value
+     HAVING SUM(impressions) > 0`,
+    [siteId, start, end, pages]
   );
   return rows;
 }

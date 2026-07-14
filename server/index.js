@@ -16,6 +16,8 @@ import copilotRouter from './routes/copilot.js';
 import integrationsRouter from './routes/integrations.js';
 import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
+import clientsRouter from './routes/clients.js';
+import growthReportRouter from './routes/growth-report.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
 import { pool } from './db.js';
@@ -58,6 +60,8 @@ app.use('/api', copilotRouter);
 app.use('/api', integrationsRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', watchlistRouter);
+app.use('/api', clientsRouter);
+app.use('/api', growthReportRouter);
 
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);

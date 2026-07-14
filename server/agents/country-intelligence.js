@@ -20,14 +20,21 @@ const DELTA_LIMIT = 8;
 export async function run({ siteId, start, end }) {
   const prior = priorPeriod(start, end);
 
-  const [countryRows, countryDelta, cityRows, cityDelta, languageRows, gscCountryPerf] = await Promise.all([
+  const [countryRows, countryDelta, cityRows, cityDelta, languageRows, gscCountryPerf, gscTopPage] = await Promise.all([
     getGa4BreakdownRange(siteId, start, end, 'country', TOP_LIMIT),
     getGa4BreakdownDelta(siteId, 'country', { start, end }, prior, DELTA_LIMIT),
     getGa4BreakdownRange(siteId, start, end, 'city', TOP_LIMIT),
     getGa4BreakdownDelta(siteId, 'city', { start, end }, prior, DELTA_LIMIT),
     getGa4BreakdownRange(siteId, start, end, 'language', TOP_LIMIT),
     getSearchPerformanceRange(siteId, start, end, 'country', 50),
+    getSearchPerformanceRange(siteId, start, end, 'page', 1),
   ]);
+  // GA4 doesn't track sessions broken down by page+language together, so
+  // there's no real "this language's top page" to point a translation
+  // draft at — the site's own single top-traffic page (by impressions) is
+  // the most defensible real, grounded stand-in. Without SOME page attached,
+  // generators/translation.js has nothing to fetch and always 400s.
+  const topPage = gscTopPage[0]?.dim_value || null;
 
   // GA4's own 'country' dimension already returns readable names (e.g.
   // "Nepal"); GSC's country breakdown uses ISO-3 codes, so it's converted
@@ -82,14 +89,19 @@ export async function run({ siteId, start, end }) {
   }
   // Secondary languages (beyond the #1 by session volume) with any real
   // traffic — a real signal of an audience segment worth localizing for.
-  for (const lang of topLanguages.slice(1, 3).filter((l) => l.sessions > 0)) {
-    recCandidates.push({
-      tag: 'Generate Translation', generatorId: 'translation',
-      reason: `${lang.language} had ${lang.sessions} real session(s) this period.`,
-      params: { targetLanguage: lang.language },
-      magnitude: lang.sessions,
-      evidence: { language: lang.language, sessions: lang.sessions },
-    });
+  // Requires a real page to translate (generators/translation.js needs
+  // page or text) — skipped entirely when the site has no page data yet,
+  // rather than emitting a recommendation that always fails to generate.
+  if (topPage) {
+    for (const lang of topLanguages.slice(1, 3).filter((l) => l.sessions > 0)) {
+      recCandidates.push({
+        tag: 'Generate Translation', generatorId: 'translation',
+        reason: `${lang.language} had ${lang.sessions} real session(s) this period — translating the site's top page (${topPage}) is a concrete first step.`,
+        params: { targetLanguage: lang.language, page: topPage },
+        magnitude: lang.sessions,
+        evidence: { language: lang.language, sessions: lang.sessions, page: topPage },
+      });
+    }
   }
   const recommendations = recCandidates.map(({ magnitude, evidence, ...r }) => r);
 

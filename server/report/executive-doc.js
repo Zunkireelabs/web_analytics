@@ -94,7 +94,9 @@ export async function runExecutiveDocReport(site, anchorDate) {
   const system = 'You are a growth strategist writing a WEEKLY AI Executive Report for a non-technical site ' +
     'owner\'s leadership team. You are given `sections`, the real, already-computed output of seven specialist ' +
     'agents (query intelligence, opportunity, country intelligence, device intelligence, AI visibility, content ' +
-    'gap, competitor intelligence) for this week — every number in it is real, already-verified data. Some ' +
+    'gap, technical SEO) for this week — every number in it is real, already-verified data. Competitor ' +
+    'intelligence runs on its own monthly cadence and is not included every week — never invent a competitor ' +
+    'claim in its absence. Some ' +
     'sections may have status "insufficient-data" or "error" — name that plainly as a gap, never guess around it.\n\n' +
     'Return ONLY a JSON object (no prose, no markdown fences) with exactly these seven string fields, each 2-4 ' +
     'plain-text sentences (no markdown, no bullet symbols):\n' +
@@ -104,10 +106,9 @@ export async function runExecutiveDocReport(site, anchorDate) {
     'named in the data) — if no clear cause is evident, say so plainly instead of speculating\n' +
     '- highestOpportunities: the highest-value real opportunities from the opportunity/content-gap/ai-visibility ' +
     'sections, prioritized\n' +
-    '- highestRisks: risks evidenced by real declining metrics, low-CTR flags, low AI-visibility scores, or (only ' +
-    'if the competitor_intelligence section has status "ok" with real findings) a named competitor outranking this ' +
-    'site on a real query — never an invented business risk with no data support, and never claim a competitive ' +
-    'threat when that section is missing/insufficient-data\n' +
+    '- highestRisks: risks evidenced by real declining metrics, low-CTR flags, or low AI-visibility scores in the ' +
+    'given sections — never an invented business risk with no data support. Competitor intelligence is not part ' +
+    'of this weekly digest (it runs monthly) — never claim a competitive threat here.\n' +
     '- recommendedActions: aggregate the specialist agents\' own already-computed recommendations for the coming ' +
     'week — do not invent new ones\n' +
     '- estimatedImpact: cite ONLY the opportunity section\'s own estimatedTrafficGain figures if present, framed ' +
