@@ -65,40 +65,59 @@ export default function Insights({ siteId }) {
   const loading = series.length === 0;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-      <PageHeader title="Insights" subtitle="Top movers, devices, and geography" icon="🔍" right={<>
-        <label className="text-xs text-slate-500">From<br/>
-          <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor}
-                 onChange={(e) => setStart(e.target.value)}
-                 className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" /></label>
-        <label className="text-xs text-slate-500">To<br/>
-          <input type="date" value={end} min={range?.earliest} max={range?.latest_visitor}
-                 onChange={(e) => setEnd(e.target.value)}
-                 className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" /></label>
-      </>} />
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 fade-up">
+      <PageHeader 
+        title="Insights" 
+        subtitle="Deep dive into search query movements, devices, and user geography" 
+        icon="🔍" 
+        right={
+          <div className="flex items-center gap-3 bg-white/80 border border-slate-200/50 backdrop-blur-md p-3 rounded-2xl shadow-sm z-10">
+            <label className="flex flex-col">
+              <span className="text-[9px] font-extrabold text-slate-400 uppercase tracking-wider mb-1 px-1">From</span>
+              <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor}
+                     onChange={(e) => setStart(e.target.value)}
+                     className="bg-white border border-slate-200/80 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition shadow-sm" />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-[9px] font-extrabold text-slate-400 uppercase tracking-wider mb-1 px-1">To</span>
+              <input type="date" value={end} min={range?.earliest} max={range?.latest_visitor}
+                     onChange={(e) => setEnd(e.target.value)}
+                     className="bg-white border border-slate-200/80 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition shadow-sm" />
+            </label>
+          </div>
+        } 
+      />
 
       {/* Range KPI summary with sparklines */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <StatCard label="Clicks (range)" icon="🖱" color="#6C63FF" data={sv('clicks')} value={total('clicks')} format={fmtInt} loading={loading} />
         <StatCard label="Impressions (range)" icon="👁" color="#8b5cf6" data={sv('impressions')} value={total('impressions')} format={fmtInt} loading={loading} />
         <StatCard label="Users (range)" icon="👥" color="#10b981" data={sv('users')} value={total('users')} format={fmtInt} loading={loading} />
         <StatCard label="Sessions (range)" icon="⏱" color="#14b8a6" data={sv('sessions')} value={total('sessions')} format={fmtInt} loading={loading} />
       </div>
 
-      {/* Top movers */}
-      <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
-
-      <div className="grid md:grid-cols-2 gap-4">
-        {/* Device split */}
-        <DonutChart title="Visitors by device (sessions)" data={deviceData} />
-
-        {/* Visitors by country (GA4) */}
-        <CountryCard title="Visitors by country" rows={country.visitors}
-          barKey="sessions" cols={[['sessions', 'Sessions'], ['users', 'Users']]} />
+      {/* Demographics & Devices Split Grid - prioritized visuals first */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+        <div className="lg:col-span-5 flex flex-col">
+          <DonutChart title="Visitors by Device" data={deviceData} />
+        </div>
+        <div className="lg:col-span-7 flex flex-col">
+          <CountryCard title="Visitors by Country" rows={country.visitors}
+            barKey="sessions" cols={[['sessions', 'Sessions'], ['users', 'Users']]} />
+        </div>
       </div>
 
       {/* Top countries by clicks — interactive world map + leaderboard */}
       <CountriesWidget rows={country.search} />
+
+      {/* Detailed query movements and highlights section at the bottom for analysis */}
+      <div className="pt-2">
+        <div className="mb-4">
+          <h2 className="text-lg font-bold text-slate-900 tracking-tight">Query Movement Analysis</h2>
+          <p className="text-xs text-slate-400 font-medium">Track search terms gaining or losing visibility</p>
+        </div>
+        <MoversList gainers={movers.gainers} droppers={movers.droppers} comparisonLabel={moverPeriodLabel(start, end)} />
+      </div>
     </div>
   );
 }
@@ -117,8 +136,8 @@ const flag = (c) => FLAG[c] || '🌐';
 function RankBadge({ n }) {
   const top = n <= 3;
   return (
-    <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-bold shrink-0"
-      style={top ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', color: '#fff' } : { background: '#f1f5f9', color: '#94a3b8' }}>
+    <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-extrabold shrink-0"
+      style={top ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', color: '#fff', boxShadow: '0 3px 6px -1.5px rgba(108, 99, 255, 0.3)' } : { background: '#f1f5f9', color: '#64748b' }}>
       {n}
     </span>
   );
@@ -131,32 +150,42 @@ function CountryCard({ title, rows, barKey, cols }) {
   const [primaryKey, primaryLbl] = cols[0];
   const [secKey, secLbl] = cols[1];
   return (
-    <div className="card p-5 fade-up">
-      <div className="flex items-center justify-between mb-3">
-        <div className="card-title">{title}</div>
-        <span className="text-[10px] text-slate-400 bg-slate-50 rounded-full px-2 py-0.5">Top {list.length || 0}</span>
-      </div>
-      {list.length === 0 && <div className="text-sm text-slate-400 py-4">No data.</div>}
-      <div className="divide-y divide-slate-50">
-        {list.map((r, i) => (
-          <div key={i} className="flex items-center gap-2.5 py-2.5">
-            <RankBadge n={i + 1} />
-            <span className="text-base shrink-0">{flag(r.country)}</span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm text-slate-700 truncate">{r.country}</span>
-                <span className="text-sm font-bold text-slate-900 shrink-0">
-                  {Number(r[primaryKey]).toLocaleString()}
-                  <span className="text-[10px] font-normal text-slate-400"> {primaryLbl.toLowerCase()}</span>
-                </span>
-              </div>
-              <div className="h-1.5 rounded-full bg-slate-100 mt-1.5 overflow-hidden">
-                <div className="h-full rounded-full" style={{ width: `${(Number(r[barKey]) / max) * 100}%`, background: 'linear-gradient(90deg,#6C63FF,#8b5cf6)' }} />
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1.5">{secLbl}: {Number(r[secKey]).toLocaleString()}</div>
-            </div>
+    <div className="card p-6 flex flex-col justify-between flex-1 fade-up">
+      <div>
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 tracking-tight">{title}</h3>
+            <p className="text-xs text-slate-400 font-medium mt-0.5">Top visitor locations ranked by session count</p>
           </div>
-        ))}
+          <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100/80 border border-slate-200/30 text-slate-500">
+            Top {list.length || 0}
+          </span>
+        </div>
+        {list.length === 0 && <div className="text-sm text-slate-400 py-10 text-center font-medium">No data.</div>}
+        <div className="divide-y divide-slate-100/50">
+          {list.map((r, i) => (
+            <div key={i} className="flex items-center gap-3 py-3 hover:bg-slate-50/50 rounded-xl px-1 transition duration-150 group">
+              <RankBadge n={i + 1} />
+              <span className="text-lg shrink-0 select-none">{flag(r.country)}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-sm font-semibold text-slate-700 truncate group-hover:text-slate-900 transition-colors">{r.country}</span>
+                  <span className="text-sm font-bold text-slate-900 shrink-0">
+                    {Number(r[primaryKey]).toLocaleString()}
+                    <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide"> {primaryLbl.toLowerCase()}</span>
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-slate-100/80 mt-2 overflow-hidden w-full">
+                  <div 
+                    className="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]" 
+                    style={{ width: `${(Number(r[barKey]) / max) * 100}%` }} 
+                  />
+                </div>
+                <div className="text-[10px] text-slate-400 font-semibold mt-2">{secLbl}: <span className="text-slate-600 font-bold">{Number(r[secKey]).toLocaleString()}</span></div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

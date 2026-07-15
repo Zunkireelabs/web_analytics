@@ -1,81 +1,139 @@
 import { useState } from 'react';
-import { CATEGORY } from './AgentCard.jsx';
 import { EVIDENCE_LABEL } from './DiscoveryCard.jsx';
 import { pagePathFor } from '../api.js';
+import { 
+  Target, 
+  Globe, 
+  FileText, 
+  BrainCircuit, 
+  ChevronDown, 
+  ChevronUp, 
+  AlertTriangle,
+  Settings
+} from 'lucide-react';
 
-// The top-of-briefing callout — a small, curated subset of AI Discoveries
-// (see command-center.js's `criticalIssues`). Title, evidence, why it
-// matters, expected impact, and one clear action are always visible so a
-// user never has to click into anything to understand the single most
-// urgent thing — but which agent found it, its confidence, and the raw
-// evidence backing it are internal detail, not headline material, so those
-// live behind the same "Show details" pattern DiscoveryCard already uses.
+const CATEGORY_META = {
+  seo: { label: 'SEO & Tech', icon: Target, color: '#6C63FF', bgLight: '#6C63FF0c', borderLight: '#6C63FF1e' },
+  geo: { label: 'Geo Target', icon: Globe, color: '#0ea5e9', bgLight: '#0ea5e90c', borderLight: '#0ea5e91e' },
+  content: { label: 'Content Audit', icon: FileText, color: '#14b8a6', bgLight: '#14b8a60c', borderLight: '#14b8a61e' },
+  meta: { label: 'Executive Brief', icon: BrainCircuit, color: '#ec4899', bgLight: '#ec48990c', borderLight: '#ec48991e' }
+};
+
 export default function CriticalIssueCard({ finding, generating, onGenerate }) {
   const [expanded, setExpanded] = useState(false);
-  const cat = CATEGORY[finding.category] || CATEGORY.seo;
+  const catKey = finding.category || 'seo';
+  const cat = CATEGORY_META[catKey] || CATEGORY_META.seo;
   const impact = finding.expectedImpact;
   const action = finding.recommendedAction;
+
   const detailEntries = [
     finding.agentName && ['agentName', finding.agentName],
-    impact?.basis === 'estimate' && ['estimate', 'Modeled, not directly measured'],
+    impact?.basis === 'estimate' && ['estimate', 'Model Estimated'],
     ...Object.entries(finding.evidence || {}).filter(([, v]) => v != null && v !== ''),
   ].filter(Boolean);
   const pagePath = pagePathFor(finding.evidence?.page);
+  const IconComponent = cat.icon;
 
   return (
-    <div className="rounded-2xl border border-slate-100 bg-white overflow-hidden transition hover:border-slate-200 hover:shadow-[0_4px_16px_-4px_rgba(225,29,72,0.12)] flex flex-col">
-      <div className="h-[3px] shrink-0 bg-gradient-to-r from-rose-500 to-rose-300" />
-      <div className="p-5 flex flex-col gap-3 flex-1">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="w-6 h-6 rounded-lg grid place-items-center text-[12px] shrink-0 bg-rose-50">🚨</span>
-          <span className="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
-            style={{ color: cat.color, background: `${cat.color}1a` }}>{cat.label}</span>
-          <span className="text-[11px] font-bold text-rose-600">Critical</span>
-        </div>
-        {impact && <span className="text-[10px] font-semibold text-slate-400 shrink-0 text-right">{impact.label} impact</span>}
-      </div>
-
+    <div className="rounded-3xl border border-slate-200/60 bg-gradient-to-br from-white to-slate-50/40 p-4 transition-all duration-300 hover:shadow-md hover:border-slate-300 relative group overflow-hidden flex flex-col justify-between shadow-sm">
+      {/* Accent Indicator Bar */}
+      <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-rose-500 to-rose-300 animate-pulse" />
+      
       <div>
-        <p className="text-[15px] font-bold text-slate-900 leading-snug">{action?.label || `${cat.label} issue`}</p>
-        {pagePath && <p className="text-[11px] text-slate-400 font-mono truncate mt-0.5">on {pagePath}</p>}
-        <p className="text-[13px] text-slate-500 leading-relaxed mt-1">{finding.whyItMatters}</p>
+        {/* Row 1: Badges */}
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span 
+              className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border"
+              style={{ color: cat.color, backgroundColor: cat.bgLight, borderColor: cat.borderLight }}
+            >
+              {cat.label}
+            </span>
+            <span className="text-[9px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-full bg-rose-50 border border-rose-100 text-rose-700 flex items-center gap-0.5">
+              <AlertTriangle size={8} /> Critical Gap
+            </span>
+          </div>
+          {impact && (
+            <span className="text-[9px] font-extrabold text-slate-400 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-150">
+              {impact.label} Impact
+            </span>
+          )}
+        </div>
 
-        {detailEntries.length > 0 && (
-          <>
-            <button type="button" onClick={() => setExpanded((e) => !e)}
-              className="inline-flex items-center gap-1 text-[11px] font-bold mt-2.5 transition-colors
-                         text-[#6C63FF] hover:underline
-                         focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF] rounded">
-              {expanded ? 'Hide details ↑' : 'Show details →'}
-            </button>
-            {expanded && (
-              <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] bg-slate-50 rounded-lg p-2.5 fade-up">
-                {detailEntries.map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-2 min-w-0">
-                    <dt className="text-slate-400 shrink-0">{EVIDENCE_LABEL[k] || k}</dt>
-                    <dd className="text-slate-700 font-medium font-mono truncate text-right">{String(v)}</dd>
-                  </div>
-                ))}
-              </dl>
+        {/* Row 2: Headline & Description */}
+        <div className="flex items-start gap-3">
+          <span 
+            className="w-7 h-7 rounded-xl grid place-items-center shrink-0 border shadow-sm bg-rose-500/5 text-rose-500 border-rose-500/10"
+          >
+            <IconComponent size={12} strokeWidth={2.25} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h4 className="text-xs font-extrabold text-slate-900 leading-snug group-hover:text-indigo-650 transition-colors">
+              {action?.label || `${cat.label} Critical issue`}
+            </h4>
+            {pagePath && (
+              <span className="inline-block text-[9px] text-slate-400 font-mono mt-0.5 truncate max-w-full">
+                on {pagePath}
+              </span>
             )}
-          </>
-        )}
+          </div>
+        </div>
       </div>
 
-      <div className="mt-auto pt-1">
-        {action?.generatorId ? (
-          <button type="button" onClick={() => onGenerate(finding)} disabled={generating}
-            className="text-xs font-semibold px-3.5 py-2 rounded-lg text-white transition disabled:opacity-60
-                       focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]"
-            style={{ background: '#6C63FF' }}>
-            {generating ? 'Generating…' : `Fix: ${action.label}`}
+      {/* Collapsible Details & Action Drawer */}
+      {!expanded ? (
+        <button 
+          type="button" 
+          onClick={() => setExpanded(true)}
+          className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/80 hover:text-[#6C63FF] hover:underline mt-2 self-start flex items-center gap-1 focus:outline-none cursor-pointer"
+        >
+          Show details & action <ChevronDown size={10} />
+        </button>
+      ) : (
+        <div className="flex flex-col gap-3 pt-2.5 border-t border-slate-100/50 mt-2 animate-slide-down">
+          {/* Description */}
+          <p className="text-[10px] font-semibold text-slate-505 leading-relaxed break-words bg-slate-50 p-2.5 rounded-xl border border-slate-150 shadow-inner">
+            {finding.whyItMatters}
+          </p>
+
+          {/* Diagnostic Details */}
+          {detailEntries.length > 0 && (
+            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-2.5 space-y-1 shadow-inner">
+              <div className="text-[8px] font-black uppercase tracking-wider text-[#8b5cf6] pb-1 border-b border-slate-800/80 mb-1">Watchlist Diagnostics</div>
+              {detailEntries.map(([k, v]) => (
+                <div key={k} className="flex justify-between items-center text-[9px] font-mono leading-tight">
+                  <span className="text-slate-500">{EVIDENCE_LABEL[k] || k}</span>
+                  <span className="text-slate-300 font-bold max-w-[150px] truncate text-right">
+                    {String(v)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Action Trigger */}
+          {action && (
+            <button
+              type="button"
+              onClick={() => onGenerate(finding)}
+              disabled={generating}
+              className="text-[9px] font-black uppercase tracking-wider py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/15 cursor-pointer"
+              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+            >
+              {generating ? 'Drafting…' : `Fix: ${action.title}`}
+            </button>
+          )}
+
+          {/* Collapse trigger */}
+          <button 
+            type="button" 
+            onClick={() => setExpanded(false)}
+            className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/80 hover:text-[#6C63FF] hover:underline mt-1 self-start flex items-center gap-1 focus:outline-none cursor-pointer"
+          >
+            Hide details <ChevronUp size={10} />
           </button>
-        ) : (
-          <span className="text-xs text-slate-400">Needs manual review — no draftable fix for this yet.</span>
-        )}
-      </div>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

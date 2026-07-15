@@ -5,7 +5,7 @@ import StatCard from '../components/StatCard.jsx';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
 import MoversList from '../components/MoversList.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
-import AgentFindingCard from '../components/AgentFindingCard.jsx';
+import AgentFindingsHub from '../components/AgentFindingsHub.jsx';
 import RecommendationCard from '../components/RecommendationCard.jsx';
 import ReportHistoryRail from '../components/ReportHistoryRail.jsx';
 
@@ -70,19 +70,29 @@ export default function Reports({ siteId }) {
   const recommendations = insights?.recommendations || [];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 font-sans">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 font-sans fade-up relative">
+
+      {/* Decorative Glows */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden no-print">
+        <div className="absolute top-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[145px] bg-indigo-500/10 opacity-50 pulse-glow" />
+        <div className="absolute bottom-10 left-1/4 w-[500px] h-[500px] rounded-full blur-[125px] bg-purple-500/8 opacity-45 pulse-glow" />
+      </div>
+
       <PageHeader title="Reports" subtitle="Your AI Executive Briefing" icon="🗒️"
         right={
           <div className="flex items-center gap-2">
             {data?.docUrl && (
               <a href={data.docUrl} target="_blank" rel="noreferrer"
-                className="text-xs font-semibold px-3.5 py-2 rounded-lg text-white transition-colors"
-                style={{ background: '#6C63FF' }}>
-                View Full Google Doc ↗
+                className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-slate-700 hover:text-slate-900 border border-slate-200/80 bg-white/70 hover:bg-white shadow-sm transition hover:scale-[1.01] active:scale-[0.99] duration-150">
+                View Google Doc ↗
               </a>
             )}
-            <button type="button" disabled title="Coming soon"
-              className="text-xs font-semibold px-3.5 py-2 rounded-lg text-slate-400 bg-slate-100 cursor-not-allowed">
+            <button 
+              type="button" 
+              onClick={() => window.print()}
+              className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/20 active-pill-shadow hover:brightness-105"
+              style={{ background: 'linear-gradient(135deg, #6C63FF, #8b5cf6)' }}
+            >
               Export PDF
             </button>
           </div>
@@ -135,19 +145,14 @@ export default function Reports({ siteId }) {
           )}
 
           {findings.length > 0 && (
-            <div>
-              <h2 className="text-[15px] font-bold text-slate-900 mb-3">AI Agent Findings</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {findings.map((f) => (
-                  <AgentFindingCard key={f.agentId} category={f.category} name={f.name}
-                    stat={f.stat} headline={f.headline} narrative={f.narrative} />
-                ))}
-              </div>
+            <div className="space-y-4">
+              <h2 className="text-[15px] font-bold text-slate-900">AI Agent Findings</h2>
+              <AgentFindingsHub findings={findings} />
             </div>
           )}
 
           {recommendations.length > 0 && (
-            <div>
+            <div id="recommendations-section" className="scroll-mt-6">
               <h2 className="text-[15px] font-bold text-slate-900 mb-3">Priority Recommendations</h2>
               <div className="space-y-2.5">
                 {recommendations.map((r) => (

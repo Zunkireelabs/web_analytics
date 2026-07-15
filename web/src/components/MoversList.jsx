@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import Sparkline from './Sparkline.jsx';
+import { ArrowUpRight, ArrowDownRight, Info } from 'lucide-react';
 
-const GREEN = '#16A34A';
-const RED = '#EF4444';
-const BLUE = '#2563EB';
-const PURPLE = '#8B5CF6';
+const GREEN = '#10b981';
+const RED = '#f43f5e';
+const BLUE = '#3b82f6';
+const PURPLE = '#8b5cf6';
 
 const sum = (arr, k) => (arr || []).reduce((a, r) => a + (Number(r[k]) || 0), 0);
 const fmtSigned = (n) => `${n >= 0 ? '+' : ''}${n.toLocaleString()}`;
@@ -26,30 +27,37 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
 
   return (
     <div className="space-y-6">
-      {/* 1 ─ Summary card */}
+      {/* 1 ─ Summary grid */}
       <div className="card p-6">
-        <div className="flex flex-wrap items-start justify-between gap-6">
-          <div>
+        <div className="flex flex-col lg:flex-row items-stretch justify-between gap-6">
+          <div className="lg:max-w-xs flex flex-col justify-center">
             <div className="flex items-center gap-2">
-              <h3 className="text-lg font-bold text-[#0F172A]">Search Query Movement</h3>
-              <InfoIcon />
+              <h3 className="text-base font-extrabold text-slate-950 tracking-tight">Query Movements</h3>
+              <span className="text-slate-400 cursor-help" title="Queries that changed the most in clicks"><Info size={14} /></span>
             </div>
-            <p className="text-sm text-[#64748B] mt-1">Clicks performance vs {comparisonLabel}</p>
+            <p className="text-xs text-slate-400 font-semibold mt-1">Clicks performance compared to {comparisonLabel}</p>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 flex-1 min-w-[320px] max-w-2xl">
+          
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 flex-1">
             <Metric icon={<TrendUp />} tint={GREEN} value={fmtSigned(netChange)} label="Net click change"
               badge={pct != null ? `${pct >= 0 ? '+' : ''}${pct}%` : null} badgeUp={netChange >= 0} />
-            <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This period"
-              sub={`vs ${priorTotal.toLocaleString()} ${comparisonLabel}`} />
-            <Metric icon={<Target />} tint={PURPLE} value={changed} label="Queries changed" />
+            <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This period clicks"
+              sub={`vs ${priorTotal.toLocaleString()}`} />
+            <Metric icon={<Target />} tint={PURPLE} value={changed} label="Queries moved" />
             <Metric icon={<Swap />} tint={GREEN}
-              value={<span><span style={{ color: GREEN }}>{gainers.length}</span> <span className="text-slate-300">/</span> <span style={{ color: RED }}>{droppers.length}</span></span>}
-              label="Gainers / Losers" />
+              value={
+                <span className="flex items-center gap-1">
+                  <span className="text-emerald-500 font-extrabold">{gainers.length}</span>
+                  <span className="text-slate-300 font-medium">/</span>
+                  <span className="text-rose-500 font-extrabold">{droppers.length}</span>
+                </span>
+              }
+              label="Gainers / Drops" />
           </div>
         </div>
       </div>
 
-      {/* 2 ─ AI Insights band */}
+      {/* 2 ─ AI Insights Highlights band */}
       <Highlights gainers={gainers} droppers={droppers} comparisonLabel={comparisonLabel} />
 
       {/* 3 ─ Two-column gainers / drops */}
@@ -64,17 +72,29 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
 /* ───────── Summary metric tile ───────── */
 function Metric({ icon, tint, value, label, badge, badgeUp, sub }) {
   return (
-    <div className="rounded-2xl border border-[#E2E8F0] p-3 card-hover bg-white">
+    <div className="rounded-2xl border border-slate-200/50 p-4 card-hover bg-white/50 backdrop-blur-md flex flex-col justify-between group">
       <div className="flex items-center justify-between">
-        <span className="w-8 h-8 rounded-lg grid place-items-center" style={{ background: `${tint}1a`, color: tint }}>{icon}</span>
+        <span 
+          className="w-8 h-8 rounded-xl grid place-items-center transition-transform duration-300 group-hover:scale-105" 
+          style={{ background: `${tint}12`, color: tint }}
+        >
+          {icon}
+        </span>
         {badge && (
-          <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md"
-            style={badgeUp ? { background: '#dcfce7', color: GREEN } : { background: '#fee2e2', color: RED }}>{badge}</span>
+          <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
+            badgeUp 
+              ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500/10' 
+              : 'bg-rose-500/5 text-rose-500 border-rose-500/10'
+          }`}>
+            {badge}
+          </span>
         )}
       </div>
-      <div className="text-xl font-bold text-[#0F172A] mt-2 leading-none">{value}</div>
-      <div className="text-[11px] text-[#64748B] mt-1">{label}</div>
-      {sub && <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>}
+      <div className="mt-3.5">
+        <div className="text-xl font-black text-slate-950 tracking-tight leading-none">{value}</div>
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-1.5">{label}</div>
+        {sub && <div className="text-[10px] font-medium text-slate-400 mt-1">{sub}</div>}
+      </div>
     </div>
   );
 }
@@ -89,10 +109,9 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
   const vsQ = take([...gainers, ...droppers].find((q) => !used.has(q.query) && / vs /i.test(q.query)));
   const topDrop = take(droppers[0]);
 
-  // Auto-translate the handful of highlighted queries here (bounded to ≤4 calls,
-  // cached server-side so repeat loads are instant).
   const highlighted = [topGain, newQ, vsQ, topDrop].filter(Boolean).map((q) => q.query);
   const [translations, setTranslations] = useState({});
+  
   useEffect(() => {
     highlighted.forEach((q) => {
       api.translate(q).then((t) => {
@@ -101,34 +120,85 @@ function Highlights({ gainers, droppers, comparisonLabel }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlighted.join('|')]);
+  
   const withTranslation = (q, text) => translations[q] ? `${text} (“${translations[q]}”)` : text;
 
   const blocks = [];
   if (topGain) {
     const c = changePct(topGain.prior, topGain.delta);
-    blocks.push({ icon: <TrendUp />, color: GREEN, tag: 'Gainer', head: `“${topGain.query}”`, text: withTranslation(topGain.query, `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}`) });
+    blocks.push({ 
+      icon: <TrendUp />, 
+      color: GREEN, 
+      tag: 'Gainer', 
+      head: `“${topGain.query}”`, 
+      text: withTranslation(topGain.query, `Highest growth · ${c.isNew ? `+${topGain.recent} clicks` : `${c.text} clicks`}`),
+      border: 'rgba(16,185,129,0.1)',
+      bg: 'rgba(16,185,129,0.03)'
+    });
   }
-  if (newQ) blocks.push({ icon: <Sparkle />, color: GREEN, tag: 'New', head: `“${newQ.query}”`, text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks vs ${comparisonLabel}`) });
-  if (vsQ) blocks.push({ icon: <Activity />, color: GREEN, tag: 'Trending', head: `“${vsQ.query}”`, text: withTranslation(vsQ.query, 'Comparison searches gaining momentum') });
-  if (topDrop) blocks.push({ icon: <TrendDown />, color: RED, tag: 'Drop', head: `“${topDrop.query}”`, text: withTranslation(topDrop.query, 'Lost the most visibility — refresh content') });
+  if (newQ) {
+    blocks.push({ 
+      icon: <Sparkle />, 
+      color: BLUE, 
+      tag: 'New', 
+      head: `“${newQ.query}”`, 
+      text: withTranslation(newQ.query, newQ.page ? `+${newQ.recent} new clicks → ${newQ.page}` : `+${newQ.recent} new clicks vs ${comparisonLabel}`),
+      border: 'rgba(59,130,246,0.1)',
+      bg: 'rgba(59,130,246,0.03)'
+    });
+  }
+  if (vsQ) {
+    blocks.push({ 
+      icon: <Activity />, 
+      color: PURPLE, 
+      tag: 'Trending', 
+      head: `“${vsQ.query}”`, 
+      text: withTranslation(vsQ.query, 'Comparison searches gaining momentum'),
+      border: 'rgba(139,92,246,0.1)',
+      bg: 'rgba(139,92,246,0.03)'
+    });
+  }
+  if (topDrop) {
+    blocks.push({ 
+      icon: <TrendDown />, 
+      color: RED, 
+      tag: 'Drop', 
+      head: `“${topDrop.query}”`, 
+      text: withTranslation(topDrop.query, 'Lost the most visibility — refresh content'),
+      border: 'rgba(244,63,94,0.1)',
+      bg: 'rgba(244,63,94,0.03)'
+    });
+  }
 
   if (blocks.length === 0) return null;
 
   return (
-    <div className="rounded-2xl border p-5" style={{ borderColor: '#E5F5EC', background: 'linear-gradient(135deg,#f0fdf4,#ffffff 85%)' }}>
+    <div className="rounded-3xl border border-indigo-500/10 p-5 bg-gradient-to-br from-indigo-500/[0.02] via-purple-500/[0.01] to-white/70 backdrop-blur-md">
       <div className="flex items-center gap-2 mb-4">
-        <span className="text-sm font-bold" style={{ color: GREEN }}>Highlights</span>
+        <span className="text-xs font-black uppercase tracking-wider text-indigo-600">Spotlight Insights</span>
       </div>
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap gap-4">
         {blocks.map((b, i) => (
-          <div key={i} className="flex items-start gap-3 flex-1 min-w-[220px] rounded-xl bg-white/80 border border-white p-3.5 shadow-sm">
-            <span className="w-9 h-9 rounded-full grid place-items-center shrink-0" style={{ background: `${b.color}1a`, color: b.color }}>{b.icon}</span>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full" style={{ background: `${b.color}1a`, color: b.color }}>{b.tag}</span>
-              </div>
-              <div className="text-sm font-semibold text-[#0F172A] leading-snug mt-1 truncate" title={b.head}>{b.head}</div>
-              <div className="text-[12px] text-[#64748B] leading-snug">{b.text}</div>
+          <div 
+            key={i} 
+            className="flex items-start gap-3 rounded-2xl border p-4 shadow-sm bg-white/70 hover:translate-y-[-1px] transition-transform duration-200 flex-1 min-w-[240px]"
+            style={{ borderColor: b.border, background: b.bg }}
+          >
+            <span 
+              className="w-8 h-8 rounded-xl grid place-items-center shrink-0 shadow-sm" 
+              style={{ background: '#fff', color: b.color }}
+            >
+              {b.icon}
+            </span>
+            <div className="min-w-0 flex-1">
+              <span 
+                className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border" 
+                style={{ borderColor: b.border, color: b.color, background: '#fff' }}
+              >
+                {b.tag}
+              </span>
+              <div className="text-sm font-bold text-slate-900 leading-snug mt-2 truncate" title={b.head}>{b.head}</div>
+              <div className="text-[11px] font-medium text-slate-500 leading-snug mt-1">{b.text}</div>
             </div>
           </div>
         ))}
@@ -142,63 +212,95 @@ function MoverCard({ kind, rows, total }) {
   const [showAll, setShowAll] = useState(false);
   const gain = kind === 'gain';
   const color = gain ? GREEN : RED;
-  const soft = gain ? '#dcfce7' : '#fee2e2';
+  const soft = gain ? '#ecfdf5' : '#fff1f2';
+  const softBorder = gain ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)';
   const displayRows = showAll ? (rows || []) : (rows || []).slice(0, 7);
   const hasMore = (rows || []).length > 7;
+  
   return (
-    <div className="card overflow-hidden">
-      <div className="flex items-center justify-between p-5 pb-3">
-        <div className="flex items-center gap-2.5">
-          <span className="w-9 h-9 rounded-xl grid place-items-center text-white" style={{ background: color }}>
-            {gain ? <TrendUp /> : <TrendDown />}
+    <div className="card flex flex-col justify-between">
+      <div>
+        <div className="flex items-center justify-between p-5 pb-3">
+          <div className="flex items-center gap-3">
+            <span 
+              className="w-9 h-9 rounded-xl grid place-items-center text-white shadow-sm" 
+              style={{ 
+                background: color,
+                boxShadow: `0 4px 10px -2px ${color}55`
+              }}
+            >
+              {gain ? <TrendUp /> : <TrendDown />}
+            </span>
+            <h3 className="font-extrabold text-slate-950 tracking-tight">{gain ? 'Top Gainers' : 'Top Drops'}</h3>
+          </div>
+          <span 
+            className="text-[10px] font-bold px-2.5 py-0.5 rounded-full border" 
+            style={{ background: soft, borderColor: softBorder, color }}
+          >
+            {gain ? '▲' : '▼'} {total} queries
           </span>
-          <h3 className="font-bold text-[#0F172A]">{gain ? 'Top Gainers' : 'Top Drops'}</h3>
         </div>
-        <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: soft, color }}>
-          {gain ? '↑' : '↓'} {total} queries
-        </span>
-      </div>
 
-      {/* column header */}
-      <div className="grid grid-cols-[24px_1fr_64px_64px_64px] items-center gap-2 px-5 pb-2 text-[10px] uppercase tracking-wide text-slate-400">
-        <span></span><span>Query</span><span className="text-right">Change</span><span className="text-right">%</span><span className="text-right">Trend</span>
-      </div>
+        {/* column header */}
+        <div className="grid grid-cols-[28px_1fr_64px_64px_64px] items-center gap-3 px-5 pt-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
+          <span></span>
+          <span>Query</span>
+          <span className="text-right">Change</span>
+          <span className="text-right">%</span>
+          <span className="text-right">Trend</span>
+        </div>
 
-      <div className="px-2">
-        {displayRows.length === 0 && <div className="text-sm text-slate-400 px-3 py-4">No movement.</div>}
-        {displayRows.map((r, i) => {
-          const c = changePct(r.prior, r.delta);
-          return (
-            <div key={i} className="grid grid-cols-[24px_1fr_64px_64px_64px] items-center gap-2 px-3 py-2.5 rounded-lg hover:bg-slate-50 transition">
-              <span className="w-6 h-6 rounded-md grid place-items-center text-[11px] font-bold" style={{ background: soft, color }}>{i + 1}</span>
-              <span className="min-w-0">
-                <span className="flex items-center gap-1 min-w-0">
-                  <span className="text-sm text-[#0F172A] truncate" title={r.query}>{r.query}</span>
-                  <TranslateButton query={r.query} />
+        <div className="px-2 divide-y divide-slate-100/50">
+          {displayRows.length === 0 && <div className="text-sm text-slate-400 px-3 py-6 font-medium">No movement.</div>}
+          {displayRows.map((r, i) => {
+            const c = changePct(r.prior, r.delta);
+            return (
+              <div key={i} className="grid grid-cols-[28px_1fr_64px_64px_64px] items-center gap-3 px-3 py-3 rounded-xl hover:bg-slate-50/50 transition duration-150 group">
+                <span 
+                  className="w-5 h-5 rounded-md grid place-items-center text-[10px] font-black" 
+                  style={{ background: soft, color }}
+                >
+                  {i + 1}
                 </span>
-                {r.page && (
-                  <span className="block text-[10px] text-slate-400 truncate" title={r.page}>
-                    → {r.page}{(r.device || r.country) && ` (${[r.device?.toLowerCase(), r.country].filter(Boolean).join(' · ')})`}
+                <span className="min-w-0 pr-1">
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-sm font-semibold text-slate-700 truncate group-hover:text-slate-900 transition-colors" title={r.query}>
+                      {r.query}
+                    </span>
+                    <TranslateButton query={r.query} />
                   </span>
-                )}
-              </span>
-              <span className="text-right text-sm font-semibold" style={{ color }}>{fmtSigned(r.delta)}</span>
-              <span className="text-right">
-                <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md"
-                  style={c.isNew ? { background: '#dbeafe', color: BLUE } : { background: soft, color }}>{c.text}</span>
-              </span>
-              <span className="flex justify-end">
-                <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={54} height={20} fill={false} dot={false} />
-              </span>
-            </div>
-          );
-        })}
+                  {r.page && (
+                    <span className="block text-[10px] text-slate-400 font-medium truncate mt-0.5" title={r.page}>
+                      → {r.page.replace(/https?:\/\/[^\/]+/i, '')}{(r.device || r.country) && ` (${[r.device?.toLowerCase(), r.country].filter(Boolean).join(' · ')})`}
+                    </span>
+                  )}
+                </span>
+                <span className="text-right text-sm font-bold tabular-nums" style={{ color }}>{fmtSigned(r.delta)}</span>
+                <span className="text-right">
+                  <span 
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded border"
+                    style={c.isNew 
+                      ? { background: '#eff6ff', borderColor: 'rgba(59,130,246,0.1)', color: '#2563eb' } 
+                      : { background: soft, borderColor: softBorder, color }}
+                  >
+                    {c.text}
+                  </span>
+                </span>
+                <span className="flex justify-end pr-1">
+                  <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={50} height={18} fill={false} dot={false} />
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {hasMore && (
-        <button className="w-full text-sm font-semibold py-3 mt-1 transition hover:brightness-95"
-          style={{ background: soft, color }}
-          onClick={() => setShowAll((s) => !s)}>
+        <button 
+          className="w-[calc(100%-16px)] text-xs font-bold py-2.5 mx-2 my-2 rounded-xl transition duration-150 border hover:brightness-95 select-none"
+          style={{ background: soft, borderColor: softBorder, color }}
+          onClick={() => setShowAll((s) => !s)}
+        >
           {showAll ? `Show less ↑` : `View all ${gain ? 'gainers' : 'drops'} (${total}) →`}
         </button>
       )}
@@ -215,7 +317,7 @@ function TranslateButton({ query }) {
       {!state && (
         <button
           type="button"
-          className="text-[10px] text-slate-400 hover:text-slate-600 leading-none"
+          className="text-[10px] text-slate-400 hover:text-slate-650 leading-none transition-colors"
           title="Translate query"
           onClick={async (e) => {
             e.stopPropagation();
@@ -225,27 +327,24 @@ function TranslateButton({ query }) {
           }}
         >🌐</button>
       )}
-      {state === 'loading' && <span className="text-[10px] text-slate-300">…</span>}
+      {state === 'loading' && <span className="text-[10px] text-slate-350 animate-pulse">…</span>}
       {state && state !== 'loading' && state.translation && (
-        <span className="text-[10px] text-slate-400 italic" title={state.language}> “{state.translation}”</span>
+        <span className="text-[10px] text-indigo-500 italic font-semibold" title={state.language}> “{state.translation}”</span>
       )}
     </span>
   );
 }
 
-// Synthesizes a short eased curve between two real endpoints (prior → recent) for the
-// row-level trend hint — not a real time series, just a shape Sparkline can render.
 function sparkSteps(from, to) {
   const a = Number(from) || 0, b = Number(to) || 0;
   return [a, a + (b - a) * 0.2, a + (b - a) * 0.45, a + (b - a) * 0.62, a + (b - a) * 0.82, b];
 }
 
-/* ───────── Inline lucide-style icons ───────── */
-const S = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' };
+const S = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' };
 const TrendUp = () => (<svg {...S}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></svg>);
 const TrendDown = () => (<svg {...S}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7" /><polyline points="16 17 22 17 22 11" /></svg>);
 const Activity = () => (<svg {...S}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>);
 const Target = () => (<svg {...S}><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></svg>);
 const Swap = () => (<svg {...S}><polyline points="17 4 21 8 17 12" /><path d="M21 8H7" /><polyline points="7 20 3 16 7 12" /><path d="M3 16h14" /></svg>);
 const Sparkle = () => (<svg {...S}><path d="M12 3v4M12 17v4M5 12H1M23 12h-4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" /></svg>);
-const InfoIcon = () => (<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4M12 8h.01" /></svg>);
+

@@ -127,7 +127,7 @@ export async function getAgentActivityFeed(siteId, agentIds, limit = 12) {
 export async function getCommandCenterData(siteId) {
   const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation']),
+    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
     buildRecommendations(siteId),
     categoryByAgentId(),
@@ -140,6 +140,7 @@ export async function getCommandCenterData(siteId) {
   const competitorRun = execAndCompetitorRuns.find((r) => r.agent_id === 'competitor-intelligence') || null;
   const authorityRun = execAndCompetitorRuns.find((r) => r.agent_id === 'authority') || null;
   const aiRecommendationRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-recommendation') || null;
+  const countryIntelligenceRun = execAndCompetitorRuns.find((r) => r.agent_id === 'country-intelligence') || null;
 
   const allFindings = findingRuns.flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })));
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
@@ -287,6 +288,22 @@ export async function getCommandCenterData(siteId) {
       // Both must be true — see lib/model-providers/openai.js's configured()
       // for why a bare OPENAI_API_KEY isn't treated as "on" for this agent.
       openAiConfigured: !!process.env.OPENAI_API_KEY && process.env.AI_RECOMMENDATION_ENABLED === 'true',
+    },
+    geoIntelligence: countryIntelligenceRun?.status === 'ok' ? {
+      topCountries: countryIntelligenceRun.facts.topCountries,
+      growingMarkets: countryIntelligenceRun.facts.growingMarkets,
+      decliningMarkets: countryIntelligenceRun.facts.decliningMarkets,
+      topLanguages: countryIntelligenceRun.facts.topLanguages,
+      lowCtrCountries: countryIntelligenceRun.facts.lowCtrCountries,
+      history: (countryIntelligenceRun.facts.topCountries || []).slice(0, 5).map((c, i) => ({
+        date: c.country,
+        sessions: c.sessions
+      })),
+    } : null,
+    geoIntelligenceMeta: {
+      hasRun: !!countryIntelligenceRun,
+      status: countryIntelligenceRun?.status ?? null,
+      lastRunAt: countryIntelligenceRun?.created_at ?? null,
     },
     activity: shapeActivity(activityRows, catByAgent),
     recentChanges,

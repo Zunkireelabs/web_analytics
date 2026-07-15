@@ -1,60 +1,76 @@
 import { useEffect, useState } from 'react';
 import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
-import SectionHeader from '../components/SectionHeader.jsx';
-import StatTile from '../components/StatTile.jsx';
 import DraftModal from '../components/DraftModal.jsx';
 import { PRIORITY } from '../components/WatchlistCard.jsx';
+import { 
+  Sparkles, 
+  Bot, 
+  Clock, 
+  AlertTriangle, 
+  Cpu, 
+  TrendingUp, 
+  CheckCircle2, 
+  ChevronDown, 
+  ChevronUp, 
+  ArrowRight,
+  Activity,
+  History,
+  FileText,
+  Settings,
+  Calendar,
+  Layers,
+  SlidersHorizontal,
+  FolderSync
+} from 'lucide-react';
 
 const GENERATOR_META = {
-  'meta-title': { label: 'Meta Title & Description', icon: '🏷️', color: '#6C63FF' },
-  faq: { label: 'FAQ', icon: '❓', color: '#0ea5e9' },
+  'meta-title': { label: 'Meta Titles', icon: '🏷️', color: '#6C63FF' },
+  faq: { label: 'FAQ Blocks', icon: '❓', color: '#0ea5e9' },
   schema: { label: 'Schema Markup', icon: '🧩', color: '#8b5cf6' },
   'internal-links': { label: 'Internal Links', icon: '🔗', color: '#14b8a6' },
-  'blog-outline': { label: 'Blog Outline', icon: '📝', color: '#ec4899' },
-  'landing-page': { label: 'Landing Page', icon: '🚀', color: '#c2410c' },
-  translation: { label: 'Translation', icon: '🌐', color: '#06b6d4' },
-  'llms-txt': { label: 'llms.txt & AI-Crawler Robots.txt', icon: '🤖', color: '#10b981' },
+  'blog-outline': { label: 'Blog Outlines', icon: '📝', color: '#ec4899' },
+  'landing-page': { label: 'Landing Pages', icon: '🚀', color: '#c2410c' },
+  translation: { label: 'Translations', icon: '🌐', color: '#06b6d4' },
+  'llms-txt': { label: 'llms.txt Files', icon: '🤖', color: '#10b981' },
 };
 
-// Must stay in sync with the real status enum — server/store/drafts.js /
-// server/migrations/038_draft_branch_pushed_status.sql /
-// 039_draft_merged_to_stage.sql. `pr_opened` stays for any historical draft
-// from before Phase 13; no new draft reaches it.
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
   approved: 'approved', branch_pushed: 'branch pushed', merged_to_stage: 'merged to stage',
   pr_opened: 'PR opened', implemented: 'implemented',
 };
+
 const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'implemented'];
 const STAGE_COLOR = {
   draft: '#94a3b8', edited: '#f59e0b', submitted_for_approval: '#f59e0b',
   approved: '#10b981', branch_pushed: '#7c3aed', merged_to_stage: '#2563eb',
   pr_opened: '#2563eb', implemented: '#10b981',
 };
+
 const STATUS_FILTERS = [
-  { value: '', label: 'All statuses' },
-  { value: 'submitted_for_approval', label: 'Pending approval' },
+  { value: '', label: 'All Drafts' },
+  { value: 'submitted_for_approval', label: 'Pending Approval' },
   { value: 'approved', label: 'Approved' },
-  { value: 'branch_pushed', label: 'Branch pushed' },
-  { value: 'merged_to_stage', label: 'Merged to stage' },
+  { value: 'branch_pushed', label: 'Branch Pushed' },
+  { value: 'merged_to_stage', label: 'Merged to Stage' },
   { value: 'implemented', label: 'Implemented' },
 ];
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
-const VISIBLE_PER_GROUP = 5;
 
-// A small 5-dot progress indicator for the draft lifecycle (draft → edited →
-// submitted_for_approval → approved → implemented) — replaces a single flat
-// status pill so progress reads at a glance instead of requiring the label text.
 function DraftStepper({ status }) {
   const idx = Math.max(0, STATUS_ORDER.indexOf(status));
   return (
-    <div className="flex items-center" aria-label={`Status: ${DRAFT_STATUS_LABEL[status] || status}`}>
+    <div className="flex items-center gap-1" aria-label={`Status: ${DRAFT_STATUS_LABEL[status] || status}`}>
       {STATUS_ORDER.map((s, i) => (
         <span key={s} className="flex items-center">
-          <span className="w-1.5 h-1.5 rounded-full shrink-0"
-            style={{ background: i <= idx ? STAGE_COLOR[status] : '#e2e8f0' }} />
+          <span className="w-1.5 h-1.5 rounded-full shrink-0 transition-all duration-300"
+            style={{ 
+              background: i <= idx ? STAGE_COLOR[status] : '#e2e8f0',
+              boxShadow: i === idx ? `0 0 6px ${STAGE_COLOR[status]}` : 'none',
+              transform: i === idx ? 'scale(1.25)' : 'scale(1)'
+            }} />
           {i < STATUS_ORDER.length - 1 && (
             <span className="w-3 h-px shrink-0" style={{ background: i < idx ? STAGE_COLOR[status] : '#e2e8f0' }} />
           )}
@@ -64,98 +80,8 @@ function DraftStepper({ status }) {
   );
 }
 
-// A group of N near-identical recommendations (e.g. "Add an FAQ section" on
-// 19 different pages) used to render as an undifferentiated 19-row wall —
-// same real repetition problem the Command Center's Discoveries feed had,
-// fixed here the way that page's density calls for: priority-sorted,
-// collapsed to the top 5 by default, with everything still reachable behind
-// "Show all" rather than hidden — a worklist shouldn't lose capability, just
-// noise. Each generator gets its own color identity (top bar + icon chip) and
-// each row gets a priority-colored left strip, so the page reads as
-// color-coded content types instead of one undifferentiated gray list.
-function RecommendationGroup({ generatorId, items, generatingId, onGenerate, draftsByFindingId, onViewDraft }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = GENERATOR_META[generatorId] || { label: generatorId, icon: '•', color: '#64748b' };
-  const sorted = [...items].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
-  const visible = expanded ? sorted : sorted.slice(0, VISIBLE_PER_GROUP);
-  const hidden = sorted.length - visible.length;
-
-  return (
-    <div className="card overflow-hidden">
-      <div className="h-[3px] shrink-0" style={{ background: `linear-gradient(to right, ${meta.color}, ${meta.color}55)` }} />
-      <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-slate-50">
-        <span className="w-7 h-7 rounded-lg grid place-items-center text-[13px] shrink-0"
-          style={{ background: `${meta.color}1a`, color: meta.color }}>{meta.icon}</span>
-        <h3 className="text-[15px] font-bold tracking-tight text-slate-900">{meta.label}</h3>
-        <span className="text-xs font-mono font-semibold text-slate-400 ml-auto">{items.length}</span>
-      </div>
-      <div className="divide-y divide-slate-50">
-        {visible.map((item) => {
-          const pr = PRIORITY[item.priority] || PRIORITY.low;
-          // A recommendation stays real even after a draft exists for it —
-          // buildRecommendations doesn't cross-reference drafts, so the same
-          // finding keeps showing until the underlying agent re-runs and
-          // stops flagging it. This is the real "have we already acted on
-          // this" answer instead: a real draft, matched by the same real
-          // finding id (draft.finding_id === item.id) that generate() sets.
-          const existingDraft = draftsByFindingId.get(item.id);
-          return (
-            <div key={item.id} className="flex gap-3 px-5 py-3">
-              <span className="w-[3px] rounded-full shrink-0 self-stretch" style={{ background: pr.color }} />
-              <div className="min-w-0 flex-1 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <div className="text-sm font-medium text-slate-800 truncate">{item.tag}</div>
-                    {item.priority === 'high' && <span className="text-[10px] font-bold text-rose-600 shrink-0">HIGH</span>}
-                    {existingDraft && (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0"
-                        style={{ color: STAGE_COLOR[existingDraft.status], background: `${STAGE_COLOR[existingDraft.status]}1a` }}>
-                        {existingDraft.status === 'implemented' ? '✓ IMPLEMENTED' : (DRAFT_STATUS_LABEL[existingDraft.status] || existingDraft.status).toUpperCase()}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{item.reason}</div>
-                  {item.params.page && <div className="text-[10px] text-slate-400 mt-0.5 truncate">{item.params.page}</div>}
-                </div>
-                {existingDraft ? (
-                  <button
-                    onClick={() => onViewDraft(existingDraft)}
-                    className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg text-slate-600 hover:bg-slate-100 border border-slate-200"
-                  >
-                    View Draft
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => onGenerate(item)}
-                    disabled={generatingId === item.id}
-                    className="shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 disabled:opacity-60"
-                  >
-                    {generatingId === item.id ? 'Generating…' : 'Generate Draft'}
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      {hidden > 0 && (
-        <button onClick={() => setExpanded(true)}
-          className="w-full text-xs font-semibold text-indigo-600 hover:bg-indigo-50/60 px-5 py-2.5 border-t border-slate-50 transition">
-          Show all {sorted.length} →
-        </button>
-      )}
-      {expanded && sorted.length > VISIBLE_PER_GROUP && (
-        <button onClick={() => setExpanded(false)}
-          className="w-full text-xs font-semibold text-slate-400 hover:bg-slate-50 px-5 py-2 border-t border-slate-50 transition">
-          Show fewer ↑
-        </button>
-      )}
-    </div>
-  );
-}
-
 export default function ActionCenter() {
-  const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts'
+  const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts' | 'implemented'
   const [recs, setRecs] = useState(null); // null = loading
   const [drafts, setDrafts] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -164,25 +90,37 @@ export default function ActionCenter() {
   const [activeDraft, setActiveDraft] = useState(null);
   const [error, setError] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
+  
+  // Sidebar category selections
+  const [activeCategory, setActiveCategory] = useState(null);
+  const [showAllRecommendations, setShowAllRecommendations] = useState(false);
 
-  const loadRecs = () => api.actionCenter.recommendations().then(setRecs).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
-  // Always the full, unfiltered list — the top-of-page stat tiles (Pending
-  // Approval, Implemented) need every draft to count correctly; the status
-  // filter below is applied client-side only for what the Drafts tab shows.
-  const loadDrafts = () => api.actionCenter.drafts().then(setDrafts).catch(() => setDrafts([]));
+  // Selected item inside lists for split-screen preview
+  const [selectedRecommendation, setSelectedRecommendation] = useState(null);
+  const [selectedDraftItem, setSelectedDraftItem] = useState(null);
 
-  // Both load on mount (not just when the Drafts tab is opened) so the
-  // top-of-page stat row has draft data immediately, regardless of which tab
-  // is active first.
+  useEffect(() => {
+    setShowAllRecommendations(false);
+    setSelectedRecommendation(null);
+  }, [activeCategory, tab]);
+
+  const loadRecs = () => api.actionCenter.recommendations().then((data) => {
+    setRecs(data);
+    const groupedKeys = Object.keys(
+      (data?.items || []).reduce((acc, item) => {
+        (acc[item.generatorId] ||= []).push(item);
+        return acc;
+      }, {})
+    );
+    if (groupedKeys.length > 0) setActiveCategory(groupedKeys[0]);
+  }).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
+
+  const loadDrafts = () => api.actionCenter.drafts().then((data) => {
+    setDrafts(data);
+    if (data && data.length > 0) setSelectedDraftItem(data[0]);
+  }).catch(() => setDrafts([]));
+
   useEffect(() => { loadRecs(); loadDrafts(); }, []);
-
-  // A draft's status can change from outside this page entirely (another
-  // tab/session, or a real merge-to-stage that auto-completes to
-  // implemented server-side) — the mount-time fetch above has no way to
-  // learn about that on its own. Re-fetching every time staff actually
-  // looks at the Drafts tab is cheap and keeps what they see honest,
-  // without needing a polling interval for a page that isn't usually left
-  // open in the background.
   useEffect(() => { if (tab === 'drafts' || tab === 'implemented') loadDrafts(); }, [tab]);
 
   const visibleDrafts = statusFilter ? (drafts || []).filter((d) => d.status === statusFilter) : drafts;
@@ -193,6 +131,13 @@ export default function ActionCenter() {
     try {
       const fresh = await api.actionCenter.refresh(range.start, range.end);
       setRecs(fresh);
+      const groupedKeys = Object.keys(
+        (fresh?.items || []).reduce((acc, item) => {
+          (acc[item.generatorId] ||= []).push(item);
+          return acc;
+        }, {})
+      );
+      if (groupedKeys.length > 0) setActiveCategory(groupedKeys[0]);
     } catch (e) {
       setError(e.message || 'Refresh failed');
     } finally {
@@ -219,12 +164,6 @@ export default function ActionCenter() {
     return acc;
   }, {});
 
-  // Real finding_id -> draft lookup for "has this recommendation already
-  // been acted on" (see RecommendationGroup). `drafts` is already ordered
-  // created_at DESC, so the first draft seen per finding_id is its most
-  // recent — good enough since one finding practically only ever gets one
-  // real draft at a time. Manually-created drafts have finding_id = null
-  // and are simply never looked up (never match a real recommendation id).
   const draftsByFindingId = new Map();
   for (const d of drafts || []) {
     if (d.finding_id && !draftsByFindingId.has(d.finding_id)) draftsByFindingId.set(d.finding_id, d);
@@ -237,158 +176,468 @@ export default function ActionCenter() {
   const pendingApprovalCount = (drafts || []).filter((d) => d.status === 'submitted_for_approval').length;
   const implementedThisWeekCount = (drafts || []).filter((d) => d.status === 'implemented' && d.implemented_at >= daysAgo(7)).length;
 
+  // Selected category items mapping
+  const activeItems = activeCategory ? (grouped[activeCategory] || []) : [];
+  const sortedItems = [...activeItems].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
+  const activeMeta = activeCategory ? GENERATOR_META[activeCategory] : null;
+
+  // Default active selection helper
+  useEffect(() => {
+    if (sortedItems.length > 0 && !selectedRecommendation) {
+      setSelectedRecommendation(sortedItems[0]);
+    }
+  }, [sortedItems]);
+
+  useEffect(() => {
+    if (visibleDrafts && visibleDrafts.length > 0 && !selectedDraftItem) {
+      setSelectedDraftItem(visibleDrafts[0]);
+    }
+  }, [visibleDrafts]);
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+      
       <PageHeader
         title="Action Center"
-        subtitle="Every AI recommendation becomes an editable draft — nothing here ever publishes automatically"
+        subtitle="Review, customize, and approve AI recommendations before staging deployment"
         icon="⚡"
       />
 
-      <div className="flex items-center gap-2 border-b border-slate-100">
-        {['recommendations', 'drafts', 'implemented'].map((t) => (
-          <button key={t} onClick={() => setTab(t)}
-            className={`px-3 py-2 text-sm font-semibold border-b-2 -mb-px transition ${
-              tab === t ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}>
-            {t === 'recommendations' ? 'Recommendations'
-              : t === 'drafts' ? `Drafts${drafts ? ` (${drafts.length})` : ''}`
-              : `Implemented${drafts ? ` (${implementedDrafts.length})` : ''}`}
-          </button>
-        ))}
-      </div>
+      {error && (
+        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-2xl px-4 py-3 leading-relaxed flex items-center gap-2">
+          <AlertTriangle size={14} className="text-rose-500 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
 
-      {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">{error}</div>}
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile icon="⚡" label="Recommendations" value={recs?.items.length ?? '—'}
-          tone="accent" sub="Across all generators" loading={recs === null} />
-        <StatTile icon="🔥" label="High Priority" value={recs === null ? '—' : highPriorityCount}
-          tone="critical" sub="Needs attention first" loading={recs === null} />
-        <StatTile icon="⏳" label="Pending Approval" value={drafts === null ? '—' : pendingApprovalCount}
-          tone="warning" sub="Drafts awaiting review" loading={drafts === null} />
-        <StatTile icon="✅" label="Implemented (7d)" value={drafts === null ? '—' : implementedThisWeekCount}
-          tone="success" sub="Live on site" loading={drafts === null} />
-      </div>
-
-      {tab === 'recommendations' && (
-        <>
-          <SectionHeader title="Recommendations" count={recs ? `${recs.items.length} shown` : null} />
-          <div className="card p-4 flex flex-wrap items-center gap-3">
-            <span className="text-xs text-slate-500">
-              Last analyzed: {recs ? Object.entries(recs.lastAnalyzedAt || {}).map(([id, at]) => `${id} ${timeAgo(at)}`).join(' · ') || 'never' : '…'}
-            </span>
-            <div className="ml-auto flex items-center gap-2">
-              <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5" />
-              <span className="text-xs text-slate-400">to</span>
-              <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5" />
-              <button onClick={refresh} disabled={refreshing}
-                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60">
-                {refreshing ? 'Refreshing… (~30s)' : 'Refresh Recommendations'}
-              </button>
-            </div>
-          </div>
-
-          {recs === null && <div className="card p-8 text-center text-slate-400">Loading…</div>}
-          {recs && recs.items.length === 0 && (
-            <div className="card p-8 text-center text-slate-400">
-              No recommendations yet — click "Refresh Recommendations" to run a fresh analysis.
-            </div>
-          )}
-
-          {Object.entries(grouped).map(([generatorId, items]) => (
-            <RecommendationGroup key={generatorId} generatorId={generatorId} items={items}
-              generatingId={generatingId} onGenerate={generate}
-              draftsByFindingId={draftsByFindingId} onViewDraft={setActiveDraft} />
+      {/* QUICK COMMAND METRIC HEADER PANEL */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+        
+        {/* Tab switch panel (Left, 4-cols) */}
+        <div className="lg:col-span-4 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
+          {[
+            { key: 'recommendations', label: 'Recs', count: recs?.items.length },
+            { key: 'drafts', label: 'Drafts', count: drafts?.length },
+            { key: 'implemented', label: 'Done', count: implementedDrafts.length }
+          ].map((t) => (
+            <button 
+              key={t.key} 
+              onClick={() => setTab(t.key)}
+              className={`text-xs py-2.5 px-3.5 font-black rounded-xl flex-1 transition-all duration-200 cursor-pointer ${
+                tab === t.key
+                  ? 'bg-white text-indigo-650 shadow border border-slate-200/60'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              {t.label} {t.count !== undefined && <span className="font-mono text-[9px] opacity-70">({t.count})</span>}
+            </button>
           ))}
-        </>
-      )}
+        </div>
 
-      {tab === 'drafts' && (
-        <>
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <SectionHeader title="Drafts"
-              count={drafts ? (statusFilter ? `${visibleDrafts.length} of ${drafts.length}` : `${drafts.length} total`) : null} />
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
-              className="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-600 bg-white">
-              {STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
+        {/* Date controllers & refresh pipeline (Right, 8-cols) */}
+        <div className="lg:col-span-8 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+          
+          {/* Quick stats indicators with distinct colored chips */}
+          <div className="flex items-center gap-2.5 text-[10.5px] font-black uppercase tracking-wider shrink-0">
+            <span className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 text-indigo-700 px-3 py-1.5 rounded-xl shadow-sm"><Sparkles size={11} className="text-indigo-550 animate-pulse" /> Recs: <strong className="ml-0.5">{recs?.items.length ?? 0}</strong></span>
+            <span className="flex items-center gap-1.5 bg-rose-50 border border-rose-100 text-rose-700 px-3 py-1.5 rounded-xl shadow-sm"><AlertTriangle size={11} className="text-rose-550" /> High: <strong className="ml-0.5">{highPriorityCount}</strong></span>
+            <span className="flex items-center gap-1.5 bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1.5 rounded-xl shadow-sm"><Clock size={11} className="text-amber-550" /> Review: <strong className="ml-0.5">{pendingApprovalCount}</strong></span>
           </div>
-          {drafts === null && <div className="card p-8 text-center text-slate-400">Loading…</div>}
-          {drafts && drafts.length === 0 && <div className="card p-8 text-center text-slate-400">No drafts yet — generate one from the Recommendations tab.</div>}
-          {drafts && drafts.length > 0 && visibleDrafts.length === 0 && (
-            <div className="card p-8 text-center text-slate-400">No drafts with this status.</div>
-          )}
-          {visibleDrafts && visibleDrafts.length > 0 && (
-            <div className="card overflow-hidden divide-y divide-slate-50">
-              {visibleDrafts.map((d) => {
-                const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
-                // Real evidence timestamp for the current status — the same
-                // "why does this say implemented" question DraftModal
-                // answers with a link, shown here too so it's visible
-                // without opening each draft one by one.
-                const statusAt = d.status === 'implemented' ? d.implemented_at
-                  : d.status === 'merged_to_stage' ? d.stage_merged_at
-                  : d.status === 'approved' ? d.approved_at
-                  : null;
-                return (
-                  <button key={d.id} onClick={() => setActiveDraft(d)}
-                    className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-slate-50">
-                    <span className="w-8 h-8 rounded-lg grid place-items-center text-sm shrink-0"
-                      style={{ background: `${meta.color}1a`, color: meta.color }}>{meta.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-slate-800">{meta.label}</div>
-                      <div className="text-xs text-slate-500 truncate mt-0.5">{d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}</div>
-                    </div>
-                    <div className="shrink-0 flex flex-col items-end gap-1">
-                      <DraftStepper status={d.status} />
-                      <span className="text-[10px] font-semibold text-slate-500">
-                        {DRAFT_STATUS_LABEL[d.status] || d.status}{statusAt ? ` · ${timeAgo(statusAt)}` : ''}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
 
-      {tab === 'implemented' && (
-        <>
-          <SectionHeader title="Implemented" count={drafts ? `${implementedDrafts.length} total` : null} />
-          {drafts === null && <div className="card p-8 text-center text-slate-400">Loading…</div>}
-          {drafts && implementedDrafts.length === 0 && (
-            <div className="card p-8 text-center text-slate-400">Nothing implemented yet — real changes land here once a draft is approved, pushed, and merged.</div>
-          )}
-          {implementedDrafts.length > 0 && (
-            <div className="card overflow-hidden divide-y divide-slate-50">
-              {implementedDrafts.map((d) => {
-                const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
-                return (
-                  <button key={d.id} onClick={() => setActiveDraft(d)}
-                    className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-slate-50">
-                    <span className="w-8 h-8 rounded-lg grid place-items-center text-sm shrink-0"
-                      style={{ background: `${meta.color}1a`, color: meta.color }}>{meta.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-slate-800">{meta.label}</div>
-                      <div className="text-xs text-slate-500 truncate mt-0.5">{d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}</div>
-                    </div>
-                    <div className="shrink-0 flex flex-col items-end gap-1">
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded" style={{ color: '#16a34a', background: '#16a34a1a' }}>
-                        ✓ IMPLEMENTED
+          <div className="flex items-center gap-2 ml-auto">
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
+              <span className="font-black text-slate-400">Start:</span>
+              <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
+                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[105px]" />
+            </div>
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
+              <span className="font-black text-slate-400">End:</span>
+              <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
+                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[105px]" />
+            </div>
+            <button 
+              onClick={refresh} 
+              disabled={refreshing}
+              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
+              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+            >
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* DUAL COLUMN SPLIT VIEWPORT WITH COLOR CONTRAST */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+        
+        {/* Left Column (5-cols) - Pipeline selection lists (SLATE BACKGROUND FOR CONTRAST) */}
+        <div className="lg:col-span-5 bg-slate-50 border border-slate-200 rounded-3xl p-4.5 space-y-4 shadow-sm flex flex-col justify-start">
+          
+          {/* Categories select checklist (Recommendations tab) */}
+          {tab === 'recommendations' && recs && Object.keys(grouped).length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
+                <Layers size={11} className="text-indigo-550" />
+                <span>Categories ({Object.keys(grouped).length})</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {Object.entries(grouped).map(([generatorId, items]) => {
+                  const meta = GENERATOR_META[generatorId] || { label: generatorId, icon: '•', color: '#64748b' };
+                  const active = activeCategory === generatorId;
+                  return (
+                    <button 
+                      key={generatorId} 
+                      onClick={() => setActiveCategory(generatorId)}
+                      className={`flex items-center justify-between px-3 py-2 rounded-xl text-[11px] font-bold transition-all border text-left cursor-pointer ${
+                        active 
+                          ? 'bg-white border-slate-300 text-indigo-700 shadow-sm font-black' 
+                          : 'bg-slate-100/50 border-slate-200 text-slate-600 hover:text-slate-800'
+                      }`}
+                      style={{ 
+                        color: active ? meta.color : '',
+                        borderColor: active ? `${meta.color}5a` : ''
+                      }}
+                    >
+                      <span className="flex items-center gap-1.5 truncate">
+                        <span>{meta.icon}</span>
+                        <span className="truncate">{meta.label}</span>
                       </span>
-                      <span className="text-[10px] text-slate-400">{d.implemented_at ? timeAgo(d.implemented_at) : ''}</span>
-                    </div>
-                  </button>
-                );
-              })}
+                      <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-500">
+                        {items.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
-        </>
-      )}
+
+          {/* Pipelines status list (Drafts tab) */}
+          {tab === 'drafts' && drafts && drafts.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
+                <SlidersHorizontal size={11} className="text-indigo-550" />
+                <span>Pipelines Filter</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {STATUS_FILTERS.map((f) => {
+                  const active = statusFilter === f.value;
+                  const count = f.value 
+                    ? drafts.filter((d) => d.status === f.value).length 
+                    : drafts.length;
+                  return (
+                    <button 
+                      key={f.value} 
+                      onClick={() => setStatusFilter(f.value)}
+                      className={`flex items-center justify-between gap-1.5 px-3 py-1.5 rounded-xl text-[10.5px] font-black transition-all border cursor-pointer ${
+                        active 
+                          ? 'bg-white border-slate-350 text-indigo-700 shadow-sm' 
+                          : 'bg-slate-100/60 border-slate-200 text-slate-550 hover:text-slate-800'
+                      }`}
+                    >
+                      <span>{f.label}</span>
+                      <span className="font-mono text-[9px] opacity-75">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Main list view block */}
+          {tab === 'recommendations' && (
+            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex flex-col justify-between flex-1 min-h-[300px]">
+              <div>
+                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Findings List</span>
+                  <span className="text-[10px] font-bold text-slate-400 font-mono">{activeItems.length} entries</span>
+                </div>
+
+                {recs === null ? (
+                  <div className="p-8 text-center text-xs text-slate-450 animate-pulse">Running audits…</div>
+                ) : activeItems.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-slate-450 italic">No recommendations.</div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
+                      const pr = PRIORITY[item.priority] || PRIORITY.low;
+                      const selected = selectedRecommendation?.id === item.id;
+                      const existingDraft = draftsByFindingId.get(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          onClick={() => setSelectedRecommendation(item)}
+                          className={`w-full flex items-start gap-3 px-4 py-3.5 text-left border-b border-slate-50 hover:bg-slate-50/40 transition cursor-pointer ${
+                            selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
+                          }`}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 animate-pulse" style={{ background: pr.color }} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{item.tag}</span>
+                              {existingDraft && (
+                                <span className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 border border-emerald-150 leading-none shadow-sm">
+                                  Draft ok
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] font-bold text-slate-450 mt-1 truncate">{item.reason}</p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              
+              {sortedItems.length > 4 && (
+                <div className="p-2.5 border-t border-slate-100 bg-slate-50/30 flex justify-end">
+                  <button 
+                    type="button"
+                    onClick={() => setShowAllRecommendations(!showAllRecommendations)}
+                    className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-indigo-650 hover:border-slate-350 transition flex items-center gap-1 shadow-sm focus:outline-none cursor-pointer"
+                  >
+                    <span>{showAllRecommendations ? 'Less' : `All (${sortedItems.length})`}</span>
+                    {showAllRecommendations ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'drafts' && (
+            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Drafts List</span>
+                <span className="text-[10px] font-bold text-slate-400 font-mono">{visibleDrafts?.length || 0} visible</span>
+              </div>
+
+              {drafts === null ? (
+                <div className="p-8 text-center text-xs text-slate-450 animate-pulse">Loading list…</div>
+              ) : visibleDrafts.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-405 italic">No drafts matching status.</div>
+              ) : (
+                <div className="divide-y divide-slate-100 overflow-y-auto flex-1 max-h-[360px]">
+                  {visibleDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button 
+                        key={d.id} 
+                        onClick={() => setSelectedDraftItem(d)}
+                        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50/40 transition cursor-pointer ${
+                          selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
+                        }`}
+                      >
+                        <span className="w-6 h-6 rounded-lg grid place-items-center text-xs shrink-0 border border-slate-150 bg-white" style={{ color: meta.color }}>
+                          {meta.icon}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
+                          <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
+                            {d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'implemented' && (
+            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Implemented History</span>
+                <span className="text-[10px] font-bold text-slate-405 font-mono">{implementedDrafts.length} total</span>
+              </div>
+
+              {drafts === null ? (
+                <div className="p-8 text-center text-xs text-slate-405 animate-pulse">Loading history…</div>
+              ) : implementedDrafts.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-405 italic">No logs generated.</div>
+              ) : (
+                <div className="divide-y divide-slate-100 overflow-y-auto flex-1 max-h-[360px]">
+                  {implementedDrafts.map((d) => {
+                    const meta = GENERATOR_META[d.action_type] || { label: d.action_type, icon: '•', color: '#64748b' };
+                    const selected = selectedDraftItem?.id === d.id;
+                    return (
+                      <button 
+                        key={d.id} 
+                        onClick={() => setSelectedDraftItem(d)}
+                        className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50/40 transition cursor-pointer ${
+                          selected ? 'bg-indigo-50/45 border-r-2 border-r-indigo-500' : ''
+                        }`}
+                      >
+                        <span className="w-6 h-6 rounded-lg grid place-items-center text-xs shrink-0 border border-slate-150 bg-white" style={{ color: meta.color }}>
+                          {meta.icon}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
+                          <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
+                            {d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Right Column (7-cols) - Split screen Live Workspace Preview (FLOATING WHITE CARD FOR ELEVATION CONTRAST) */}
+        <div className="lg:col-span-7">
+          
+          {tab === 'recommendations' && (
+            <div className="rounded-3xl border border-slate-205 bg-white shadow-md overflow-hidden h-full flex flex-col justify-between min-h-[350px]">
+              {selectedRecommendation ? (
+                <div className="flex-1 flex flex-col justify-between">
+                  <div>
+                    <div className="h-1.5 shrink-0 animate-pulse" style={{ background: activeMeta ? `linear-gradient(to right, ${activeMeta.color}, ${activeMeta.color}3a)` : '#e2e8f0' }} />
+                    <div className="px-6 py-5 border-b border-slate-100 flex items-center gap-3 bg-slate-50/40">
+                      {activeMeta && (
+                        <span className="w-9 h-9 rounded-xl grid place-items-center text-sm shadow border border-slate-200 bg-white animate-fade-in" style={{ color: activeMeta.color }}>
+                          {activeMeta.icon}
+                        </span>
+                      )}
+                      <div>
+                        <h3 className="text-sm font-black text-slate-900 leading-none">{selectedRecommendation.tag}</h3>
+                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Diagnosed by: {selectedRecommendation.agentName || activeMeta?.label}</p>
+                      </div>
+                    </div>
+
+                    <div className="p-6 space-y-4">
+                      <div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Diagnostic Reason</div>
+                        <p className="text-xs font-medium text-slate-650 leading-relaxed bg-slate-50 p-4.5 rounded-2xl border border-slate-150 shadow-inner">
+                          {selectedRecommendation.reason}
+                        </p>
+                      </div>
+
+                      {selectedRecommendation.params.page && (
+                        <div>
+                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Affected Page URL</div>
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[10.5px] text-indigo-650 truncate max-w-full">
+                            {selectedRecommendation.params.page}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Priority Rank</div>
+                          <span className={`inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
+                            selectedRecommendation.priority === 'high' ? 'bg-rose-50 border-rose-100 text-rose-600' : 'bg-slate-50 border-slate-200 text-slate-600'
+                          }`}>
+                            {selectedRecommendation.priority === 'high' ? '⚠️ High' : '• Normal'}
+                          </span>
+                        </div>
+                        {selectedRecommendation.expectedImpact?.label && (
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Expected Return</div>
+                            <span className="inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
+                              🚀 {selectedRecommendation.expectedImpact.label} Impact
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex justify-end">
+                    {draftsByFindingId.has(selectedRecommendation.id) ? (
+                      <button
+                        onClick={() => setActiveDraft(draftsByFindingId.get(selectedRecommendation.id))}
+                        className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition duration-150 shadow-sm active:scale-[0.98] cursor-pointer"
+                      >
+                        View Existing Draft
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => generate(selectedRecommendation)}
+                        disabled={generatingId === selectedRecommendation.id}
+                        className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
+                        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                      >
+                        {generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-xs text-slate-400 italic flex-1 flex flex-col justify-center items-center">
+                  Select a finding row on the left to review detail actions
+                </div>
+              )}
+            </div>
+          )}
+
+          {(tab === 'drafts' || tab === 'implemented') && (
+            <div className="rounded-3xl border border-slate-205 bg-white shadow-md overflow-hidden h-full flex flex-col justify-between min-h-[350px]">
+              {selectedDraftItem ? (
+                <div className="flex-1 flex flex-col justify-between">
+                  <div>
+                    <div className="h-1.5 shrink-0" style={{ background: STAGE_COLOR[selectedDraftItem.status] || '#e2e8f0' }} />
+                    <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/40">
+                      <div className="flex items-center gap-3">
+                        <span className="w-9 h-9 rounded-xl grid place-items-center text-xs shrink-0 border border-slate-200 bg-white">
+                          {GENERATOR_META[selectedDraftItem.action_type]?.icon || '•'}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-black text-slate-900 leading-none">{GENERATOR_META[selectedDraftItem.action_type]?.label || selectedDraftItem.action_type}</h3>
+                          <p className="text-[10px] text-slate-450 font-black uppercase tracking-wider mt-1.5">Action Pipeline Target</p>
+                        </div>
+                      </div>
+                      <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-1 rounded bg-slate-100 text-slate-500 border border-slate-200">
+                        {DRAFT_STATUS_LABEL[selectedDraftItem.status] || selectedDraftItem.status}
+                      </span>
+                    </div>
+
+                    <div className="p-6 space-y-4">
+                      <div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Target Element</div>
+                        <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3.5 text-xs text-slate-700 leading-relaxed font-mono truncate max-w-full">
+                          {selectedDraftItem.input?.page || selectedDraftItem.input?.topic || selectedDraftItem.input?.market || selectedDraftItem.input?.city || 'Root Context'}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 py-2.5 border-b border-slate-100">
+                        <span className="text-[10.5px] text-slate-505 font-bold">Staging Stepper Status</span>
+                        <DraftStepper status={selectedDraftItem.status} />
+                      </div>
+
+                      {selectedDraftItem.implemented_at && (
+                        <div className="text-[10px] font-bold text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-150 flex justify-between">
+                          <span>Merge Timeline:</span>
+                          <span className="text-slate-700 font-bold">{new Date(selectedDraftItem.implemented_at).toLocaleString()}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex justify-end">
+                    <button
+                      onClick={() => setActiveDraft(selectedDraftItem)}
+                      className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10 cursor-pointer"
+                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                    >
+                      Configure & Deploy Draft
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-xs text-slate-400 italic flex-1 flex flex-col justify-center items-center">
+                  Select a draft row on the left to configure staging
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        
+      </div>
 
       {activeDraft && (
         <DraftModal

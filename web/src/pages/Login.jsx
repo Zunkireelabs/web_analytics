@@ -3,15 +3,13 @@ import {
   Sparkles, Check, Lock, AlertCircle, ArrowRight, LogIn, X,
   FileText, Eye, FileSearch, Users, TrendingUp, Gauge, ShieldCheck,
   Plug, Cpu, ClipboardList, CheckCircle2, Globe2, Smartphone, Code2, Link2, MessageSquare, EyeOff,
+  Building, Mail, Info, Key, Globe, Layout, Laptop
 } from 'lucide-react';
 import { api } from '../api.js';
 import Logo from '../components/Logo.jsx';
 
 const PILLS = ['AI Agents', 'Google Search Console', 'Google Analytics 4', 'Automated Reports'];
 
-// How It Works — the real onboarding sequence (server/routes/clients.js's
-// connect flow, then server/job.js's daily/weekly agent orchestration),
-// not an invented generic SaaS funnel.
 const STEPS = [
   { icon: Plug, title: 'Connect your real data', text: 'Grant access to your Google Search Console and Analytics properties — the same data you already have, nothing new to set up.' },
   { icon: Cpu, title: 'AI agents analyze continuously', text: 'Specialist agents run daily and weekly, each looking at one real slice of your search performance — never a single generic model guessing at everything.' },
@@ -19,8 +17,6 @@ const STEPS = [
   { icon: CheckCircle2, title: 'Review and approve every fix', text: 'Agents draft the fix — a title, an FAQ, a schema block — you approve it. Nothing publishes or changes your site without you clicking approve.' },
 ];
 
-// Every entry here names a real agent in server/agents/ — same honesty
-// rule as the AGENTS preview list below (no fabricated capability).
 const AGENT_GRID = [
   { icon: Gauge, name: 'Query Intelligence', text: 'Finds real search-query gainers and droppers week over week.' },
   { icon: TrendingUp, name: 'Opportunity Agent', text: 'Surfaces striking-distance keywords close to page one.' },
@@ -35,21 +31,12 @@ const AGENT_GRID = [
   { icon: FileText, name: 'Executive Report', text: 'Synthesizes every agent into one weekly growth narrative.' },
 ];
 
-// The product's actual operating discipline — real, not marketing fluff:
-// every agent in this codebase either reports a real number or honestly
-// says "insufficient data," never fills a gap with a guess.
 const HONESTY_POINTS = [
   { icon: ShieldCheck, title: 'Never a fabricated metric', text: 'If we don\'t have a real data source for something, we say so — "insufficient data," not a made-up number.' },
   { icon: EyeOff, title: 'No black-box scores', text: 'Every score — Authority, Health, AI Visibility — is a documented formula over real data, and every input is shown.' },
   { icon: FileText, title: 'Evidence on every finding', text: 'A recommendation always cites the real number behind it — no generic advice with nothing backing it up.' },
 ];
 
-// Every entry here must name a real agent in server/agents/ and describe
-// what it actually does — no fabricated specific numbers (this list
-// previously claimed "12 missing content opportunities discovered" / "Found
-// 27 keywords" / a "Technical SEO Agent" that doesn't exist anywhere in the
-// codebase), same honesty rule the product itself enforces on labeled
-// AI output.
 const AGENTS = [
   { icon: FileText, name: 'Executive Summary Agent', status: 'completed', text: 'Synthesizes every specialist agent into one weekly growth summary.' },
   { icon: Eye, name: 'AI Visibility Agent', status: 'running', progress: 72, text: 'Checks schema, FAQ presence, and structural signals that determine AI-answer-engine readiness.' },
@@ -60,19 +47,15 @@ const AGENTS = [
 ];
 
 const METRICS = [
-  { label: 'Organic Growth Forecast', value: '+18%', color: '#34d399' },
-  { label: 'Visibility Score', value: '91/100', color: '#818cf8' },
-  { label: 'Ranking Opportunities', value: '27', color: '#38bdf8' },
-  { label: 'AI Insights Generated', value: '146', color: '#c084fc' },
+  { label: 'Organic Growth Forecast', value: '+18%', color: '#10b981' },
+  { label: 'Visibility Score', value: '91/100', color: '#6C63FF' },
+  { label: 'Ranking Opportunities', value: '27', color: '#f97316' },
+  { label: 'AI Insights Generated', value: '146', color: '#9c27b0' },
 ];
 
 export default function Login({ onAuthed }) {
-  // null | 'login' | 'request' — two separate, equally visible header
-  // entry points (not one button with a buried link inside it), since a
-  // brand-new visitor has no reason to click "Log In" to discover signup.
   const [authModal, setAuthModal] = useState(null);
 
-  // Close whichever modal is open on Escape.
   useEffect(() => {
     if (!authModal) return;
     const onKey = (e) => { if (e.key === 'Escape') setAuthModal(null); };
@@ -81,119 +64,124 @@ export default function Login({ onAuthed }) {
   }, [authModal]);
 
   return (
-    <div className="min-h-screen relative font-sans overflow-hidden"
-      style={{ background: 'linear-gradient(160deg, #0B1020 0%, #101A3A 55%, #0B1020 100%)' }}>
+    <div className="min-h-screen relative font-sans overflow-hidden bg-gradient-to-tr from-[#94a3b8] via-[#cbd5e1] to-[#e2e8f0] text-[#1e293b]">
 
-      {/* faint dotted grid */}
+      {/* Modern dotted grid background */}
       <div aria-hidden className="pointer-events-none absolute inset-0"
-        style={{ backgroundImage: 'radial-gradient(rgba(255,255,255,0.07) 1px, transparent 1px)', backgroundSize: '26px 26px' }} />
+        style={{ backgroundImage: 'radial-gradient(rgba(15,23,42,0.06) 1.2px, transparent 1.2px)', backgroundSize: '32px 32px' }} />
 
-      {/* ambient glows */}
-      <div aria-hidden className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[760px] h-[760px] rounded-full blur-[140px] bg-indigo-500/20" />
-      <div aria-hidden className="pointer-events-none absolute -top-32 -left-24 w-[420px] h-[420px] rounded-full blur-[120px] bg-purple-500/10" />
-      <div aria-hidden className="pointer-events-none absolute -bottom-24 -right-24 w-[420px] h-[420px] rounded-full blur-[120px] bg-sky-500/10" />
+      {/* Titanium steel soft glowing spotlights */}
+      <div aria-hidden className="pointer-events-none absolute top-[-10%] right-[-10%] w-[600px] h-[600px] rounded-full blur-[140px] bg-sky-500/10" />
+      <div aria-hidden className="pointer-events-none absolute top-[40%] left-[-20%] w-[700px] h-[700px] rounded-full blur-[150px] bg-slate-500/10" />
+      <div aria-hidden className="pointer-events-none absolute bottom-[-10%] right-[10%] w-[600px] h-[600px] rounded-full blur-[130px] bg-amber-500/8" />
 
-      {/* floating glow particles */}
-      <span aria-hidden className="pointer-events-none absolute top-[18%] left-[14%] w-2 h-2 rounded-full bg-indigo-400/70 blur-[1px] animate-pulse" />
-      <span aria-hidden className="pointer-events-none absolute top-[26%] right-[12%] w-1.5 h-1.5 rounded-full bg-purple-400/70 blur-[1px] animate-pulse" style={{ animationDelay: '0.6s' }} />
-      <span aria-hidden className="pointer-events-none absolute bottom-[22%] left-[10%] w-1.5 h-1.5 rounded-full bg-sky-400/60 blur-[1px] animate-pulse" style={{ animationDelay: '1.1s' }} />
-      <span aria-hidden className="pointer-events-none absolute bottom-[16%] right-[16%] w-2 h-2 rounded-full bg-indigo-300/60 blur-[1px] animate-pulse" style={{ animationDelay: '1.6s' }} />
+      {/* Floating soft light particles */}
+      <span aria-hidden className="pointer-events-none absolute top-[15%] left-[20%] w-2 h-2 rounded-full bg-amber-500/60 blur-[1px] animate-pulse" />
+      <span aria-hidden className="pointer-events-none absolute top-[30%] right-[15%] w-2.5 h-2.5 rounded-full bg-slate-600/40 blur-[1px] animate-pulse" style={{ animationDelay: '0.5s' }} />
+      <span aria-hidden className="pointer-events-none absolute bottom-[30%] left-[12%] w-2 h-2 rounded-full bg-sky-500/50 blur-[2px] animate-pulse" style={{ animationDelay: '1.2s' }} />
 
       <div className="relative z-10 flex flex-col min-h-screen">
-        {/* top bar — brand left, Log In trigger right */}
-        <header className="w-full flex items-center justify-between px-6 sm:px-10 py-6 lg:py-8">
+        
+        {/* Top Navbar */}
+        <header className="w-full flex items-center justify-between px-6 sm:px-12 py-6 lg:py-8 border-b border-slate-300/40 bg-white/40 backdrop-blur-md">
           <div className="flex items-center gap-3">
-            <div className="bg-white p-2.5 rounded-xl shadow-md">
-              <Logo size={26} />
+            <div className="bg-slate-900 p-2.5 rounded-2xl shadow-md border border-slate-850">
+              <Logo size={24} color="#ffffff" />
             </div>
             <div className="text-left hidden sm:block">
-              <div className="text-sm font-bold tracking-wider text-slate-100 uppercase">Search Analytics AI</div>
-              <div className="text-xs text-indigo-400 font-semibold">by Zunkiree Labs</div>
+              <div className="text-xs font-black tracking-widest text-slate-900 uppercase leading-none">Search Analytics</div>
+              <div className="text-[9px] text-[#ea580c] font-black tracking-widest uppercase mt-1">Zunkiree Labs</div>
             </div>
-            <span className="ml-1 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
-              <Sparkles size={10} strokeWidth={2.5} /> AI Powered
+            <span className="ml-1 inline-flex items-center gap-1 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-slate-900/10 text-slate-800 border border-slate-900/20">
+              <Sparkles size={9} strokeWidth={3} className="text-orange-500" /> AI Agency
             </span>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            <button type="button" onClick={() => setAuthModal('login')}
-              className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.14] backdrop-blur-sm rounded-xl px-4 py-2.5 transition">
-              <LogIn size={15} strokeWidth={2.25} /> Log In
+          <div className="flex items-center gap-3">
+            <button 
+              type="button" 
+              onClick={() => setAuthModal('login')}
+              className="text-xs font-black uppercase tracking-widest text-slate-700 hover:text-slate-950 bg-white/80 hover:bg-white border border-slate-300/80 rounded-xl px-4 py-2.5 shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+            >
+              <LogIn size={13} strokeWidth={2.5} /> Log In
             </button>
-            {/* The primary CTA for a brand-new visitor — equally prominent
-                as Log In, not hidden as a link inside it. */}
-            <button type="button" onClick={() => setAuthModal('request')}
-              className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 rounded-xl px-4 py-2.5 shadow-lg shadow-indigo-500/20 transition">
-              Request Access <ArrowRight size={15} strokeWidth={2.5} />
+            <button 
+              type="button" 
+              onClick={() => setAuthModal('request')}
+              className="text-xs font-black uppercase tracking-widest text-white rounded-xl px-4.5 py-2.5 transition active:scale-95 shadow-md shadow-slate-900/10 hover:shadow-slate-900/25 flex items-center gap-1.5 cursor-pointer"
+              style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
+            >
+              <span>Request Access</span>
+              <ArrowRight size={13} strokeWidth={2.5} className="text-orange-500" />
             </button>
           </div>
         </header>
 
-        {/* hero content — centered; headline/description stay reading-width,
-            the workspace preview breaks out much wider so the page doesn't
-            look flat with dead space down the sides. */}
-        <div className="flex-1 flex flex-col items-center text-center px-6 pb-16 pt-4 lg:pt-8 w-full">
-          <h1 className="text-4xl lg:text-[2.9rem] font-extrabold tracking-tight text-white leading-[1.12] mb-5 max-w-3xl">
-            Turn Search Data Into{' '}
-            <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-              Organic Growth.
+        {/* Hero Section */}
+        <div className="flex-1 flex flex-col items-center text-center px-6 pb-20 pt-14 lg:pt-20 w-full max-w-6xl mx-auto">
+          <h1 className="text-4xl sm:text-5xl lg:text-[3.6rem] font-black tracking-tight text-slate-900 leading-[1.08] mb-6 max-w-4xl">
+            Autonomous Search Insights for{' '}
+            <span className="bg-clip-text text-transparent bg-gradient-to-r from-slate-950 via-[#ea580c] to-indigo-900">
+              Organic Growth Teams.
             </span>
           </h1>
-          <p className="text-slate-400 text-[15px] leading-relaxed max-w-md mb-8">
-            AI agents continuously analyze your Google Search Console and Google Analytics data — surfacing ranking opportunities, content gaps, and growth signals automatically, day and night.
+          
+          <p className="text-slate-750 text-sm sm:text-base leading-relaxed max-w-2xl mb-10 font-bold">
+            Deploy an autonomous workforce of 11 dedicated AI specialist agents to analyze Search Console data, audit indexing issues, and draft complete code solutions in your Action Center.
           </p>
 
-          {/* Live AI workspace preview */}
-          <div className="w-full max-w-6xl">
-            <WorkspacePreview />
-          </div>
-
-          {/* Capability chips */}
-          <div className="flex flex-wrap items-center justify-center gap-2.5 mt-8">
+          <div className="flex flex-wrap items-center justify-center gap-2 mb-12">
             {PILLS.map((p) => (
-              <span key={p} className="inline-flex items-center gap-1.5 text-xs text-slate-300 bg-white/5 border border-white/10 backdrop-blur-sm rounded-full px-3.5 py-2">
-                <Check size={13} strokeWidth={2.5} className="text-emerald-400" /> {p}
+              <span key={p} className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-slate-800 bg-white/70 border border-slate-300 shadow-sm rounded-full px-3.5 py-2">
+                <Check size={12} strokeWidth={3} className="text-orange-600" /> {p}
               </span>
             ))}
           </div>
+
+          {/* SaaS Workspace Preview (High-fidelity light browser mockup) */}
+          <div className="w-full relative group">
+            {/* Ambient backlight glow on hover */}
+            <div className="absolute inset-0 -z-10 rounded-[36px] bg-gradient-to-tr from-slate-900/20 to-amber-500/10 opacity-60 blur-3xl transition duration-500 group-hover:opacity-80" />
+            <WorkspacePreview />
+          </div>
         </div>
 
-        {/* How It Works — the real onboarding + agent-orchestration
-            sequence, so a visitor who lands directly on Request Access
-            (not just the hero) still understands what happens next. */}
-        <section className="w-full px-6 py-20 border-t border-white/[0.06]">
-          <div className="max-w-5xl mx-auto text-center">
-            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">How It Works</h2>
-            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">From your real data to an approved fix — every step grounded in something real, nothing automated behind your back.</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 text-left">
+        {/* How It Works Section */}
+        <section className="w-full px-6 py-24 border-t border-slate-300/40 bg-white/30">
+          <div className="max-w-5xl mx-auto text-center space-y-3">
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider">How It Works</h2>
+            <p className="text-slate-655 text-sm max-w-lg mx-auto pb-10 font-black">Continuous data pipelines and human-in-the-loop approvals.</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 text-left">
               {STEPS.map((s, i) => (
-                <div key={s.title} className="relative bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5">
-                  <span className="absolute -top-3 -left-3 w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-xs font-bold grid place-items-center shadow-lg">{i + 1}</span>
-                  <s.icon size={20} strokeWidth={2} className="text-indigo-300 mb-3" />
-                  <h3 className="text-sm font-bold text-white mb-1.5">{s.title}</h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">{s.text}</p>
+                <div key={s.title} className="relative bg-white/80 border border-white rounded-2xl p-5 hover:border-slate-350 transition duration-150 flex flex-col justify-between min-h-[190px] shadow-sm">
+                  <span className="absolute -top-3.5 -left-2.5 w-7 h-7 rounded-full bg-gradient-to-br from-slate-900 to-slate-850 text-white text-xs font-black grid place-items-center shadow-md">{i + 1}</span>
+                  <div>
+                    <s.icon size={20} strokeWidth={2.25} className="text-orange-600 mb-4" />
+                    <h3 className="text-sm font-black text-slate-900 leading-tight mb-2">{s.title}</h3>
+                  </div>
+                  <p className="text-[11px] text-slate-655 leading-relaxed font-bold">{s.text}</p>
                 </div>
               ))}
             </div>
           </div>
         </section>
 
-        {/* What the agents actually do — every name/description matches a
-            real agent in server/agents/, same honesty rule as the hero's
-            live preview list (no fabricated capability). */}
-        <section className="w-full px-6 py-20 border-t border-white/[0.06] bg-white/[0.015]">
-          <div className="max-w-5xl mx-auto text-center">
-            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">11 Specialist Agents, Not One Generic Model</h2>
-            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">Each agent looks at one real slice of your search performance — here's exactly what each one actually does.</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-left">
+        {/* 11 Specialist Agents Section */}
+        <section className="w-full px-6 py-24 border-t border-slate-300 bg-white/50">
+          <div className="max-w-5xl mx-auto text-center space-y-3">
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider">The Agent Taskforce</h2>
+            <p className="text-slate-655 text-sm max-w-lg mx-auto pb-10 font-black">11 automated specialist workers, never a single generic model.</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 text-left">
               {AGENT_GRID.map((a) => (
-                <div key={a.name} className="flex items-start gap-3 bg-white/[0.03] border border-white/[0.08] rounded-xl p-4">
-                  <span className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 grid place-items-center shrink-0">
-                    <a.icon size={16} strokeWidth={2} className="text-indigo-300" />
+                <div key={a.name} className="flex items-start gap-4 bg-white/60 border border-white/80 rounded-2xl p-4.5 hover:border-slate-300/80 transition duration-150 shadow-sm">
+                  <span className="w-9 h-9 rounded-xl bg-white border border-slate-200 grid place-items-center shrink-0 text-orange-600 shadow-sm">
+                    <a.icon size={16} strokeWidth={2.25} />
                   </span>
                   <div className="min-w-0">
-                    <h3 className="text-sm font-bold text-white">{a.name}</h3>
-                    <p className="text-xs text-slate-400 leading-relaxed mt-0.5">{a.text}</p>
+                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest">{a.name}</h3>
+                    <p className="text-[11.5px] text-slate-600 leading-relaxed mt-1.5 font-bold">{a.text}</p>
                   </div>
                 </div>
               ))}
@@ -201,35 +189,43 @@ export default function Login({ onAuthed }) {
           </div>
         </section>
 
-        {/* Honesty discipline — a genuine, distinctive property of this
-            product (see e.g. server/agents/types.js's insufficient-data
-            contract), not a generic trust badge. */}
-        <section className="w-full px-6 py-20 border-t border-white/[0.06]">
-          <div className="max-w-4xl mx-auto text-center">
-            <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">Not a Black Box</h2>
-            <p className="text-slate-400 text-sm max-w-lg mx-auto mb-12">Most AI SEO tools show you a confident-looking score with no way to check it. Ours doesn't work that way.</p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 text-left">
+        {/* Open Architecture Section */}
+        <section className="w-full px-6 py-24 border-t border-slate-300 bg-white/30">
+          <div className="max-w-4xl mx-auto text-center space-y-3">
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider">Built for Rigor</h2>
+            <p className="text-slate-655 text-sm max-w-lg mx-auto pb-10 font-black">Fully transparent datasets, clear scoring definitions, and zero black-boxes.</p>
+            
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-left">
               {HONESTY_POINTS.map((h) => (
-                <div key={h.title} className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-5">
-                  <h.icon size={20} strokeWidth={2} className="text-emerald-400 mb-3" />
-                  <h3 className="text-sm font-bold text-white mb-1.5">{h.title}</h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">{h.text}</p>
+                <div key={h.title} className="bg-white/80 border border-white/90 rounded-2xl p-5 hover:border-slate-350 transition shadow-sm">
+                  <h.icon size={22} strokeWidth={2} className="text-emerald-600 mb-4" />
+                  <h3 className="text-sm font-black text-slate-900 mb-2 leading-snug">{h.title}</h3>
+                  <p className="text-[11px] text-slate-655 leading-relaxed font-bold">{h.text}</p>
                 </div>
               ))}
             </div>
           </div>
         </section>
 
-        {/* Closing CTA — repeats Request Access so a convinced scroller
-            doesn't have to scroll back to the header. */}
-        <section className="w-full px-6 py-20 border-t border-white/[0.06] text-center">
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3">Ready to see what's really happening in your search performance?</h2>
-          <p className="text-slate-400 text-sm max-w-md mx-auto mb-8">Requests are reviewed by a real person — not instant signup, but you'll be ready to log in the moment it's approved.</p>
-          <button type="button" onClick={() => setAuthModal('request')}
-            className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 rounded-xl px-6 py-3.5 shadow-lg shadow-indigo-500/20 transition">
-            Request Access <ArrowRight size={15} strokeWidth={2.5} />
+        {/* Bottom Call to Action */}
+        <section className="w-full px-6 py-24 border-t border-slate-300 text-center bg-slate-900/[0.01]">
+          <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider mb-4">Stage your organic search growth today.</h2>
+          <p className="text-slate-705 text-sm max-w-md mx-auto mb-8 font-bold">All access requests undergo manual verification. Setup your credentials now to instantly login upon approval.</p>
+          <button 
+            type="button" 
+            onClick={() => setAuthModal('request')}
+            className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-widest text-white rounded-xl px-6 py-3.5 shadow-md shadow-slate-950/10 hover:shadow-slate-950/25 transition active:scale-95 cursor-pointer"
+            style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
+          >
+            <span>Request Access</span>
+            <ArrowRight size={14} strokeWidth={2.5} className="text-orange-500" />
           </button>
         </section>
+
+        {/* Footer */}
+        <footer className="w-full py-8 text-center text-[10px] font-black text-slate-500 uppercase tracking-widest border-t border-slate-300/40">
+          &copy; {new Date().getFullYear()} ZUNKIRREE LABS · SEARCH ANALYTICS AI · ALL RIGHTS RESERVED
+        </footer>
       </div>
 
       {authModal && <LoginModal initialMode={authModal} onClose={() => setAuthModal(null)} onAuthed={onAuthed} />}
@@ -237,21 +233,16 @@ export default function Login({ onAuthed }) {
   );
 }
 
-/* ───────────────────────── LOGIN MODAL ───────────────────────── */
+/* ───────────────────────── LOGIN / REGISTER MODAL ───────────────────────── */
 
 function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
+  const [mode, setMode] = useState(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [showForgot, setShowForgot] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  // 'login' | 'request' — a real signup request, never an immediate account
-  // (see server/routes/login.js's POST /signup-requests — staff must
-  // approve it on /clients before this email/password can ever log in).
-  // Opens directly into whichever the header button the visitor actually
-  // clicked, rather than always starting on login.
-  const [mode, setMode] = useState(initialMode);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -260,7 +251,7 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
     try {
       await api.login(email, password);
       onAuthed();
-    } catch {
+    } catch (e2) {
       setErr('Invalid email or password.');
     } finally {
       setBusy(false);
@@ -269,16 +260,20 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
 
   if (mode === 'request') {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
-        <div aria-hidden className="absolute inset-0 bg-[#050810]/75 backdrop-blur-md" />
-        <div onClick={(e) => e.stopPropagation()}
-          className="w-full rounded-[24px] p-8 lg:p-10 shadow-2xl relative overflow-hidden backdrop-blur-xl fade-up"
-          style={{ maxWidth: 430, background: 'rgba(15,21,48,0.92)', border: '1px solid rgba(255,255,255,0.12)' }}>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
+        <div aria-hidden className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+        <div 
+          onClick={(e) => e.stopPropagation()}
+          className="w-full max-w-[460px] rounded-[32px] p-6 sm:p-8 shadow-2xl relative overflow-hidden backdrop-blur-xl border border-slate-300 bg-slate-100/95 text-slate-800 animate-slide-up"
+        >
+          {/* aura */}
           <div className="absolute -top-24 -left-24 w-48 h-48 rounded-full bg-indigo-500/10 blur-3xl pointer-events-none" />
+          
           <button type="button" onClick={onClose} aria-label="Close"
-            className="absolute top-4 right-4 z-10 w-8 h-8 rounded-lg grid place-items-center text-slate-400 hover:text-white hover:bg-white/[0.08] transition">
-            <X size={16} strokeWidth={2.25} />
+            className="absolute top-4 right-4 z-10 w-8 h-8 rounded-full border border-slate-250 hover:border-slate-350 grid place-items-center text-slate-450 hover:text-slate-850 hover:bg-slate-200/50 transition duration-150 focus:outline-none cursor-pointer">
+            <X size={15} strokeWidth={2.25} />
           </button>
+          
           <RequestAccessForm onBack={() => setMode('login')} />
         </div>
       </div>
@@ -286,99 +281,90 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
-      <div aria-hidden className="absolute inset-0 bg-[#050810]/75 backdrop-blur-md" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
+      <div aria-hidden className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
 
-      <div onClick={(e) => e.stopPropagation()}
-        className="w-full rounded-[24px] p-8 lg:p-10 shadow-2xl relative overflow-hidden backdrop-blur-xl fade-up"
-        style={{ maxWidth: 430, background: 'rgba(15,21,48,0.92)', border: '1px solid rgba(255,255,255,0.12)' }}>
-
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-[440px] rounded-[32px] p-6 sm:p-8 shadow-2xl relative overflow-hidden backdrop-blur-xl border border-slate-300 bg-slate-100/95 text-slate-800 animate-slide-up"
+      >
         <div className="absolute -top-24 -left-24 w-48 h-48 rounded-full bg-indigo-500/10 blur-3xl pointer-events-none" />
 
         <button type="button" onClick={onClose} aria-label="Close"
-          className="absolute top-4 right-4 z-10 w-8 h-8 rounded-lg grid place-items-center text-slate-400 hover:text-white hover:bg-white/[0.08] transition">
-          <X size={16} strokeWidth={2.25} />
+          className="absolute top-4 right-4 z-10 w-8 h-8 rounded-full border border-slate-250 hover:border-slate-350 grid place-items-center text-slate-450 hover:text-slate-850 hover:bg-slate-200/50 transition duration-150 focus:outline-none cursor-pointer">
+          <X size={15} strokeWidth={2.25} />
         </button>
 
-        <div className="relative z-[1]">
-          <div className="mb-3 flex justify-center">
-            <div className="bg-white p-4 rounded-2xl shadow-lg">
-              <Logo size={38} />
+        <div className="relative z-[1] space-y-5">
+          <div className="flex flex-col items-center text-center">
+            <div className="bg-slate-900 p-2.5 rounded-2xl border border-slate-800 shadow-md">
+              <Logo size={28} color="#ffffff" />
+            </div>
+            <div className="mt-3.5">
+              <div className="text-xs font-black text-slate-900 uppercase tracking-widest leading-none">Search Analytics AI</div>
+              <div className="text-[9.5px] text-[#ea580c] font-black uppercase tracking-widest mt-1">Enterprise Login</div>
             </div>
           </div>
-          <div className="text-center">
-            <div className="text-sm font-bold text-white tracking-wide">Search Analytics AI</div>
-            <div className="text-[10px] text-indigo-300 font-bold uppercase tracking-wider mt-1">Enterprise Workspace</div>
-          </div>
 
-          <div className="text-center mt-6 mb-8">
-            <h2 className="text-2xl font-extrabold text-white">Welcome Back</h2>
-            <p className="text-sm text-slate-400 mt-2">Sign in with your email and password to access your workspace.</p>
-          </div>
-
-          <form onSubmit={submit} className="space-y-5">
+          <form onSubmit={submit} className="space-y-4 pt-2">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Email</label>
-              <input
-                type="email"
-                autoFocus
-                autoComplete="username"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@company.com"
-                className="w-full bg-slate-950/60 border border-slate-800/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-xl px-4 py-3.5 text-sm transition-all placeholder-slate-700"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Password</label>
+              <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-550 mb-1.5">Email Address</label>
               <div className="relative">
+                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                  <Mail size={13} />
+                </span>
+                <input
+                  type="email"
+                  autoFocus
+                  required
+                  autoComplete="username"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@company.com"
+                  className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-10 pr-4 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 transition duration-150 text-slate-800 placeholder:text-slate-400"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-555 mb-1.5">Password</label>
+              <div className="relative">
+                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                  <Lock size={13} />
+                </span>
                 <input
                   type="password"
+                  required
                   autoComplete="current-password"
-                  autoCorrect="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••••"
-                  className="w-full bg-slate-950/60 border border-slate-800/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-xl px-4 py-3.5 text-sm transition-all placeholder-slate-700"
+                  className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-10 pr-4 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 transition duration-150 text-slate-800 placeholder:text-slate-400"
                 />
-                <div className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-600">
-                  <Lock size={16} strokeWidth={2} />
-                </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-between text-xs">
-              <label className="flex items-center gap-2 text-slate-400 cursor-pointer select-none">
+            <div className="flex items-center justify-between text-[11px] font-semibold">
+              <label className="flex items-center gap-1.5 text-slate-500 cursor-pointer select-none">
                 <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-indigo-500 cursor-pointer" />
                 Remember Me
               </label>
               <button type="button" onClick={() => setShowForgot((s) => !s)}
-                className="text-indigo-400 hover:text-indigo-300 font-semibold">
+                className="text-indigo-650 hover:text-indigo-800 transition">
                 Forgot Password?
               </button>
             </div>
+            
             {showForgot && (
-              <p className="text-xs text-slate-500 bg-white/[0.03] border border-white/5 rounded-xl px-3.5 py-2.5 -mt-2">
-                Contact your workspace admin to reset your password.
-              </p>
+              <div className="text-[10px] text-slate-650 bg-white border border-slate-200 rounded-xl px-3 py-2 leading-relaxed flex gap-1.5 shadow-sm">
+                <Info size={12} className="text-orange-500 shrink-0 mt-0.5" />
+                <span>Contact your Zunkiree Labs account administrator to request a credential reset.</span>
+              </div>
             )}
 
-            <p className="text-center text-xs text-slate-500">
-              Don't have access yet?{' '}
-              <button type="button" onClick={() => setMode('request')} className="text-indigo-400 hover:text-indigo-300 font-semibold">
-                Request it →
-              </button>
-            </p>
-
             {err && (
-              <div className="bg-rose-500/10 border border-rose-500/20 text-rose-300 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
-                <AlertCircle size={16} strokeWidth={2} className="shrink-0" />
+              <div className="bg-rose-50 border border-rose-100 text-rose-700 px-3.5 py-2.5 rounded-xl text-[11px] flex items-center gap-2">
+                <AlertCircle size={14} className="shrink-0 text-rose-500" />
                 <span>{err}</span>
               </div>
             )}
@@ -386,26 +372,24 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
             <button
               type="submit"
               disabled={busy}
-              className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold py-3.5 rounded-xl text-sm shadow-lg shadow-indigo-500/20 transition duration-200 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              className="w-full text-[10px] font-black uppercase tracking-wider py-3.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-slate-900/10 disabled:opacity-50 cursor-pointer"
+              style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
             >
-              {busy ? (
-                <>
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                  </svg>
-                  Decrypting Database...
-                </>
-              ) : (
-                <>Access Workspace <ArrowRight size={15} strokeWidth={2.5} /></>
-              )}
+              {busy ? 'Verifying Credentials…' : 'Access Workspace'}
             </button>
           </form>
 
-          <div className="mt-7 pt-6 border-t border-slate-800/60 flex flex-col items-center gap-1.5 text-[11px] text-slate-400">
-            <span className="flex items-center gap-1.5"><ShieldCheck size={12} strokeWidth={2.5} className="text-emerald-400/90" /> Secure Multi-Tenant Platform</span>
-            <span className="flex items-center gap-1.5"><Lock size={12} strokeWidth={2.5} className="text-emerald-400/90" /> Encrypted Authentication</span>
-            <span className="text-slate-500 mt-1">Powered by Zunkiree Labs</span>
+          <div className="text-center text-[10.5px] font-bold text-slate-500">
+            Don't have access?{' '}
+            <button type="button" onClick={() => setMode('request')} className="text-indigo-650 hover:text-indigo-800 font-bold cursor-pointer">
+              Request Access
+            </button>
+          </div>
+
+          <div className="pt-4 border-t border-slate-200 flex justify-center gap-4 text-[9px] font-black text-slate-400 uppercase tracking-widest">
+            <span className="flex items-center gap-1"><ShieldCheck size={11} className="text-emerald-600" /> Secure Link</span>
+            <span>·</span>
+            <span className="flex items-center gap-1"><Lock size={11} className="text-emerald-600" /> AES-256</span>
           </div>
         </div>
       </div>
@@ -415,16 +399,6 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
 
 /* ───────────────────────── REQUEST ACCESS FORM ───────────────────────── */
 
-const inputCls = 'w-full bg-slate-950/60 border border-slate-800/80 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white rounded-xl px-4 py-3.5 text-sm transition-all placeholder-slate-700';
-const labelCls = 'block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2';
-
-// A real submission, never an immediate account — see POST /signup-requests
-// (server/routes/login.js). Staff review and approve/reject it from the
-// existing internal /clients page before any real login exists for this
-// email/password. `honeypot` is a hidden field real users never see or
-// fill in; a bot that fills every input on the page fills this too, and
-// the backend silently no-ops instead of creating a row — no CAPTCHA/
-// third-party dependency needed for this low-traffic B2B form.
 function RequestAccessForm({ onBack }) {
   const [companyName, setCompanyName] = useState('');
   const [websiteDomain, setWebsiteDomain] = useState('');
@@ -455,92 +429,127 @@ function RequestAccessForm({ onBack }) {
 
   if (done) {
     return (
-      <div className="relative z-[1] text-center py-4">
-        <div className="mb-3 flex justify-center">
-          <div className="bg-white p-4 rounded-2xl shadow-lg"><Logo size={38} /></div>
+      <div className="relative z-[1] text-center space-y-4 py-4">
+        <div className="flex justify-center">
+          <div className="bg-slate-900 p-2.5 rounded-2xl border border-slate-800 shadow-md">
+            <Logo size={28} color="#ffffff" />
+          </div>
         </div>
-        <h2 className="text-xl font-extrabold text-white mb-2">Request submitted</h2>
-        <p className="text-sm text-slate-400 leading-relaxed">
-          We'll review your request and be in touch once it's approved — you'll be able to log in with the email
-          and password you just set.
+        <h2 className="text-base font-black text-slate-850 uppercase tracking-wider">Request Submitted</h2>
+        <p className="text-xs text-slate-500 leading-relaxed font-bold">
+          Your request is in the pending review pipeline. Once approved by Zunkiree staff, you will be able to log in with the credentials you just configured.
         </p>
-        <button type="button" onClick={onBack}
-          className="mt-6 text-sm font-semibold text-indigo-400 hover:text-indigo-300">
-          ← Back to log in
+        <button 
+          type="button" 
+          onClick={onBack}
+          className="text-xs font-black uppercase tracking-wider text-indigo-650 hover:text-indigo-800 cursor-pointer"
+        >
+          ← Return to Login
         </button>
       </div>
     );
   }
 
   return (
-    <div className="relative z-[1]">
-      <div className="mb-3 flex justify-center">
-        <div className="bg-white p-4 rounded-2xl shadow-lg"><Logo size={38} /></div>
-      </div>
-      <div className="text-center mt-6 mb-8">
-        <h2 className="text-2xl font-extrabold text-white">Request Access</h2>
-        <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-          AI agents that continuously analyze your Google Search Console and Analytics data. Tell us about your
-          company below — a real person reviews every request, so this isn't instant signup, but you'll set your
-          password now and be ready to log in the moment it's approved.
-        </p>
+    <div className="relative z-[1] space-y-4">
+      <div className="flex flex-col items-center text-center">
+        <div className="bg-slate-900 p-2.5 rounded-2xl border border-slate-800 shadow-md">
+          <Logo size={28} color="#ffffff" />
+        </div>
+        <div className="mt-3.5">
+          <h2 className="text-sm font-black text-slate-850 uppercase tracking-widest leading-none">Request Portal Access</h2>
+          <p className="text-[10px] text-slate-500 font-bold mt-1.5 leading-relaxed">
+            Fill in your company profiles below. Setting your admin credentials now speeds up instant loading upon approval.
+          </p>
+        </div>
       </div>
 
-      <form onSubmit={submit} className="space-y-4">
-        {/* Visually hidden from real users, present for bots that fill every field. */}
+      <form onSubmit={submit} className="space-y-3.5">
         <div aria-hidden="true" style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, overflow: 'hidden' }}>
           <label htmlFor="company_url">Company URL</label>
           <input id="company_url" type="text" tabIndex={-1} autoComplete="off"
             value={honeypot} onChange={(e) => setHoneypot(e.target.value)} />
         </div>
 
-        <div>
-          <label className={labelCls}>Company name</label>
-          <input type="text" required autoFocus value={companyName} onChange={(e) => setCompanyName(e.target.value)}
-            placeholder="Acme Corp" className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls}>Website (optional)</label>
-          <input type="text" value={websiteDomain} onChange={(e) => setWebsiteDomain(e.target.value)}
-            placeholder="acme.com" className={inputCls} />
-        </div>
-        <div>
-          <label className={labelCls}>Work email</label>
-          <input type="email" required autoComplete="username" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)}
-            placeholder="you@acme.com" className={inputCls} />
-        </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={labelCls}>Password</label>
-            <input type="password" required autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
-              placeholder="At least 8 characters" className={inputCls} minLength={8} />
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-500 mb-1">Company Name</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Building size={12} />
+              </span>
+              <input type="text" required autoFocus value={companyName} onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="Acme Corp" className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+            </div>
           </div>
           <div>
-            <label className={labelCls}>Confirm</label>
-            <input type="password" required autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
-              placeholder="Repeat password" className={inputCls} minLength={8} />
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Website</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Globe size={12} />
+              </span>
+              <input type="text" value={websiteDomain} onChange={(e) => setWebsiteDomain(e.target.value)}
+                placeholder="acme.com" className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+            </div>
           </div>
         </div>
+        
         <div>
-          <label className={labelCls}>Anything else? (optional)</label>
+          <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Work Email</label>
+          <div className="relative">
+            <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+              <Mail size={12} />
+            </span>
+            <input type="email" required autoComplete="username" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)}
+              placeholder="you@acme.com" className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-500 mb-1">Password</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Lock size={12} />
+              </span>
+              <input type="password" required autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 chars" className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" minLength={8} />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-500 mb-1">Confirm</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Lock size={12} />
+              </span>
+              <input type="password" required autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Repeat password" className="w-full text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" minLength={8} />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Brief Description (Optional)</label>
           <textarea rows={2} value={message} onChange={(e) => setMessage(e.target.value)}
-            placeholder="What are you hoping to track?" className={inputCls} />
+            placeholder="What domains do you wish to monitor?" className="w-full text-xs font-semibold border border-slate-250 rounded-xl p-3 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-850 placeholder:text-slate-400 resize-none" />
         </div>
 
         {err && (
-          <div className="bg-rose-500/10 border border-rose-500/20 text-rose-300 px-4 py-3 rounded-xl text-sm flex items-center gap-2">
-            <AlertCircle size={16} strokeWidth={2} className="shrink-0" />
+          <div className="bg-rose-50 border border-rose-100 text-rose-700 px-3.5 py-2.5 rounded-xl text-[11px] flex items-center gap-2">
+            <AlertCircle size={14} className="shrink-0 text-rose-500" />
             <span>{err}</span>
           </div>
         )}
 
         <button type="submit" disabled={busy}
-          className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold py-3.5 rounded-xl text-sm shadow-lg shadow-indigo-500/20 transition duration-200 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
-          {busy ? 'Submitting…' : 'Submit request'}
+          className="w-full text-[10px] font-black uppercase tracking-wider py-3.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-slate-900/10 disabled:opacity-50 cursor-pointer"
+          style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
+        >
+          {busy ? 'Submitting Application…' : 'Submit Access Request'}
         </button>
         <button type="button" onClick={onBack}
-          className="w-full text-center text-xs font-semibold text-slate-400 hover:text-slate-200">
-          ← Back to log in
+          className="w-full text-center text-[10px] font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest cursor-pointer">
+          ← Back to Login
         </button>
       </form>
     </div>
@@ -551,41 +560,67 @@ function RequestAccessForm({ onBack }) {
 
 function WorkspacePreview() {
   return (
-    <div className="w-full rounded-[28px] p-5 lg:p-6 text-left backdrop-blur-xl relative overflow-hidden"
-      style={{ background: 'rgba(255,255,255,0.065)', border: '1px solid rgba(255,255,255,0.14)', boxShadow: '0 24px 60px -20px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.06)' }}>
+    <div className="w-full rounded-[36px] bg-slate-950 border border-slate-800 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.08)] text-left relative overflow-hidden">
+      
+      {/* Browser chrome header bar */}
+      <div className="h-11 border-b border-slate-900 bg-slate-950 px-5 flex items-center justify-between shrink-0 select-none">
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full bg-rose-500/80" />
+          <span className="w-3 h-3 rounded-full bg-amber-500/80" />
+          <span className="w-3 h-3 rounded-full bg-emerald-500/80" />
+        </div>
+        <div className="w-1/2 max-w-sm h-6 bg-slate-900 rounded-lg border border-slate-850 flex items-center justify-center gap-1.5 text-[10px] font-mono text-slate-500 font-semibold select-all">
+          <Laptop size={10} className="text-slate-655" />
+          <span>zunkiree.ai/Nepal-Travel/growth</span>
+        </div>
+        <div className="flex items-center gap-2 text-slate-600">
+          <Layout size={13} />
+        </div>
+      </div>
 
-      {/* header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span className="relative flex w-2 h-2">
-            <span className="absolute inline-flex w-full h-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
-            <span className="relative inline-flex w-2 h-2 rounded-full bg-emerald-400" />
+      <div className="p-6 space-y-6">
+        {/* Workspace Active Agent Header */}
+        <div className="flex items-center justify-between border-b border-slate-900 pb-4.5">
+          <div className="flex items-center gap-2.5">
+            <span className="relative flex w-2.5 h-2.5">
+              <span className="absolute inline-flex w-full h-full rounded-full bg-emerald-450 opacity-75 animate-ping" />
+              <span className="relative inline-flex w-2.5 h-2.5 rounded-full bg-emerald-550" />
+            </span>
+            <div>
+              <h3 className="text-xs font-black uppercase tracking-widest text-slate-350">Live Agent Taskforce Activity</h3>
+              <p className="text-[9.5px] text-slate-500 font-bold mt-0.5">Specialist workers analyzing index channels in real time</p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 rounded-full px-2.5 py-1">
+            <Sparkles size={9} strokeWidth={3} className="text-orange-500" /> Active Audits
           </span>
-          <span className="text-xs font-bold text-white tracking-wide">AI Agent Activity</span>
         </div>
-        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 rounded-full px-2.5 py-1">
-          <Sparkles size={10} strokeWidth={2.5} /> Live
-        </span>
-      </div>
 
-      {/* agent rows — 2-column grid once there's room, so the wider panel
-          reads as a balanced dashboard grid instead of one long stretched list */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-0.5">
-        {AGENTS.map((a) => <AgentRow key={a.name} {...a} />)}
-      </div>
-
-      {/* metrics */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4 pt-4 border-t border-white/[0.06]">
-        {METRICS.map((m) => <MetricTile key={m.label} {...m} />)}
-      </div>
-
-      {/* trend chart */}
-      <div className="mt-3 bg-white/[0.03] border border-white/[0.06] rounded-xl p-3">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] font-bold text-slate-300">Organic Visibility Trend</span>
-          <span className="text-[9px] text-emerald-400 font-bold">+18% ▲</span>
+        {/* 2-Column Grid for Agents */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-1 bg-slate-900/50 rounded-2xl border border-slate-850 p-4">
+          {AGENTS.map((a) => <AgentRow key={a.name} {...a} />)}
         </div>
-        <PreviewChart />
+
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch pt-2">
+          {/* Left: Metrics summary */}
+          <div className="md:col-span-6 grid grid-cols-2 gap-3.5">
+            {METRICS.map((m) => <MetricTile key={m.label} {...m} />)}
+          </div>
+          
+          {/* Right: organic trend */}
+          <div className="md:col-span-6 bg-slate-900/60 border border-slate-850 rounded-2xl p-4 flex flex-col justify-between">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <span className="text-[9.5px] font-black uppercase tracking-widest text-slate-400">Search Visibility Forecast</span>
+                <p className="text-[9px] text-slate-550 font-bold mt-0.5">Staged query opportunities impact estimate</p>
+              </div>
+              <span className="text-[10px] text-emerald-450 font-black uppercase tracking-wider bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full shadow-sm">+18% ▲</span>
+            </div>
+            <div className="w-full flex-1 flex items-end">
+              <PreviewChart />
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -594,10 +629,12 @@ function WorkspacePreview() {
 function AgentRow({ icon: Icon, name, status, progress, text }) {
   const running = status === 'running';
   return (
-    <div className="flex items-start gap-2.5 rounded-xl px-2 py-2 hover:bg-white/[0.03] transition">
-      <span className="relative flex w-6 h-6 rounded-lg items-center justify-center shrink-0 mt-0.5"
-        style={{ background: running ? 'rgba(129,140,248,0.15)' : 'rgba(52,211,153,0.15)' }}>
-        <Icon size={12} strokeWidth={2.25} style={{ color: running ? '#a5b4fc' : '#6ee7b7' }} />
+    <div className="flex items-start gap-3 rounded-2xl px-3 py-3 hover:bg-slate-900/60 border border-transparent hover:border-slate-850 transition duration-150">
+      <span className="relative flex w-7.5 h-7.5 rounded-xl items-center justify-center shrink-0 mt-0.5 border border-slate-800 bg-slate-900 shadow-sm"
+        style={{ 
+          color: running ? '#818cf8' : '#10b981'
+        }}>
+        <Icon size={13} strokeWidth={2.25} />
         {running && (
           <span className="absolute -top-0.5 -right-0.5 flex w-2 h-2">
             <span className="absolute inline-flex w-full h-full rounded-full bg-indigo-400 opacity-75 animate-ping" />
@@ -606,52 +643,55 @@ function AgentRow({ icon: Icon, name, status, progress, text }) {
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[12px] font-semibold text-white truncate">{name}</span>
-          <span className={`text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 ${
-            running ? 'text-indigo-300 bg-indigo-500/10' : 'text-emerald-300 bg-emerald-500/10'
+        <div className="flex items-center justify-between gap-2 leading-none">
+          <span className="text-[11.5px] font-black text-slate-200 truncate">{name}</span>
+          <span className={`text-[8.5px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full shrink-0 border bg-slate-950 ${
+            running 
+              ? 'text-indigo-400 border-indigo-500/20' 
+              : 'text-emerald-400 border-emerald-500/20'
           }`}>
-            {running ? 'Running…' : 'Completed'}
+            {running ? 'Audit running' : 'Analysis ok'}
           </span>
         </div>
-        <p className="text-[10.5px] text-slate-400 leading-snug mt-0.5">{text}</p>
+        <p className="text-[10px] font-semibold text-slate-400 leading-relaxed mt-1.5">{text}</p>
+        
         {running && (
-          <div className="mt-1.5 h-1 rounded-full bg-white/[0.06] overflow-hidden relative">
+          <div className="mt-2 h-1 rounded-full bg-slate-950 overflow-hidden relative border border-slate-950">
             {progress != null ? (
-              <div className="h-full rounded-full" style={{ width: `${progress}%`, background: 'linear-gradient(90deg,#6C63FF,#a78bfa)' }} />
+              <div className="h-full rounded-full" style={{ width: `${progress}%`, background: 'linear-gradient(90deg,#6C63FF,#8b5cf6)' }} />
             ) : (
-              <div className="absolute inset-y-0 left-0 w-1/3 rounded-full shimmer-sweep"
-                style={{ background: 'linear-gradient(90deg,transparent,#a78bfa,transparent)' }} />
+              <div className="absolute inset-y-0 left-0 w-1/3 rounded-full shimmer-sweep animate-pulse"
+                style={{ background: 'linear-gradient(90deg,transparent,#8b5cf6,transparent)' }} />
             )}
           </div>
         )}
       </div>
-      {progress != null && <span className="text-[10px] font-bold text-indigo-300 shrink-0 mt-0.5">{progress}%</span>}
+      {progress != null && <span className="text-[9.5px] font-black font-mono text-indigo-400 shrink-0 mt-0.5 ml-1">{progress}%</span>}
     </div>
   );
 }
 
 function MetricTile({ label, value, color }) {
   return (
-    <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl px-2.5 py-2">
-      <div className="text-[8.5px] text-slate-300 font-semibold uppercase tracking-wide leading-tight" style={{ minHeight: '2.2em' }}>{label}</div>
-      <div className="text-sm font-black mt-0.5" style={{ color }}>{value}</div>
+    <div className="bg-slate-900/70 border border-slate-850 rounded-2xl p-4 flex flex-col justify-between shadow-sm">
+      <div className="text-[9px] font-black uppercase tracking-widest text-slate-450 leading-none">{label}</div>
+      <div className="text-xl font-black mt-3 font-mono leading-none" style={{ color }}>{value}</div>
     </div>
   );
 }
 
 function PreviewChart() {
   return (
-    <svg viewBox="0 0 280 44" className="w-full" preserveAspectRatio="none">
+    <svg viewBox="0 0 280 60" className="w-full h-14" preserveAspectRatio="none">
       <defs>
         <linearGradient id="loginPreviewFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#8b5cf6" stopOpacity="0.35" />
-          <stop offset="1" stopColor="#8b5cf6" stopOpacity="0" />
+          <stop offset="0" stopColor="#6C63FF" stopOpacity="0.15" />
+          <stop offset="1" stopColor="#6C63FF" stopOpacity="0" />
         </linearGradient>
       </defs>
-      <path d="M0,34 28,29 56,31 84,20 112,24 140,14 168,19 196,9 224,15 252,4 280,10 280,44 0,44 Z" fill="url(#loginPreviewFill)" />
-      <polyline points="0,34 28,29 56,31 84,20 112,24 140,14 168,19 196,9 224,15 252,4 280,10"
-        fill="none" stroke="#a78bfa" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M0,45 28,38 56,41 84,28 112,32 140,20 168,26 196,12 224,20 252,5 280,12 280,60 0,60 Z" fill="url(#loginPreviewFill)" />
+      <polyline points="0,45 28,38 56,41 84,28 112,32 140,20 168,26 196,12 224,20 252,5 280,12"
+        fill="none" stroke="#6C63FF" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
