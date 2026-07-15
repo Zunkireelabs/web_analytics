@@ -76,7 +76,14 @@ function shapeFinding(f, meta, groundedById) {
   let recommendedAction = f.recommendedAction;
   if (recommendedAction?.generatorId) {
     const grounded = groundedById.get(f.id);
-    recommendedAction = grounded ? { ...recommendedAction, params: grounded.params } : null;
+    // Ungrounded → strip generatorId/params (not the whole object) so the
+    // frontend's `action?.generatorId` check still correctly hides the
+    // "Fix" button, but `label` survives — losing it meant a perfectly
+    // real, human-written headline (e.g. "Fix heading structure: exactly
+    // one H1...") silently fell back to a generic "<Category> issue" title.
+    recommendedAction = grounded
+      ? { ...recommendedAction, params: grounded.params }
+      : { ...recommendedAction, generatorId: null, params: null };
   }
   return {
     id: f.id, agentId: f.agentId, agentName: meta?.name, category: meta?.category || 'seo',

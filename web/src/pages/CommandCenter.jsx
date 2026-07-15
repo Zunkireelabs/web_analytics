@@ -259,7 +259,7 @@ export default function CommandCenter() {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile icon="⚠️" label="Critical Issues" value={data?.stats?.criticalIssues ?? '—'} tone="critical" sub="Needs attention this week" loading={data === null} />
+        <StatTile icon="⚠️" label="Critical Issues" value={data?.stats?.criticalIssues ?? '—'} tone="critical" sub="Top 3 shown below" loading={data === null} />
         <StatTile icon="✨" label="New Opportunities" value={data?.stats?.newOpportunities ?? '—'} tone="accent" sub="Actionable, ready to draft" loading={data === null} />
         <StatTile icon="🤖" label="Analysis Status" value={status.label.split(' ')[0]} sub="10 specialist agents · view orchestration →" loading={data === null} to="/ai-orchestration" />
         <StatTile icon="🕐" label="Last Analysis" value={data?.stats?.lastAnalyzedAt ? timeAgo(data.stats.lastAnalyzedAt) : '—'} sub="Refresh anytime" loading={data === null} />
@@ -269,7 +269,8 @@ export default function CommandCenter() {
           purpose ("avoid overwhelming users"); the full breadth lives in AI
           Discoveries below. */}
       <section>
-        <SectionHeader title="Critical Issues" count={data ? `${data.criticalIssues.length} shown` : null}
+        <SectionHeader title="Critical Issues"
+          count={data ? `${data.criticalIssues.length} of ${data.stats.criticalIssues} shown` : null}
           desc="The highest-priority problems only — title, evidence, why it matters, and one clear fix." />
         {data === null ? (
           <GridSkeleton count={3} className="grid grid-cols-1 md:grid-cols-3 gap-3" />

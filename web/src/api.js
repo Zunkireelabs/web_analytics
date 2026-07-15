@@ -102,6 +102,18 @@ export function daysAgo(n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Shortens a full page URL down to just its path, e.g.
+// "https://zunkireelabs.com/services/consulting" -> "/services/consulting" —
+// which page a finding/action is actually about is the single most useful
+// piece of context on a card face (it's what tells two otherwise-identical
+// "Add an FAQ section" cards apart), and nobody needs the domain repeated
+// on every card of a single-site dashboard. Falls back to the raw value
+// (or null) if it isn't a parseable URL.
+export function pagePathFor(url) {
+  if (!url) return null;
+  try { return new URL(url).pathname || '/'; } catch { return url; }
+}
+
 // Compact "Xm/Xh/Xd ago" for a timestamp — shared by any page showing
 // freshness of a persisted run (Action Center, AI Command Center).
 export function timeAgo(iso) {
