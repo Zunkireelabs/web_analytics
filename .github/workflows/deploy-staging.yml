@@ -88,8 +88,14 @@ jobs:
             TZ=${{ vars.TZ }}
 
             # ── Cron — disabled on staging to avoid duplicate emails/ingests ─
+            # DISABLE_CRON only skips the recurring timer; runStartupCatchup()
+            # in server/index.js fires on every boot regardless, gated by its
+            # own separate DISABLE_CATCHUP flag — without it, every staging
+            # container restart re-runs real ingestion/weekly/executive jobs
+            # (including emailing real connected clients) for every site.
             CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
             DISABLE_CRON=true
+            DISABLE_CATCHUP=true
 
             # ── Deployment ───────────────────────────────────────────────────
             ANALYTICS_DOMAIN=${{ vars.STAGING_DOMAIN }}
