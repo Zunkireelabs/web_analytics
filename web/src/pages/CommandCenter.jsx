@@ -91,17 +91,34 @@ export default function CommandCenter() {
   // ?highlight=health-score for a health-drop alert, which has no single
   // finding to point at. Scrolls to and briefly rings the matching card
   // once the real data (and therefore the DOM node) has loaded.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const highlightId = searchParams.get('highlight');
+  const tab = searchParams.get('tab') === 'details' ? 'details' : 'briefing';
+  const goTab = (t) => setSearchParams((prev) => {
+    const next = new URLSearchParams(prev);
+    next.set('tab', t);
+    return next;
+  });
   const [highlightActive, setHighlightActive] = useState(true);
   useEffect(() => {
     if (!highlightId || data === null) return;
+    // Notification links (NotificationBell.jsx) only know a finding id, not
+    // which tab it lives on — Briefing and Details split the same findings
+    // pool, so find the owning array first and switch tabs before querying
+    // the DOM, rather than guessing from the id's shape.
+    const ownerTab = highlightId === 'health-score' ? 'briefing'
+      : data.criticalIssues.some((f) => f.id === highlightId) ? 'briefing'
+      : data.discoveries.some((f) => f.id === highlightId) ? 'briefing'
+      : data.growthOpportunities.some((f) => f.id === highlightId) ? 'briefing'
+      : data.watchlist.some((w) => w.findingId === highlightId) ? 'details'
+      : null;
+    if (ownerTab && ownerTab !== tab) { goTab(ownerTab); return; }
     const el = document.querySelector(`[data-finding-id="${CSS.escape(highlightId)}"]`);
     if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     const t = setTimeout(() => setHighlightActive(false), 4000);
     return () => clearTimeout(t);
-  }, [highlightId, data]);
+  }, [highlightId, data, tab]);
   const highlightClass = (id) => (highlightId === id && highlightActive ? 'ring-2 ring-[#6C63FF] ring-offset-2 rounded-2xl transition-shadow' : '');
 
   const checkIntegration = async (id) => {
@@ -206,6 +223,26 @@ export default function CommandCenter() {
 
       {error && <div className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 fade-up">{error}</div>}
 
+      {/* Briefing = the highest-value stuff only, so first load is short and
+          scannable. Details holds the rest, one click away — same data
+          object either way, this only changes what's rendered. */}
+      <div className="flex items-center gap-2 border-b border-slate-100">
+        <button type="button" onClick={() => goTab('briefing')}
+          className={`px-3 py-2 text-sm font-semibold border-b-2 -mb-px transition ${
+            tab === 'briefing' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}>
+          Briefing
+        </button>
+        <button type="button" onClick={() => goTab('details')}
+          className={`px-3 py-2 text-sm font-semibold border-b-2 -mb-px transition ${
+            tab === 'details' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}>
+          Details
+        </button>
+      </div>
+
+      {tab === 'briefing' && (<>
+
       {/* Website Health + Executive AI Briefing — the hero. A number never
           appears without its explanation next to it. */}
       <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
@@ -290,6 +327,10 @@ export default function CommandCenter() {
           </div>
         )}
       </section>
+
+      </>)}
+
+      {tab === 'details' && (<>
 
       {/* Top Competitors — AI-identified (no external SEO API required),
           crawled, and ranked on a real computed score (same structural
@@ -423,6 +464,8 @@ export default function CommandCenter() {
           {data === null ? <CardSkeleton h="h-56" /> : <ChangesTimeline items={data.recentChanges} matchHeight={activityHeight} />}
         </section>
       </div>
+
+      </>)}
 
       {activeDraft && <DraftModal draft={activeDraft} onClose={() => setActiveDraft(null)} onSaved={setActiveDraft} onDeleted={() => setActiveDraft(null)} />}
     </div>
