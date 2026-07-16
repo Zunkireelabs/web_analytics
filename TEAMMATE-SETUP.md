@@ -125,6 +125,8 @@ You should see the dashboard. Press Ctrl+C to stop.
 
 This makes the server start automatically when you log in and restart itself if it ever crashes — exactly how Yukta's machine runs it.
 
+> **Note (2026-07-16):** production (`main`) has never actually been deployed to the VPS, so the `stage` deployment is temporarily doubling as the live automation host for the company's own site — its cron is intentionally left on (see `.github/workflows/deploy-staging.yml`) so the daily email fires without depending on any one laptop being on. Once a real production launch happens, this local macOS setup should go back to being dev-only, and the interim staging cron should be revisited (especially before onboarding any real/test client onto the staging database, since its cron being live would email them too).
+
 ### 7a — Find your Node path
 
 ```bash
