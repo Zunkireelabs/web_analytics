@@ -1,8 +1,12 @@
 import pg from 'pg';
 import 'dotenv/config';
 
-// Neon serverless Postgres: use the POOLED connection string and keep max small.
-// Serverless Postgres limits concurrent connections, so a tiny pool is correct.
+// Neon serverless Postgres: DATABASE_URL must be the POOLED (PgBouncer,
+// "-pooler" hostname) connection string, never the direct one — the direct
+// endpoint's connection ceiling is low enough that Command Center's ~15-20
+// queries per page load can exhaust a pool of any size under light
+// concurrency (two tabs, a reload racing an in-flight request). Once
+// genuinely pooled, `max: 10` is safely within Neon's pooler limits.
 const { Pool } = pg;
 
 if (!process.env.DATABASE_URL) {
@@ -11,7 +15,7 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 3,
+  max: 10,
   idleTimeoutMillis: 10_000,
   connectionTimeoutMillis: 10_000,
   ssl: { rejectUnauthorized: false },
