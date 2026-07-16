@@ -38,12 +38,12 @@ const HONESTY_POINTS = [
 ];
 
 const AGENTS = [
-  { icon: FileText, name: 'Executive Summary Agent', status: 'completed', text: 'Synthesizes every specialist agent into one weekly growth summary.' },
-  { icon: Eye, name: 'AI Visibility Agent', status: 'running', progress: 72, text: 'Checks schema, FAQ presence, and structural signals that determine AI-answer-engine readiness.' },
-  { icon: FileSearch, name: 'Content Gap Agent', status: 'completed', text: 'Scores ranking pages for content completeness gaps.' },
-  { icon: Users, name: 'Competitor Intelligence', status: 'running', text: 'Identifies real competitors and compares content, SEO structure, and positioning.' },
-  { icon: TrendingUp, name: 'Ranking Opportunity Agent', status: 'running', text: 'Finds striking-distance keywords close to page one.' },
-  { icon: Gauge, name: 'Query Intelligence Agent', status: 'completed', text: 'Analyzed search queries for gainers and droppers.' },
+  { icon: FileText, name: 'Executive Summary Agent', status: 'completed', text: 'Synthesizes every specialist agent into one weekly growth summary.', log: 'SUCCESS: Compiled 6 agent reports into PDF briefing' },
+  { icon: Eye, name: 'AI Visibility Agent', status: 'running', progress: 72, text: 'Checks schema, FAQ presence, and structural signals that determine AI-answer-engine readiness.', log: 'RUNNING: Auditing 18/25 URLs for schema validation' },
+  { icon: FileSearch, name: 'Content Gap Agent', status: 'completed', text: 'Scores ranking pages for content completeness gaps.', log: 'SUCCESS: Identified 4 high-priority content gaps' },
+  { icon: Users, name: 'Competitor Intelligence', status: 'running', text: 'Identifies real competitors and compares content, SEO structure, and positioning.', log: 'RUNNING: Fetching keyword gaps for 3 competitor domains' },
+  { icon: TrendingUp, name: 'Ranking Opportunity Agent', status: 'running', text: 'Finds striking-distance keywords close to page one.', log: 'RUNNING: Scanning 250 SERP keywords in striking-distance' },
+  { icon: Gauge, name: 'Query Intelligence Agent', status: 'completed', text: 'Analyzed search queries for gainers and droppers.', log: 'SUCCESS: Parsed GSC search query performance trends' },
 ];
 
 const METRICS = [
@@ -52,6 +52,20 @@ const METRICS = [
   { label: 'Ranking Opportunities', value: '27', color: '#f97316' },
   { label: 'AI Insights Generated', value: '146', color: '#9c27b0' },
 ];
+
+const AGENT_TAGS = {
+  'Query Intelligence': { tag: 'INPUT: GSC API', color: 'bg-orange-500/10 text-orange-400 border-orange-500/25' },
+  'Opportunity Agent': { tag: 'FOCUS: RANKINGS', color: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/25' },
+  'Country Intelligence': { tag: 'INPUT: GEOGRAPHY', color: 'bg-orange-500/10 text-orange-400 border-orange-500/25' },
+  'Device Intelligence': { tag: 'FOCUS: PLATFORMS', color: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/25' },
+  'AI Visibility': { tag: 'INPUT: AI ENGINES', color: 'bg-purple-500/10 text-purple-400 border-purple-500/25' },
+  'Content Gap': { tag: 'FOCUS: ON-PAGE', color: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/25' },
+  'Competitor Intelligence': { tag: 'INPUT: SERP DATA', color: 'bg-orange-500/10 text-orange-400 border-orange-500/25' },
+  'Technical SEO': { tag: 'FOCUS: WEB VITALS', color: 'bg-indigo-500/10 text-indigo-400 border-indigo-500/25' },
+  'Authority Score': { tag: 'INPUT: BACKLINKS', color: 'bg-orange-500/10 text-orange-400 border-orange-500/25' },
+  'AI Recommendation': { tag: 'INPUT: LLM AUDIT', color: 'bg-purple-500/10 text-purple-400 border-purple-500/25' },
+  'Executive Report': { tag: 'FOCUS: DIGEST', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25' },
+};
 
 export default function Login({ onAuthed }) {
   const [authModal, setAuthModal] = useState(null);
@@ -152,36 +166,59 @@ export default function Login({ onAuthed }) {
             <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider">How It Works</h2>
             <p className="text-slate-655 text-sm max-w-lg mx-auto pb-10 font-black">Continuous data pipelines and human-in-the-loop approvals.</p>
             
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 text-left">
+            <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 text-left mt-8">
+              {/* Dotted connector line for large screens */}
+              <div className="hidden lg:block absolute top-[40%] left-[10%] right-[10%] h-[2px] border-t-2 border-dashed border-slate-300 -z-10" />
+              
               {STEPS.map((s, i) => (
-                <div key={s.title} className="relative bg-white/80 border border-white rounded-2xl p-5 hover:border-slate-350 transition duration-150 flex flex-col justify-between min-h-[190px] shadow-sm">
-                  <span className="absolute -top-3.5 -left-2.5 w-7 h-7 rounded-full bg-gradient-to-br from-slate-900 to-slate-850 text-white text-xs font-black grid place-items-center shadow-md">{i + 1}</span>
-                  <div>
-                    <s.icon size={20} strokeWidth={2.25} className="text-orange-600 mb-4" />
-                    <h3 className="text-sm font-black text-slate-900 leading-tight mb-2">{s.title}</h3>
+                <div key={s.title} className="relative group bg-white/80 border border-white rounded-[24px] p-6 hover:border-slate-350 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between min-h-[210px] shadow-[0_10px_30px_-10px_rgba(0,0,0,0.03)]">
+                  <span className="absolute -top-3.5 -left-2.5 w-8 h-8 rounded-xl bg-slate-900 text-white text-xs font-black grid place-items-center shadow-lg group-hover:scale-110 transition duration-300 group-hover:bg-gradient-to-tr group-hover:from-orange-600 group-hover:to-orange-500">
+                    {i + 1}
+                  </span>
+                  <div className="pt-2">
+                    <div className="w-10 h-10 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-center text-orange-600 mb-5 group-hover:scale-110 group-hover:bg-orange-50 transition duration-300 shadow-sm">
+                      <s.icon size={20} strokeWidth={2} />
+                    </div>
+                    <h3 className="text-sm font-black text-slate-900 leading-tight mb-2.5 uppercase tracking-wide">{s.title}</h3>
                   </div>
-                  <p className="text-[11px] text-slate-655 leading-relaxed font-bold">{s.text}</p>
+                  <p className="text-[11.5px] text-slate-600 leading-relaxed font-bold mt-2">{s.text}</p>
                 </div>
               ))}
             </div>
           </div>
         </section>
 
-        {/* 11 Specialist Agents Section */}
-        <section className="w-full px-6 py-24 border-t border-slate-300 bg-white/50">
-          <div className="max-w-5xl mx-auto text-center space-y-3">
-            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider">The Agent Taskforce</h2>
-            <p className="text-slate-655 text-sm max-w-lg mx-auto pb-10 font-black">11 automated specialist workers, never a single generic model.</p>
+        {/* 11 Specialist Agents Section (High-Contrast Dark Theme Redesign) */}
+        <section className="w-full relative px-6 py-24 border-t border-slate-900 bg-slate-950 text-white overflow-hidden">
+          {/* Subtle grid background overlay */}
+          <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.03]"
+            style={{ backgroundImage: 'radial-gradient(white 1.2px, transparent 1.2px)', backgroundSize: '32px 32px' }} />
+          
+          <div aria-hidden className="pointer-events-none absolute top-[-20%] right-[-10%] w-[500px] h-[500px] rounded-full blur-[140px] bg-indigo-500/10" />
+          <div aria-hidden className="pointer-events-none absolute bottom-[-20%] left-[-10%] w-[500px] h-[500px] rounded-full blur-[140px] bg-orange-500/8" />
+
+          <div className="relative z-10 max-w-5xl mx-auto text-center space-y-3">
+            <h2 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-wider">The Agent Taskforce</h2>
+            <p className="text-slate-400 text-sm max-w-lg mx-auto pb-12 font-semibold">11 automated specialist workers, never a single generic model.</p>
             
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 text-left">
               {AGENT_GRID.map((a) => (
-                <div key={a.name} className="flex items-start gap-4 bg-white/60 border border-white/80 rounded-2xl p-4.5 hover:border-slate-300/80 transition duration-150 shadow-sm">
-                  <span className="w-9 h-9 rounded-xl bg-white border border-slate-200 grid place-items-center shrink-0 text-orange-600 shadow-sm">
-                    <a.icon size={16} strokeWidth={2.25} />
-                  </span>
-                  <div className="min-w-0">
-                    <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest">{a.name}</h3>
-                    <p className="text-[11.5px] text-slate-600 leading-relaxed mt-1.5 font-bold">{a.text}</p>
+                <div key={a.name} className="group relative flex flex-col justify-between bg-slate-900/40 border border-slate-850 hover:border-slate-700/80 rounded-[24px] p-5.5 hover:bg-slate-900/60 hover:shadow-2xl hover:-translate-y-0.5 transition-all duration-300 shadow-[0_8px_30px_-8px_rgba(0,0,0,0.2)]">
+                  <div className="flex items-start gap-4">
+                    <span className="w-10 h-10 rounded-2xl bg-slate-950 border border-slate-800 grid place-items-center shrink-0 text-orange-400 shadow-sm group-hover:scale-110 group-hover:text-orange-555 transition duration-300">
+                      <a.icon size={18} strokeWidth={2} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2.5">
+                        <h3 className="text-xs font-black text-slate-200 uppercase tracking-widest leading-none">{a.name}</h3>
+                        {AGENT_TAGS[a.name] && (
+                          <span className={`text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${AGENT_TAGS[a.name].color}`}>
+                            {AGENT_TAGS[a.name].tag}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11.5px] text-slate-400 leading-relaxed mt-3 font-semibold">{a.text}</p>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -207,23 +244,40 @@ export default function Login({ onAuthed }) {
           </div>
         </section>
 
-        {/* Bottom Call to Action */}
-        <section className="w-full px-6 py-24 border-t border-slate-300 text-center bg-slate-900/[0.01]">
-          <h2 className="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-wider mb-4">Stage your organic search growth today.</h2>
-          <p className="text-slate-705 text-sm max-w-md mx-auto mb-8 font-bold">All access requests undergo manual verification. Setup your credentials now to instantly login upon approval.</p>
-          <button 
-            type="button" 
-            onClick={() => setAuthModal('request')}
-            className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-widest text-white rounded-xl px-6 py-3.5 shadow-md shadow-slate-950/10 hover:shadow-slate-950/25 transition active:scale-95 cursor-pointer"
-            style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
-          >
-            <span>Request Access</span>
-            <ArrowRight size={14} strokeWidth={2.5} className="text-orange-500" />
-          </button>
+        {/* Bottom Call to Action (High-Contrast Dark Theme Redesign) */}
+        <section className="w-full relative px-6 py-28 border-t border-slate-900 text-center overflow-hidden bg-gradient-to-tr from-slate-950 via-[#0f172a] to-slate-900">
+          {/* Subtle glowing elements */}
+          <div aria-hidden className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[250px] rounded-full blur-[100px] bg-orange-500/10" />
+          <div aria-hidden className="pointer-events-none absolute top-[-20%] left-[20%] w-[300px] h-[300px] rounded-full blur-[120px] bg-indigo-500/10" />
+          
+          <div className="relative z-10 max-w-3xl mx-auto space-y-5">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-orange-500/15 text-orange-400 border border-orange-500/25">
+              <Sparkles size={9} strokeWidth={3} /> Launch Your Growth Engine
+            </span>
+            
+            <h2 className="text-3xl sm:text-4xl font-black text-white uppercase tracking-wider leading-tight">
+              Stage your organic search growth today.
+            </h2>
+            
+            <p className="text-slate-400 text-sm max-w-lg mx-auto font-semibold leading-relaxed">
+              All access requests undergo manual verification. Setup your credentials now to instantly login upon approval.
+            </p>
+            
+            <div className="pt-4">
+              <button 
+                type="button" 
+                onClick={() => setAuthModal('request')}
+                className="inline-flex items-center gap-2.5 text-xs font-black uppercase tracking-widest text-white rounded-xl px-7 py-4.5 transition duration-300 hover:scale-105 active:scale-95 cursor-pointer shadow-lg bg-gradient-to-r from-orange-600 to-amber-500 hover:shadow-orange-500/20 hover:shadow-2xl border border-orange-500/20"
+              >
+                <span>Request Access Portal</span>
+                <ArrowRight size={14} strokeWidth={2.5} className="text-white" />
+              </button>
+            </div>
+          </div>
         </section>
 
-        {/* Footer */}
-        <footer className="w-full py-8 text-center text-[10px] font-black text-slate-500 uppercase tracking-widest border-t border-slate-300/40">
+        {/* Footer (Dark Theme to Match CTA) */}
+        <footer className="w-full py-10 text-center text-[10px] font-black text-slate-500 uppercase tracking-widest border-t border-slate-900 bg-slate-950">
           &copy; {new Date().getFullYear()} ZUNKIRREE LABS · SEARCH ANALYTICS AI · ALL RIGHTS RESERVED
         </footer>
       </div>
@@ -626,11 +680,11 @@ function WorkspacePreview() {
   );
 }
 
-function AgentRow({ icon: Icon, name, status, progress, text }) {
+function AgentRow({ icon: Icon, name, status, progress, text, log }) {
   const running = status === 'running';
   return (
     <div className="flex items-start gap-3 rounded-2xl px-3 py-3 hover:bg-slate-900/60 border border-transparent hover:border-slate-850 transition duration-150">
-      <span className="relative flex w-7.5 h-7.5 rounded-xl items-center justify-center shrink-0 mt-0.5 border border-slate-800 bg-slate-900 shadow-sm"
+      <span className="relative flex w-8 h-8 rounded-xl items-center justify-center shrink-0 mt-0.5 border border-slate-800 bg-slate-900 shadow-sm"
         style={{ 
           color: running ? '#818cf8' : '#10b981'
         }}>
@@ -655,8 +709,21 @@ function AgentRow({ icon: Icon, name, status, progress, text }) {
         </div>
         <p className="text-[10px] font-semibold text-slate-400 leading-relaxed mt-1.5">{text}</p>
         
+        {/* Terminal/Console log representing "agent working" */}
+        {log && (
+          <div className="mt-2.5 font-mono text-[9px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-850 flex items-center justify-between text-slate-400 gap-1.5">
+            <div className="flex items-center gap-1.5 truncate">
+              <span className={running ? "text-indigo-400 animate-pulse font-black" : "text-emerald-400 font-black"}>
+                {running ? '❯' : '✓'}
+              </span>
+              <span className="truncate">{log}</span>
+            </div>
+            {running && <span className="w-1.5 h-3 bg-indigo-400/80 animate-ping shrink-0" />}
+          </div>
+        )}
+
         {running && (
-          <div className="mt-2 h-1 rounded-full bg-slate-950 overflow-hidden relative border border-slate-950">
+          <div className="mt-2.5 h-1 rounded-full bg-slate-950 overflow-hidden relative border border-slate-950">
             {progress != null ? (
               <div className="h-full rounded-full" style={{ width: `${progress}%`, background: 'linear-gradient(90deg,#6C63FF,#8b5cf6)' }} />
             ) : (
