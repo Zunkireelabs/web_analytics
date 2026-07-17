@@ -138,7 +138,7 @@ export default function CopilotPanel({ open, onClose }) {
           </div>
           <button 
             onClick={onClose}
-            className="w-8 h-8 rounded-full border border-slate-200/60 hover:border-slate-350 grid place-items-center text-slate-400 hover:text-slate-700 hover:bg-white shadow-sm transition active:scale-95 focus:outline-none"
+            className="w-10 h-10 rounded-full border border-slate-200/60 hover:border-slate-350 grid place-items-center text-slate-400 hover:text-slate-700 hover:bg-white shadow-sm transition active:scale-95 focus:outline-none"
             aria-label="Close"
           >
             <X size={14} strokeWidth={2.5} />

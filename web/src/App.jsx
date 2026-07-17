@@ -103,7 +103,7 @@ export default function App() {
           one page. Internal-only, same gate as AI Growth/Action Center. */}
       {isInternal && !copilotOpen && (
         <button type="button" onClick={() => setCopilotOpen(true)}
-          className="fixed bottom-6 right-6 z-30 w-14 h-14 rounded-full text-white text-xl shadow-lg
+          className="fixed bottom-6 right-6 z-20 w-14 h-14 rounded-full text-white text-xl shadow-lg
                      hover:scale-105 transition-transform focus-visible:outline focus-visible:outline-2
                      focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]"
           style={{ background: '#6C63FF', boxShadow: '0 8px 24px -4px rgba(108,99,255,0.5)' }}

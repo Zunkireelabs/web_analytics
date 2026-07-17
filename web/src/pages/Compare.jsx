@@ -110,48 +110,53 @@ export default function Compare({ siteId }) {
           icon="📈"
         />
         
+        {/* Mode selector + date inputs stretch full-width on mobile (w-full +
+            flex-1) — at their natural content width they left a big dead gap
+            on the right of this full-width card, same issue as Overview's
+            date bar. The status badge stays natural-width; it's a label, not
+            something that should be artificially stretched. */}
         <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md p-3.5 rounded-2xl flex flex-wrap items-center gap-3.5 z-10 shadow-sm">
           {/* Mode Selector */}
-          <div className="flex bg-slate-100/70 p-0.5 rounded-xl border border-slate-200/30">
+          <div className="flex flex-1 sm:flex-none bg-slate-100/70 p-0.5 rounded-xl border border-slate-200/30">
             <button onClick={() => setMode('month')}
-              className={`text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
+              className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
                 mode === 'month' ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow' : 'text-slate-500 hover:text-slate-800'
               }`}>
               Month
             </button>
             <button onClick={() => setMode('week')}
-              className={`text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
+              className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
                 mode === 'week' ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow' : 'text-slate-500 hover:text-slate-800'
               }`}>
               Week
             </button>
           </div>
 
-          <span className="text-xs font-bold px-2.5 py-1 rounded-full border bg-indigo-500/5 border-indigo-500/10 text-indigo-600 shadow-sm">
+          <span className="shrink-0 text-xs font-bold px-2.5 py-1 rounded-full border bg-indigo-500/5 border-indigo-500/10 text-indigo-600 shadow-sm">
             {overall.t}
           </span>
 
           {/* Date inputs depending on mode */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 w-full sm:w-auto">
             {mode === 'month' ? (
-              <div className="flex items-center gap-2">
-                <input type="month" value={a} onChange={(e) => setA(e.target.value)} 
-                  className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[120px]" />
-                <span className="text-slate-400 font-bold">vs</span>
-                <input type="month" value={b} onChange={(e) => setB(e.target.value)} 
-                  className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[120px]" />
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <input type="month" value={a} onChange={(e) => setA(e.target.value)}
+                  className="flex-1 sm:flex-none min-w-0 bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm sm:w-[120px]" />
+                <span className="text-slate-400 font-bold shrink-0">vs</span>
+                <input type="month" value={b} onChange={(e) => setB(e.target.value)}
+                  className="flex-1 sm:flex-none min-w-0 bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm sm:w-[120px]" />
               </div>
             ) : (
-              <div className="flex items-center gap-2">
-                <div className="flex flex-col">
-                  <input type="date" value={wA} onChange={(e) => setWA(e.target.value)} 
-                    className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[125px]" />
+              <div className="flex flex-wrap items-start gap-2 w-full sm:w-auto">
+                <div className="flex flex-col flex-1 sm:flex-none min-w-0">
+                  <input type="date" value={wA} onChange={(e) => setWA(e.target.value)}
+                    className="w-full sm:w-[125px] bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm" />
                   <span className="text-[8px] font-bold text-slate-400 mt-1 px-1">{weekLabel(wA)}</span>
                 </div>
-                <span className="text-slate-400 font-bold pb-4">vs</span>
-                <div className="flex flex-col">
-                  <input type="date" value={wB} onChange={(e) => setWB(e.target.value)} 
-                    className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[125px]" />
+                <span className="text-slate-400 font-bold shrink-0 self-start mt-1.5">vs</span>
+                <div className="flex flex-col flex-1 sm:flex-none min-w-0">
+                  <input type="date" value={wB} onChange={(e) => setWB(e.target.value)}
+                    className="w-full sm:w-[125px] bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm" />
                   <span className="text-[8px] font-bold text-slate-400 mt-1 px-1">{weekLabel(wB)}</span>
                 </div>
               </div>
@@ -196,8 +201,9 @@ export default function Compare({ siteId }) {
         </div>
       </div>
 
-      {/* KPI grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      {/* KPI grid — always 2 cols (even below sm) so 6 cards stacked
+          one-per-row doesn't turn into a long mobile scroll. */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
         {METRICS.map((m) => (
           <StatCard key={m.key} label={m.label} icon={m.icon} color={m.color}
             data={sv(m.key)} value={db[m.key]} prev={da[m.key]} format={fmtInt} loading={!data} />

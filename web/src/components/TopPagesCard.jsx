@@ -86,9 +86,15 @@ export default function TopPagesCard({ pages, loading }) {
         ) : rows.length === 0 ? (
           <div className="py-14 text-center text-sm text-slate-400 font-medium">No page data for this range.</div>
         ) : (
-          <div className="grid md:grid-cols-2 gap-x-10 gap-y-6 mt-3">
-            <Column rows={displayRows.slice(0, mid)} max={max} offset={0} labelOf={labelOf} />
-            <Column rows={displayRows.slice(mid)} max={max} offset={mid} labelOf={labelOf} />
+          // Below md this is a single stacked column (up to 10-20 rows) that
+          // used to push the whole page taller as it grows. Capping it with
+          // its own scroll keeps that growth inside the card instead of the
+          // page — md+ already splits into two columns so it doesn't need it.
+          <div className="max-h-[420px] overflow-y-auto pr-1 -mr-1 custom-scrollbar md:max-h-none md:overflow-visible md:pr-0 md:mr-0">
+            <div className="grid md:grid-cols-2 gap-x-10 gap-y-6 mt-3">
+              <Column rows={displayRows.slice(0, mid)} max={max} offset={0} labelOf={labelOf} />
+              <Column rows={displayRows.slice(mid)} max={max} offset={mid} labelOf={labelOf} />
+            </div>
           </div>
         )}
       </div>

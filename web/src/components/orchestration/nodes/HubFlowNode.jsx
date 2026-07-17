@@ -29,11 +29,11 @@ export default function HubFlowNode({ data }) {
     // to show), but still a real elevated node on the canvas, not stray
     // floating text — same glass-pill language as the rest of the app.
     return (
-      <div className="relative flex items-center gap-2 pl-1.5 pr-3.5 py-1.5 rounded-full"
-        style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>
+      <div className="glass-panel shadow-sm relative flex items-center gap-2 pl-1.5 pr-3.5 py-1.5 rounded-full"
+        style={{ background: 'rgba(255,255,255,0.85)' }}>
         <Handle type="source" position={Position.Right} style={{ background: 'transparent', border: 'none', width: 1, height: 1 }} />
         {icon}
-        <span className="text-[11px] font-medium text-white/60 whitespace-nowrap">{data.label}</span>
+        <span className="text-[11px] font-medium text-slate-700 whitespace-nowrap">{data.label}</span>
       </div>
     );
   }
@@ -43,17 +43,17 @@ export default function HubFlowNode({ data }) {
       <Handle type="target" position={Position.Left} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', width: 6, height: 6 }} />
       <Handle type="source" position={Position.Right} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', width: 6, height: 6 }} />
       {icon}
-      <p className={`font-bold text-white mt-2.5 text-center ${big ? 'text-[15px]' : 'text-[13px]'}`}>{data.label}</p>
-      {data.sub && <p className="text-[10.5px] text-white/40 mt-1 text-center leading-relaxed max-w-[180px]">{data.sub}</p>}
+      <p className={`font-bold text-slate-800 mt-2.5 text-center ${big ? 'text-[15px]' : 'text-[13px]'}`}>{data.label}</p>
+      {data.sub && <p className="text-[10.5px] text-slate-400 mt-1 text-center leading-relaxed max-w-[190px]">{data.sub}</p>}
     </>
   );
 
-  const className = `relative rounded-2xl px-4 py-4 w-[220px] flex flex-col items-center transition duration-200 hover:-translate-y-0.5 block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${(data.to || data.onSelect) ? 'cursor-pointer' : ''}`;
+  const className = `relative rounded-2xl px-5 py-5 w-[230px] flex flex-col items-center transition duration-200 hover:-translate-y-0.5 block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${(data.to || data.onSelect) ? 'cursor-pointer' : ''}`;
   const style = {
-    background: 'linear-gradient(180deg, #2a3a63, #212f54)',
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.90))',
     border: `1px solid ${color}40`,
     outlineColor: color,
-    boxShadow: '0 1px 2px rgba(0,0,0,0.35), 0 8px 20px -8px rgba(0,0,0,0.55)',
+    boxShadow: '0 1px 2px rgba(15,23,42,0.08), 0 8px 20px -8px rgba(15,23,42,0.18)',
   };
 
   if (data.to) return <Link to={data.to} className={className} style={style}>{content}</Link>;

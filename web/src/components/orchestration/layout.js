@@ -1,5 +1,5 @@
 import { Position, MarkerType } from '@xyflow/react';
-import { CATEGORY } from '../AgentCard.jsx';
+import { ORCH_CATEGORY as CATEGORY } from './palette.js';
 
 const arrow = (color) => ({ type: MarkerType.ArrowClosed, color, width: 14, height: 14 });
 
@@ -19,20 +19,24 @@ export const DATA_SOURCES = [
   { id: 'ds-dataforseo', label: 'DataForSEO (SERP)', icon: '🌎' },
 ];
 
-const CARD_W = 220;
+const CARD_W = 230;
 const SOURCE_H = 40;
-const AGENT_H = 118;
+const AGENT_H = 128;
 const HUB_H = 148;
 const HUB_BIG_H = 168;
-const ROW_H = 108;
-const COL_GAP = 120;
+// Was 108 — *less* than AGENT_H (118 at the time), so agent cards in the
+// same sub-column literally overlapped by 10px. Now comfortably taller than
+// a card plus a real gap between rows.
+const ROW_H = 156;
+const AGENT_SUBCOL_GAP = 60; // was 40 — gap between the two agent sub-columns
+const COL_GAP = 160;
 const COL_X = {
   sources: 0,
   agents: CARD_W + COL_GAP, // first of two agent sub-columns
-  store: CARD_W + COL_GAP + (CARD_W + 40) * 2,
-  consumers: CARD_W + COL_GAP + (CARD_W + 40) * 2 + CARD_W + COL_GAP + 60,
+  store: CARD_W + COL_GAP + (CARD_W + AGENT_SUBCOL_GAP) * 2,
+  consumers: CARD_W + COL_GAP + (CARD_W + AGENT_SUBCOL_GAP) * 2 + CARD_W + COL_GAP,
 };
-const CENTER_Y = 260;
+const CENTER_Y = 320;
 
 // Evenly spaced y positions for `count` items, vertically centered on
 // CENTER_Y — same helper for every column so the whole graph reads as one
@@ -56,6 +60,11 @@ const CONSUMERS = [
   { id: 'executive-report', icon: '🧠', label: 'Executive Report', big: true, color: CATEGORY.meta.color, sub: 'Weekly narrative from 7 of 10 agents' },
 ];
 
+const FINDINGS_STORE = {
+  id: 'findings-store', icon: '🗄️', label: 'Findings Store',
+  sub: "Every agent's results, persisted — the shared table every page below reads from",
+};
+
 // Pure function: (real agent list + real live-run state) -> React Flow
 // nodes/edges. No layout state lives in a component — same graph shape
 // every render, recomputed from the same real inputs the old diagram used.
@@ -66,7 +75,10 @@ export function buildGraph({ agents, runningAgents, onSelectAgent }) {
   const nodes = [];
   const edges = [];
 
-  const sourceY = columnY(DATA_SOURCES.length);
+  // Sources are 40px pills, not full agent cards — their own tighter row
+  // height instead of inheriting the agent grid's spacing, which would
+  // otherwise stretch five small pills across a needlessly tall column.
+  const sourceY = columnY(DATA_SOURCES.length, 76);
   DATA_SOURCES.forEach((ds, i) => {
     nodes.push({
       id: ds.id, type: 'hub', draggable: false, connectable: false,
@@ -84,7 +96,7 @@ export function buildGraph({ agents, runningAgents, onSelectAgent }) {
     const row = Math.floor(i / 2);
     nodes.push({
       id: agent.id, type: 'agent', draggable: false, connectable: false,
-      position: { x: COL_X.agents + subCol * (CARD_W + 40), y: agentY[row] },
+      position: { x: COL_X.agents + subCol * (CARD_W + AGENT_SUBCOL_GAP), y: agentY[row] },
       width: CARD_W, height: AGENT_H,
       sourcePosition: Position.Right, targetPosition: Position.Left,
       data: { agent, isRunning: runningAgents.has(agent.id), runStartedAt: runningAgents.get(agent.id) ?? null, onSelect: () => onSelectAgent(agent) },
@@ -97,11 +109,11 @@ export function buildGraph({ agents, runningAgents, onSelectAgent }) {
   });
 
   nodes.push({
-    id: 'findings-store', type: 'hub', draggable: false, connectable: false,
+    id: FINDINGS_STORE.id, type: 'hub', draggable: false, connectable: false,
     position: { x: COL_X.store, y: CENTER_Y },
     width: CARD_W, height: HUB_H,
     sourcePosition: Position.Right, targetPosition: Position.Left,
-    data: { variant: 'store', icon: '🗄️', label: 'Findings Store', sub: "Every agent's results, persisted — the shared table every page below reads from" },
+    data: { variant: 'store', icon: FINDINGS_STORE.icon, label: FINDINGS_STORE.label, sub: FINDINGS_STORE.sub },
   });
 
   // Executive Report is a real agent (agents/executive-report.js) but only
@@ -127,8 +139,8 @@ export function buildGraph({ agents, runningAgents, onSelectAgent }) {
   if (executiveReportMeta) {
     edges.push({
       id: 'exec-cc', source: 'executive-report', target: 'command-center', type: 'flow',
-      data: { dashed: true, loopBack: true, color: '#ec4899' },
-      markerEnd: arrow('#ec4899'),
+      data: { dashed: true, loopBack: true, color: CATEGORY.meta.color },
+      markerEnd: arrow(CATEGORY.meta.color),
     });
   }
 

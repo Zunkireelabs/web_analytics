@@ -38,7 +38,9 @@ export default function MoversList({ gainers = [], droppers = [], comparisonLabe
             <p className="text-xs text-slate-400 font-semibold mt-1">Clicks performance compared to {comparisonLabel}</p>
           </div>
           
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 flex-1">
+          {/* Always 2 cols (even below sm) so 4 tiles stacked one-per-row
+              doesn't turn into a long mobile scroll. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4 flex-1">
             <Metric icon={<TrendUp />} tint={GREEN} value={fmtSigned(netChange)} label="Net click change"
               badge={pct != null ? `${pct >= 0 ? '+' : ''}${pct}%` : null} badgeUp={netChange >= 0} />
             <Metric icon={<Activity />} tint={BLUE} value={recentTotal.toLocaleString()} label="This period clicks"
@@ -242,12 +244,12 @@ function MoverCard({ kind, rows, total }) {
         </div>
 
         {/* column header */}
-        <div className="grid grid-cols-[28px_1fr_64px_64px_64px] items-center gap-3 px-5 pt-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
+        <div className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_64px_64px_64px] items-center gap-2 sm:gap-3 px-5 pt-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
           <span></span>
           <span>Query</span>
           <span className="text-right">Change</span>
           <span className="text-right">%</span>
-          <span className="text-right">Trend</span>
+          <span className="text-right hidden sm:block">Trend</span>
         </div>
 
         <div className="px-2 divide-y divide-slate-100/50">
@@ -255,7 +257,7 @@ function MoverCard({ kind, rows, total }) {
           {displayRows.map((r, i) => {
             const c = changePct(r.prior, r.delta);
             return (
-              <div key={i} className="grid grid-cols-[28px_1fr_64px_64px_64px] items-center gap-3 px-3 py-3 rounded-xl hover:bg-slate-50/50 transition duration-150 group">
+              <div key={i} className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_64px_64px_64px] items-center gap-2 sm:gap-3 px-3 py-3 rounded-xl hover:bg-slate-50/50 transition duration-150 group">
                 <span 
                   className="w-5 h-5 rounded-md grid place-items-center text-[10px] font-black" 
                   style={{ background: soft, color }}
@@ -286,7 +288,7 @@ function MoverCard({ kind, rows, total }) {
                     {c.text}
                   </span>
                 </span>
-                <span className="flex justify-end pr-1">
+                <span className="justify-end pr-1 hidden sm:flex">
                   <Sparkline data={sparkSteps(r.prior, r.recent)} color={color} width={50} height={18} fill={false} dot={false} />
                 </span>
               </div>
@@ -317,7 +319,7 @@ function TranslateButton({ query }) {
       {!state && (
         <button
           type="button"
-          className="text-[10px] text-slate-400 hover:text-slate-650 leading-none transition-colors"
+          className="inline-flex items-center justify-center w-8 h-8 -my-2 text-[10px] text-slate-400 hover:text-slate-650 leading-none transition-colors"
           title="Translate query"
           onClick={async (e) => {
             e.stopPropagation();

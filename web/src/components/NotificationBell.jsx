@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 
@@ -11,6 +12,7 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null); // { items, unread }
   const ref = useRef(null);
+  const panelRef = useRef(null); // the portaled panel lives outside `ref`'s subtree
   const navigate = useNavigate();
 
   const load = () => api.notifications.list().then(setData).catch(() => {});
@@ -21,7 +23,11 @@ export default function NotificationBell() {
   }, []);
 
   useEffect(() => {
-    function onClickOutside(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function onClickOutside(e) {
+      if (ref.current?.contains(e.target)) return;
+      if (panelRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
@@ -62,7 +68,7 @@ export default function NotificationBell() {
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen((o) => !o)} aria-label="Notifications"
-        className="relative w-9 h-9 rounded-lg grid place-items-center text-slate-500 hover:bg-slate-100 hover:text-slate-800
+        className="relative w-10 h-10 rounded-lg grid place-items-center text-slate-500 hover:bg-slate-100 hover:text-slate-800
                    transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]">
         <span className="text-lg">🔔</span>
         {unread > 0 && (
@@ -72,12 +78,16 @@ export default function NotificationBell() {
         )}
       </button>
 
-      {open && (
-        // Opens toward the main content, not off the left edge of the
-        // narrow sidebar this bell lives in — `right-0` here would anchor
-        // the panel's right edge at the bell (near the sidebar's own left
-        // edge) and push most of a 384px-wide panel off-screen.
-        <div className="absolute left-0 mt-2 w-96 max-h-[70vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 fade-up">
+      {/* Portaled to document.body: `fixed` positioning is supposed to be
+          relative to the viewport, but the mobile sidebar drawer (this
+          bell's actual parent) animates open/closed via a CSS `transform`
+          (translate-x), and any transformed ancestor becomes the containing
+          block for its `fixed` descendants instead of the viewport. That was
+          silently shifting this panel left by the drawer's own offset,
+          clipping it off-screen. Rendering into body sidesteps that ancestor
+          entirely. */}
+      {open && createPortal(
+        <div ref={panelRef} className="fixed top-16 left-1/2 -translate-x-1/2 w-[calc(100vw-2rem)] max-w-96 max-h-[70vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 fade-up">
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 sticky top-0 bg-white">
             <span className="text-sm font-bold text-slate-900">Notifications</span>
             {unread > 0 && <button onClick={markAllRead} className="text-[11px] font-semibold text-[#6C63FF] hover:underline">Mark all read</button>}
@@ -99,7 +109,8 @@ export default function NotificationBell() {
               ))}
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -159,12 +159,15 @@ export default function Overview({ siteId }) {
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-2">
         <PageHeader title="Overview" subtitle="Search performance & visitor analytics summary" icon="📊" />
         
-        {/* Date presets and pickers in a modern glass bar */}
+        {/* Date presets and pickers in a modern glass bar. The two groups
+            below stretch full-width and their items share the row equally
+            on mobile (w-full + flex-1) — left content-sized on its own, they
+            left the rest of this full-width card empty on the right. */}
         <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm p-3 rounded-2xl flex flex-wrap items-center gap-3 z-10">
-          <div className="flex bg-slate-100/70 p-0.5 rounded-xl border border-slate-200/30">
+          <div className="flex w-full sm:w-auto bg-slate-100/70 p-0.5 rounded-xl border border-slate-200/30">
             {[3, 7, 14, 30].map((d) => (
               <button key={d} onClick={() => setPreset(d)}
-                className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition ${
+                className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3 py-1.5 rounded-lg transition ${
                   start === shiftYmd(anchor, d) && end === anchor
                     ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow'
                     : 'text-slate-500 hover:text-slate-800'
@@ -173,7 +176,7 @@ export default function Overview({ siteId }) {
               </button>
             ))}
             <button onClick={setAll}
-              className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition ${
+              className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3 py-1.5 rounded-lg transition ${
                 range && start === range.earliest && end === anchor
                   ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow'
                   : 'text-slate-500 hover:text-slate-800'
@@ -182,22 +185,31 @@ export default function Overview({ siteId }) {
             </button>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-xs w-full sm:w-auto">
             <input type="date" value={start} min={range?.earliest} max={range?.latest_visitor}
               onChange={(e) => setStart(e.target.value)}
-              className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[115px]" />
-            <span className="text-slate-400 font-bold">→</span>
+              className="flex-1 sm:flex-none bg-white border border-slate-200/80 rounded-xl px-2.5 py-1 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm min-w-0 sm:w-[115px]" />
+            <span className="text-slate-400 font-bold shrink-0">→</span>
             <input type="date" value={end} min={range?.earliest} max={range?.latest_visitor}
               onChange={(e) => setEnd(e.target.value)}
-              className="bg-white border border-slate-200/80 rounded-xl px-2.5 py-1 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm w-[115px]" />
+              className="flex-1 sm:flex-none bg-white border border-slate-200/80 rounded-xl px-2.5 py-1 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm min-w-0 sm:w-[115px]" />
           </div>
         </div>
       </div>
 
       {range?.earliest && (
-        <p className="text-[10px] font-bold text-slate-400 -mt-4 pl-1.5 flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500/60" />
-          Data through <span className="text-slate-600">{range.latest_visitor}</span> · Search finalized through <span className="text-slate-600">{range.freshest}</span>.
+        // The dot and the text must be exactly 2 flex items, not one flex
+        // item per text run — `flex` on a mix of bare text + inline spans
+        // makes each text run its own anonymous flex item, which shrinks/
+        // wraps independently of its neighbors instead of as one paragraph.
+        // That was splitting "Data through" from its date and even
+        // mid-word ("2026-07-" / "17") on mobile. Wrapping it all in one
+        // span makes it flow as normal text again.
+        <p className="text-[10px] font-bold text-slate-400 -mt-4 pl-1.5 flex items-start gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500/60 mt-1 shrink-0" />
+          <span>
+            Data through <span className="text-slate-600">{range.latest_visitor}</span> · Search finalized through <span className="text-slate-600">{range.freshest}</span>.
+          </span>
         </p>
       )}
 
@@ -212,8 +224,12 @@ export default function Overview({ siteId }) {
             Live Activity
           </span>
 
-          <div className="flex flex-wrap gap-3 items-center text-xs font-semibold">
-            <span className="text-slate-600 bg-white border border-slate-100 shadow-sm rounded-xl px-3 py-1.5 flex items-center gap-1.5">
+          {/* w-full + flex-1 pills: on mobile these two used to sit at their
+              natural (narrow) width, leaving a big dead gap on the right of
+              this full-width card. Stretching them to share the row evenly
+              fills it; sm+ reverts to natural width since there's more room. */}
+          <div className="flex flex-wrap gap-3 items-center text-xs font-semibold w-full sm:w-auto">
+            <span className="flex-1 sm:flex-none justify-center sm:justify-start text-slate-600 bg-white border border-slate-100 shadow-sm rounded-xl px-3 py-1.5 flex items-center gap-1.5">
               🚀 <strong className="text-slate-900 font-black">{fmtInt(todayRow.users ?? 0)}</strong> users
               {yesterdayRow && (() => {
                 const delta = (todayRow.users ?? 0) - (yesterdayRow.users ?? 0);
@@ -221,7 +237,7 @@ export default function Overview({ siteId }) {
               })()}
             </span>
 
-            <span className="text-slate-600 bg-white border border-slate-100 shadow-sm rounded-xl px-3 py-1.5 flex items-center gap-1.5">
+            <span className="flex-1 sm:flex-none justify-center sm:justify-start text-slate-600 bg-white border border-slate-100 shadow-sm rounded-xl px-3 py-1.5 flex items-center gap-1.5">
               ⏱ <strong className="text-slate-900 font-black">{fmtInt(todayRow.sessions ?? 0)}</strong> sessions
               {yesterdayRow && (() => {
                 const delta = (todayRow.sessions ?? 0) - (yesterdayRow.sessions ?? 0);
@@ -241,7 +257,9 @@ export default function Overview({ siteId }) {
         <div className="lg:col-span-8 flex flex-col">
           <PerformanceTrendCard series={series} loading={loading} />
         </div>
-        <div className="lg:col-span-4 grid grid-cols-2 gap-4">
+        {/* Always 2 columns (even below sm) — 4 cards stacked one-per-row was
+            a lot of vertical scroll on a phone for what's just 4 numbers. */}
+        <div className="lg:col-span-4 grid grid-cols-2 gap-3 sm:gap-4">
           <KpiCard icon={BarChart3} iconBg="rgba(108,99,255,0.08)" iconColor="#6C63FF"
             label="Impressions" value={fmtInt(pm.impressions)}
             badge={badgeFor(pm.impressions, pmp.impressions)} sub={compareLabel} loading={loading} />
@@ -258,8 +276,10 @@ export default function Overview({ siteId }) {
         </div>
       </div>
 
-      {/* Secondary metrics: search position + GA4 audience */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
+      {/* Secondary metrics: search position + GA4 audience. Always 2 cols
+          (even below sm) — 4 cards stacked one-per-row was a lot of vertical
+          scroll on a phone for what's just 4 numbers with sparklines. */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
         <StatCard label="Avg position" hint="lower is better" icon="🏅" color="#f59e0b" data={svPosition()} value={pm.position} prev={pmp.position} lowerIsBetter format={fmtFloat} loading={loading} />
         <StatCard label="Users" icon="👥" color="#10b981" data={sv('users')} value={pm.users} prev={pmp.users} format={fmtInt} loading={loading} />
         <StatCard label="Sessions" icon="⏱" color="#14b8a6" data={sv('sessions')} value={pm.sessions} prev={pmp.sessions} format={fmtInt} loading={loading} />

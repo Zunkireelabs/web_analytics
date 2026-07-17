@@ -103,7 +103,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
           <button 
             type="button" 
             onClick={() => setShowPages((s) => !s)}
-            className="text-[10px] font-black uppercase tracking-wider text-[#6C63FF] hover:underline flex items-center gap-1 focus:outline-none"
+            className="text-[10px] font-black uppercase tracking-wider text-[#6C63FF] hover:underline flex items-center gap-1 py-2 focus:outline-none"
           >
             {showPages ? 'Hide detailed authority analysis ↑' : `Show detailed authority analysis (${authority.topLinkedPages.length}) ↓`}
           </button>
@@ -138,7 +138,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
                   <div className="space-y-2">
                     {authority.topLinkedPages.slice(0, 5).map((p, i) => (
                       <div key={i} className="flex justify-between items-center text-[10px] font-mono leading-tight">
-                        <span className="text-slate-400 truncate max-w-[170px]" title={p.page}>{p.page}</span>
+                        <span className="text-slate-400 truncate max-w-[120px] sm:max-w-[170px]" title={p.page}>{p.page}</span>
                         <span className="text-emerald-400 font-bold shrink-0">{p.referringDomain} domains</span>
                       </div>
                     ))}

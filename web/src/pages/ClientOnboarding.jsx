@@ -22,7 +22,7 @@ import {
   Sliders
 } from 'lucide-react';
 
-const inputCls = 'w-full text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
+const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
 
 function Field({ label, hint, icon: Icon, ...props }) {
@@ -133,7 +133,7 @@ function ConnectStep({ client, onConnected }) {
   );
 }
 
-const inputMonoCls = 'w-full text-xs font-mono border border-slate-200/80 bg-slate-50/50 rounded-xl px-3.5 py-2.5 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 text-slate-800 placeholder:text-slate-400';
+const inputMonoCls = 'w-full text-base sm:text-xs font-mono border border-slate-200/80 bg-slate-50/50 rounded-xl px-3.5 py-2.5 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 text-slate-800 placeholder:text-slate-400';
 
 const EXAMPLE_URL_FILE_MAP = `{
   "pages": {
@@ -199,11 +199,11 @@ function RepoConnectStep({ client, onConnected }) {
           Git Setup: The Action Center relies on a hand-authored <code>url_file_map</code> to translate website routes to real file paths in your repository.
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Field label="Repo Owner" value={repoOwner} onChange={(e) => setRepoOwner(e.target.value)} placeholder="acme-inc" required icon={Building} />
         <Field label="Repo Name" value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="acme-website" required icon={FolderPlus} />
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Field label="Default Branch" value={repoDefaultBranch} onChange={(e) => setRepoDefaultBranch(e.target.value)} placeholder="main" icon={GitBranch} />
         <Field label="Tech Stack" value={techStack} onChange={(e) => setTechStack(e.target.value)} placeholder="e.g. astro, nextjs, nunjucks" icon={Settings} />
       </div>
@@ -422,13 +422,13 @@ export default function ClientOnboarding() {
                             </p>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-3 shrink-0">
                           <button type="button" onClick={() => approveRequest(r)} disabled={busy}
-                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition disabled:opacity-60 active:scale-95">
+                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition disabled:opacity-60 active:scale-95">
                             {state === 'approving' ? 'Approve…' : 'Approve'}
                           </button>
                           <button type="button" onClick={() => rejectRequest(r)} disabled={busy}
-                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-60 active:scale-95">
+                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-60 active:scale-95">
                             {state === 'rejecting' ? 'Reject…' : 'Reject'}
                           </button>
                         </div>
@@ -541,22 +541,22 @@ export default function ClientOnboarding() {
                       </div>
 
                       {/* Row actions */}
-                      <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-slate-100/50">
+                      <div className="flex items-center gap-2.5 flex-wrap pt-2 border-t border-slate-100/50">
                         {!c.connected && (
                           <button type="button" onClick={() => setConnectingClient({ id: c.id, name: c.name })}
-                            className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition active:scale-95">
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition active:scale-95">
                             Connect API
                           </button>
                         )}
                         {c.connected && !c.baselined && (
                           <button type="button" onClick={() => retryBaseline(c)} disabled={rState === 'running'}
-                            className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
                             <RefreshCw size={9} className={rState === 'running' ? 'animate-spin' : ''} />
                             <span>Retry Ingest</span>
                           </button>
                         )}
                         <button type="button" onClick={() => setConnectingRepoClient({ id: c.id, name: c.name })}
-                          className="text-[9px] font-black uppercase tracking-widest px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 border border-slate-200/50 transition active:scale-95 flex items-center gap-1">
+                          className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 border border-slate-200/50 transition active:scale-95 flex items-center gap-1">
                           <GitBranch size={9} />
                           <span>{c.repoConnected ? 'Edit Repo' : 'Link Repo'}</span>
                         </button>

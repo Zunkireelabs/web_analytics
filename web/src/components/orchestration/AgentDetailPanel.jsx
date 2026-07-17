@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, daysAgo, timeAgo } from '../../api.js';
-import { CATEGORY } from '../AgentCard.jsx';
+import { ORCH_CATEGORY as CATEGORY } from './palette.js';
 
 const DEFAULT_START = daysAgo(7);
 const DEFAULT_END = daysAgo(0);
@@ -54,7 +54,7 @@ export default function AgentDetailPanel({ agent, onClose }) {
             <h2 className="text-lg font-bold text-slate-900 mt-2 leading-snug">{agent.name}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Close"
-            className="text-slate-400 hover:text-slate-600 text-2xl leading-none shrink-0 -mt-1">×</button>
+            className="w-10 h-10 grid place-items-center rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 text-2xl leading-none shrink-0 -mt-1 -mr-1.5 transition-colors">×</button>
         </div>
 
         <div className="p-5 space-y-4">

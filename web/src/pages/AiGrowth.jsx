@@ -3,14 +3,15 @@ import { api, daysAgo, timeAgo } from '../api.js';
 import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagram.jsx';
 import AgentDetailPanel from '../components/orchestration/AgentDetailPanel.jsx';
 import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
-import { 
-  Play, 
-  Terminal, 
-  Cpu, 
-  Activity, 
-  CheckCircle, 
-  Workflow, 
-  BrainCircuit, 
+import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
+import {
+  Play,
+  Terminal,
+  Cpu,
+  Activity,
+  CheckCircle,
+  Workflow,
+  BrainCircuit,
   AlertTriangle,
   RotateCw,
   Eye,
@@ -18,7 +19,9 @@ import {
   ChevronRight,
   Target,
   Globe,
-  FileText
+  FileText,
+  Database,
+  Send
 } from 'lucide-react';
 
 const FALLBACK_POLL_MS = 45000;
@@ -41,6 +44,21 @@ const AGENT_META = {
   'ai-recommendation': { label: 'AI Recommendation Auditor', icon: BrainCircuit, color: '#8b5cf6' },
   'executive-report': { label: 'Executive Report', icon: FileText, color: '#0f172a' },
 };
+
+// Category → icon for the Live Agent Findings Feed cards (findings are keyed
+// by CATEGORY, a smaller set than the per-agent AGENT_META above).
+const ICONS = { seo: Target, geo: Globe, content: FileText, meta: BrainCircuit };
+
+// The real, fixed shape of the pipeline (server/agents/orchestrator.js ->
+// runner.js -> the shared agent_runs table -> its readers) — rendered as a
+// persistent strip on both tabs so the page reads as "a pipeline" even at
+// rest, not just while the Systems Map graph is open.
+const SIGNAL_STAGES = [
+  { label: 'Sources', icon: Database, color: CATEGORY.seo.color },
+  { label: 'Agents', icon: Cpu, color: CATEGORY.seo.color },
+  { label: 'Findings Store', icon: Activity, color: CATEGORY.content.color },
+  { label: 'Reports', icon: Send, color: CATEGORY.meta.color },
+];
 
 export default function AiGrowth() {
   const [agents, setAgents] = useState(null); 
@@ -81,6 +99,16 @@ export default function AiGrowth() {
     const poll = setInterval(refresh, FALLBACK_POLL_MS);
     return () => clearInterval(poll);
   }, [refresh]);
+
+  // Load findings already persisted from prior runs on mount — without this,
+  // the feed only ever shows findings from a run triggered in this exact
+  // browser tab/session, so a page load always reads "0 findings" even when
+  // agent_runs already has real, complete data.
+  useEffect(() => {
+    api.reportInsights(1).then((res) => {
+      if (res?.agentFindings?.length) setRevealedFindings(res.agentFindings);
+    }).catch(() => {});
+  }, []);
 
   // Connect to SSE stream
   useEffect(() => {
@@ -165,45 +193,46 @@ export default function AiGrowth() {
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden"
-      style={{ background: 'linear-gradient(180deg, #101625 0%, #0d111d 50%, #080a12 100%)' }}>
-      
-      {/* Visual background ambient grids */}
+      style={{ background: 'linear-gradient(160deg, #eafaf6 0%, #eef6ff 50%, #f5f0ff 100%)' }}>
+
+      {/* Visual background ambient grids — teal -> violet, echoing the
+          signal-path hue sweep (ingest/teal through synthesis/violet). */}
       <div aria-hidden className="pointer-events-none absolute inset-0 -z-0">
         <div className="absolute top-0 left-1/4 w-[700px] h-[700px] rounded-full blur-[145px]"
-          style={{ background: 'radial-gradient(circle, rgba(108,99,255,0.18), transparent 60%)' }} />
+          style={{ background: 'radial-gradient(circle, rgba(13,148,136,0.10), transparent 60%)' }} />
         <div className="absolute bottom-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[135px]"
-          style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.12), transparent 60%)' }} />
+          style={{ background: 'radial-gradient(circle, rgba(124,58,237,0.10), transparent 60%)' }} />
       </div>
 
       <div className="relative max-w-[1400px] mx-auto px-4 sm:px-6 md:px-10 py-8">
-        
+
         {/* Main top title bar */}
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-8">
           <div>
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-400 px-3 py-1 rounded-full mb-3 border border-indigo-500/10 bg-indigo-500/5">
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-600 px-3 py-1 rounded-full mb-3 border border-indigo-500/15 bg-indigo-500/5">
               <BrainCircuit size={11} className="animate-pulse" /> Agent Intelligence Console
             </span>
-            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">AI Agent Audit Runner</h1>
-            <p className="text-xs text-slate-400 mt-1 max-w-xl font-medium">
+            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">AI Agent Audit Runner</h1>
+            <p className="text-xs text-slate-500 mt-1 max-w-xl font-medium">
               Watch SEO, Geo, and Content specialist agents scan, verify, and document site performance diagnostics in real-time.
             </p>
           </div>
 
           <div className="flex items-center gap-3">
             {/* View Mode Segment Switcher */}
-            <div className="flex bg-slate-900/60 p-0.5 rounded-xl border border-slate-800">
-              <button 
+            <div className="flex bg-white/70 p-0.5 rounded-xl border border-slate-200">
+              <button
                 onClick={() => setViewMode('console')}
                 className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-lg transition ${
-                  viewMode === 'console' ? 'bg-white text-slate-950 font-black' : 'text-slate-400 hover:text-white'
+                  viewMode === 'console' ? 'bg-slate-900 text-white font-black shadow-sm' : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
                 <Terminal size={12} /> Interactive
               </button>
-              <button 
+              <button
                 onClick={() => setViewMode('diagram')}
                 className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-lg transition ${
-                  viewMode === 'diagram' ? 'bg-white text-slate-950 font-black' : 'text-slate-400 hover:text-white'
+                  viewMode === 'diagram' ? 'bg-slate-900 text-white font-black shadow-sm' : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
                 <Workflow size={12} /> Systems Map
@@ -230,6 +259,28 @@ export default function AiGrowth() {
           </div>
         </div>
 
+        {/* Signal Path strip — the fixed pipeline shape, always visible so
+            the page reads as "a pipeline" on both tabs, even at rest. */}
+        <div className="card rounded-2xl mb-6 px-5 py-4 flex items-center gap-1 overflow-x-auto custom-scrollbar">
+          {SIGNAL_STAGES.map((stage, i) => (
+            <div key={stage.label} className="flex items-center gap-1 shrink-0">
+              {i > 0 && (
+                <span aria-hidden className="w-6 sm:w-10 h-px mx-1 shrink-0"
+                  style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(108,99,255,0.4) 0 6px, transparent 6px 12px)' }} />
+              )}
+              <div className="flex flex-col items-center gap-1.5 w-20 sm:w-24 shrink-0">
+                <span className="w-8 h-8 rounded-lg grid place-items-center"
+                  style={{ background: `${stage.color}1a`, color: stage.color }}>
+                  <stage.icon size={14} />
+                </span>
+                <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 text-center leading-tight">
+                  {stage.label}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
         {viewMode === 'console' ? (
           /* ================= INTERACTIVE RUNNING CONSOLE ================= */
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
@@ -238,9 +289,10 @@ export default function AiGrowth() {
             <div className="lg:col-span-5 flex flex-col gap-6">
               
               {/* Pulsing Core Reactor card */}
-              <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-6 flex flex-col items-center justify-center text-center relative overflow-hidden min-h-[220px]">
-                <div aria-hidden className="absolute inset-0 bg-radial-glow opacity-30" />
-                
+              <div className="card rounded-3xl p-6 flex flex-col items-center justify-center text-center relative overflow-hidden min-h-[220px]">
+                <div aria-hidden className="absolute inset-0 opacity-40 pointer-events-none"
+                  style={{ background: 'radial-gradient(circle at 50% 20%, rgba(108,99,255,0.12), transparent 65%)' }} />
+
                 {isThinking || runningAgents.size > 0 ? (
                   <div className="relative">
                     {/* Glowing outer rotating ring */}
@@ -251,42 +303,52 @@ export default function AiGrowth() {
                     </div>
                   </div>
                 ) : (
-                  <div className="w-20 h-20 rounded-full bg-slate-800 border border-slate-700/80 grid place-items-center">
+                  <div className="relative w-20 h-20 rounded-full bg-slate-50 border border-slate-200 grid place-items-center">
+                    <svg viewBox="0 0 80 80" fill="none" className="absolute inset-0">
+                      <circle cx="40" cy="40" r="38" stroke={CATEGORY.seo.color} strokeOpacity="0.18" strokeWidth="1.5" strokeDasharray="2 5" />
+                    </svg>
                     <BrainCircuit size={28} className="text-slate-400" />
                   </div>
                 )}
 
                 <div className="mt-4 z-10">
-                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-200">
+                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">
                     {isThinking || runningAgents.size > 0 ? 'Agent Intelligence Active' : 'Cluster Idle'}
                   </h3>
-                  <p className="text-[10px] text-slate-400 font-semibold mt-1">
-                    {runningAgents.size > 0 
-                      ? `${runningAgents.size} agents currently auditing site streams` 
+                  <p className="text-[10px] text-slate-500 font-semibold mt-1">
+                    {runningAgents.size > 0
+                      ? `${runningAgents.size} agents currently auditing site streams`
                       : 'Standby for diagnostic commands'}
                   </p>
+                  {!(isThinking || runningAgents.size > 0) && (
+                    <div className="flex items-center justify-center gap-1.5 mt-2.5">
+                      {Object.values(CATEGORY).map((cat) => (
+                        <span key={cat.label} className="w-1.5 h-1.5 rounded-full" style={{ background: cat.color }} />
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Terminal Logs Panel */}
-              <div className="bg-[#0b0f19] border border-slate-850 rounded-3xl p-4 flex-1 flex flex-col min-h-[250px] shadow-2xl">
-                <div className="flex items-center gap-2 border-b border-slate-850 pb-2 mb-3">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80" />
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
-                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-450 ml-2">Console Output Stream</span>
+              <div className="card rounded-3xl p-4 flex-1 flex flex-col min-h-[250px]">
+                <div className="flex items-center gap-2 border-b border-slate-200 pb-2 mb-3">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-400" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-500 ml-2">Console Output Stream</span>
                 </div>
 
-                <div className="flex-1 overflow-y-auto max-h-[300px] font-mono text-[10px] space-y-2.5 pr-1.5 custom-scrollbar text-slate-350">
+                <div className="flex-1 overflow-y-auto max-h-[300px] font-mono text-[10px] space-y-2.5 pr-1.5 custom-scrollbar text-slate-600">
                   {consoleLogs.map((log, idx) => (
                     <div key={idx} className="leading-relaxed flex items-start gap-2.5">
                       <span className="text-slate-500 shrink-0 select-none">[{log.time}]</span>
                       <span className={
-                        log.type === 'success' ? 'text-emerald-400' 
-                          : log.type === 'error' ? 'text-rose-400' 
-                          : log.type === 'start' ? 'text-purple-400'
-                          : log.type === 'system' ? 'text-indigo-400 font-bold'
-                          : 'text-slate-350'
+                        log.type === 'success' ? 'text-emerald-600'
+                          : log.type === 'error' ? 'text-rose-600'
+                          : log.type === 'start' ? 'text-purple-600'
+                          : log.type === 'system' ? 'text-indigo-600 font-bold'
+                          : 'text-slate-600'
                       }>
                         {log.text}
                       </span>
@@ -298,22 +360,38 @@ export default function AiGrowth() {
             </div>
 
             {/* Right side: Revealed Diagnostic analysis cards list */}
-            <div className="lg:col-span-7 card p-6 bg-slate-900/40 border-slate-800 flex flex-col justify-between min-h-[450px]">
+            <div className="lg:col-span-7 card p-6 flex flex-col justify-between min-h-[450px]">
               <div>
-                <div className="flex items-baseline justify-between border-b border-slate-800 pb-3 mb-5">
-                  <h3 className="text-sm font-black uppercase tracking-wider text-slate-300">Live Agent Findings Feed</h3>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                <div className="flex items-baseline justify-between border-b border-slate-200 pb-3 mb-5">
+                  <h3 className="text-sm font-black uppercase tracking-wider text-slate-800">Live Agent Findings Feed</h3>
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                     {revealedFindings.length} findings revealed
                   </span>
                 </div>
 
                 {revealedFindings.length === 0 ? (
-                  <div className="py-20 text-center flex flex-col items-center justify-center">
-                    <Activity size={24} className="text-slate-650 animate-pulse mb-3" />
-                    <p className="text-xs font-semibold text-slate-400">Awaiting analysis stream...</p>
-                    <p className="text-[10px] text-slate-450 mt-1 max-w-[280px]">
-                      Diagnostic findings will appear here one-by-one as agents complete auditing.
+                  <div>
+                    <p className="text-[10px] text-slate-400 mb-4">
+                      Awaiting analysis stream — diagnostic findings will fill these in one-by-one as agents complete auditing.
                     </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {Object.entries(CATEGORY).map(([key, cat]) => {
+                        const ItemIcon = ICONS[key] || Target;
+                        return (
+                          <div key={key} className="rounded-2xl p-4 flex flex-col gap-3 min-h-[110px]"
+                            style={{ border: `1.5px dashed ${cat.color}40`, background: `${cat.color}0a` }}>
+                            <span className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider opacity-80" style={{ color: cat.color }}>
+                              <ItemIcon size={12} /> {cat.label}
+                            </span>
+                            <div className="space-y-1.5">
+                              <span className="block h-1.5 rounded-full w-4/5" style={{ background: `${cat.color}30` }} />
+                              <span className="block h-1.5 rounded-full w-3/5" style={{ background: `${cat.color}30` }} />
+                            </div>
+                            <span className="text-[9px] text-slate-400 mt-auto">Waiting on {cat.label} agents…</span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[460px] overflow-y-auto pr-1.5 custom-scrollbar">
@@ -321,29 +399,29 @@ export default function AiGrowth() {
                       const itemCat = CATEGORY[f.category] || CATEGORY.seo;
                       const ItemIcon = ICONS[f.category] || Target;
                       return (
-                        <div 
+                        <div
                           key={f.agentId || i}
-                          className="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-700/80 transition-all duration-300 scale-up"
+                          className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all duration-300"
                         >
                           <div>
-                            <div className="flex items-center justify-between border-b border-slate-850 pb-2 mb-3">
+                            <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
                               <span className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider" style={{ color: itemCat.color }}>
                                 <ItemIcon size={12} /> {itemCat.label}
                               </span>
                               {f.stat && (
-                                <span 
-                                  className="text-[9px] font-bold px-2 py-0.5 rounded-full border border-slate-750 bg-slate-800/60"
+                                <span
+                                  className="text-[9px] font-bold px-2 py-0.5 rounded-full border bg-slate-50"
                                   style={{ color: itemCat.color, borderColor: `${itemCat.color}25` }}
                                 >
                                   {f.stat}
                                 </span>
                               )}
                             </div>
-                            <h4 className="text-xs font-extrabold text-slate-200 leading-snug">{f.headline}</h4>
+                            <h4 className="text-xs font-extrabold text-slate-800 leading-snug">{f.headline}</h4>
                             {f.narrative && f.narrative !== f.headline && (
                               <div className="mt-2.5">
-                                <button 
-                                  type="button" 
+                                <button
+                                  type="button"
                                   onClick={() => toggleExpand(i)}
                                   className="text-[9px] font-black uppercase tracking-wider hover:underline transition-colors"
                                   style={{ color: itemCat.color }}
@@ -351,14 +429,14 @@ export default function AiGrowth() {
                                   {expandedIndices.has(i) ? 'Hide Details ↑' : 'View Details →'}
                                 </button>
                                 {expandedIndices.has(i) && (
-                                  <p className="text-[10px] font-medium text-slate-400 mt-2 leading-relaxed break-words bg-slate-950/40 p-2.5 border-l-2 rounded-r-xl border-slate-800" style={{ borderLeftColor: itemCat.color }}>
+                                  <p className="text-[10px] font-medium text-slate-600 mt-2 leading-relaxed break-words bg-slate-50 p-2.5 border-l-2 rounded-r-xl border-slate-200" style={{ borderLeftColor: itemCat.color }}>
                                     {f.narrative}
                                   </p>
                                 )}
                               </div>
                             )}
                           </div>
-                          <div className="mt-4 pt-2 border-t border-slate-850 flex items-center justify-between">
+                          <div className="mt-4 pt-2 border-t border-slate-100 flex items-center justify-between">
                             <span className="text-[9px] font-bold text-slate-500">Agent: {f.name}</span>
                             {f.generatedAt && (
                               <span className="text-slate-500 text-[10px] flex items-center gap-0.5 font-bold">
@@ -374,13 +452,13 @@ export default function AiGrowth() {
               </div>
 
               {revealedFindings.length > 0 && !isThinking && (
-                <div className="mt-6 pt-4 border-t border-slate-800/50 flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1.5">
+                <div className="mt-6 pt-4 border-t border-slate-200 flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-emerald-600 flex items-center gap-1.5">
                     <CheckCircle size={12} /> Processing cycle complete
                   </span>
-                  <a 
-                    href="/reports" 
-                    className="text-[10px] font-black uppercase tracking-wider text-indigo-400 hover:text-indigo-300 flex items-center gap-1 hover:underline"
+                  <a
+                    href="/reports"
+                    className="text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:text-indigo-500 flex items-center gap-1 hover:underline"
                   >
                     View executive report summary <ChevronRight size={12} />
                   </a>
@@ -391,21 +469,38 @@ export default function AiGrowth() {
         ) : (
           /* ================= ARCHITECTURE SYSTEM DIAGRAM ================= */
           <div className="space-y-6">
-            <div className="grid lg:grid-cols-3 gap-6 items-start">
-              <div className="lg:col-span-2">
-                <p className="text-xs text-white/45 leading-relaxed font-medium">
+            <div className="grid lg:grid-cols-3 gap-6 items-stretch">
+              <div className="lg:col-span-2 card rounded-2xl p-5 flex flex-col justify-center">
+                <p className="text-xs text-slate-600 leading-relaxed font-medium mb-4">
                   This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.
                 </p>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-4 border-t border-slate-200">
+                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 mr-1">Node status</span>
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
+                    <span className="w-2 h-2 rounded-full" style={{ background: '#a78bfa' }} /> Running
+                  </span>
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
+                    <span className="w-2 h-2 rounded-full" style={{ background: '#059669' }} /> Ran recently
+                  </span>
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
+                    <span className="w-2 h-2 rounded-full" style={{ background: '#f59e0b' }} /> Failed last run
+                  </span>
+                  <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">
+                    <span className="w-2 h-2 rounded-full" style={{ background: '#64748b' }} /> Idle / not yet run
+                  </span>
+                </div>
               </div>
               <LiveActivityRail items={activity} />
             </div>
 
             {agents !== null && agents.length === 0 ? (
-              <div className="rounded-2xl p-12 text-center text-sm text-white/40" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>
+              <div className="rounded-2xl p-12 text-center text-sm text-slate-400" style={{ border: '1px solid rgba(15,23,42,0.08)' }}>
                 No agents available yet.
               </div>
             ) : agents === null ? (
-              <div className="rounded-3xl h-[620px] animate-pulse" style={{ background: 'rgba(255,255,255,0.04)' }} />
+              // Matches OrchestrationDiagram's real responsive canvas height
+              // exactly, so there's no layout jump when the graph replaces it.
+              <div className="rounded-3xl h-[300px] md:h-[680px] animate-pulse" style={{ background: 'rgba(15,23,42,0.04)' }} />
             ) : (
               <OrchestrationDiagram agents={agents} onSelectAgent={setSelected} runningAgents={runningAgents} />
             )}

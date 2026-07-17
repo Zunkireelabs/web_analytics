@@ -282,7 +282,7 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
             <Field label="Key Reference Pages Included" icon={Link2}>
               <ul className="space-y-1">
                 {content.keyPages.map((p, i) => (
-                  <li key={i} className="text-xs text-indigo-700 hover:underline truncate">
+                  <li key={i} className="text-xs text-indigo-700 hover:underline truncate" title={p.title || p.url}>
                     {p.title || p.url}
                   </li>
                 ))}

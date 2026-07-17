@@ -88,8 +88,9 @@ export default function Insights({ siteId }) {
         } 
       />
 
-      {/* Range KPI summary with sparklines */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
+      {/* Range KPI summary with sparklines — always 2 cols (even below sm) so
+          4 cards stacked one-per-row doesn't turn into a long mobile scroll. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-5">
         <StatCard label="Clicks (range)" icon="🖱" color="#6C63FF" data={sv('clicks')} value={total('clicks')} format={fmtInt} loading={loading} />
         <StatCard label="Impressions (range)" icon="👁" color="#8b5cf6" data={sv('impressions')} value={total('impressions')} format={fmtInt} loading={loading} />
         <StatCard label="Users (range)" icon="👥" color="#10b981" data={sv('users')} value={total('users')} format={fmtInt} loading={loading} />

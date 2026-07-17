@@ -298,17 +298,17 @@ export default function CommandCenter() {
       </div>
 
       {/* REDESIGNED TOP ROW: Balanced 3-column Layout with shadows and rank badges */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch">
-        
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+
         {/* Column 1: Website Health score Circular SVG Gauge (4-cols) */}
-        <div className="md:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl overflow-hidden" data-finding-id="health-score">
+        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl overflow-hidden" data-finding-id="health-score">
           <div className={highlightClass('health-score')}>
             <HealthScoreCard score={data?.health?.score} trendWeek={data?.health?.trendWeek} loading={data === null} />
           </div>
         </div>
 
         {/* Column 2: Competitor Leaderboard (4-cols) */}
-        <div className="md:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
               <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-slate-200 shadow-sm">
@@ -350,7 +350,7 @@ export default function CommandCenter() {
         </div>
 
         {/* Column 3: Ingestion/Connection Health (4-cols) */}
-        <div className="md:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-2.5 mb-3 border-b border-slate-100 pb-3">
               <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-slate-200 shadow-sm">

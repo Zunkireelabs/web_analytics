@@ -17,7 +17,7 @@ export default function ActionRow({ item, generating, onGenerate }) {
         type="button"
         onClick={() => onGenerate(item)}
         disabled={generating}
-        className="shrink-0 text-xs font-semibold px-3.5 py-2 rounded-lg text-white transition disabled:opacity-60
+        className="shrink-0 text-xs font-semibold px-3.5 py-2.5 rounded-lg text-white transition disabled:opacity-60
                    focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]"
         style={{ background: '#6C63FF' }}
       >

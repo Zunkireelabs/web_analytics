@@ -92,7 +92,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
           <button 
             type="button" 
             onClick={() => setShowPrompts((s) => !s)}
-            className="text-[10px] font-black uppercase tracking-wider text-[#14b8a6] hover:underline flex items-center gap-1 focus:outline-none"
+            className="text-[10px] font-black uppercase tracking-wider text-[#14b8a6] hover:underline flex items-center gap-1 py-2 focus:outline-none"
           >
             {showPrompts ? 'Hide prompt scan details ↑' : `Show prompt scan details (${promptCount}) ↓`}
           </button>

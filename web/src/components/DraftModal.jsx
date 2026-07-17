@@ -201,9 +201,9 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
               </div>
             </div>
           </div>
-          <button 
-            onClick={onClose} 
-            className="w-8 h-8 rounded-full border border-slate-200/70 hover:border-slate-300 grid place-items-center text-slate-400 hover:text-slate-700 transition active:scale-95"
+          <button
+            onClick={onClose}
+            className="w-10 h-10 rounded-full border border-slate-200/70 hover:border-slate-300 grid place-items-center text-slate-400 hover:text-slate-700 transition active:scale-95 shrink-0"
             aria-label="Close modal"
           >
             <X size={15} />
@@ -240,7 +240,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                className="w-full h-96 text-xs font-mono border border-slate-200 rounded-2xl p-4 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-400 bg-slate-950 text-slate-200 scrollbar-thin"
+                className="w-full h-64 sm:h-96 max-h-[50vh] text-xs font-mono border border-slate-200 rounded-2xl p-4 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:border-indigo-400 bg-slate-950 text-slate-200 scrollbar-thin"
                 spellCheck={false}
               />
             </div>
@@ -265,10 +265,10 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                   )}
 
                   {!filePreview && (
-                    <button 
-                      type="button" 
+                    <button
+                      type="button"
                       onClick={loadFilePreview}
-                      className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-xl text-slate-650 hover:bg-slate-100 border border-slate-250 transition duration-150 active:scale-[0.98] shadow-sm flex items-center gap-1.5"
+                      className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-slate-650 hover:bg-slate-100 border border-slate-250 transition duration-150 active:scale-[0.98] shadow-sm flex items-center gap-1.5"
                     >
                       <GitBranch size={12} /> Show real file diff from GitHub
                     </button>
@@ -313,29 +313,29 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
         </div>
 
         {/* Modal Footer Controls */}
-        <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-slate-100 bg-slate-50/50 rounded-b-3xl">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-6 py-4 border-t border-slate-100 bg-slate-50/50 rounded-b-3xl">
           {draft.status !== 'implemented' ? (
-            <button 
-              onClick={remove} 
-              className="text-[10px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-700 flex items-center gap-1 px-2.5 py-1.5 rounded-lg hover:bg-rose-50/40 transition"
+            <button
+              onClick={remove}
+              className="text-[11px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-rose-50/40 transition"
             >
               <Trash2 size={12} /> Discard Draft
             </button>
           ) : <span />}
 
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
             {editing ? (
               <>
-                <button 
-                  onClick={() => setEditing(false)} 
-                  className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl text-slate-500 hover:bg-slate-100 transition"
+                <button
+                  onClick={() => setEditing(false)}
+                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 transition"
                 >
                   Cancel
                 </button>
-                <button 
-                  onClick={save} 
+                <button
+                  onClick={save}
                   disabled={saving}
-                  className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                  className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                   style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                 >
                   <Save size={12} /> {saving ? 'Saving…' : 'Save Draft'}
@@ -343,25 +343,25 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
               </>
             ) : (
               <>
-                <button 
-                  onClick={copy} 
-                  className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl text-slate-600 hover:bg-slate-100 border border-slate-205 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
+                <button
+                  onClick={copy}
+                  className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100 border border-slate-205 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
                 >
                   <Copy size={12} /> {copyLabel}
                 </button>
 
                 {(draft.status === 'draft' || draft.status === 'edited') && (
                   <>
-                    <button 
-                      onClick={startEdit} 
-                      className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl text-indigo-600 hover:bg-indigo-50 border border-indigo-200 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
+                    <button
+                      onClick={startEdit}
+                      className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-indigo-600 hover:bg-indigo-50 border border-indigo-200 transition duration-150 shadow-sm active:scale-[0.98] flex items-center gap-1"
                     >
                       <Edit3 size={12} /> Edit
                     </button>
-                    <button 
-                      onClick={() => transition(() => api.actionCenter.submitDraft(draft.id))} 
+                    <button
+                      onClick={() => transition(() => api.actionCenter.submitDraft(draft.id))}
                       disabled={transitioning}
-                      className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-100 hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-100 hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
                       <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Submitting…' : 'Submit for Approval'}
@@ -370,10 +370,10 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                 )}
 
                 {draft.status === 'submitted_for_approval' && (
-                  <button 
-                    onClick={() => transition(() => api.actionCenter.approveDraft(draft.id))} 
+                  <button
+                    onClick={() => transition(() => api.actionCenter.approveDraft(draft.id))}
                     disabled={transitioning}
-                    className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-emerald-100 hover:shadow-emerald-500/15 disabled:opacity-60 flex items-center gap-1"
+                    className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-emerald-100 hover:shadow-emerald-500/15 disabled:opacity-60 flex items-center gap-1"
                     style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
                   >
                     <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Approving…' : 'Approve'}
@@ -383,18 +383,18 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                 {draft.status === 'approved' && (
                   <>
                     {!MERGE_MANDATORY_TYPES.includes(draft.action_type) && (
-                      <button 
-                        onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))} 
+                      <button
+                        onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
                         disabled={transitioning}
-                        className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition"
+                        className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition"
                       >
                         Mark Implemented manually
                       </button>
                     )}
-                    <button 
-                      onClick={() => transition(() => api.actionCenter.pushBranch(draft.id))} 
+                    <button
+                      onClick={() => transition(() => api.actionCenter.pushBranch(draft.id))}
                       disabled={transitioning}
-                      className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
                       <GitBranch size={12} /> {transitioning ? 'Pushing…' : 'Push Branch'}
@@ -404,16 +404,16 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
 
                 {draft.status === 'branch_pushed' && (
                   <>
-                    <span 
-                      className="text-[10px] font-mono text-slate-400 truncate max-w-[140px] hidden sm:inline-block bg-slate-100 rounded-lg px-2 py-1" 
+                    <span
+                      className="text-[10px] font-mono text-slate-400 truncate max-w-[140px] hidden sm:inline-block bg-slate-100 rounded-lg px-2 py-1"
                       title={draft.branch_name}
                     >
                       {draft.branch_name}
                     </span>
-                    <button 
-                      onClick={() => transition(() => api.actionCenter.mergeToStage(draft.id))} 
+                    <button
+                      onClick={() => transition(() => api.actionCenter.mergeToStage(draft.id))}
                       disabled={transitioning}
-                      className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
                       <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Merging…' : 'Merge to Stage'}
@@ -426,10 +426,10 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
                       Live on staging.
                     </span>
-                    <button 
-                      onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))} 
+                    <button
+                      onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
                       disabled={transitioning}
-                      className="text-[10px] font-black uppercase tracking-wider px-4 py-2 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/15 disabled:opacity-60 shrink-0"
+                      className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/15 disabled:opacity-60 shrink-0"
                       style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
                     >
                       Mark Implemented

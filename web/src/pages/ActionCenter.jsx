@@ -244,16 +244,16 @@ export default function ActionCenter() {
             <span className="flex items-center gap-1.5 bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1.5 rounded-xl shadow-sm"><Clock size={11} className="text-amber-550" /> Review: <strong className="ml-0.5">{pendingApprovalCount}</strong></span>
           </div>
 
-          <div className="flex items-center gap-2 ml-auto">
+          <div className="flex items-center flex-wrap gap-2 gap-y-2 ml-auto">
             <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
               <span className="font-black text-slate-400">Start:</span>
               <input type="date" value={range.start} onChange={(e) => setRange((r) => ({ ...r, start: e.target.value }))}
-                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[105px]" />
+                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[90px] sm:w-[105px]" />
             </div>
             <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-[10px]">
               <span className="font-black text-slate-400">End:</span>
               <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
-                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[105px]" />
+                className="bg-transparent border-none outline-none font-bold text-slate-700 w-[90px] sm:w-[105px]" />
             </div>
             <button 
               onClick={refresh} 
@@ -358,7 +358,13 @@ export default function ActionCenter() {
                 ) : activeItems.length === 0 ? (
                   <div className="p-8 text-center text-xs text-slate-450 italic">No recommendations.</div>
                 ) : (
-                  <div className="divide-y divide-slate-100">
+                  // Unlike the Drafts/Implemented lists below (which already
+                  // cap at max-h-[360px] overflow-y-auto), this one had no
+                  // scroll bound — "View All" expanding to a dozen-plus
+                  // entries just grew the whole card (and page) instead of
+                  // scrolling internally, burying the right column's
+                  // Generate Draft panel far below the fold on mobile.
+                  <div className="divide-y divide-slate-100 overflow-y-auto max-h-[360px]">
                     {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
                       const pr = PRIORITY[item.priority] || PRIORITY.low;
                       const selected = selectedRecommendation?.id === item.id;

@@ -33,12 +33,12 @@ export default function TopQueriesCard({ queries, loading }) {
           <div className="py-14 text-center text-sm text-slate-400 font-medium">No query data for this range.</div>
         ) : (
           <>
-            <div className="grid grid-cols-[28px_1fr_84px_64px_64px] gap-3 px-2 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
+            <div className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_84px_64px_64px] gap-2 sm:gap-3 px-2 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
               <span>#</span>
               <span>Query</span>
-              <span className="text-right">Impressions</span>
+              <span className="text-right">Impr.</span>
               <span className="text-right">Clicks</span>
-              <span className="text-right">CTR</span>
+              <span className="text-right hidden sm:block">CTR</span>
             </div>
             <div className="divide-y divide-slate-100/50">
               {displayRows.map((r, i) => {
@@ -47,7 +47,7 @@ export default function TopQueriesCard({ queries, loading }) {
                 const ctr = impr > 0 ? (clicks / impr) * 100 : 0;
                 const share = Math.max((impr / max) * 100, 3);
                 return (
-                  <div key={i} className="grid grid-cols-[28px_1fr_84px_64px_64px] items-center gap-3 py-3 px-2 hover:bg-slate-50/50 rounded-xl transition duration-150 group">
+                  <div key={i} className="grid grid-cols-[20px_1fr_56px_44px] sm:grid-cols-[28px_1fr_84px_64px_64px] items-center gap-2 sm:gap-3 py-3 px-2 hover:bg-slate-50/50 rounded-xl transition duration-150 group">
                     <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-extrabold shrink-0"
                       style={i === 0 
                         ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', color: '#fff', boxShadow: '0 4px 8px -2px rgba(108, 99, 255, 0.3)' } 
@@ -69,7 +69,7 @@ export default function TopQueriesCard({ queries, loading }) {
                     </div>
                     <span className="text-sm font-bold text-slate-900 text-right tabular-nums">{fmt(impr)}</span>
                     <span className="text-sm font-medium text-slate-600 text-right tabular-nums">{fmt(clicks)}</span>
-                    <span className="text-sm font-semibold text-slate-700 text-right tabular-nums">{ctr.toFixed(1)}%</span>
+                    <span className="text-sm font-semibold text-slate-700 text-right tabular-nums hidden sm:block">{ctr.toFixed(1)}%</span>
                   </div>
                 );
               })}

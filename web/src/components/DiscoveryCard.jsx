@@ -113,7 +113,7 @@ export default function DiscoveryCard({ finding }) {
             <button 
               type="button" 
               onClick={() => setExpanded(true)}
-              className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] flex items-center gap-1 focus:outline-none cursor-pointer"
+              className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] flex items-center gap-1 py-2 focus:outline-none cursor-pointer"
             >
               Show parameters <ChevronDown size={10} />
             </button>

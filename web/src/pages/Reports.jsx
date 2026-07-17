@@ -80,7 +80,7 @@ export default function Reports({ siteId }) {
 
       <PageHeader title="Reports" subtitle="Your AI Executive Briefing" icon="🗒️"
         right={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {data?.docUrl && (
               <a href={data.docUrl} target="_blank" rel="noreferrer"
                 className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-slate-700 hover:text-slate-900 border border-slate-200/80 bg-white/70 hover:bg-white shadow-sm transition hover:scale-[1.01] active:scale-[0.99] duration-150">
@@ -124,7 +124,9 @@ export default function Reports({ siteId }) {
               imply a freshness timestamp this page doesn't really have. */}
           <ExecutiveSummaryPanel text={data?.narrative} />
 
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          {/* Always 2 cols (even below sm) so 5 cards stacked one-per-row
+              doesn't turn into a long mobile scroll. */}
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
             <StatCard label="Clicks" icon="🖱" color="#8b5cf6" value={m?.clicks} format={fmtInt} loading={loading} />
             <StatCard label="Impressions" icon="👁" color="#6C63FF" value={m?.impressions} format={fmtInt} loading={loading} />
             <StatCard label="Avg position" hint="lower is better" icon="🏅" color="#f59e0b"

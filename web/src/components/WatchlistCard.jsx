@@ -107,7 +107,7 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
           <button 
             type="button" 
             onClick={() => setExpanded(true)}
-            className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] hover:underline mt-1 self-start flex items-center gap-1 focus:outline-none cursor-pointer"
+            className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] hover:underline mt-1 self-start flex items-center gap-1 py-2 focus:outline-none cursor-pointer"
           >
             Show details & actions <ChevronDown size={10} />
           </button>
@@ -149,13 +149,13 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
             )}
 
             {/* Row 6: Action Trigger Buttons */}
-            <div className="flex items-center gap-1.5 pt-2.5 border-t border-slate-100">
+            <div className="flex items-center flex-wrap gap-1.5 pt-2.5 border-t border-slate-100">
               {item.recommendedAction?.generatorId && (
-                <button 
-                  type="button" 
-                  onClick={() => onGenerate(item)} 
+                <button
+                  type="button"
+                  onClick={() => onGenerate(item)}
                   disabled={generating}
-                  className="text-[9px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/15 cursor-pointer"
+                  className="text-[9px] font-black uppercase tracking-wider px-3 py-1.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/15 cursor-pointer max-w-[140px] sm:max-w-[200px] truncate"
                   style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                 >
                   {generating ? 'Drafting…' : `Fix: ${item.recommendedAction.label}`}
@@ -195,7 +195,7 @@ export default function WatchlistCard({ item, generating, onGenerate, onStatusCh
             <button 
               type="button" 
               onClick={() => setExpanded(false)}
-              className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] hover:underline mt-1 self-start flex items-center gap-1 focus:outline-none cursor-pointer"
+              className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/85 hover:text-[#6C63FF] hover:underline mt-1 self-start flex items-center gap-1 py-2 focus:outline-none cursor-pointer"
             >
               Hide details <ChevronUp size={10} />
             </button>
