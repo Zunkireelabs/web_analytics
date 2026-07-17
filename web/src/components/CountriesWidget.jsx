@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 
 const GEO_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json';
@@ -61,6 +61,28 @@ export default function CountriesWidget({ rows }) {
     const b = wrap.current.getBoundingClientRect();
     setTip((t) => (t ? { ...t, x: e.clientX - b.left, y: e.clientY - b.top } : t));
   };
+  // Touch devices don't fire hover events — tap a country to toggle its
+  // tooltip at the tapped point, tap it again (or elsewhere) to dismiss.
+  const onTapCountry = (e, r) => {
+    if (!wrap.current || !r) return;
+    e.stopPropagation();
+    const b = wrap.current.getBoundingClientRect();
+    const x = e.clientX - b.left;
+    const y = e.clientY - b.top;
+    setTip((t) => (t && t.name === r.country
+      ? null
+      : { x, y, name: r.country, clicks: Number(r.clicks) || 0, impr: Number(r.impressions) || 0 }));
+  };
+  // Tap-outside-to-dismiss: any click landing outside the map wrapper
+  // closes an open (tap-triggered) tooltip.
+  useEffect(() => {
+    if (!tip) return;
+    const onDocClick = (e) => {
+      if (wrap.current && !wrap.current.contains(e.target)) setTip(null);
+    };
+    document.addEventListener('click', onDocClick);
+    return () => document.removeEventListener('click', onDocClick);
+  }, [tip]);
 
   // AI insight
   const ctrOpp = sorted.filter((r) => r !== top && Number(r.impressions) > 0)
@@ -104,7 +126,7 @@ export default function CountriesWidget({ rows }) {
           {/* This card is real GSC data + plain threshold checks, not an LLM call — no "AI" badge. */}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mt-4">
           <Stat label="Countries reached" value={countries} />
           <Stat label="Total clicks" value={total.toLocaleString()} />
           <Stat label="Top country" value={top ? <span>{flag(top.country)} {top.country}</span> : '—'} />
@@ -115,7 +137,7 @@ export default function CountriesWidget({ rows }) {
       {/* map (left) + ranked table (right) — side by side, sharing one tier scale */}
       <div className="grid lg:grid-cols-[1.3fr_1fr] gap-0">
         {/* map: tier-shaded + legend so the shading is actually legible */}
-        <div className="relative p-3" ref={wrap} onMouseMove={onMove}>
+        <div className="relative p-3" ref={wrap} onMouseMove={onMove} onClick={() => setTip(null)}>
           <div className="flex items-center justify-between px-2 mb-1">
             <div className="text-[11px] font-semibold text-slate-500">Global reach</div>
             <Legend />
@@ -130,6 +152,7 @@ export default function CountriesWidget({ rows }) {
                     fill={fillFor(r)} stroke="#ffffff" strokeWidth={0.4}
                     onMouseEnter={() => r && setTip({ x: 0, y: 0, name: r.country, clicks, impr: Number(r.impressions) || 0 })}
                     onMouseLeave={() => setTip(null)}
+                    onClick={(e) => onTapCountry(e, r)}
                     style={{
                       default: { outline: 'none' },
                       hover: { fill: clicks > 0 ? '#312e81' : '#dbe2ea', outline: 'none', cursor: clicks > 0 ? 'pointer' : 'default' },

@@ -94,7 +94,12 @@ jobs:
             ANALYTICS_DOMAIN=${{ vars.PROD_DOMAIN }}
             ENVEOF
 
-            docker compose up -d --build
+            docker compose build
+
+            echo "Applying database migrations..."
+            docker compose run --rm analytics node server/migrations/run.js
+
+            docker compose up -d
 
             echo "Waiting for container to be healthy..."
             sleep 10

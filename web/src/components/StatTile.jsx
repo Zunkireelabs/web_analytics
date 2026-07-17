@@ -1,5 +1,13 @@
 import { Link } from 'react-router-dom';
 import { useCountUp } from '../useCountUp.js';
+import { AlertTriangle, Sparkles, Bot, Clock } from 'lucide-react';
+
+const EMOJI_MAP = {
+  '⚠️': AlertTriangle,
+  '✨': Sparkles,
+  '🤖': Bot,
+  '🕐': Clock,
+};
 
 const TONE = {
   critical: { text: 'text-rose-600', chipBg: '#fee2e220', chipColor: '#e11d48' },
@@ -29,20 +37,22 @@ export default function StatTile({ label, value, sub, tone = 'default', icon, lo
   }
   const Wrapper = to ? Link : 'div';
   const wrapperProps = to ? { to } : {};
+  const LucideIcon = typeof icon === 'string' && EMOJI_MAP[icon] ? EMOJI_MAP[icon] : null;
+
   return (
     <Wrapper {...wrapperProps} className={`card card-hover p-4 block ${to ? 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]' : ''}`}>
       <div className="flex items-center gap-2 mb-2">
         {icon && (
-          <span className="w-6 h-6 rounded-lg grid place-items-center text-[13px] shrink-0" style={{ background: t.chipBg, color: t.chipColor }}>
-            {icon}
+          <span className="w-6 h-6 rounded-lg grid place-items-center shrink-0" style={{ background: t.chipBg, color: t.chipColor }}>
+            {LucideIcon ? <LucideIcon size={12} strokeWidth={2.5} /> : icon}
           </span>
         )}
-        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
       </div>
-      <div className={`text-2xl font-bold tracking-tight tabular-nums ${t.text}`}>
+      <div className={`text-2xl font-black tracking-tight tabular-nums ${t.text}`}>
         {typeof value === 'number' ? animated : value}
       </div>
-      {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
+      {sub && <div className="text-[10px] text-slate-450 font-semibold mt-1.5">{sub}</div>}
     </Wrapper>
   );
 }

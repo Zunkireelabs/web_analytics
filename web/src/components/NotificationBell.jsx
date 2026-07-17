@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
+
+const PANEL_WIDTH = 320; // must match the `md:w-80` on the panel below
 
 // In-app notifications — the first (and today, only) subscriber to the
 // channel-agnostic event system (server/notifications/). Polls every
@@ -10,7 +13,15 @@ import { api, timeAgo } from '../api.js';
 export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState(null); // { items, unread }
+  // Desktop-only: the bell's on-screen position, used to anchor the panel
+  // directly below it like a normal dropdown. null on mobile, where the
+  // panel instead uses a fixed, viewport-centered fallback position (see
+  // the className below) — anchoring under the bell doesn't work there
+  // since the bell sits inside a 240px-wide sidebar drawer, far too narrow
+  // for a readable panel underneath it.
+  const [anchor, setAnchor] = useState(null);
   const ref = useRef(null);
+  const panelRef = useRef(null); // the portaled panel lives outside `ref`'s subtree
   const navigate = useNavigate();
 
   const load = () => api.notifications.list().then(setData).catch(() => {});
@@ -20,8 +31,37 @@ export default function NotificationBell() {
     return () => clearInterval(t);
   }, []);
 
+  // Computed with useLayoutEffect (not useEffect) so it's resolved before
+  // the browser paints — otherwise the panel would flash at its mobile
+  // fallback position for a frame before snapping under the bell.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const mq = window.matchMedia('(min-width: 768px)');
+    const compute = () => {
+      if (!mq.matches || !ref.current) { setAnchor(null); return; }
+      const rect = ref.current.getBoundingClientRect();
+      const left = Math.max(16, Math.min(rect.left, window.innerWidth - PANEL_WIDTH - 16));
+      // The bell sits high up in the sidebar's own header row, well above
+      // where the main content's page header (icon + title, ~80px tall on
+      // every page via the shared PageHeader component) sits — a small
+      // fixed gap below the bell put the panel right on top of that
+      // header instead of clearing it. Flooring at 96px from the viewport
+      // top (not just below the bell) clears it regardless of exactly how
+      // tall the bell's own row is.
+      const top = Math.max(rect.bottom + 8, 96);
+      setAnchor({ top, left });
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    return () => window.removeEventListener('resize', compute);
+  }, [open]);
+
   useEffect(() => {
-    function onClickOutside(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function onClickOutside(e) {
+      if (ref.current?.contains(e.target)) return;
+      if (panelRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
@@ -62,7 +102,7 @@ export default function NotificationBell() {
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen((o) => !o)} aria-label="Notifications"
-        className="relative w-9 h-9 rounded-lg grid place-items-center text-slate-500 hover:bg-slate-100 hover:text-slate-800
+        className="relative w-10 h-10 rounded-lg grid place-items-center text-slate-500 hover:bg-slate-100 hover:text-slate-800
                    transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]">
         <span className="text-lg">🔔</span>
         {unread > 0 && (
@@ -72,12 +112,26 @@ export default function NotificationBell() {
         )}
       </button>
 
-      {open && (
-        // Opens toward the main content, not off the left edge of the
-        // narrow sidebar this bell lives in — `right-0` here would anchor
-        // the panel's right edge at the bell (near the sidebar's own left
-        // edge) and push most of a 384px-wide panel off-screen.
-        <div className="absolute left-0 mt-2 w-96 max-h-[70vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 fade-up">
+      {/* Portaled to document.body: `fixed` positioning is supposed to be
+          relative to the viewport, but the mobile sidebar drawer (this
+          bell's actual parent) animates open/closed via a CSS `transform`
+          (translate-x), and any transformed ancestor becomes the containing
+          block for its `fixed` descendants instead of the viewport. That was
+          silently shifting this panel left by the drawer's own offset,
+          clipping it off-screen. Rendering into body sidesteps that ancestor
+          entirely.
+
+          Desktop (`anchor` set): positioned directly below the bell, like a
+          normal dropdown. Mobile (`anchor` null): falls back to the fixed,
+          viewport-centered position — anchoring under the bell isn't legible
+          there, since the bell sits inside a 240px-wide sidebar drawer. */}
+      {open && createPortal(
+        <div ref={panelRef}
+          className={`fixed max-h-[70vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 fade-up ${
+            anchor ? 'w-80' : 'top-16 left-1/2 -translate-x-1/2 w-[calc(100vw-2rem)] max-w-96'
+          }`}
+          style={anchor ? { top: anchor.top, left: anchor.left } : undefined}
+        >
           <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 sticky top-0 bg-white">
             <span className="text-sm font-bold text-slate-900">Notifications</span>
             {unread > 0 && <button onClick={markAllRead} className="text-[11px] font-semibold text-[#6C63FF] hover:underline">Mark all read</button>}
@@ -99,7 +153,8 @@ export default function NotificationBell() {
               ))}
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -1,8 +1,8 @@
 export default function SectionHeader({ title, desc, count, action }) {
   return (
     <div className="mb-3.5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-[17px] font-bold tracking-tight text-slate-900">{title}</h2>
+      <div className="flex items-center justify-between gap-3 min-w-0">
+        <h2 className="text-[17px] font-bold tracking-tight text-slate-900 truncate">{title}</h2>
         <div className="flex items-center gap-3 shrink-0">
           {count != null && <span className="text-xs font-mono font-semibold text-slate-400">{count}</span>}
           {action}

@@ -17,7 +17,7 @@ export default function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourc
 
   const stroke = isLive ? '#a78bfa' : data?.color || '#6C63FF';
   const strokeWidth = isLive ? 2.5 : isLoopBack ? 1.5 : 1.75;
-  const opacity = isLive ? 0.9 : isLoopBack ? 0.45 : 0.35;
+  const opacity = isLive ? 0.9 : isLoopBack ? 0.55 : 0.45;
   const strokeDasharray = isLoopBack ? '3 5' : '5 7';
   const className = isLive ? 'orbit-edge-live' : 'orbit-edge';
 

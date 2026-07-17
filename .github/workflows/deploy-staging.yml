@@ -108,7 +108,12 @@ jobs:
             ANALYTICS_DOMAIN=${{ vars.STAGING_DOMAIN }}
             ENVEOF
 
-            docker compose -f docker-compose.dev.yml up -d --build
+            docker compose -f docker-compose.dev.yml build
+
+            echo "Applying database migrations..."
+            docker compose -f docker-compose.dev.yml run --rm analytics node server/migrations/run.js
+
+            docker compose -f docker-compose.dev.yml up -d
 
             echo "Waiting for container to be healthy..."
             sleep 10

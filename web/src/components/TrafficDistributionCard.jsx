@@ -3,10 +3,15 @@ import { TrendingUp } from 'lucide-react';
 
 const num = (v) => Number(v || 0);
 
-// GA4's default channel groups fold into these five buckets — keeps the legend
-// stable and readable even as new/unusual channel names show up over time.
+// GA4's default channel groups fold into these five buckets
 const BUCKETS = ['Direct', 'Organic Search', 'Referral', 'Social', 'Other'];
-const COLORS = { 'Direct': '#6C63FF', 'Organic Search': '#a5b4fc', 'Referral': '#c4b5fd', 'Social': '#f0abfc', 'Other': '#e2e8f0' };
+const COLORS = { 
+  'Direct': '#6C63FF', 
+  'Organic Search': '#8b5cf6', 
+  'Referral': '#38bdf8', 
+  'Social': '#ec4899', 
+  'Other': '#cbd5e1' 
+};
 
 function bucketOf(channel) {
   const c = String(channel || '');
@@ -26,58 +31,67 @@ export default function TrafficDistributionCard({ channels, loading }) {
   const runnerUp = [...rows].filter((r) => r.name !== lead.name).sort((a, b) => b.value - a.value)[0];
 
   return (
-    <div className="card p-6 flex flex-col">
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <h3 className="text-[15px] font-semibold text-slate-900 tracking-tight">Traffic Distribution</h3>
-          <p className="text-xs text-slate-400 mt-0.5">Sessions by acquisition channel</p>
+    <div className="card p-6 flex flex-col justify-between">
+      <div>
+        <div className="flex items-start justify-between mb-6">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 tracking-tight">Traffic Distribution</h3>
+            <p className="text-xs text-slate-400 font-medium mt-0.5">Sessions by acquisition channel</p>
+          </div>
         </div>
-      </div>
 
-      {loading ? (
-        <div className="py-10 text-center text-sm text-slate-400 animate-pulse">Loading…</div>
-      ) : total === 0 ? (
-        <div className="py-10 text-center text-sm text-slate-400">No session data for this range.</div>
-      ) : (
-        <>
-          <div className="flex items-center gap-5">
-            <div className="relative shrink-0" style={{ width: 132, height: 132 }}>
+        {loading ? (
+          <div className="py-14 text-center text-sm text-slate-400 animate-pulse font-medium">Loading distribution…</div>
+        ) : total === 0 ? (
+          <div className="py-14 text-center text-sm text-slate-400 font-medium">No session data for this range.</div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-center gap-6 py-2">
+            <div className="relative shrink-0" style={{ width: 140, height: 140 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={pieRows} dataKey="value" nameKey="name" innerRadius={44} outerRadius={62}
-                    paddingAngle={pieRows.length > 1 ? 3 : 0} stroke="none" startAngle={90} endAngle={-270}>
+                  <Pie data={pieRows} dataKey="value" nameKey="name" innerRadius={46} outerRadius={66}
+                    paddingAngle={pieRows.length > 1 ? 4 : 0} stroke="none" startAngle={90} endAngle={-270}>
                     {pieRows.map((r) => <Cell key={r.name} fill={COLORS[r.name]} />)}
                   </Pie>
                 </PieChart>
               </ResponsiveContainer>
-              <div className="absolute inset-0 grid place-content-center text-center pointer-events-none">
-                <div className="text-xl font-bold text-slate-900 leading-none tabular-nums">{total.toLocaleString()}</div>
-                <div className="text-[10px] text-slate-400 mt-1">Total Sessions</div>
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
+                <div className="text-xl font-black text-slate-950 leading-none tabular-nums tracking-tight">
+                  {total.toLocaleString()}
+                </div>
+                <div className="text-[9px] font-bold text-slate-400 uppercase tracking-wider mt-1">Sessions</div>
               </div>
             </div>
-            <div className="flex-1 min-w-0 space-y-2">
-              {rows.map((r) => (
-                <div key={r.name} className="flex items-center gap-2 text-[13px]">
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: COLORS[r.name] }} />
-                  <span className="text-slate-600 truncate flex-1">{r.name}</span>
-                  <span className="text-slate-900 font-semibold tabular-nums shrink-0">
-                    {total ? Math.round((r.value / total) * 100) : 0}%
-                  </span>
-                </div>
-              ))}
+            <div className="flex-1 min-w-0 w-full space-y-2.5">
+              {rows.map((r) => {
+                const percentage = total ? Math.round((r.value / total) * 100) : 0;
+                return (
+                  <div key={r.name} className="flex items-center justify-between text-xs font-semibold px-2 py-1 hover:bg-slate-50 rounded-lg transition duration-150">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: COLORS[r.name] }} />
+                      <span className="text-slate-600 truncate">{r.name}</span>
+                    </div>
+                    <span className="text-slate-900 font-bold tabular-nums pl-2 shrink-0">
+                      {percentage}%
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
+        )}
+      </div>
 
-          <div className="mt-auto pt-4 border-t border-slate-50 flex items-start gap-2.5">
-            <span className="w-6 h-6 rounded-md grid place-items-center shrink-0 bg-indigo-50 text-indigo-600 mt-0.5">
-              <TrendingUp size={13} strokeWidth={2.25} />
-            </span>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              {leadShare}% of your traffic came via <span className="font-semibold text-slate-700">{lead.name}</span>.
-              {runnerUp && runnerUp.value === 0 && ` Consider improving visibility in ${runnerUp.name.toLowerCase()}.`}
-            </p>
-          </div>
-        </>
+      {!loading && total > 0 && (
+        <div className="mt-5 pt-4 border-t border-slate-100/80 flex items-start gap-3 bg-indigo-500/5 hover:bg-indigo-500/10 transition border border-indigo-500/10 rounded-2xl p-3.5">
+          <span className="w-7 h-7 rounded-xl grid place-items-center shrink-0 bg-indigo-500/10 text-indigo-600">
+            <TrendingUp size={14} strokeWidth={2.5} />
+          </span>
+          <p className="text-xs text-slate-600 leading-relaxed font-medium">
+            <strong className="text-slate-900 font-bold">{leadShare}%</strong> of sessions acquired via <span className="font-bold text-indigo-600 underline decoration-indigo-200/60 decoration-2 underline-offset-2">{lead.name}</span>.
+            {runnerUp && runnerUp.value === 0 && ` Expanding presence in ${runnerUp.name.toLowerCase()} would build reach.`}
+          </p>
+        </div>
       )}
     </div>
   );
