@@ -1,4 +1,5 @@
-import { getGa4BreakdownRange, getGa4BreakdownDelta, getSearchPerformanceRange } from '../store/read.js';
+import { getGa4BreakdownRange, getGa4BreakdownDelta, getSearchPerformanceRange, getSiteById } from '../store/read.js';
+import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { flagLowCtr } from './lib/ctr-anomaly.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
@@ -20,21 +21,23 @@ const DELTA_LIMIT = 8;
 export async function run({ siteId, start, end }) {
   const prior = priorPeriod(start, end);
 
-  const [countryRows, countryDelta, cityRows, cityDelta, languageRows, gscCountryPerf, gscTopPage] = await Promise.all([
+  const [site, countryRows, countryDelta, cityRows, cityDelta, languageRows, gscCountryPerf, gscTopPagesRaw] = await Promise.all([
+    getSiteById(siteId),
     getGa4BreakdownRange(siteId, start, end, 'country', TOP_LIMIT),
     getGa4BreakdownDelta(siteId, 'country', { start, end }, prior, DELTA_LIMIT),
     getGa4BreakdownRange(siteId, start, end, 'city', TOP_LIMIT),
     getGa4BreakdownDelta(siteId, 'city', { start, end }, prior, DELTA_LIMIT),
     getGa4BreakdownRange(siteId, start, end, 'language', TOP_LIMIT),
     getSearchPerformanceRange(siteId, start, end, 'country', 50),
-    getSearchPerformanceRange(siteId, start, end, 'page', 1),
+    getSearchPerformanceRange(siteId, start, end, 'page', TOP_LIMIT),
   ]);
+  const domain = knownDomain(site);
   // GA4 doesn't track sessions broken down by page+language together, so
   // there's no real "this language's top page" to point a translation
   // draft at — the site's own single top-traffic page (by impressions) is
   // the most defensible real, grounded stand-in. Without SOME page attached,
   // generators/translation.js has nothing to fetch and always 400s.
-  const topPage = gscTopPage[0]?.dim_value || null;
+  const topPage = filterOwnDomainPages(gscTopPagesRaw, domain)[0]?.dim_value || null;
 
   // GA4's own 'country' dimension already returns readable names (e.g.
   // "Nepal"); GSC's country breakdown uses ISO-3 codes, so it's converted

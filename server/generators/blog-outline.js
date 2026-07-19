@@ -1,4 +1,5 @@
-import { getSearchPerformanceRange } from '../store/read.js';
+import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
+import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -23,7 +24,12 @@ export async function generate({ siteId, params }) {
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
-  const otherPages = await getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT);
+  const [site, otherPagesRaw] = await Promise.all([
+    getSiteById(siteId),
+    getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
+  ]);
+  const domain = knownDomain(site);
+  const otherPages = filterOwnDomainPages(otherPagesRaw, domain);
   const candidates = otherPages.map((p) => p.dim_value);
   const candidateSet = new Set(candidates);
 

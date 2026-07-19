@@ -1,7 +1,8 @@
-import { getSearchPerformanceRange, getSearchPerformanceForPages } from '../../store/read.js';
+import { getSearchPerformanceRange, getSearchPerformanceForPages, getSiteById } from '../../store/read.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
 import { sortByRotation } from './rotation.js';
+import { knownDomain, filterOwnDomainPages } from './site-domain.js';
 
 const DEFAULT_GSC_LIMIT = 100;
 const DEFAULT_ZERO_TRAFFIC_LIMIT = 200;
@@ -32,10 +33,14 @@ export async function selectCandidatePages(siteId, agentId, {
   start, end, gscLimit = DEFAULT_GSC_LIMIT, zeroTrafficLimit = DEFAULT_ZERO_TRAFFIC_LIMIT, batchSize = DEFAULT_BATCH_SIZE,
   getCheckedAtForPages = getCheckedAtForPagesDefault,
 } = {}) {
-  const [gscPages, inventory] = await Promise.all([
+  const [site, gscPagesRaw, inventoryRaw] = await Promise.all([
+    getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', gscLimit),
     listPageInventory(siteId, { limit: zeroTrafficLimit + gscLimit }),
   ]);
+  const domain = knownDomain(site);
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
+  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
 
   const impressionsByPage = new Map(gscPages.map((p) => [p.dim_value, Number(p.impressions)]));
   const gscUrls = gscPages.map((p) => p.dim_value);

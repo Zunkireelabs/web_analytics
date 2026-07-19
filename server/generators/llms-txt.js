@@ -1,5 +1,6 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
+import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -26,11 +27,13 @@ export async function generate({ siteId, params }) {
   const { start, end } = params.start && params.end ? params : defaultRange();
   const priorityPages = Array.isArray(params.priorityPages) ? params.priorityPages.slice(0, KEY_PAGES_LIMIT) : [];
 
-  const [site, pagePerf] = await Promise.all([
+  const [site, pagePerfRaw] = await Promise.all([
     getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', 100),
   ]);
   const siteName = site?.name || 'This site';
+  const domain = knownDomain(site);
+  const pagePerf = filterOwnDomainPages(pagePerfRaw, domain);
 
   // Real site origin, derived from an actual ranking page URL — same
   // technique ai-visibility.js uses, since gsc_property can be a

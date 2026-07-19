@@ -23,6 +23,7 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
+import { knownDomain, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 
@@ -442,11 +443,13 @@ export async function runSiteDiscoveryIfDue(site) {
     return null;
   }
 
-  const [sitemapUrls, crawledUrls, gscPages] = await Promise.all([
+  const [sitemapUrls, crawledUrls, gscPagesRaw] = await Promise.all([
     discoverFromSitemaps(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
     crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
     getSearchPerformanceRange(site.id, start, end, 'page', 200),
   ]);
+  const domain = knownDomain(site);
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
 
   await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
   await upsertPageInventoryBatch(site.id, crawledUrls, 'crawl');
