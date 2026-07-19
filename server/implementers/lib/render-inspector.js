@@ -40,10 +40,24 @@ function hasLoopQaPattern(fileContent) {
 // Regex/structural evidence only — no LLM, no cost, instant. Returns a
 // strength bucket plus the human-readable evidence that produced it, so a
 // resulting decision can always cite what it actually saw.
+//
+// 'strong' (skips the LLM entirely, 95% confidence) is reserved for signals
+// that are structurally unambiguous on their own: a real templating loop
+// rendering question/answer fields, or an existing FAQPage schema block.
+// Generic signals (an "accordion" keyword, a lone "FAQ" text mention) never
+// combine into 'strong' by themselves — two weak, non-specific signals
+// stacking up is not the same as one piece of real structural evidence, and
+// letting them combine skipped the LLM sanity check on exactly the pages
+// that needed it most (an unrelated accordion component + an incidental
+// "FAQ" mention elsewhere on the page). Anything short of that always goes
+// through llmAssistedInspection below, never auto-decided from a keyword
+// count alone.
 export function scanVisibleFaqSignals(fileContent) {
   const evidence = [];
   let score = 0;
-  if (hasLoopQaPattern(fileContent)) {
+  const hasLoopQa = hasLoopQaPattern(fileContent);
+  const hasSchema = FAQ_SCHEMA_PATTERN.test(fileContent);
+  if (hasLoopQa) {
     score += 2;
     evidence.push('a templating loop renders question/answer fields (e.g. "{% for item in faq %}" or .map with .question/.answer)');
   }
@@ -55,11 +69,11 @@ export function scanVisibleFaqSignals(fileContent) {
     score += 1;
     evidence.push('the text "FAQ" or "Frequently Asked Questions" appears in the file');
   }
-  if (FAQ_SCHEMA_PATTERN.test(fileContent)) {
+  if (hasSchema) {
     score += 1;
     evidence.push('an existing FAQPage JSON-LD schema block is already present');
   }
-  const strength = score >= 2 ? 'strong' : score === 1 ? 'weak' : 'none';
+  const strength = (hasLoopQa || hasSchema) ? 'strong' : score >= 1 ? 'weak' : 'none';
   return { strength, score, evidence };
 }
 
@@ -100,8 +114,15 @@ async function llmAssistedInspection(fileContent, deterministicSignals) {
   const truncated = fileContent.length > TRUNCATE_CHARS;
 
   const system = 'You are examining a website template file to gather FACTS, not to make a decision. ' +
-    'A deterministic scan already found weak/ambiguous signals of an existing visible FAQ section and could ' +
-    'not confidently classify the page. Report only what you can directly observe in the given excerpt.' +
+    'A deterministic scan already found weak/ambiguous signals (e.g. the word "FAQ"/"FAQs" appearing somewhere, ' +
+    'or generic accordion-related keywords) and could not confidently classify the page — those signals alone ' +
+    'are NOT proof of a real FAQ section. Distinguish carefully: (a) a REAL, VISIBLE FAQ section — multiple ' +
+    'question/answer pairs actually presented to site visitors as an FAQ or Q&A block — versus (b) any ' +
+    'INCIDENTAL use of the word "FAQ"/"FAQs" in unrelated prose, a statistic, a nav link label, or a single ' +
+    'passing sentence that is not itself a Q&A section. Only report hasVisibleFaqSection: true for case (a). If ' +
+    'you report true, evidenceQuotes MUST be the actual visible question text(s) from a real Q&A section — if ' +
+    'you cannot quote at least one genuine question a visitor would see and read as part of an FAQ, report ' +
+    'hasVisibleFaqSection: false instead, even if the word "FAQ" appears elsewhere in the file.' +
     (truncated ? ' This excerpt may be truncated — if you cannot rule out something existing beyond it, say "unsure".' : '') +
     ' Respond with ONLY JSON: {"hasVisibleFaqSection": true|false|"unsure", "evidenceQuotes": ["short exact quotes"], "hasSafeInsertionPoint": true|false}.';
   const user = `Deterministic signals already found: ${deterministicSignals.evidence.join('; ') || 'none'}.\n\nFile excerpt:\n${excerpt}`;

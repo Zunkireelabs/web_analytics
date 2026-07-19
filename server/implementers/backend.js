@@ -20,6 +20,22 @@ export const meta = {
 // needs a different mechanism, just its own marker name and value-builder.
 const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links']);
 
+// The real field name buildMergeValues() (lib/marker-merge.js) expects for
+// each action type — used only to build an accurate, type-specific example
+// in the "no markers configured" error below, never hardcoded to one type
+// regardless of which draft actually triggered it.
+const MARKER_FIELD_BY_ACTION_TYPE = {
+  'meta-title': 'title',
+  faq: 'faq',
+  schema: 'schema',
+  'internal-links': 'links',
+};
+
+function markerConfigExample(actionType) {
+  const field = MARKER_FIELD_BY_ACTION_TYPE[actionType] || 'field';
+  return { field, marker: field.toUpperCase() };
+}
+
 // llms-txt is site-level, not per-page — draft.content.llmsTxt/robotsDirectives
 // are already full raw file-body strings (server/generators/llms-txt.js), so
 // this is a straight file write with zero content transformation needed. The
@@ -59,9 +75,10 @@ async function computeMarkerMerge(site, draft, renderModeOverride) {
 
   const markerMap = resolveMarkers(site, page, draft.action_type);
   if (!markerMap) {
+    const { field, marker } = markerConfigExample(draft.action_type);
     return {
       ok: false, reason: 'no-insertion-marker',
-      error: `No markers configured for "${page}" in url_file_map.pages[...].placements or .markers — add e.g. {"title":"TITLE"} there, and a matching marker in ${filePath}: either <!-- SEOAI:TITLE:START -->...<!-- SEOAI:TITLE:END --> around HTML content, or a trailing # SEOAI:TITLE comment on a single quoted-value line (e.g. front matter).`,
+      error: `No markers configured for "${page}" in url_file_map.pages[...].placements or .markers — add e.g. {"${field}":"${marker}"} there, and a matching marker in ${filePath}: either <!-- SEOAI:${marker}:START -->...<!-- SEOAI:${marker}:END --> around HTML content, or a trailing # SEOAI:${marker} comment on a single quoted-value line (e.g. front matter).`,
     };
   }
 
@@ -119,7 +136,8 @@ async function previewLiveMarkerContent(site, draft) {
 
   const markerMap = resolveMarkers(site, page, draft.action_type);
   if (!markerMap) {
-    return { ok: false, reason: 'no-insertion-marker', error: `No markers configured for "${page}".` };
+    const { field, marker } = markerConfigExample(draft.action_type);
+    return { ok: false, reason: 'no-insertion-marker', error: `No markers configured for "${page}" — add e.g. {"${field}":"${marker}"} to url_file_map.pages[...].placements or .markers.` };
   }
 
   const branch = STAGE_BRANCH;
