@@ -1,8 +1,9 @@
 import { analyzePageUrl } from './page-content.js';
 import { scorePageCategories } from './visibility-score.js';
-import { getSearchPerformanceRange } from '../../store/read.js';
+import { getSearchPerformanceRange, getSiteById } from '../../store/read.js';
 import { getCompetitorProvider } from '../../ingest/competitor-providers/index.js';
 import { callLLM } from '../../llm.js';
+import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
 
 // LLM-driven competitor discovery + crawl + compare — the MVP pipeline that
 // makes competitor-intelligence work with zero external SEO API, so it's
@@ -15,10 +16,6 @@ const TOP_PAGES_FOR_CONTEXT = 8;
 const TOP_QUERIES_FOR_CONTEXT = 15;
 const SERP_QUERIES_TO_CHECK = 5;
 const SERP_DEPTH_PER_QUERY = 10;
-
-function hostnameOf(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return null; }
-}
 
 function stripJsonFences(raw) {
   return raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
@@ -170,14 +167,15 @@ export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore
 // successful or not, so a caller can report "identified but couldn't reach
 // X" instead of a competitor silently vanishing.
 export async function runCompetitorDiscovery(siteId, start, end) {
-  const [topPages, topQueries] = await Promise.all([
+  const [site, topPagesRaw, topQueries] = await Promise.all([
+    getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', TOP_PAGES_FOR_CONTEXT),
     getSearchPerformanceRange(siteId, start, end, 'query', TOP_QUERIES_FOR_CONTEXT),
   ]);
-  const topPageUrls = topPages.map((p) => p.dim_value);
-  if (!topPageUrls.length) return { ownDomain: null, competitors: [] };
+  const ownDomain = await resolveOwnDomain(site, siteId, start, end);
+  const topPageUrls = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
+  if (!topPageUrls.length) return { ownDomain, competitors: [] };
 
-  const ownDomain = hostnameOf(topPageUrls[0]);
   const ownPageFetch = await analyzePageUrl(topPageUrls[0]);
   if (!ownPageFetch.ok) return { ownDomain, ownScore: null, competitors: [] };
   const ownScore = overallStructuralScore(ownPageFetch.analysis);

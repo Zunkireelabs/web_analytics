@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl } from './lib/page-content.js';
-import { resolveOwnDomain } from './lib/site-domain.js';
+import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { sortByRotation } from './lib/rotation.js';
 import {
   listActivePrompts, upsertTrackedPrompt, getCheckedAtForPrompts,
@@ -86,11 +86,11 @@ export async function run({ siteId, start, end }) {
 
   const site = await getSiteById(siteId);
   const domain = await resolveOwnDomain(site, siteId, start, end);
-  const [topPages, topQueries] = await Promise.all([
+  const [topPagesRaw, topQueries] = await Promise.all([
     getSearchPerformanceRange(siteId, start, end, 'page', 8),
     getSearchPerformanceRange(siteId, start, end, 'query', 15),
   ]);
-  const topPageUrls = topPages.map((p) => p.dim_value);
+  const topPageUrls = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
   const topQueryTexts = topQueries.map((q) => q.dim_value);
 
   // Refresh the prompt universe from real current data — idempotent

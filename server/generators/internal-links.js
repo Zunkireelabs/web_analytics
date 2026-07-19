@@ -1,5 +1,6 @@
-import { getSearchPerformanceRange } from '../store/read.js';
+import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -24,14 +25,16 @@ export async function generate({ siteId, params }) {
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
-  const [fetched, otherPages] = await Promise.all([
+  const [fetched, site, otherPagesRaw] = await Promise.all([
     analyzePageUrl(page),
+    getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
   ]);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
 
+  const domain = knownDomain(site);
   // Real candidate targets only — excludes the source page itself.
-  const candidates = otherPages
+  const candidates = filterOwnDomainPages(otherPagesRaw, domain)
     .map((p) => p.dim_value)
     .filter((url) => url !== page);
   const candidateSet = new Set(candidates);
