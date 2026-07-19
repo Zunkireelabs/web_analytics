@@ -121,6 +121,7 @@
  *   url_file_map.pages[url].placements = {
  *     [actionType]: { slot?: string, markers: { [field]: markerName } }
  *   }
+ *   url_file_map.patterns[].placements = { [actionType]: { same shape } }  // matches every URL that pattern resolves (e.g. one entry covers every /blog/:slug post)
  *   url_file_map.defaults.placements = { [actionType]: { same shape } }  // site-wide, inherited
  *
  * - `slot` is a logical, framework-agnostic location — the recommended
@@ -139,11 +140,14 @@
  *   stays entirely in lib/marker-merge.js, which already filters marker
  *   entries against whatever fields are present in a draft's built values.
  * - Resolution order (highest priority first): page-level `placements
- *   [actionType]` -> site-level `defaults.placements[actionType]` -> legacy
- *   flat `pages[url].markers` (the pre-placement config shape, read
- *   unmodified) -> nothing configured. A site that has only ever used the
- *   legacy flat `markers` shape needs no migration — it keeps working
- *   exactly as before.
+ *   [actionType]` -> pattern-level `patterns[].placements[actionType]`
+ *   (matches whichever pattern resolveFile would also match — a real
+ *   shared marker convention, not a per-post config chore; marker NAMES
+ *   are fixed strings here, not $1-substituted like resolveFile's file
+ *   paths) -> site-level `defaults.placements[actionType]` -> legacy flat
+ *   `pages[url].markers` (the pre-placement config shape, read unmodified)
+ *   -> nothing configured. A site that has only ever used the legacy flat
+ *   `markers` shape needs no migration — it keeps working exactly as before.
  * - A content type with no page-based placement concept at all (blog-outline/
  *   landing-page/translation create NEW files via resolveNewContentTarget/
  *   resolveTranslationTarget, never a marker splice) simply resolves to

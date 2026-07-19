@@ -16,6 +16,24 @@ function getPageEntry(site, pageUrl) {
   return map.pages?.[path] || map.pages?.[normalized] || null;
 }
 
+// The first `patterns[]` entry whose regex matches this URL — same matching
+// logic resolveFile uses for file paths, shared here so pattern-level
+// placement config (resolvePlacement below) can reuse it instead of a
+// second regex-matching implementation.
+function getMatchingPattern(site, pageUrl) {
+  const map = site.url_file_map || {};
+  if (!pageUrl) return null;
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  for (const p of map.patterns || []) {
+    if (!p.match) continue;
+    const re = new RegExp(p.match);
+    if (re.test(normalized) || re.test(path)) return p;
+  }
+  return null;
+}
+
 // Existing-page generators (schema, meta-title, faq, internal-links,
 // translation) resolve against `pages` (exact match) then `patterns` (regex
 // with $1-style capture-group substitution, for templated routes like
@@ -24,18 +42,15 @@ export function resolveFile(site, pageUrl) {
   const entry = getPageEntry(site, pageUrl);
   if (entry?.file) return entry.file;
 
-  const map = site.url_file_map || {};
+  const pattern = getMatchingPattern(site, pageUrl);
+  if (!pattern?.file) return null;
+
   let path;
   try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-
-  for (const p of map.patterns || []) {
-    if (!p.match || !p.file) continue;
-    const re = new RegExp(p.match);
-    const m = normalized.match(re) || path.match(re);
-    if (m) return p.file.replace(/\$(\d+)/g, (_, n) => m[Number(n)] ?? '');
-  }
-  return null;
+  const re = new RegExp(pattern.match);
+  const m = normalized.match(re) || path.match(re);
+  return m ? pattern.file.replace(/\$(\d+)/g, (_, n) => m[Number(n)] ?? '') : null;
 }
 
 // Recommended, non-exhaustive slot vocabulary for placement config below —
@@ -64,24 +79,42 @@ const DEFAULT_SLOT_BY_ACTION_TYPE = {
 // Single source of truth for "where does this (page, action type) land."
 // Resolution order, highest priority first:
 //   1. page-level `pages[url].placements[actionType]` — { slot?, markers }
-//   2. site-level `defaults.placements[actionType]` — same shape, inherited
+//   2. pattern-level `patterns[].placements[actionType]` — same shape,
+//      applies to every URL that pattern matches (e.g. one config entry
+//      covers every /blog/:slug post instead of configuring each one
+//      individually — mirrors how resolveFile already resolves a file path
+//      for an unconfigured page via the matching pattern)
+//   3. site-level `defaults.placements[actionType]` — same shape, inherited
 //      by every page that doesn't set its own (configuration inheritance,
 //      for conventions a whole site shares instead of repeating per page)
-//   3. legacy flat `pages[url].markers` (pre-placement config, read
+//   4. legacy flat `pages[url].markers` (pre-placement config, read
 //      unmodified — full backward compatibility, no migration required)
-//   4. nothing configured — { slot: <default or null>, markers: null }
+//   5. nothing configured — { slot: <default or null>, markers: null }
 // `markers` is always a raw `{field: markerName}` object exactly as the
 // config author wrote it; this resolver has zero knowledge of which fields
 // a given action type actually produces — lib/marker-merge.js's
 // spliceMarkers already filters marker entries by whatever fields are
 // present in the built values, so that coupling never needs to exist here.
+// Marker NAMES are fixed strings, not $1-substituted like resolveFile's
+// file paths — a shared marker convention (e.g. "TITLE") is exactly the
+// point of configuring it once at the pattern level.
 export function resolvePlacement(site, pageUrl, actionType) {
   const defaultSlot = DEFAULT_SLOT_BY_ACTION_TYPE[actionType] || null;
   const entry = getPageEntry(site, pageUrl);
 
-  const configured = entry?.placements?.[actionType] || site.url_file_map?.defaults?.placements?.[actionType];
-  if (configured) {
-    return { slot: configured.slot || defaultSlot, markers: configured.markers || null };
+  const pageConfigured = entry?.placements?.[actionType];
+  if (pageConfigured) {
+    return { slot: pageConfigured.slot || defaultSlot, markers: pageConfigured.markers || null };
+  }
+
+  const patternConfigured = getMatchingPattern(site, pageUrl)?.placements?.[actionType];
+  if (patternConfigured) {
+    return { slot: patternConfigured.slot || defaultSlot, markers: patternConfigured.markers || null };
+  }
+
+  const siteConfigured = site.url_file_map?.defaults?.placements?.[actionType];
+  if (siteConfigured) {
+    return { slot: siteConfigured.slot || defaultSlot, markers: siteConfigured.markers || null };
   }
 
   if (entry?.markers) return { slot: defaultSlot, markers: entry.markers };
