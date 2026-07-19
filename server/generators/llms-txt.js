@@ -95,7 +95,7 @@ export async function generate({ siteId, params }) {
   try {
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
-    throw new Error('llms.txt generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('llms.txt generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   const llmsTxt = typeof parsed.llmsTxt === 'string' ? parsed.llmsTxt : '';

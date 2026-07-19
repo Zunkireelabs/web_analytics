@@ -28,7 +28,7 @@ export async function generate({ siteId, params }) {
     analyzePageUrl(page),
     getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
   ]);
-  if (!fetched.ok) throw new Error(`Could not fetch page: ${fetched.error}`);
+  if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
 
   // Real candidate targets only — excludes the source page itself.
   const candidates = otherPages
@@ -53,7 +53,7 @@ export async function generate({ siteId, params }) {
     suggestions = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
     if (!Array.isArray(suggestions)) throw new Error('not an array');
   } catch {
-    throw new Error('Internal links generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('Internal links generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   // Deterministic safety check — never trust the model's URL alone: drop

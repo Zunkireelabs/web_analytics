@@ -34,7 +34,7 @@ export async function generate({ params }) {
     items = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
-    throw new Error('FAQ generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });
   }
   items = items.filter((i) => i && typeof i.question === 'string' && typeof i.answer === 'string').slice(0, 8);
 

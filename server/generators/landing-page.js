@@ -25,7 +25,7 @@ export async function generate({ params }) {
   try {
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
-    throw new Error('Landing page generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   const content = {

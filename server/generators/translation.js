@@ -21,7 +21,7 @@ export async function generate({ params }) {
   let keyContent = text || '';
   if (page) {
     const fetched = await analyzePageUrl(page);
-    if (!fetched.ok) throw new Error(`Could not fetch page: ${fetched.error}`);
+    if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
     title = fetched.analysis.title;
     metaDescription = fetched.analysis.metaDescription;
     keyContent = fetched.analysis.bodyText.slice(0, KEY_CONTENT_CHARS);
@@ -38,7 +38,7 @@ export async function generate({ params }) {
   try {
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
-    throw new Error('Translation generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('Translation generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   const content = {

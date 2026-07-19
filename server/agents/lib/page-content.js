@@ -291,6 +291,14 @@ export function inferSchemaType(pageUrl, schemaTypes = []) {
   let path = '';
   try { path = new URL(pageUrl).pathname; } catch { /* leave path empty, fall through to default */ }
   for (const [re, type] of PATH_SCHEMA_HINTS) if (re.test(path)) return type;
+  // A bare root path is a homepage far more often than it's an article — the
+  // generic 'Article' fallback below is wrong for exactly this common case
+  // (confirmed in practice: a SaaS app's homepage failed Article generation
+  // outright, since there's no headline/body to write an article about).
+  // 'Organization' is BOILERPLATE_SCHEMA_TYPES-listed above only for
+  // skipping an *already-existing* type that says nothing page-specific —
+  // it's still the right type to recommend *adding* when nothing exists yet.
+  if (path === '/' || path === '') return 'Organization';
   return 'Article';
 }
 
