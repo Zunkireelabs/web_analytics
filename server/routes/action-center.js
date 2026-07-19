@@ -213,21 +213,27 @@ router.post('/action-center/drafts/:id/implemented', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Zero-write dry run — the real file diff a reviewer sees BEFORE approving,
-// not just the abstract draft content. Available any time a draft isn't
-// implemented yet (not gated to 'approved') since this never touches
-// GitHub. Uses the exact same merge function /apply below does, so what's
-// previewed here and what actually gets written can never diverge.
+// Two different things depending on status: for a draft that isn't
+// implemented yet, a zero-write dry run of the real file diff a reviewer
+// sees BEFORE approving — uses the exact same merge function /apply below
+// does, so what's previewed here and what actually gets written can never
+// diverge. For an already-implemented draft, there's no pending change to
+// preview — this instead shows the real, current content sitting in the
+// live marker(s), read fresh from GitHub every call (see backend.js's
+// previewLiveMarkerContent), using whichever implementer/adapter actually
+// did the merge (resolveImplementerForMerge, same persisted-at-push-time
+// choice merge-to-stage itself uses) rather than re-resolving fresh.
 router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
-    if (draft.status === 'implemented') return res.status(400).json({ error: 'Already implemented — nothing to preview.' });
 
     const site = await getSiteById(req.siteId);
     if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — connect one first.' });
 
-    const resolved = await resolveImplementerForApply(site, draft);
+    const resolved = draft.status === 'implemented'
+      ? await resolveImplementerForMerge(draft)
+      : await resolveImplementerForApply(site, draft);
     if (resolved.error) return res.status(400).json({ error: resolved.error });
     const { implementer } = resolved;
     if (typeof implementer.preview !== 'function') {

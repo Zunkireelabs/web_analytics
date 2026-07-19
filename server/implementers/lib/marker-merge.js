@@ -58,6 +58,15 @@ export function hasMarker(fileContent, name) {
   return !!findMarker(fileContent, name);
 }
 
+// Whatever's currently sitting inside a marker, verbatim — used to show an
+// implemented draft's real, live content (routes/action-center.js's preview
+// for an already-merged draft) without recomputing anything: the marker
+// already holds whatever was actually applied, so there's nothing to build
+// or diff against, just read what's there.
+export function getMarkerContent(fileContent, name) {
+  return findMarker(fileContent, name)?.old ?? null;
+}
+
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
   if (block.test(fileContent)) {

@@ -1,7 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, mergeBranchToStage, STAGE_BRANCH } from './lib/github-ops.js';
 import { getFileContent } from '../github/client.js';
-import { buildMergeValues, spliceMarkers } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent } from './lib/marker-merge.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 
 export const meta = {
@@ -100,6 +100,45 @@ async function computeMarkerMerge(site, draft, renderModeOverride) {
   };
 }
 
+// For an already-implemented draft, "preview" means something different:
+// there's no pending change to review, just the real content that's
+// actually live right now. No recomputation, no render-mode re-inspection —
+// the marker already holds whatever was genuinely applied at merge time, so
+// this just reads it, verbatim. Kept deliberately separate from
+// computeMarkerMerge rather than reusing it with a flag, since recomputing
+// a "diff" against content that's already merged would be comparing the
+// live file to itself and could even produce a misleading result if
+// something (like render mode) would resolve differently today than it did
+// at merge time.
+async function previewLiveMarkerContent(site, draft) {
+  const page = draft.content?.page || draft.input?.page;
+  const filePath = resolveFile(site, page);
+  if (!filePath) {
+    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}".` };
+  }
+
+  const markerMap = resolveMarkers(site, page, draft.action_type);
+  if (!markerMap) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No markers configured for "${page}".` };
+  }
+
+  const branch = STAGE_BRANCH;
+  const file = await getFileContent(site, filePath, branch);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${branch}".` };
+  }
+
+  const changedRegions = Object.entries(markerMap)
+    .map(([field, markerName]) => ({ field, markerName, content: getMarkerContent(file.content, markerName) }))
+    .filter((r) => r.content !== null);
+
+  if (!changedRegions.length) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI markers found in ${filePath} for this draft's fields — it may have been removed or overwritten since this draft was implemented.` };
+  }
+
+  return { ok: true, filePath, live: true, changedRegions };
+}
+
 // Pushes a real branch (forked from stage) with the real change — not
 // merged yet (see mergeToStage below). Staff reviews the real diff (Draft
 // Preview panel, unchanged — same computeMarkerMerge output) before
@@ -130,6 +169,17 @@ export async function mergeToStage(site, draft) {
 // preview is just that raw content shown as the "after" — still real, still
 // a genuine before/after via a live fetch of the current file.
 export async function preview(site, draft, opts = {}) {
+  if (draft.status === 'implemented') {
+    if (draft.action_type === 'llms-txt') {
+      const llmsPath = resolveSiteRootFile(site, 'llmsTxt');
+      if (!llmsPath) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured.' };
+      const file = await getFileContent(site, llmsPath, STAGE_BRANCH);
+      return { ok: true, filePath: llmsPath, live: true, changedRegions: [{ field: 'llmsTxt', content: file?.content || '' }] };
+    }
+    if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
+    return { ok: false, reason: 'merge-strategy-not-implemented', error: `No live view available for "${draft.action_type}" yet.` };
+  }
+
   if (draft.action_type === 'llms-txt') {
     const llmsPath = resolveSiteRootFile(site, 'llmsTxt');
     if (!llmsPath) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured.' };

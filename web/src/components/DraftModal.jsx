@@ -48,21 +48,52 @@ const STATUS_INFO = {
 };
 
 function FileDiffPreview({ result }) {
+  const header = (
+    <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-extrabold uppercase tracking-wide flex-wrap">
+      <GitBranch size={12} />
+      <span>Target:</span>
+      <code className="font-mono text-slate-600 bg-slate-100 rounded px-1.5 py-0.5">{result.filePath}</code>
+      {result.renderMode === 'schema-only' && (
+        <span className="ml-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100 normal-case tracking-normal font-bold">
+          Schema only — visible page content unchanged
+        </span>
+      )}
+    </div>
+  );
+
+  // Implemented drafts have nothing pending to diff against — this shows
+  // what's actually sitting in the live marker(s) right now, read fresh
+  // every time this loads (backend.js's previewLiveMarkerContent), not a
+  // before/after.
+  if (result.live) {
+    return (
+      <div className="mt-4 space-y-4 animate-slide-down">
+        {header}
+        {result.changedRegions.map((r, i) => (
+          <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
+            {r.field && (
+              <div className="bg-slate-50 px-4 py-2 border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-450">
+                Field: {r.field}
+              </div>
+            )}
+            <div className="bg-emerald-50/20 p-4">
+              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2 flex items-center gap-1">
+                <span>✓ Currently Live</span>
+              </p>
+              <pre className="text-[11px] font-mono whitespace-pre-wrap text-emerald-950/85 leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">{r.content}</pre>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   const regions = result.changedRegions?.length
     ? result.changedRegions
     : [{ field: result.filePath, before: result.oldContent, after: result.newContent }];
   return (
     <div className="mt-4 space-y-4 animate-slide-down">
-      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-extrabold uppercase tracking-wide flex-wrap">
-        <GitBranch size={12} />
-        <span>Target:</span>
-        <code className="font-mono text-slate-600 bg-slate-100 rounded px-1.5 py-0.5">{result.filePath}</code>
-        {result.renderMode === 'schema-only' && (
-          <span className="ml-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100 normal-case tracking-normal font-bold">
-            Schema only — visible page content unchanged
-          </span>
-        )}
-      </div>
+      {header}
       {regions.map((r, i) => (
         <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
           {r.field && r.field !== result.filePath && (
@@ -285,9 +316,10 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                   onSelectTitle={draft.action_type === 'meta-title' && draft.status !== 'implemented' ? selectTitle : undefined} />
               </div>
 
-              {/* GitHub File Diff Preview Section */}
-              {draft.status !== 'implemented' && (
-                <div className="mt-5 pt-5 border-t border-slate-100">
+              {/* GitHub File Diff Preview Section — for an implemented draft
+                  this shows the real, currently-live content instead of a
+                  pending diff (see FileDiffPreview's `result.live` branch). */}
+              <div className="mt-5 pt-5 border-t border-slate-100">
                   {draft.status === 'branch_pushed' && (
                     <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
                       <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
@@ -303,7 +335,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       onClick={loadFilePreview}
                       className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-slate-650 hover:bg-slate-100 border border-slate-250 transition duration-150 active:scale-[0.98] shadow-sm flex items-center gap-1.5"
                     >
-                      <GitBranch size={12} /> Show real file diff from GitHub
+                      <GitBranch size={12} /> {draft.status === 'implemented' ? 'Show what\'s live on GitHub' : 'Show real file diff from GitHub'}
                     </button>
                   )}
                   {filePreview === 'loading' && (
@@ -334,7 +366,6 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     </div>
                   )}
                 </div>
-              )}
             </>
           )}
           {error && (
