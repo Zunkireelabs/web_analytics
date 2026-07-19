@@ -40,7 +40,7 @@ export async function generate({ siteId, params }) {
   try {
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
-    throw new Error('Blog outline generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('Blog outline generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])

@@ -20,7 +20,7 @@ export async function generate({ params }) {
   }
 
   const fetched = await analyzePageUrl(page);
-  if (!fetched.ok) throw new Error(`Could not fetch page: ${fetched.error}`);
+  if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
   const { title, bodyText } = fetched.analysis;
 
   const system = `You are a structured-data specialist. Draft valid schema.org JSON-LD of type "${schemaType}" ` +
@@ -36,7 +36,7 @@ export async function generate({ params }) {
   try {
     jsonLd = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
-    throw new Error('Schema generation failed: model did not return valid JSON');
+    throw Object.assign(new Error('Schema generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   // Recursive — placeholders often land inside nested objects (e.g.
