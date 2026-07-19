@@ -6,7 +6,14 @@ async function req(path, opts = {}) {
     ...opts,
   });
   if (res.status === 401) throw new Error('UNAUTH');
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    // Most callers only ever read `.message` — this just makes any other
+    // fields a specific error response includes (e.g. render-mode-uncertain's
+    // confidence/suggestedMode) available to callers that need them, without
+    // changing behavior for the ones that don't.
+    throw Object.assign(new Error(body.error || `HTTP ${res.status}`), body);
+  }
   return res.json();
 }
 
@@ -87,9 +94,9 @@ export const api = {
     saveDraft: (id, content) => req(`/action-center/drafts/${id}`, { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id) => req(`/action-center/drafts/${id}`, { method: 'DELETE' }),
     submitDraft: (id) => req(`/action-center/drafts/${id}/submit`, { method: 'POST' }),
-    approveDraft: (id) => req(`/action-center/drafts/${id}/approve`, { method: 'POST' }),
+    approveDraft: (id, renderMode) => req(`/action-center/drafts/${id}/approve`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
     implementDraft: (id) => req(`/action-center/drafts/${id}/implemented`, { method: 'POST' }),
-    pushBranch: (id) => req(`/action-center/drafts/${id}/push-branch`, { method: 'POST' }),
+    pushBranch: (id, renderMode) => req(`/action-center/drafts/${id}/push-branch`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
     mergeToStage: (id) => req(`/action-center/drafts/${id}/merge-to-stage`, { method: 'POST' }),
     previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
   },

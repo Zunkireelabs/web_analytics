@@ -83,6 +83,18 @@ jobs:
             SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
 
+            # ── Action Center GitHub integration ────────────────────────────
+            # Without this, server/github/client.js throws "No GitHub PAT set"
+            # the moment someone pushes/merges a draft from the live staging
+            # dashboard — it previously only worked when run from a machine
+            # with GITHUB_PAT already in its own local .env. The Actions
+            # secret itself can't be named GITHUB_PAT — GitHub reserves any
+            # secret name starting with GITHUB_ for its own auto-provided
+            # secrets (e.g. GITHUB_TOKEN) and rejects creating one — so the
+            # secret is named GH_PAT instead, and only renamed to the
+            # GITHUB_PAT env var the app code actually expects right here.
+            GITHUB_PAT=${{ secrets.GH_PAT }}
+
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}
             TZ=${{ vars.TZ }}

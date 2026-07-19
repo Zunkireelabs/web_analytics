@@ -755,133 +755,170 @@ only on our own dashboard. It is not part of the Core Dashboard client
 template described in Part 1. Do not assume a client build has any of this
 unless productizing it is made an explicit, separate decision later (§23).**
 
-**Update: a frontend now exists** (`/ai-growth`, `/action-center` pages,
-nav tabs in `Header.jsx`), and it is **enforced internal-only** rather than
-merely undocumented — this is a real access-control boundary, not just a
+**A full frontend exists** (`/ai-growth` Command Center, `/ai-orchestration`
+orchestration diagram, `/action-center`, `/clients` — all with nav entries in
+`Sidebar.jsx`), and it is **enforced internal-only** rather than merely
+undocumented — this is a real access-control boundary, not just a
 convention. `COMPANY_SITE_ID` (env var) names the one `sites.id` that counts
 as "internal." `requireInternalSite` middleware (`server/routes/login.js`,
-applied after `requireAuth` in `server/routes/agents.js` and
-`server/routes/action-center.js`) 404s any other site's session. The
-frontend mirrors this: `GET /api/me` returns `isInternal` (computed
-server-side, never trusted from the client), and `App.jsx`/`Header.jsx` only
-register the `/ai-growth`/`/action-center` routes and nav tabs when
+applied after `requireAuth` in `server/routes/agents.js`,
+`server/routes/command-center.js`, and `server/routes/action-center.js`) 404s
+any other site's session. The frontend mirrors this: `GET /api/me` returns
+`isInternal` (computed server-side, never trusted from the client), and
+`App.jsx`/`Sidebar.jsx` only register those four routes and nav items when
 `isInternal` is true. A new client site (via `create-client.js`) is
 internal-only-gated by default — nothing has to be done per-client to keep
 this hidden from them. `server/routes/action-center.js` also depends on
-`server/generators/` (draft-generation logic) and `server/store/drafts.js`
-(migration 014) — not documented in depth here yet; treat as part of this
-same internal-only boundary until someone writes it up properly.
+`server/generators/` (9 content-draft generators) and `server/store/drafts.js`
+(migration 014) — see §22 for the current structural reference.
 
 ## 22. AI Agents framework (`server/agents/`)
 
+**Updated — this section previously described an early "Phase 1 skeleton"
+state (7 agents, no `callLLM` usage, no frontend). That is no longer
+accurate; the system below reflects the current, verified implementation.**
+The two narrative reference docs at the repo root, `AGENT-WORKFLOW.md` and
+`SYSTEM-WORKFLOW.md`, describe this same current state and are kept in sync
+with it — read those for a walkthrough; this section is the structural
+reference.
+
 A pluggable framework of specialist growth/SEO analysis agents, structurally
 and operationally separate from the Part 1 AI features (§10): backend logic
-lives entirely in `server/agents/`, introduces **no new environment variables**
-(verified zero `process.env` usage in `server/agents/`, `server/routes/agents.js`,
-`server/store/agent-runs.js`), and is **not wired into any cron/schedule** —
-every agent run is triggered on-demand by calling its route.
+lives entirely in `server/agents/`, and every agent is now both **scheduled**
+(daily/weekly cron, throttled per-agent) and **on-demand** (callable directly
+from the internal frontend).
 
 **Additional folders/files this system adds** (omitted from the Part 1
 folder tree in §3):
 ```
 server/
 ├── agents/
-│   ├── types.js               Documentation-only contract (AgentMeta/AgentInput/AgentOutput shapes)
-│   ├── registry.js            Auto-discovers every agent module in this folder
-│   ├── runner.js               runAgent(id, input) — invokes, times, persists to agent_runs
-│   ├── query-intelligence.js   Phase 1 skeleton: top-queries breakdown
-│   ├── opportunity.js          Phase 1 skeleton: query→landing-page mapping
-│   ├── device.js               Phase 1 skeleton: device breakdown
-│   ├── country.js              Phase 1 skeleton: country breakdown
-│   ├── ai-visibility.js        Always "insufficient-data" — no citation/SERP source connected
-│   ├── content-gap.js          Always "insufficient-data" — no competitor/SERP/entity source connected
-│   └── executive-report.js     Meta-agent: composes the other 6 agents' facts
-├── routes/agents.js            /api/agents* routes (requireAuth-gated, same login.js middleware)
-├── store/agent-runs.js         Append-only insert + history read for agent_runs
-└── migrations/010_agent_runs.sql
+│   ├── types.js                    Documentation-only contract (AgentMeta/AgentInput/AgentOutput shapes)
+│   ├── registry.js                 Auto-discovers every agent module in this folder by meta.id
+│   ├── runner.js                    runAgent(id, input) — the one choke point: invokes, times, persists
+│   │                                to agent_runs, broadcasts a live SSE event via activity-bus.js
+│   ├── orchestrator.js              runOrchestration() — fans out to N agents in parallel, merges
+│   │                                findings, calls callLLM once for a synthesized narrative
+│   ├── query-intelligence.js        seo — daily
+│   ├── opportunity.js               seo — daily
+│   ├── device-intelligence.js       seo — daily
+│   ├── country-intelligence.js      geo — daily
+│   ├── ai-visibility.js             geo — daily; always "insufficient-data", no citation/SERP-AI-Overview
+│   │                                source connected (deliberate no-fabrication policy, unchanged from before)
+│   ├── technical-seo.js             seo — daily; Core Web Vitals checks skipped if PAGESPEED_API_KEY unset
+│   ├── content-gap.js               content — on-demand + Executive Report only, not in the daily cron set
+│   ├── competitor-intelligence.js   seo — monthly (throttled); needs DATAFORSEO_LOGIN/PASSWORD, else
+│   │                                falls back to LLM-only discovery
+│   ├── authority.js                 seo — monthly (throttled); needs DATAFORSEO_LOGIN/PASSWORD, else
+│   │                                "insufficient-data" (never estimated) — surfaced in AuthorityScoreCard.jsx
+│   ├── ai-recommendation.js         content — monthly (throttled); needs OPENAI_API_KEY **and** an explicit
+│   │                                AI_RECOMMENDATION_ENABLED=true opt-in flag (double-gated on purpose)
+│   └── executive-report.js          meta — composes the other agents via runOrchestration + callLLM
+├── agents/lib/                      24 support modules: command-center.js, copilot.js, watchlist.js,
+│                                    activity-bus.js (SSE pub/sub), authority-score.js, competitor-analysis.js,
+│                                    growth-report.js, insights.js, recommendations.js, page-content.js,
+│                                    site-discovery.js, fix-verification.js, technical-seo-analysis.js,
+│                                    model-providers/openai.js, etc.
+├── routes/agents.js                 /api/agents* routes, requireAuth + requireInternalSite-gated
+├── routes/command-center.js         Separate router for the Command Center aggregate view
+├── routes/action-center.js          Separate router; depends on server/generators/ (9 content generators)
+│                                    and server/store/drafts.js (migration 014) for implementable drafts
+├── store/agent-runs.js              Append-only insert + history read for agent_runs
+├── cron.js                          node-cron: daily job (CRON_SCHEDULE, default 0 7 * * *) and weekly
+│                                    job (WEEKLY_CRON_SCHEDULE, default 0 8 * * 4) — same Express process,
+│                                    no separate worker/queue
+├── migrations/010_agent_runs.sql
+├── migrations/014_*                 Action Center drafts
+├── migrations/035_authority_score.sql
+└── migrations/036_ai_recommendation_tracking.sql
 ```
 
-**Wiring**: `server/index.js` imports `agentsRouter` from `routes/agents.js`
-and mounts it with `app.use('/api', agentsRouter)`, alongside (not instead
-of) `metricsRouter`. It uses the exact same `requireAuth` middleware from
-`routes/login.js` as the client-facing routes — there is no separate
-authentication scheme for this internal system.
+**Wiring**: `server/index.js` mounts `app.use('/api', agentsRouter)`. Unlike
+the Part 1 client routes, this surface (and `command-center`/`action-center`)
+is gated by `requireInternalSite` (`server/routes/login.js`), keyed on the
+`COMPANY_SITE_ID` env var — every non-internal site's session gets a `404`.
+`GET /api/me` computes `isInternal` server-side (never trusted from the
+client), and `web/src/App.jsx` only registers the `/ai-growth`,
+`/ai-orchestration`, `/action-center`, `/clients` routes (and `Sidebar.jsx`
+only shows their nav items) when `isInternal` is true.
 
-**Contract** (`server/agents/types.js`, documentation-only JSDoc, no runtime
-code): every agent module exports exactly `meta` (id, name, description,
-category ∈ `seo`/`content`/`geo`/`meta`, version, optional `requires` for
-meta-agents, optional `dataSources` for agents that depend on data this
-schema doesn't have yet) and `async function run(input)` returning
-`{ meta, status, facts, narrative, generatedAt, ... }` where `status` is
-`'ok'` | `'insufficient-data'` | `'error'`. `facts` are plain computed values;
-`narrative` is reserved for an LLM-written summary layered on top (not yet
-used by any agent — see below).
+**Contract** (`server/agents/types.js`, documentation-only JSDoc): every
+agent module exports `meta` (id, name, description, category ∈
+`seo`/`content`/`geo`/`meta`, version) and `async function run(input)`
+returning `{ meta, status, facts, narrative, generatedAt, ... }` where
+`status` is `'ok'` | `'insufficient-data'` | `'error'`. Every agent now calls
+`callLLM` (`server/llm.js`, shared with Part 1 §19) to produce its
+`narrative` — this is no longer reserved/unused as it was at the previous
+snapshot.
 
 **Registry** (`registry.js`) — auto-discovers every `.js` file in
-`server/agents/` except `types.js`/`registry.js`/`runner.js` itself, importing
-each and indexing it by `meta.id`; throws at load time on a duplicate id.
-Adding a new agent is a one-file operation — drop `server/agents/<id>.js`
-exporting `{meta, run}` and it is immediately listed and runnable, no registry
-edits required. `listAgentMeta()` and `getAgent(id)` are the two exports
-`routes/agents.js` uses.
+`server/agents/` (excluding `types.js`/`registry.js`/`runner.js`/
+`orchestrator.js`), indexing by `meta.id`; adding a new agent is still a
+one-file operation, no registry edits required.
 
-**Runner** (`runner.js`) — `runAgent(id, input, {persist=true})` is the one
-place that invokes an agent, times it (`tookMs`), and persists the result to
-`agent_runs` via `server/store/agent-runs.js`. `persist: false` exists for
-in-process composition (used by `executive-report.js`) so a meta-agent
-calling six sub-agents doesn't write six redundant history rows for a single
-logical run.
+**Runner** (`runner.js`) — `runAgent(id, input)` invokes, times (`tookMs`),
+persists to `agent_runs`, and broadcasts a live start/done event via
+`activity-bus.js`'s `subscribeActivity`/publish pair. This SSE feed is what
+`GET /api/agents/live` streams to the frontend.
 
-**API routes** (`server/routes/agents.js`, `requireAuth`-gated):
+**Orchestrator** (`orchestrator.js`) — `runOrchestration()` fans out to
+multiple agents in parallel, merges their findings, and makes exactly one
+`callLLM` call to synthesize a cross-agent narrative. Used by the Executive
+Report, and by the Command Center / Action Center / AI Copilot refresh
+actions — all four share this one code path rather than each reimplementing
+fan-out + synthesis.
 
-| Method | Path | Query / Body | Returns |
-|---|---|---|---|
-| GET | `/agents` | — | metadata for every registered agent (id/name/description/category/dataSources) |
-| POST | `/agents/:id/run` | `{ site, start, end, params }` | runs one agent by id, persists to `agent_runs`, returns its output |
-| GET | `/agents/:id/runs` | `?site&limit=10` | recent run history for one agent on a site |
+**Frontend — real, not a mock.** `web/src/pages/AiGrowth.jsx` (`/ai-orchestration`)
+renders `OrchestrationDiagram.jsx`, which is driven entirely by real data:
+`GET /api/agents/status` (latest persisted run per agent, joined from
+`agent_runs`), `GET /api/agents/activity` (recent run history), and a live
+`GET /api/agents/live` SSE stream — a code comment in `routes/agents.js`
+states explicitly this is real state only, never a simulated "running" node.
+`CommandCenter.jsx` (`/ai-growth`, the default landing page for this section)
+reads already-persisted `agent_runs` via `command-center.js` — fast, not a
+live recompute. `ActionCenter.jsx` turns agent findings into drafts, with a
+GitHub integration (`server/github/client.js`) for push-branch/merge-to-stage
+actions. `CopilotPanel.jsx` is an internal chat UI reusing the orchestrator's
+`synthesizeFindings`. `NotificationBell.jsx` is fed by `server/notifications/detect.js`,
+which diffs agent findings run-over-run to surface new opportunities.
 
-`POST /agents/:id/run` maps an unknown agent id to a `404` before falling
-through to the shared error handler for anything else.
+**Triggers, in full:**
+1. **Cron** (`server/cron.js`) — daily job runs the 6 daily-cadence agents
+   (`query-intelligence`, `opportunity`, `country-intelligence`,
+   `device-intelligence`, `ai-visibility`, `technical-seo`); weekly job
+   (Thursdays by default) runs the 3 monthly-throttled agents
+   (`competitor-intelligence`, `authority`, `ai-recommendation` — each only
+   actually executes once per 30 days via `runAgentIfDue`) then
+   `executive-report`. `content-gap` is deliberately excluded from the cron
+   set — on-demand and Executive-Report-only.
+2. **On-demand API** — `POST /api/agents/:id/run` (any single agent),
+   `POST /api/command-center/refresh`, `POST /api/action-center/recommendations/refresh`.
+3. **No separate scheduler/queue/worker** — same single Express process as
+   Part 1; `runStartupCatchup()` (`server/job.js`) runs unawaited at boot to
+   catch up any site whose scheduled run was missed while the process was down.
 
-**Database table** — `agent_runs` (migration 010): `id SERIAL PK`, `site_id`
-FK to `sites`, `agent_id TEXT`, `agent_version INT` (default 1), `input
-JSONB`, `status TEXT` (default `'ok'`), `facts JSONB`, `narrative TEXT`,
-`error TEXT`, `took_ms INT`, `created_at`. Index `(site_id, agent_id,
-created_at DESC)`. **Append-only by design** — unlike every table in the
-Part 1 schema (§9), nothing upserts into it; every agent invocation is a new
-row, kept for history/audit/future trend views. It still has a `site_id` FK
-following the same multi-tenant-ready pattern as the rest of the schema
-(every agent function takes `siteId` explicitly), but nothing loops over
-multiple sites for it today, consistent with §20.
+**`insufficient-data` remains a deliberate design choice**, unchanged from
+the previous snapshot: `ai-visibility` (no citation-tracking/SERP-AI-Overview
+provider) and `authority`/`competitor-intelligence` when `DATAFORSEO_LOGIN`/
+`PASSWORD` are unset all say so plainly rather than fabricating a number —
+real DataForSEO-backed data for competitor intelligence is still pending
+manager budget approval as of this writing.
 
-**Seven agents are currently registered, all explicitly "Phase 1 skeletons"**
-— none of them call `callLLM` yet (verified: zero `callLLM` usage anywhere in
-`server/agents/`), so every `narrative` field is `null` today:
-
-| Agent id | Category | What `run()` actually does today |
-|---|---|---|
-| `query-intelligence` | seo | Raw top-10 GSC query breakdown via `getGscBreakdownRange`. No mover/trend scoring yet. |
-| `opportunity` | seo | Raw query→landing-page mapping via `getTopPagePerQuery`. No striking-distance/CTR-gap scoring yet. |
-| `device` | seo | Raw GA4 device breakdown (top 5) via `getGa4BreakdownRange`. No CTR/position-gap anomaly detection yet. |
-| `country` | geo | Raw GA4 country breakdown (top 10) via `getGa4BreakdownRange`. No period-over-period delta yet. |
-| `ai-visibility` | geo | **Always returns `status: 'insufficient-data'`** — no AI-citation-tracking or SERP-AI-Overview data source exists in this schema; by explicit product decision it never fabricates an estimate to fill the gap. |
-| `content-gap` | content | **Always returns `status: 'insufficient-data'`** — no competitor/SERP/entity data source exists; same no-fabrication policy. |
-| `executive-report` | meta | Composes the other six by calling each `agent.run()` **directly** (bypassing `runAgent`/persistence — see Runner above), collecting their `{status, facts, message}` into one `sections` object. No synthesized cross-agent narrative yet. |
-
-The `insufficient-data` pattern (`ai-visibility.js`, `content-gap.js`) is a
-deliberate, explicitly-commented design choice: an agent whose declared
-`dataSources` are all `not-connected` must say so plainly rather than
-producing a plausible-looking but invented number. Wiring a real data
-provider later (the comments describe a future `server/providers/` layer)
-is designed to only change that one agent's `run()` — no registry, runner, or
-router changes needed.
+**Env vars this system adds** (on top of the Part 1 core vars in §16):
+`DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`, `COMPETITOR_LOCATION_CODE`,
+`COMPETITOR_LANGUAGE_CODE`, `COMPETITOR_PROVIDER`, `PAGESPEED_API_KEY`,
+`AI_RECOMMENDATION_ENABLED`, `AI_RECOMMENDATION_MODEL`, `COMPANY_SITE_ID`
+(the internal-only feature-flag gate), `FIX_VERIFY_DELAY_HOURS`.
 
 **Design conventions worth reusing for any similarly internal, pluggable
 feature**: an auto-discovery registry over a fixed directory instead of
 manual wiring; a documentation-only contract file (`types.js`) instead of a
 base class; an explicit "never fabricate — return `insufficient-data`
 instead" rule for anything lacking a real data source; append-only history
-logging instead of upsert-by-day when a "run" has no natural coalescing key.
+logging instead of upsert-by-day when a "run" has no natural coalescing key;
+a single orchestrator/runner choke point that every caller (cron, API,
+meta-agent) goes through, instead of each caller reimplementing persistence
+and broadcast.
 
 ## 23. Future Improvements (AI Growth Platform, internal-only)
 
@@ -889,22 +926,15 @@ All of the following applies only to the internal system in §22. None of it
 implies or plans a client-facing rollout — that remains a separate, explicit
 product decision, not assumed by any item below.
 
-- Build a frontend surface for `/api/agents*` for internal use — today there
-  is no dashboard page or component for this at all.
-- Wire real data providers for `ai-visibility` (AI citation tracking / SERP
-  AI-Overview detection) and `content-gap` (competitor/SERP/entity data) so
-  those two agents can move off `insufficient-data`; per the code's own
-  comments this is designed to be a self-contained change to each agent's
-  `run()` only.
-- Add the actual scoring logic the "Phase 1 skeleton" comments defer:
-  striking-distance scoring in `opportunity`, mover/trend scoring in
-  `query-intelligence`, CTR/position-gap anomaly detection in `device`,
-  period-over-period deltas in `country`.
-- Add LLM narrative synthesis — no agent calls `callLLM` yet, including
-  `executive-report`, whose whole purpose is to eventually synthesize one
-  cross-agent summary rather than just collect raw sub-agent facts.
-- Consider whether agent runs should ever be scheduled (cron) rather than
-  purely on-demand, once the framework and its data sources are mature.
+- Wire a real data provider for `ai-visibility` (AI citation tracking / SERP
+  AI-Overview detection) so it can move off `insufficient-data` — no source
+  is connected yet.
+- Get manager budget approval to wire real DataForSEO-backed data for
+  `competitor-intelligence` (currently LLM-only fallback when
+  `DATAFORSEO_LOGIN`/`PASSWORD` are unset).
+- Consider whether `content-gap` should join the daily/weekly cron set now
+  that the other agents have proven the scheduling pattern, or stay
+  on-demand-only by design.
 - **If and only if** this framework is later validated internally and a
   deliberate decision is made to offer it to clients: define per-site
   enablement, decide whether it's a paid tier feature, and only then fold it
@@ -962,10 +992,12 @@ today.** This section documents a possible future direction for the Internal
 AI Growth Platform (Part 2), not a plan already in motion; treat it with the
 same caution as §21 and §23.
 
-**Current state:** the AI Growth Platform (§22) is purely request-driven —
-every agent executes only when its `/api/agents/:id/run` route is called, and
-there is no background or scheduled execution today. That's an intentional
-constraint for the current phase, not an oversight.
+**Current state:** the AI Growth Platform (§22) now has basic cron scheduling
+(daily/weekly, throttled per-agent — see §22) in addition to on-demand runs,
+but everything still executes in-process in the same Express server; there is
+no separate runtime, queue, event-driven triggering, or agent memory. What's
+described below — a fully independent always-on runtime — remains
+aspirational.
 
 **The long-term idea** is an "Always-On AI Runtime" that keeps operating
 independently of the dashboard — continuing to run whether or not anyone is

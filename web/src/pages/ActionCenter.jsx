@@ -630,7 +630,7 @@ export default function ActionCenter() {
                       className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10 cursor-pointer"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
-                      Configure & Deploy Draft
+                      {selectedDraftItem.status === 'implemented' ? 'View Draft' : 'Configure & Deploy Draft'}
                     </button>
                   </div>
                 </div>
@@ -647,6 +647,7 @@ export default function ActionCenter() {
 
       {activeDraft && (
         <DraftModal
+          key={activeDraft.id}
           draft={activeDraft}
           onClose={() => setActiveDraft(null)}
           onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); }}

@@ -9,9 +9,34 @@ import {
   markDraftImplemented, markDraftBranchPushed, markDraftMergedToStage, recordApplyFailure, recordMergeFailure,
   MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
-import { getImplementerForGenerator } from '../implementers/registry.js';
+import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
+import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { getFileContent } from '../github/client.js';
+import { STAGE_BRANCH } from '../implementers/lib/github-ops.js';
+import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
+
+// Best-effort, informational only — shown right after generation so staff
+// see the likely render mode before even submitting for approval. Never
+// blocks draft creation: a missing repo/file-mapping/fetch failure just
+// means no hint is attached. Approval re-inspects fresh regardless (the
+// page may change between generation and approval), so this is never the
+// authoritative decision, only an early preview of it.
+async function buildRenderModeHint(siteId, actionType, page) {
+  if (!page || !INSPECTABLE_ACTION_TYPES.includes(actionType)) return null;
+  try {
+    const site = await getSiteById(siteId);
+    if (!site?.repo_owner || !site?.repo_name) return null;
+    const filePath = resolveFile(site, page);
+    if (!filePath) return null;
+    const file = await getFileContent(site, filePath, STAGE_BRANCH);
+    if (!file) return null;
+    return await inspectRenderMode(file.content, actionType);
+  } catch {
+    return null;
+  }
+}
 
 const router = Router();
 router.use(requireAuth, requireInternalSite);
@@ -56,7 +81,8 @@ router.post('/action-center/generate', async (req, res, next) => {
     const draft = await createDraft(req.siteId, {
       actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
     });
-    res.json({ ...draft, summary });
+    const renderModeHint = await buildRenderModeHint(req.siteId, generatorId, params?.page || content?.page);
+    res.json({ ...draft, summary, renderModeHint });
   } catch (e) {
     if (e.status === 400) return res.status(400).json({ error: e.message });
     next(e);
@@ -101,11 +127,50 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Approval now auto-publishes: the moment a draft is approved, it's pushed
+// to a real branch and merged straight into `stage` (auto-completing to
+// 'implemented') in the same request — no separate manual Push Branch/Merge
+// to Stage clicks. Safe to automate because the real file diff this would
+// produce is already previewable (GET .../preview) any time before approval,
+// so nothing is lost by skipping the extra post-approval review clicks. Any
+// failure below (no repo configured, no implementer wired, GitHub error)
+// simply leaves the draft at 'approved' or 'branch_pushed' with the same
+// apply_error the manual /push-branch and /merge-to-stage routes already
+// set — those routes remain as manual retry options for that case.
 router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
   try {
-    const draft = await approveDraft(req.siteId, req.params.id, req.userId);
+    let draft = await approveDraft(req.siteId, req.params.id, req.userId);
     if (!draft) return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
-    res.json(draft);
+
+    const site = await getSiteById(req.siteId);
+    if (!site.repo_owner || !site.repo_name) return res.json(draft);
+
+    const resolved = await resolveImplementerForApply(site, draft);
+    if (resolved.error) return res.json(draft);
+    const { implementer, implementerId } = resolved;
+
+    const applyResult = await implementer.apply(site, draft, { renderModeOverride: req.body?.renderMode });
+    if (!applyResult.ok) {
+      await recordApplyFailure(req.siteId, draft.id, applyResult.error);
+      if (applyResult.reason === 'render-mode-uncertain') {
+        return res.status(422).json({
+          error: applyResult.error, reason: applyResult.reason,
+          confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode,
+        });
+      }
+      return res.json(await getDraft(req.siteId, draft.id));
+    }
+    draft = await markDraftBranchPushed(req.siteId, draft.id, { branchName: applyResult.branchName, implementerId });
+
+    if (typeof implementer.mergeToStage !== 'function') return res.json(draft);
+
+    const mergeResult = await implementer.mergeToStage(site, draft);
+    if (!mergeResult.ok) {
+      await recordMergeFailure(req.siteId, draft.id, mergeResult.error);
+      return res.json(await getDraft(req.siteId, draft.id));
+    }
+    await markDraftMergedToStage(req.siteId, draft.id, { mergeSha: mergeResult.mergeSha, mergeUrl: mergeResult.mergeUrl });
+    res.json(await finalizeImplemented(req.siteId, draft.id, site));
   } catch (e) { next(e); }
 });
 
@@ -148,22 +213,29 @@ router.post('/action-center/drafts/:id/implemented', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Zero-write dry run — the real file diff a reviewer sees BEFORE approving,
-// not just the abstract draft content. Available any time a draft isn't
-// implemented yet (not gated to 'approved') since this never touches
-// GitHub. Uses the exact same merge function /apply below does, so what's
-// previewed here and what actually gets written can never diverge.
+// Two different things depending on status: for a draft that isn't
+// implemented yet, a zero-write dry run of the real file diff a reviewer
+// sees BEFORE approving — uses the exact same merge function /apply below
+// does, so what's previewed here and what actually gets written can never
+// diverge. For an already-implemented draft, there's no pending change to
+// preview — this instead shows the real, current content sitting in the
+// live marker(s), read fresh from GitHub every call (see backend.js's
+// previewLiveMarkerContent), using whichever implementer/adapter actually
+// did the merge (resolveImplementerForMerge, same persisted-at-push-time
+// choice merge-to-stage itself uses) rather than re-resolving fresh.
 router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
-    if (draft.status === 'implemented') return res.status(400).json({ error: 'Already implemented — nothing to preview.' });
 
     const site = await getSiteById(req.siteId);
     if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — connect one first.' });
 
-    const implementer = await getImplementerForGenerator(draft.action_type);
-    if (!implementer) return res.status(400).json({ error: `No implementer wired for "${draft.action_type}" yet` });
+    const resolved = draft.status === 'implemented'
+      ? await resolveImplementerForMerge(draft)
+      : await resolveImplementerForApply(site, draft);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    const { implementer } = resolved;
     if (typeof implementer.preview !== 'function') {
       return res.status(422).json({ error: `No preview available for "${draft.action_type}" yet.`, reason: 'merge-strategy-not-implemented' });
     }
@@ -188,15 +260,19 @@ router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
     const site = await getSiteById(req.siteId);
     if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — run `npm run connect-repo` first.' });
 
-    const implementer = await getImplementerForGenerator(draft.action_type);
-    if (!implementer) return res.status(400).json({ error: `No implementer wired for "${draft.action_type}" yet` });
+    const resolved = await resolveImplementerForApply(site, draft);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    const { implementer, implementerId } = resolved;
 
-    const result = await implementer.apply(site, draft);
+    const result = await implementer.apply(site, draft, { renderModeOverride: req.body?.renderMode });
     if (!result.ok) {
       await recordApplyFailure(req.siteId, draft.id, result.error);
-      return res.status(422).json({ error: result.error, reason: result.reason });
+      return res.status(422).json({
+        error: result.error, reason: result.reason,
+        confidence: result.confidence, suggestedMode: result.suggestedMode,
+      });
     }
-    const updated = await markDraftBranchPushed(req.siteId, draft.id, { branchName: result.branchName, implementerId: implementer.meta.id });
+    const updated = await markDraftBranchPushed(req.siteId, draft.id, { branchName: result.branchName, implementerId });
     res.json(updated);
   } catch (e) { next(e); }
 });
@@ -216,8 +292,10 @@ router.post('/action-center/drafts/:id/merge-to-stage', async (req, res, next) =
     if (!draft || draft.status !== 'branch_pushed') return res.status(404).json({ error: 'Draft not found, or has no pushed branch yet' });
 
     const site = await getSiteById(req.siteId);
-    const implementer = await getImplementerForGenerator(draft.action_type);
-    if (!implementer || typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No merge step wired for "${draft.action_type}" yet` });
+    const resolved = await resolveImplementerForMerge(draft);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    const { implementer } = resolved;
+    if (typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No merge step wired for "${draft.action_type}" yet` });
 
     const result = await implementer.mergeToStage(site, draft);
     if (!result.ok) {
