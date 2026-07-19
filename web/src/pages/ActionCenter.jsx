@@ -647,6 +647,7 @@ export default function ActionCenter() {
 
       {activeDraft && (
         <DraftModal
+          key={activeDraft.id}
           draft={activeDraft}
           onClose={() => setActiveDraft(null)}
           onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); }}

@@ -4,20 +4,30 @@
 // map matches, callers must treat that as an honest "not configured yet"
 // failure (reason: 'no-file-mapping'), not attempt a fallback guess.
 
+// Shared by every resolver below — normalizes a page URL to its pathname
+// (with/without a trailing slash) and looks up the matching `pages` entry,
+// so path-normalization logic exists exactly once.
+function getPageEntry(site, pageUrl) {
+  const map = site.url_file_map || {};
+  if (!pageUrl) return null;
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  return map.pages?.[path] || map.pages?.[normalized] || null;
+}
+
 // Existing-page generators (schema, meta-title, faq, internal-links,
 // translation) resolve against `pages` (exact match) then `patterns` (regex
 // with $1-style capture-group substitution, for templated routes like
 // /blog/:slug that a single exact-match entry per URL can't cover).
 export function resolveFile(site, pageUrl) {
-  const map = site.url_file_map || {};
-  if (!pageUrl) return null;
+  const entry = getPageEntry(site, pageUrl);
+  if (entry?.file) return entry.file;
 
+  const map = site.url_file_map || {};
   let path;
   try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-
-  if (map.pages?.[path]?.file) return map.pages[path].file;
-  if (map.pages?.[normalized]?.file) return map.pages[normalized].file;
 
   for (const p of map.patterns || []) {
     if (!p.match || !p.file) continue;
@@ -28,20 +38,85 @@ export function resolveFile(site, pageUrl) {
   return null;
 }
 
+// Recommended, non-exhaustive slot vocabulary for placement config below —
+// documentation/consistency only (e.g. a future UI dropdown), never
+// validated against. A site is free to use any other string as a slot name.
+export const STANDARD_SLOTS = [
+  'metadata', 'head', 'hero', 'page-top', 'content',
+  'related-content', 'faq', 'before-footer', 'page-end', 'site-root',
+];
+
+// Default slot per action type — WHERE a type conventionally belongs, not
+// WHAT fields it produces (that knowledge stays entirely in
+// lib/marker-merge.js; this module never hardcodes a type's field names).
+// Types with no entry (blog-outline/landing-page/translation — net-new
+// content, resolved via resolveNewContentTarget/resolveTranslationTarget
+// below, never marker-based) simply have no default placement; that's a
+// normal, expected outcome, not an error.
+const DEFAULT_SLOT_BY_ACTION_TYPE = {
+  'meta-title': 'metadata',
+  'faq': 'faq',
+  'schema': 'head',
+  'internal-links': 'related-content',
+  'llms-txt': 'site-root',
+};
+
+// Single source of truth for "where does this (page, action type) land."
+// Resolution order, highest priority first:
+//   1. page-level `pages[url].placements[actionType]` — { slot?, markers }
+//   2. site-level `defaults.placements[actionType]` — same shape, inherited
+//      by every page that doesn't set its own (configuration inheritance,
+//      for conventions a whole site shares instead of repeating per page)
+//   3. legacy flat `pages[url].markers` (pre-placement config, read
+//      unmodified — full backward compatibility, no migration required)
+//   4. nothing configured — { slot: <default or null>, markers: null }
+// `markers` is always a raw `{field: markerName}` object exactly as the
+// config author wrote it; this resolver has zero knowledge of which fields
+// a given action type actually produces — lib/marker-merge.js's
+// spliceMarkers already filters marker entries by whatever fields are
+// present in the built values, so that coupling never needs to exist here.
+export function resolvePlacement(site, pageUrl, actionType) {
+  const defaultSlot = DEFAULT_SLOT_BY_ACTION_TYPE[actionType] || null;
+  const entry = getPageEntry(site, pageUrl);
+
+  const configured = entry?.placements?.[actionType] || site.url_file_map?.defaults?.placements?.[actionType];
+  if (configured) {
+    return { slot: configured.slot || defaultSlot, markers: configured.markers || null };
+  }
+
+  if (entry?.markers) return { slot: defaultSlot, markers: entry.markers };
+
+  return { slot: defaultSlot, markers: null };
+}
+
 // Marker names for a splice-based merge (meta-title/faq — see
 // implementers/lib/marker-merge.js), e.g. { title: "TITLE", faq: "FAQ" }.
-// Only supported on exact `pages` entries, not regex `patterns` — a
-// templated route matched by a pattern would need the same marker names on
-// every page it matches anyway, so there's no real benefit to supporting it
-// there yet, and it keeps this resolver simple.
-export function resolveMarkers(site, pageUrl) {
-  const map = site.url_file_map || {};
-  if (!pageUrl) return null;
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
-  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-  return map.pages?.[path]?.markers || map.pages?.[normalized]?.markers || null;
+// Thin projection of resolvePlacement — kept as its own export since most
+// callers (backend.js) only ever need the markers, not the slot.
+export function resolveMarkers(site, pageUrl, actionType) {
+  return resolvePlacement(site, pageUrl, actionType).markers;
 }
+
+// Adapter routing: whether a (page, action type) is routed to a named
+// adapter (server/implementers/adapters/<id>.js) instead of the default
+// backend/frontend implementer. This is a routing/integration decision
+// (which framework-specific code owns writing the change), not a content-
+// placement judgment call — so unlike render mode below, it stays explicit,
+// static config; there's no "evidence in the page" that tells you which
+// adapter to use. `url_file_map.pages[url].adapters` shape:
+// { [actionType]: 'adapter-id' }. No config → no adapter, default routing.
+export function resolveAdapter(site, pageUrl, actionType) {
+  const entry = getPageEntry(site, pageUrl);
+  return entry?.adapters?.[actionType] || null;
+}
+
+// Render mode (visible vs. schema-only) is NOT resolved here, and
+// deliberately has no static config surface — see
+// implementers/lib/render-inspector.js. It's decided fresh on every call by
+// inspecting the actual live file content (deterministic evidence first,
+// LLM only when genuinely ambiguous), never read from a stored decision,
+// so it always reflects the template's current state rather than whatever
+// was true the last time someone looked.
 
 // Net-new-content generators (blog-outline, landing-page) have no existing
 // URL — resolves a deterministic new file path from the configured target

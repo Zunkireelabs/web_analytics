@@ -1,18 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
-import Insights from './pages/Insights.jsx';
-import Compare from './pages/Compare.jsx';
-import Reports from './pages/Reports.jsx';
-import GrowthReport from './pages/GrowthReport.jsx';
-import CommandCenter from './pages/CommandCenter.jsx';
-import AiGrowth from './pages/AiGrowth.jsx';
-import ActionCenter from './pages/ActionCenter.jsx';
-import ClientOnboarding from './pages/ClientOnboarding.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import CopilotPanel from './components/CopilotPanel.jsx';
+
+// Lazy-loaded: none of these are needed for first paint. The internal-only
+// ones (CommandCenter/AiGrowth/ActionCenter/ClientOnboarding) also pull in
+// heavy libraries (@xyflow/react, react-simple-maps) that would otherwise
+// ship to every visitor, including pre-login.
+const Insights = lazy(() => import('./pages/Insights.jsx'));
+const Compare = lazy(() => import('./pages/Compare.jsx'));
+const Reports = lazy(() => import('./pages/Reports.jsx'));
+const GrowthReport = lazy(() => import('./pages/GrowthReport.jsx'));
+const CommandCenter = lazy(() => import('./pages/CommandCenter.jsx'));
+const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
+const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
+const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 
 export default function App() {
   const [authed, setAuthed] = useState(null); // null = still checking
@@ -74,23 +79,25 @@ export default function App() {
           </svg>
         </button>
         {siteId ? (
-          <Routes>
-            {/* No standalone marketing homepage in the authenticated app — land straight on Overview. */}
-            <Route path="/" element={<Navigate to="/overview" replace />} />
-            <Route path="/overview" element={<Overview siteId={siteId} />} />
-            <Route path="/insights" element={<Insights siteId={siteId} />} />
-            <Route path="/compare" element={<Compare siteId={siteId} />} />
-            <Route path="/reports" element={<Reports siteId={siteId} />} />
-            <Route path="/growth" element={<GrowthReport />} />
-            {/* AI Command Center is the default /ai-growth landing experience;
-                /ai-orchestration is the orchestration diagram — how the 10
-                specialist agents actually connect (AiGrowth.jsx) — and still
-                the place to run or inspect one agent directly. */}
-            {isInternal && <Route path="/ai-growth" element={<CommandCenter />} />}
-            {isInternal && <Route path="/ai-orchestration" element={<AiGrowth />} />}
-            {isInternal && <Route path="/action-center" element={<ActionCenter />} />}
-            {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
-          </Routes>
+          <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
+            <Routes>
+              {/* No standalone marketing homepage in the authenticated app — land straight on Overview. */}
+              <Route path="/" element={<Navigate to="/overview" replace />} />
+              <Route path="/overview" element={<Overview siteId={siteId} />} />
+              <Route path="/insights" element={<Insights siteId={siteId} />} />
+              <Route path="/compare" element={<Compare siteId={siteId} />} />
+              <Route path="/reports" element={<Reports siteId={siteId} />} />
+              <Route path="/growth" element={<GrowthReport />} />
+              {/* AI Command Center is the default /ai-growth landing experience;
+                  /ai-orchestration is the orchestration diagram — how the 10
+                  specialist agents actually connect (AiGrowth.jsx) — and still
+                  the place to run or inspect one agent directly. */}
+              {isInternal && <Route path="/ai-growth" element={<CommandCenter />} />}
+              {isInternal && <Route path="/ai-orchestration" element={<AiGrowth />} />}
+              {isInternal && <Route path="/action-center" element={<ActionCenter />} />}
+              {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
+            </Routes>
+          </Suspense>
         ) : (
           <div className="max-w-7xl mx-auto px-4 py-10 text-gray-500">
             No site configured yet. Run the migration to seed your site, then ingest some data.

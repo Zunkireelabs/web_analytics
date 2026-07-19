@@ -35,9 +35,11 @@ export default function Overview({ siteId }) {
   const [rangeQueries, setRangeQueries] = useState([]);
   const [rangePages, setRangePages] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [rangeReady, setRangeReady] = useState(false);
 
   useEffect(() => {
     if (!siteId) return;
+    setRangeReady(false);
     api.range(siteId).then((r) => {
       setRange(r);
       const latest = r.latest_visitor || r.freshest;
@@ -45,21 +47,16 @@ export default function Overview({ siteId }) {
         setEnd(latest);
         setStart(shiftYmd(latest, 3));
       }
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setRangeReady(true));
   }, [siteId]);
 
   useEffect(() => {
-    if (!siteId) return;
+    // Wait for the range-fetch effect above to resolve the real start/end
+    // before fetching data — otherwise this fires once with the placeholder
+    // default dates and again with the corrected ones, wasting a full
+    // 5-request round-trip on every load.
+    if (!siteId || !rangeReady) return;
     setLoading(true);
-    // On mount this effect fires once with the placeholder default start/end,
-    // then again as soon as the range-fetch effect above corrects them —
-    // two overlapping requests for two different date ranges. Without this
-    // guard, whichever response lands last wins (usually the larger,
-    // slower placeholder-range query), silently overwriting the correct
-    // numbers with stale ones even though the date picker itself (bound
-    // directly to start/end state, not to fetched data) already shows the
-    // right dates. `cancelled` discards a response for a start/end that's
-    // no longer current.
     let cancelled = false;
     const rangeLen = Math.round((new Date(`${end}T00:00:00Z`) - new Date(`${start}T00:00:00Z`)) / 86400000);
     const priorEnd = shiftYmd(start, 1);
@@ -82,7 +79,7 @@ export default function Overview({ siteId }) {
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [siteId, start, end]);
+  }, [siteId, start, end, rangeReady]);
 
   const anchor = range?.latest_visitor || range?.freshest || daysAgo(1);
   const setPreset = (d) => { setStart(shiftYmd(anchor, d)); setEnd(anchor); };

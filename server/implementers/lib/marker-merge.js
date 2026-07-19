@@ -51,6 +51,13 @@ function findMarker(fileContent, name) {
   return null;
 }
 
+// Exact, deterministic presence check — the one piece of render-mode
+// evidence (lib/render-inspector.js) that's always answered by regex, never
+// guessed at by an LLM: does this exact marker already exist in the file.
+export function hasMarker(fileContent, name) {
+  return !!findMarker(fileContent, name);
+}
+
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
   if (block.test(fileContent)) {
@@ -127,8 +134,20 @@ function renderLinksHtml(suggestions) {
 // (meta-title, faq questions/answers, the existing schemaJsonLd transform)
 // or a deterministic wrapper around it — never a new LLM call, so preview
 // and apply can never diverge from what a human actually approved.
-export function buildMergeValues(actionType, content) {
+//
+// `mode` (see implementers/lib/render-inspector.js's inspectRenderMode and
+// implementers/types.js for the full contract — decided by live page
+// inspection, not static config) selects which representation
+// of the content to splice, for any type that has more than one:
+//   'visible' (default) — today's exact original behavior, unchanged.
+//   'schema-only' — only the structured-data fragment, for a content type
+//     that has one (currently just faq — schema is already schema-only by
+//     nature). A content type with no schema fragment (meta-title,
+//     internal-links) honestly errors rather than silently no-op'ing —
+//     same no-fabrication discipline as agents/ai-visibility.js.
+export function buildMergeValues(actionType, content, mode = 'visible') {
   if (actionType === 'meta-title') {
+    if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
     if (!content.selectedTitle) {
       return { ok: false, error: 'No title selected yet — pick one of the candidate titles (Draft Preview → "Use this") before this can be applied.' };
     }
@@ -139,9 +158,13 @@ export function buildMergeValues(actionType, content) {
 
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
-    const html = renderFaqHtml(content.items);
-    const jsonLd = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : '';
-    return { ok: true, values: { faq: jsonLd ? `${html}\n${jsonLd}` : html } };
+    const visible = renderFaqHtml(content.items);
+    const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
+    if (mode === 'schema-only') {
+      if (!schema) return { ok: false, error: 'This FAQ draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      return { ok: true, values: { faq: schema } };
+    }
+    return { ok: true, values: { faq: schema ? `${visible}\n${schema}` : visible } };
   }
 
   if (actionType === 'schema') {
@@ -149,10 +172,12 @@ export function buildMergeValues(actionType, content) {
     if (content.placeholderFields?.length) {
       return { ok: false, error: `This schema draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the model couldn't confirm these from the real page text. Fill them in manually (edit the draft) before this can be applied.` };
     }
+    // Already structured-data-only by nature — every mode produces the same value.
     return { ok: true, values: { schema: `<script type="application/ld+json">${JSON.stringify(content.jsonLd)}</script>` } };
   }
 
   if (actionType === 'internal-links') {
+    if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
     return { ok: true, values: { links: renderLinksHtml(content.suggestions) } };
   }

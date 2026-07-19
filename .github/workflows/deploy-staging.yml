@@ -83,18 +83,37 @@ jobs:
             SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
 
+            # ── Action Center GitHub integration ────────────────────────────
+            # Without this, server/github/client.js throws "No GitHub PAT set"
+            # the moment someone pushes/merges a draft from the live staging
+            # dashboard — it previously only worked when run from a machine
+            # with GITHUB_PAT already in its own local .env. The Actions
+            # secret itself can't be named GITHUB_PAT — GitHub reserves any
+            # secret name starting with GITHUB_ for its own auto-provided
+            # secrets (e.g. GITHUB_TOKEN) and rejects creating one — so the
+            # secret is named GH_PAT instead, and only renamed to the
+            # GITHUB_PAT env var the app code actually expects right here.
+            GITHUB_PAT=${{ secrets.GH_PAT }}
+
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}
             TZ=${{ vars.TZ }}
 
-            # ── Cron — disabled on staging to avoid duplicate emails/ingests ─
-            # DISABLE_CRON only skips the recurring timer; runStartupCatchup()
-            # in server/index.js fires on every boot regardless, gated by its
-            # own separate DISABLE_CATCHUP flag — without it, every staging
-            # container restart re-runs real ingestion/weekly/executive jobs
-            # (including emailing real connected clients) for every site.
+            # ── Cron ──────────────────────────────────────────────────────
+            # Staging is temporarily doubling as the live automation host for
+            # the company's own site — production (main) has never actually
+            # been deployed, so this is the only VPS instance capable of
+            # sending the daily email without depending on a laptop being on.
+            # DISABLE_CRON is intentionally left ON (false) so the real
+            # 07:00 daily / Thursday weekly schedule fires here for real.
+            # DISABLE_CATCHUP stays true regardless — that only guards
+            # against runStartupCatchup() re-running real ingestion/weekly/
+            # executive jobs (and re-emailing) on every redeploy-triggered
+            # restart; it's unrelated to the recurring schedule itself.
+            # Revisit before onboarding any real/test client onto the
+            # staging database — its cron being live would email them too.
             CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
-            DISABLE_CRON=true
+            DISABLE_CRON=false
             DISABLE_CATCHUP=true
 
             # ── Deployment ───────────────────────────────────────────────────

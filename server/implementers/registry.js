@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // ~/Travel/ci-cd-deployment-master-guide for why stage doesn't need one).
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const NON_IMPLEMENTER_FILES = new Set(['types.js', 'registry.js']);
+const NON_IMPLEMENTER_FILES = new Set(['types.js', 'registry.js', 'resolve.js']);
 
 let cache = null;
 
