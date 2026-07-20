@@ -225,3 +225,18 @@ export async function hasDraftSince(siteId, source, actionType, since) {
   );
   return rows.length > 0;
 }
+
+// Every finding_id with at least one implemented draft — finding ids are
+// stable slugs (e.g. `content-gap:<page>:Missing FAQ`, see agents/types.js),
+// so this reliably answers "already shipped" even though the underlying
+// agent re-derives the same finding fresh on its next scheduled run.
+// Used by buildRecommendations (agents/lib/recommendations.js) to stop
+// resurfacing a finding in the Findings List once its fix is actually live,
+// instead of waiting on the next agent run to naturally stop re-detecting it.
+export async function getImplementedFindingIds(siteId) {
+  const { rows } = await query(
+    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND status = 'implemented' AND finding_id IS NOT NULL",
+    [siteId]
+  );
+  return new Set(rows.map((r) => r.finding_id));
+}
