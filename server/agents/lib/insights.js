@@ -10,13 +10,16 @@ import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js
 export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation'];
 
 // Findings from these agents are inherently upside-framed (growth,
-// striking-distance, localization), as opposed to problem-framed. Shared by
-// the Command Center's Growth Opportunities section and the Opportunity
-// Watchlist (agents/lib/watchlist.js) — the single place that defines what
-// "an opportunity" means today. A future seasonal-opportunity agent (see
-// watchlist.js's `opportunity_type` column) extends this list, not a
-// parallel one — one growth taxonomy, not two.
-export const OPPORTUNITY_AGENT_IDS = ['opportunity', 'country-intelligence'];
+// striking-distance, localization, AI-recommendation visibility a
+// competitor is capturing instead of you), as opposed to problem-framed.
+// Shared by the Command Center's Growth Opportunities section and the
+// Opportunity Watchlist (agents/lib/watchlist.js) — the single place that
+// defines what "an opportunity" means today. A future seasonal-opportunity
+// agent (see watchlist.js's `opportunity_type` column) extends this list,
+// not a parallel one — one growth taxonomy, not two. Every WORKSPACE_AGENT_IDS
+// tab in CommandCenter.jsx must own at least one id here, or its Growth
+// Opportunities/Watchlist sections are structurally unable to populate.
+export const OPPORTUNITY_AGENT_IDS = ['opportunity', 'country-intelligence', 'ai-recommendation'];
 
 const firstSentence = (text) => (text || '').trim().split(/(?<=[.!?])\s+/)[0] || '';
 

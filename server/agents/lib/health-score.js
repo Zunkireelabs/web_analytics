@@ -20,8 +20,10 @@ const TIER_WEIGHT = { high: 3, medium: 2, low: 1 };
 
 // Caps total penalty so the score can't be dragged toward 0 by sheer finding
 // volume on a large site — 0 would misleadingly read as "the site is down,"
-// which a findings count alone never actually means.
-const MAX_PENALTY = 65;
+// which a findings count alone never actually means. Kept in sync with FLOOR
+// (100 - MAX_PENALTY === FLOOR) so the floor below is actually reachable
+// instead of dead code the penalty cap can never reach.
+const MAX_PENALTY = 80;
 const FLOOR = 20;
 
 // Groups a finding by the real-world thing it's about, so the same issue
