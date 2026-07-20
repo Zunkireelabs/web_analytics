@@ -21,13 +21,21 @@ import { resolveAdapter } from './lib/url-file-map.js';
 // than re-deriving it — a page's adapter config could in principle change
 // between push and merge, and the merge must apply to whatever was actually
 // pushed, not whatever config says today.
+//
+// resolveAdapter returns a config OBJECT (at minimum `{id}`, plus whatever
+// per-adapter parameters that adapter needs — e.g. dataFile/idField/
+// itemsField/format for data-array-content.js), not a bare id string — an
+// adapter re-resolves its own full config itself (calling resolveAdapter
+// again with the same site/page/actionType) inside apply()/preview()/
+// mergeToStage() rather than having it threaded through here, so this
+// module only ever needs the `id` for adapter lookup + persistence.
 export async function resolveImplementerForApply(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const adapterId = resolveAdapter(site, page, draft.action_type);
+  const adapterConfig = resolveAdapter(site, page, draft.action_type);
 
-  if (adapterId) {
-    const adapter = await getAdapter(adapterId);
-    if (!adapter) return { error: `No adapter registered for "${adapterId}" — add one at server/implementers/adapters/${adapterId}.js` };
+  if (adapterConfig) {
+    const adapter = await getAdapter(adapterConfig.id);
+    if (!adapter) return { error: `No adapter registered for "${adapterConfig.id}" — add one at server/implementers/adapters/${adapterConfig.id}.js` };
     return { implementer: adapter, implementerId: `adapter:${adapter.meta.id}` };
   }
 
