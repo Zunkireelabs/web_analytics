@@ -1,4 +1,3 @@
-import { useLayoutEffect, useRef, useState } from 'react';
 import { timeAgo } from '../api.js';
 import { 
   PlusCircle, 
@@ -6,7 +5,9 @@ import {
   TrendingUp, 
   TrendingDown, 
   Activity,
-  ArrowRight
+  Link2,
+  Database,
+  Sparkles
 } from 'lucide-react';
 
 const MARKER = {
@@ -20,137 +21,138 @@ const MARKER = {
 };
 
 const PREFIX = { health: '', resolved: 'Resolved: ', new: 'New: ' };
-const FALLBACK_COLLAPSED_HEIGHT = 480;
 
-function highlightUrlsAndPaths(text) {
-  // Regex to match URLs in double quotes or parens, or general http/https endpoints
-  const parts = text.split(/("[^"]+"|\([^)]+\))/g);
-  return parts.map((part, i) => {
-    if ((part.startsWith('"') && part.endsWith('"')) || (part.startsWith('(') && part.endsWith(')'))) {
-      const inner = part.slice(1, -1);
-      if (inner.startsWith('http://') || inner.startsWith('https://')) {
-        try {
-          const url = new URL(inner);
-          const displayPath = url.pathname + url.search;
-          return (
-            <span 
-              key={i} 
-              className="inline-block px-1.5 py-0.5 mx-0.5 text-[9px] font-mono font-bold bg-slate-100 text-slate-700 rounded-md border border-slate-200 truncate max-w-[180px] align-middle hover:max-w-none transition-all duration-300"
-              title={inner}
-            >
-              {displayPath}
-            </span>
-          );
-        } catch {
-          return (
-            <code key={i} className="px-1 py-0.5 mx-0.5 text-[9px] font-mono bg-slate-100 text-slate-700 rounded border border-slate-250 align-middle">
-              {inner}
-            </code>
-          );
-        }
-      }
-      return (
-        <code key={i} className="px-1 py-0.5 mx-0.5 text-[9px] font-mono bg-slate-100 text-slate-700 rounded border border-slate-250 align-middle">
-          {part}
-        </code>
-      );
-    }
-    return part;
-  });
+function pagePath(page) {
+  try {
+    const url = new URL(page);
+    return url.pathname + url.search;
+  } catch {
+    return page;
+  }
 }
 
-export default function ChangesTimeline({ items, matchHeight }) {
-  const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
-  const contentRef = useRef(null);
-  const collapsedHeight = matchHeight || FALLBACK_COLLAPSED_HEIGHT;
+function parseTextStructure(text) {
+  const parensMatches = [...text.matchAll(/\(([^)]+)\)/g)].map(m => m[1]);
+  const quotesMatches = [...text.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+  
+  let cleanText = text;
+  const paths = [];
+  const contexts = [];
+  const titles = [];
+  
+  parensMatches.forEach(match => {
+    if (match.startsWith('/') || match.startsWith('http://') || match.startsWith('https://')) {
+      paths.push(match);
+    } else {
+      contexts.push(match);
+    }
+    cleanText = cleanText.replace(`(${match})`, '');
+  });
+  
+  quotesMatches.forEach(match => {
+    if (match.startsWith('/') || match.startsWith('http://') || match.startsWith('https://')) {
+      paths.push(match);
+    } else if (match.length > 15) {
+      titles.push(match);
+    }
+    cleanText = cleanText.replace(`"${match}"`, '');
+  });
+  
+  // Clean up formatting
+  cleanText = cleanText.replace(/\s+/g, ' ').replace(/\(\s*\)/g, '').replace(/""/g, '').trim();
+  if (cleanText.endsWith('.')) cleanText = cleanText.slice(0, -1);
+  
+  return { cleanText, paths, contexts, titles };
+}
 
-  useLayoutEffect(() => {
-    if (!contentRef.current) return;
-    setOverflowing(contentRef.current.scrollHeight > collapsedHeight + 1);
-  }, [items, collapsedHeight]);
-
+export default function ChangesTimeline({ items }) {
   if (!items?.length) {
     return <div className="card p-6 text-center text-xs font-semibold text-slate-400">No changes logged since the last analysis.</div>;
   }
 
   return (
-    <div className="relative pl-6 space-y-4">
+    <div className="relative pl-10 pr-4 space-y-4">
       {/* Vertical Timeline Bar */}
-      <div className="absolute left-[13px] top-2 bottom-2 w-[1.5px] bg-slate-100/80" />
+      <div className="absolute left-[8px] top-2 bottom-2 w-[1.5px] bg-slate-100/80" />
 
-      <div className="relative">
-        <div 
-          ref={contentRef} 
-          className="space-y-4 overflow-hidden transition-[max-height] duration-300 ease-in-out"
-          style={{ maxHeight: expanded ? 4000 : collapsedHeight }}
-        >
-          {items.map((c, i) => {
-            const isHealth = c.type === 'health';
-            const m = isHealth ? MARKER.health[c.positive ? 'up' : 'down'] : MARKER[c.type] || MARKER.fallback;
-            const IconComponent = m.icon;
-            const isNew = c.type === 'new';
+      <div className="space-y-4">
+        {items.map((c, i) => {
+          const isHealth = c.type === 'health';
+          const m = isHealth ? MARKER.health[c.positive ? 'up' : 'down'] : MARKER[c.type] || MARKER.fallback;
+          const IconComponent = m.icon;
+          const isNew = c.type === 'new';
+          const parsed = parseTextStructure(c.text);
 
-            return (
-              <div key={i} className="relative flex items-start gap-3.5 group">
-                
-                {/* Timeline Dot Indicator */}
-                <span 
-                  className="w-7 h-7 rounded-full grid place-items-center shrink-0 border z-10 bg-white transition shadow-sm group-hover:scale-105"
-                  style={{ borderColor: m.border, color: m.color, backgroundColor: m.bg }}
-                >
-                  <IconComponent size={11} strokeWidth={2.5} />
-                </span>
+          return (
+            <div key={i} className="relative group">
+              {/* Timeline Dot Indicator */}
+              <span 
+                className="absolute left-[-32px] top-[26px] -translate-x-1/2 -translate-y-1/2 w-7 h-7 rounded-full grid place-items-center border z-10 bg-white transition-all duration-300 shadow-sm group-hover:scale-110 group-hover:shadow-md"
+                style={{ borderColor: m.border, color: m.color, backgroundColor: m.bg, boxShadow: `0 0 10px ${m.color}15` }}
+              >
+                <IconComponent size={11} strokeWidth={2.5} />
+              </span>
 
-                {/* Content block */}
-                <div className={`flex-1 min-w-0 border rounded-2xl p-3 transition ${
-                  isNew ? 'bg-rose-500/[0.01] border-rose-500/10 hover:bg-rose-500/[0.03]' : 'bg-slate-50/40 border-slate-100 hover:bg-slate-50'
-                }`}>
-                  <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${
-                        isNew ? 'text-rose-700 bg-rose-50 border-rose-100' : 'text-emerald-700 bg-emerald-50 border-emerald-100'
-                      }`}>
-                        {PREFIX[c.type]?.replace(': ', '') || 'Audit Update'}
-                      </span>
-                      {isNew && c.priority === 'high' && (
-                        <span className="text-[8px] font-black tracking-widest text-white bg-rose-600 px-1.5 py-0.5 rounded-md animate-pulse">
-                          CRITICAL
-                        </span>
-                      )}
-                    </div>
-
-                    <span className="text-[10px] text-slate-400 font-mono font-medium">
-                      {timeAgo(c.at)}
+              {/* Content block */}
+              <div className={`border rounded-2xl p-4 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md hover:bg-white ${
+                isNew 
+                  ? 'bg-gradient-to-br from-white to-rose-500/[0.02] border-rose-500/20 hover:border-rose-500/40' 
+                  : 'bg-gradient-to-br from-white to-slate-50/50 border-slate-200/80 hover:border-slate-300'
+              }`}>
+                <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border shadow-sm ${
+                      isNew ? 'text-rose-700 bg-rose-50 border-rose-100' : 'text-emerald-700 bg-emerald-50 border-emerald-100'
+                    }`}>
+                      {PREFIX[c.type]?.replace(': ', '') || 'Audit Update'}
                     </span>
+                    {isNew && c.priority === 'high' && (
+                      <span className="text-[8px] font-black tracking-widest text-white bg-rose-600 px-1.5 py-0.5 rounded-md animate-pulse shadow-sm shadow-rose-500/20">
+                        CRITICAL
+                      </span>
+                    )}
                   </div>
 
-                  <p className="text-[11.5px] font-semibold text-slate-700 leading-relaxed break-words">
-                    {highlightUrlsAndPaths(c.text)}
-                  </p>
+                  <span className="text-[10px] text-slate-400 font-mono font-bold">
+                    {timeAgo(c.at)}
+                  </span>
                 </div>
 
+                <p className="text-[12px] font-extrabold text-slate-800 leading-relaxed break-words mb-2.5">
+                  {parsed.cleanText}
+                </p>
+
+                {/* Structured pill targets */}
+                {(parsed.paths.length > 0 || parsed.contexts.length > 0 || parsed.titles.length > 0) && (
+                  <div className="border-t border-slate-100 mt-2.5 pt-2.5 flex flex-wrap gap-2">
+                    {parsed.paths.map((p, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5 text-[9.5px] font-mono font-bold text-indigo-700 bg-indigo-50/50 border border-indigo-150/70 rounded-lg px-2.5 py-1 max-w-full truncate shadow-sm hover:bg-indigo-100/50 transition-colors">
+                        <Link2 size={10} className="shrink-0 text-indigo-400" />
+                        <span className="truncate" title={p}>{pagePath(p)}</span>
+                      </div>
+                    ))}
+
+                    {parsed.contexts.map((ctx, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5 text-[9.5px] text-slate-650 bg-slate-50 border border-slate-200/60 rounded-lg px-2.5 py-1 max-w-full font-bold shadow-sm">
+                        <Database size={10} className="shrink-0 text-slate-400" />
+                        <span>{ctx}</span>
+                      </div>
+                    ))}
+
+                    {parsed.titles.map((t, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5 text-[9.5px] text-violet-750 bg-violet-50/50 border border-violet-100/60 rounded-lg px-2.5 py-1 max-w-full font-black italic shadow-sm">
+                        <Sparkles size={10} className="shrink-0 text-violet-400 animate-pulse" />
+                        <span className="truncate">"{t}"</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            );
-          })}
-        </div>
 
-        {!expanded && overflowing && (
-          <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-white to-transparent pointer-events-none" />
-        )}
+            </div>
+          );
+        })}
       </div>
-
-      {overflowing && (
-        <div className="pt-2">
-          <button 
-            type="button" 
-            onClick={() => setExpanded(!expanded)}
-            className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-[#6C63FF] hover:underline hover:text-indigo-750 focus:outline-none"
-          >
-            {expanded ? 'Show fewer ↑' : `Show all ${items.length} updates →`}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -53,6 +53,7 @@ const WORKSPACE_AGENT_IDS = {
   content: ['content-gap', 'ai-visibility', 'ai-recommendation'],
 };
 const workspaceForAgentId = (agentId) => Object.keys(WORKSPACE_AGENT_IDS).find((key) => WORKSPACE_AGENT_IDS[key].includes(agentId)) || null;
+const WORKSPACE_LABELS = { seo: 'SEO', content: 'Content', geo: 'Geo' };
 
 export default function CommandCenter() {
   const [data, setData] = useState(null);
@@ -93,8 +94,7 @@ export default function CommandCenter() {
   const [showAllDiscoveries, setShowAllDiscoveries] = useState(false);
   const [showAllOpportunities, setShowAllOpportunities] = useState(false);
   const [showAllWatchlist, setShowAllWatchlist] = useState(false);
-  const [showAllActivity, setShowAllActivity] = useState(false);
-  const [showAllChanges, setShowAllChanges] = useState(false);
+
 
   useEffect(() => {
     setShowAllDiscoveries(false);
@@ -274,9 +274,65 @@ export default function CommandCenter() {
   const contentInfo = getAgentWorkspace('content');
   const geoInfo = getAgentWorkspace('geo');
 
-  const activeWorkspace = selectedAgent === 'seo' ? seoInfo 
-    : selectedAgent === 'content' ? contentInfo 
+  const activeWorkspace = selectedAgent === 'seo' ? seoInfo
+    : selectedAgent === 'content' ? contentInfo
     : geoInfo;
+
+  // Watchlist items are filtered per-tab (by owning agent), so a tab can
+  // legitimately show 0 while another tab has real open items — surfaced
+  // here so the empty state points there instead of reading as "nothing to
+  // do at all."
+  const otherWatchlistTabs = Object.entries({ seo: seoInfo, content: contentInfo, geo: geoInfo })
+    .filter(([key, info]) => key !== selectedAgent && info.watchlist.length > 0)
+    .map(([key, info]) => ({ key, label: WORKSPACE_LABELS[key], count: info.watchlist.length }));
+
+  const agentTheme = {
+    seo: {
+      color: '#6C63FF',
+      textClass: 'text-indigo-650',
+      bgClass: 'bg-indigo-50/50',
+      borderClass: 'border-indigo-150',
+      gradientBar: 'bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]',
+      terminalText: 'text-indigo-400',
+      headingClass: 'text-indigo-600 border-indigo-100',
+      badgeClass: 'text-indigo-650 bg-indigo-50 border-indigo-150',
+      glowBg: 'bg-indigo-50/20',
+      glowBorder: 'border-indigo-200/60',
+      glowSoftBorder: 'border-indigo-100',
+      glowAccent1: 'bg-indigo-400',
+      glowAccent2: 'bg-indigo-300',
+    },
+    content: {
+      color: '#14b8a6',
+      textClass: 'text-teal-650',
+      bgClass: 'bg-teal-50/50',
+      borderClass: 'border-teal-150',
+      gradientBar: 'bg-gradient-to-r from-teal-500 to-emerald-500',
+      terminalText: 'text-teal-400',
+      headingClass: 'text-teal-600 border-teal-100',
+      badgeClass: 'text-teal-600 bg-teal-50 border-teal-150',
+      glowBg: 'bg-teal-50/20',
+      glowBorder: 'border-teal-200/60',
+      glowSoftBorder: 'border-teal-100',
+      glowAccent1: 'bg-teal-400',
+      glowAccent2: 'bg-teal-300',
+    },
+    geo: {
+      color: '#0ea5e9',
+      textClass: 'text-sky-600',
+      bgClass: 'bg-sky-50/50',
+      borderClass: 'border-sky-150',
+      gradientBar: 'bg-gradient-to-r from-sky-500 to-blue-500',
+      terminalText: 'text-sky-400',
+      headingClass: 'text-sky-600 border-sky-100',
+      badgeClass: 'text-sky-600 bg-sky-50 border-sky-150',
+      glowBg: 'bg-sky-50/20',
+      glowBorder: 'border-sky-200/60',
+      glowSoftBorder: 'border-sky-100',
+      glowAccent1: 'bg-sky-400',
+      glowAccent2: 'bg-sky-300',
+    }
+  }[selectedAgent];
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 relative font-sans fade-up">
@@ -301,17 +357,21 @@ export default function CommandCenter() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
 
         {/* Column 1: Website Health score Circular SVG Gauge (4-cols) */}
-        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl overflow-hidden" data-finding-id="health-score">
+        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-indigo-50/15 p-5 shadow-sm rounded-3xl overflow-hidden" data-finding-id="health-score">
+          {/* Top Indicator bar */}
+          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]" />
           <div className={highlightClass('health-score')}>
             <HealthScoreCard score={data?.health?.score} trendWeek={data?.health?.trendWeek} loading={data === null} />
           </div>
         </div>
 
         {/* Column 2: Competitor Leaderboard (4-cols) */}
-        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
+          {/* Top Indicator bar */}
+          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
           <div>
             <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
-              <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-slate-200 shadow-sm">
+              <span className="w-8 h-8 rounded-xl grid place-items-center bg-orange-50 text-orange-600 shrink-0 border border-orange-100 shadow-sm">
                 <Globe size={14} />
               </span>
               <div className="leading-tight">
@@ -322,7 +382,7 @@ export default function CommandCenter() {
             {data?.competitors && data.competitors.length > 0 ? (
               <div className="space-y-2.5">
                 {data.competitors.slice(0, 3).map((r, i) => {
-                  const medalColors = i === 0 ? 'bg-amber-500 text-white' : i === 1 ? 'bg-slate-400 text-white' : 'bg-amber-600 text-white';
+                  const medalColors = i === 0 ? 'bg-amber-500 text-white' : i === 1 ? 'bg-slate-450 text-white' : 'bg-amber-600 text-white';
                   const score = r.comparison?.competitorScore || 85;
                   return (
                     <div key={r.domain} className="space-y-1">
@@ -334,14 +394,14 @@ export default function CommandCenter() {
                         <span className="text-slate-900 font-mono font-black shrink-0">{score}%</span>
                       </div>
                       <div className="h-1 rounded-full bg-slate-100 overflow-hidden">
-                        <div className="h-full rounded-full bg-indigo-500" style={{ width: `${score}%` }} />
+                        <div className="h-full rounded-full bg-gradient-to-r from-orange-500 to-rose-500" style={{ width: `${score}%` }} />
                       </div>
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="text-xs text-slate-405 italic p-4 text-center">No competitors logged.</div>
+              <div className="text-xs text-slate-455 italic p-4 text-center">No competitors logged.</div>
             )}
           </div>
           <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5">
@@ -350,10 +410,12 @@ export default function CommandCenter() {
         </div>
 
         {/* Column 3: Ingestion/Connection Health (4-cols) */}
-        <div className="lg:col-span-4 card border border-slate-205 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-emerald-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
+          {/* Top Indicator bar */}
+          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-emerald-400 to-teal-400" />
           <div>
             <div className="flex items-center gap-2.5 mb-3 border-b border-slate-100 pb-3">
-              <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-slate-200 shadow-sm">
+              <span className="w-8 h-8 rounded-xl grid place-items-center bg-emerald-50 text-emerald-600 shrink-0 border border-emerald-100 shadow-sm">
                 <Workflow size={14} />
               </span>
               <div className="leading-tight">
@@ -364,7 +426,7 @@ export default function CommandCenter() {
             {integrations && integrations.length > 0 ? (
               <div className="grid grid-cols-2 gap-2">
                 {integrations.slice(0, 2).map((i) => (
-                  <div key={i.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col justify-between text-left shadow-sm">
+                  <div key={i.id} className={`p-2.5 bg-slate-50 border rounded-2xl flex flex-col justify-between text-left shadow-sm ${i.status === 'ok' ? 'border-emerald-100/50' : 'border-rose-100/50'}`}>
                     <span className="text-[10px] font-black text-slate-700 truncate leading-snug">{i.name}</span>
                     <span className={`text-[9px] font-black uppercase tracking-wider mt-2.5 w-fit px-2 py-0.5 rounded border flex items-center gap-1 ${
                       i.status === 'ok' ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-rose-50 border-rose-100 text-rose-700'
@@ -407,16 +469,16 @@ export default function CommandCenter() {
           {/* SEO Agent Select Card */}
           <button
             onClick={() => setSelectedAgent('seo')}
-            className={`text-left p-4 rounded-3xl border transition-all duration-200 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
+            className={`text-left p-4 rounded-3xl border transition-all duration-300 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
               selectedAgent === 'seo'
-                ? 'bg-white border-slate-350 shadow-md ring-1 ring-slate-200'
+                ? 'bg-gradient-to-br from-white to-indigo-50/20 border-indigo-300 shadow-md ring-1 ring-indigo-100'
                 : 'bg-white/50 border-slate-200 hover:bg-white hover:border-slate-300'
             }`}
           >
-            {selectedAgent === 'seo' && <div className="absolute top-0 inset-x-0 h-1 bg-indigo-500" />}
+            {selectedAgent === 'seo' && <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]" />}
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-3">
-                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'seo' ? 'bg-indigo-50 text-indigo-650 border border-indigo-100 shadow-sm' : 'bg-slate-100 text-slate-400'}`}>
+                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'seo' ? 'bg-indigo-50 text-indigo-650 border border-indigo-150 shadow-sm' : 'bg-slate-100 text-slate-400'}`}>
                   <Target size={16} strokeWidth={2.25} />
                 </span>
                 <div>
@@ -430,7 +492,7 @@ export default function CommandCenter() {
             <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
               <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className="text-emerald-600 font-bold">Active</span></span>
               <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'seo' ? 'border-indigo-100 text-indigo-650' : 'border-slate-200 text-slate-500'
+                selectedAgent === 'seo' ? 'border-indigo-200 text-indigo-650 bg-indigo-50/40' : 'border-slate-200 text-slate-500'
               }`}>
                 {seoInfo.issues.length + seoInfo.opportunities.length} findings
               </span>
@@ -440,16 +502,16 @@ export default function CommandCenter() {
           {/* Content Agent Select Card */}
           <button
             onClick={() => setSelectedAgent('content')}
-            className={`text-left p-4 rounded-3xl border transition-all duration-200 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
+            className={`text-left p-4 rounded-3xl border transition-all duration-300 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
               selectedAgent === 'content'
-                ? 'bg-white border-slate-350 shadow-md ring-1 ring-slate-200'
+                ? 'bg-gradient-to-br from-white to-teal-50/20 border-teal-300 shadow-md ring-1 ring-teal-100'
                 : 'bg-white/50 border-slate-200 hover:bg-white hover:border-slate-300'
             }`}
           >
-            {selectedAgent === 'content' && <div className="absolute top-0 inset-x-0 h-1 bg-indigo-500" />}
+            {selectedAgent === 'content' && <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-teal-500 to-emerald-500" />}
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-3">
-                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'content' ? 'bg-indigo-50 text-indigo-650 border border-indigo-100 shadow-sm' : 'bg-slate-100 text-slate-400'}`}>
+                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'content' ? 'bg-teal-55 text-teal-650 border border-teal-150 shadow-sm' : 'bg-slate-100 text-slate-400'}`}>
                   <FileText size={16} strokeWidth={2.25} />
                 </span>
                 <div>
@@ -463,7 +525,7 @@ export default function CommandCenter() {
             <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
               <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className="text-emerald-600 font-bold">Active</span></span>
               <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'content' ? 'border-indigo-100 text-indigo-650' : 'border-slate-200 text-slate-500'
+                selectedAgent === 'content' ? 'border-teal-200 text-teal-650 bg-teal-50/40' : 'border-slate-200 text-slate-500'
               }`}>
                 {contentInfo.issues.length + contentInfo.opportunities.length} findings
               </span>
@@ -473,16 +535,16 @@ export default function CommandCenter() {
           {/* Geo Agent Select Card */}
           <button
             onClick={() => setSelectedAgent('geo')}
-            className={`text-left p-4 rounded-3xl border transition-all duration-200 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
+            className={`text-left p-4 rounded-3xl border transition-all duration-300 flex flex-col justify-between min-h-[110px] relative group overflow-hidden cursor-pointer ${
               selectedAgent === 'geo'
-                ? 'bg-white border-slate-350 shadow-md ring-1 ring-slate-200'
+                ? 'bg-gradient-to-br from-white to-sky-50/20 border-sky-350 shadow-md ring-1 ring-sky-100'
                 : 'bg-white/50 border-slate-200 hover:bg-white hover:border-slate-300'
             }`}
           >
-            {selectedAgent === 'geo' && <div className="absolute top-0 inset-x-0 h-1 bg-indigo-500" />}
+            {selectedAgent === 'geo' && <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-sky-500 to-blue-500" />}
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-3">
-                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'geo' ? 'bg-indigo-50 text-indigo-650 border border-indigo-100 shadow-sm' : 'bg-slate-100 text-slate-405'}`}>
+                <span className={`w-8 h-8 rounded-xl grid place-items-center ${selectedAgent === 'geo' ? 'bg-sky-50 text-sky-600 border border-sky-150 shadow-sm' : 'bg-slate-100 text-slate-405'}`}>
                   <Globe size={16} strokeWidth={2.25} />
                 </span>
                 <div>
@@ -496,7 +558,7 @@ export default function CommandCenter() {
             <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
               <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className="text-emerald-600 font-bold">Active</span></span>
               <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'geo' ? 'border-indigo-100 text-indigo-650' : 'border-slate-200 text-slate-505'
+                selectedAgent === 'geo' ? 'border-sky-200 text-sky-600 bg-sky-50/40' : 'border-slate-200 text-slate-505'
               }`}>
                 {geoInfo.issues.length + geoInfo.opportunities.length} findings
               </span>
@@ -506,12 +568,14 @@ export default function CommandCenter() {
 
         {/* Right Side: Selected Agent Workspace File Details (8-cols) */}
         <div className="lg:col-span-8 card border border-slate-205 bg-white shadow-md p-5 flex flex-col gap-5 relative overflow-hidden rounded-3xl">
+          {/* Active Agent Top Accent Gradient Line */}
+          <div className={`absolute top-0 inset-x-0 h-1.5 ${agentTheme.gradientBar}`} />
           
           {/* Top Title & Active Agent Thinking Output */}
           <div className="flex flex-col gap-3 pb-3.5 border-b border-slate-100">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <span className="w-9 h-9 rounded-2xl grid place-items-center bg-indigo-50 border border-slate-200 text-indigo-600 shadow-sm animate-pulse">
+                <span className={`w-9 h-9 rounded-2xl grid place-items-center border shadow-sm animate-pulse ${agentTheme.bgClass} ${agentTheme.borderClass} ${agentTheme.textClass}`}>
                   <Cpu size={16} />
                 </span>
                 <div>
@@ -531,7 +595,7 @@ export default function CommandCenter() {
 
             {/* LIVE CONSOLE BAR SHOWING THE ACTIVE AGENT IS THINKING/WORKING */}
             <div className="bg-slate-900 text-slate-200 rounded-2xl p-3 flex items-center gap-2.5 text-[10.5px] font-mono border border-slate-800 shadow-inner">
-              <Terminal size={12} className="text-orange-500 animate-pulse shrink-0" />
+              <Terminal size={12} className={`${agentTheme.terminalText} animate-pulse shrink-0`} />
               <span className="text-slate-400 select-none">[Agent Log]</span>
               <span className="text-white truncate font-bold animate-fade-in">
                 {selectedAgent === 'seo' ? '🤖 Technical-SEO: indexing audits verified, striking-distance opportunities mapped.'
@@ -570,14 +634,14 @@ export default function CommandCenter() {
               {/* Row 1: Critical Gaps & Watchlist (cols-12 split) */}
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch">
                 <div className="md:col-span-7 flex flex-col">
-                  <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                  <h4 className="text-xs font-black text-slate-805 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
                     <AlertTriangle size={14} className="text-rose-500" /> Critical Gaps: What We Lack ({activeWorkspace.issues.length})
                   </h4>
                   {activeWorkspace.issues.length > 0 ? (
                     <div className="space-y-3.5">
                       {activeWorkspace.issues.map((f) => (
                         <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
-                          <CriticalIssueCard finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
+                           <CriticalIssueCard finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
                         </div>
                       ))}
                     </div>
@@ -589,8 +653,8 @@ export default function CommandCenter() {
                 </div>
 
                 <div className="md:col-span-5 flex flex-col">
-                  <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
-                    <CheckCircle2 size={14} className="text-emerald-500" /> Open Opportunity Watchlist ({activeWorkspace.watchlist.length})
+                  <h4 className="text-xs font-black text-slate-808 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                    <CheckCircle2 size={14} className={agentTheme.textClass} /> Open Opportunity Watchlist ({activeWorkspace.watchlist.length})
                   </h4>
                   {activeWorkspace.watchlist.length > 0 ? (
                     <div className="space-y-3.5 flex-1 flex flex-col justify-between">
@@ -606,15 +670,29 @@ export default function CommandCenter() {
                         <button 
                           type="button"
                           onClick={() => setShowAllWatchlist(!showAllWatchlist)}
-                          className="text-[9.5px] font-black uppercase tracking-wider text-indigo-650 mt-3 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer"
+                          className={`text-[9.5px] font-black uppercase tracking-wider mt-3 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer ${agentTheme.textClass}`}
                         >
                           {showAllWatchlist ? 'Show Less ↑' : `Show All (${activeWorkspace.watchlist.length}) ↓`}
                         </button>
                       )}
                     </div>
                   ) : (
-                    <div className="border border-dashed border-slate-200 rounded-3xl p-5 text-center text-[10px] text-slate-400 font-bold bg-slate-50/20 flex-1 flex flex-col justify-center items-center min-h-[100px]">
-                      No watchlisted items for this workspace.
+                    <div className="border border-dashed border-slate-200 rounded-3xl p-5 text-center text-[10px] text-slate-400 font-bold bg-slate-50/20 flex-1 flex flex-col justify-center items-center min-h-[100px] gap-2">
+                      <span>No watchlisted items for this workspace.</span>
+                      {otherWatchlistTabs.length > 0 && (
+                        <span className="flex flex-wrap justify-center gap-2">
+                          {otherWatchlistTabs.map((tab) => (
+                            <button
+                              key={tab.key}
+                              type="button"
+                              onClick={() => setSelectedAgent(tab.key)}
+                              className="text-[9.5px] font-black uppercase tracking-wider text-indigo-600 hover:underline cursor-pointer"
+                            >
+                              +{tab.count} in {tab.label} →
+                            </button>
+                          ))}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -625,8 +703,8 @@ export default function CommandCenter() {
                 <div className="md:col-span-7 flex flex-col">
                   <div className="flex flex-col h-full justify-between">
                     <div>
-                      <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
-                        <BrainCircuit size={14} className="text-indigo-500" /> Agent Discoveries ({activeWorkspace.discoveries.length})
+                      <h4 className="text-xs font-black text-slate-805 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                        <BrainCircuit size={14} className={agentTheme.textClass} /> Agent Discoveries ({activeWorkspace.discoveries.length})
                       </h4>
                       {activeWorkspace.discoveries.length > 0 ? (
                         <div className="space-y-3">
@@ -646,7 +724,7 @@ export default function CommandCenter() {
                       <button 
                         type="button"
                         onClick={() => setShowAllDiscoveries(!showAllDiscoveries)}
-                        className="text-[9.5px] font-black uppercase tracking-wider text-indigo-650 mt-3.5 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer"
+                        className={`text-[9.5px] font-black uppercase tracking-wider mt-3.5 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer ${agentTheme.textClass}`}
                       >
                         {showAllDiscoveries ? 'Show Less ↑' : `Show All (${activeWorkspace.discoveries.length}) ↓`}
                       </button>
@@ -657,8 +735,8 @@ export default function CommandCenter() {
                 <div className="md:col-span-5 flex flex-col">
                   <div className="flex flex-col h-full justify-between">
                     <div>
-                      <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
-                        <TrendingUp size={14} className="text-emerald-650" /> Opportunities We Miss ({activeWorkspace.opportunities.length})
+                      <h4 className="text-xs font-black text-slate-805 uppercase tracking-wider flex items-center gap-2 mb-3 border-b border-slate-100 pb-2">
+                        <TrendingUp size={14} className="text-emerald-600" /> Opportunities We Miss ({activeWorkspace.opportunities.length})
                       </h4>
                       {activeWorkspace.opportunities.length > 0 ? (
                         <div className="space-y-3">
@@ -686,7 +764,6 @@ export default function CommandCenter() {
                   </div>
                 </div>
               </div>
-
             </div>
           )}
 
@@ -695,8 +772,22 @@ export default function CommandCenter() {
            activeWorkspace.discoveries.length === 0 &&
            activeWorkspace.opportunities.length === 0 &&
            activeWorkspace.watchlist.length === 0 && (
-             <div className="border border-dashed border-slate-200 rounded-3xl p-8 text-center text-xs text-slate-400 font-bold bg-slate-50/30">
-               ✨ This agent has completed all diagnostics. No issues or gaps logged for this domain.
+             <div className={`relative border border-dashed rounded-3xl p-10 text-center bg-gradient-to-br from-white to-slate-50/20 ${agentTheme.glowBg} ${agentTheme.glowBorder} overflow-hidden shadow-sm`}>
+               {/* Glowing accent circle */}
+               <div className={`absolute -right-12 -bottom-12 w-24 h-24 rounded-full blur-2xl opacity-40 ${agentTheme.glowAccent1}`} />
+               <div className={`absolute -left-12 -top-12 w-24 h-24 rounded-full blur-2xl opacity-40 ${agentTheme.glowAccent2}`} />
+               
+               <div className="relative z-10 flex flex-col items-center justify-center">
+                 <div className={`w-12 h-12 rounded-2xl grid place-items-center mb-4 shadow-md bg-white border ${agentTheme.glowSoftBorder}`}>
+                   <Sparkles size={20} className={`${agentTheme.textClass} animate-pulse`} />
+                 </div>
+                 <h4 className="text-sm font-black text-slate-800 uppercase tracking-wider mb-1">
+                   Audit Complete & Verified
+                 </h4>
+                 <p className="text-[11.5px] font-bold text-slate-400 max-w-sm leading-relaxed">
+                   The {selectedAgent === 'seo' ? 'SEO & Technical Auditor' : selectedAgent === 'content' ? 'Content Strategy Agent' : 'Geographical Investigator'} has run all diagnostics. No issues, gaps, or anomalies were detected.
+                 </p>
+               </div>
              </div>
           )}
 
@@ -708,14 +799,17 @@ export default function CommandCenter() {
         <section className="border-t border-slate-200 pt-5">
           <button
             onClick={() => setShowIntegrations(!showIntegrations)}
-            className="w-full flex items-center justify-between text-xs font-black text-slate-500 uppercase tracking-widest pb-3 cursor-pointer"
+            className="w-full flex items-center justify-between text-xs font-black text-slate-500 uppercase tracking-widest pb-3 cursor-pointer hover:text-slate-800 transition-colors focus:outline-none"
           >
-            <span>Connection & Integration Health Details</span>
+            <span className="flex items-center gap-2">
+              <Workflow size={14} className="text-emerald-500" />
+              <span>Connection & Integration Health Details</span>
+            </span>
             {showIntegrations ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
 
           {showIntegrations && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-3 items-stretch animate-slide-down">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-4 pb-3 px-4 items-stretch animate-slide-down bg-emerald-500/[0.02] border border-emerald-500/10 rounded-3xl mt-2">
               {integrations.map((i) => (
                 <div key={i.id} className="flex flex-col">
                   <IntegrationHealthCard integration={i} checking={checkingId === i.id}
@@ -731,49 +825,56 @@ export default function CommandCenter() {
       <section className="border-t border-slate-200 pt-5 pb-8">
         <button
           onClick={() => setShowOpsHistory(!showOpsHistory)}
-          className="w-full flex items-center justify-between text-xs font-black text-slate-505 uppercase tracking-widest pb-3 cursor-pointer"
+          className="w-full flex items-center justify-between text-xs font-black text-slate-505 uppercase tracking-widest pb-3 cursor-pointer hover:text-slate-800 transition-colors focus:outline-none"
         >
-          <span>Operations History Logs</span>
+          <span className="flex items-center gap-2">
+            <History size={14} className="text-indigo-500" />
+            <span>Operations History Logs</span>
+          </span>
           {showOpsHistory ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
         </button>
 
         {showOpsHistory && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-3 items-stretch animate-slide-down">
-            <div className="card border border-slate-200 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6 items-start animate-slide-down bg-gradient-to-tr from-indigo-50/20 via-transparent to-violet-50/15 border border-indigo-100/50 rounded-[32px] mt-2 shadow-inner">
+            
+            {/* AI Audit Activity Card */}
+            <div className="relative card border border-indigo-100 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
+              <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-indigo-400 pointer-events-none" />
               <div>
-                <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide flex items-center gap-2 mb-3.5 border-b border-slate-100 pb-2">
-                  <Activity size={14} className="text-indigo-505" /> AI Audit Activity
-                </h4>
-                <ActivityFeed items={showAllActivity ? (data?.activity || []) : (data?.activity || []).slice(0, 4)} />
+                <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
+                  <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-indigo-100/80 shadow-sm">
+                    <Activity size={14} />
+                  </span>
+                  <div className="leading-tight">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">AI Audit Activity</h3>
+                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">Specialist model executions</span>
+                  </div>
+                </div>
+                <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
+                  <ActivityFeed items={data?.activity || []} />
+                </div>
               </div>
-              {data?.activity && data.activity.length > 4 && (
-                <button 
-                  type="button"
-                  onClick={() => setShowAllActivity(!showAllActivity)}
-                  className="text-[9.5px] font-black uppercase tracking-wider text-indigo-650 mt-3.5 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer"
-                >
-                  {showAllActivity ? 'Show Less ↑' : `Show All (${data.activity.length}) ↓`}
-                </button>
-              )}
             </div>
 
-            <div className="card border border-slate-200 bg-white p-5 shadow-sm rounded-3xl flex flex-col justify-between">
+            {/* Recent Structural Changes Card */}
+            <div className="relative card border border-slate-200 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
+              <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-slate-400 pointer-events-none" />
               <div>
-                <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide flex items-center gap-2 mb-3.5 border-b border-slate-100 pb-2">
-                  <History size={14} className="text-slate-500" /> Recent Structural Changes
-                </h4>
-                <ChangesTimeline items={showAllChanges ? (data?.recentChanges || []) : (data?.recentChanges || []).slice(0, 4)} />
+                <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
+                  <span className="w-8 h-8 rounded-xl grid place-items-center bg-slate-55 text-slate-650 shrink-0 border border-slate-200/85 shadow-sm">
+                    <History size={14} />
+                  </span>
+                  <div className="leading-tight">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Recent Structural Changes</h3>
+                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">Discovered anomalies & updates</span>
+                  </div>
+                </div>
+                <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
+                  <ChangesTimeline items={data?.recentChanges || []} />
+                </div>
               </div>
-              {data?.recentChanges && data.recentChanges.length > 4 && (
-                <button 
-                  type="button"
-                  onClick={() => setShowAllChanges(!showAllChanges)}
-                  className="text-[9.5px] font-black uppercase tracking-wider text-slate-500 mt-3.5 hover:underline flex items-center gap-1 focus:outline-none cursor-pointer"
-                >
-                  {showAllChanges ? 'Show Less ↑' : `Show All (${data.recentChanges.length}) ↓`}
-                </button>
-              )}
             </div>
+            
           </div>
         )}
       </section>
