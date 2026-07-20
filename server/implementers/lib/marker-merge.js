@@ -58,6 +58,71 @@ export function hasMarker(fileContent, name) {
   return !!findMarker(fileContent, name);
 }
 
+// Fields using the LINE convention (a single quoted front-matter value) —
+// established by this codebase's only real precedent, meta-title's `title`
+// field (see module comment above). Everything else is a BLOCK marker.
+const LINE_CONVENTION_FIELDS = new Set(['title']);
+
+// The front-matter block only, `---\n...\n---\n` at the very start of the
+// file — auto-insertion for a LINE marker is restricted to inside this
+// block so it can never mistake an unrelated `title:`-looking string
+// elsewhere in the file's real body content for the front-matter field.
+function frontMatterLength(fileContent) {
+  const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(fileContent);
+  return match ? match[0].length : null;
+}
+
+// Auto-inserts a trailing `# SEOAI:<name>` comment onto an existing
+// `field: "value"` front-matter line — deliberately conservative: only
+// proceeds when front matter exists AND the field's value is already
+// quoted (this site's real pages use both quoted and unquoted title
+// values; rewriting an unquoted YAML scalar risks corrupting it if the
+// value contains ":" or other YAML-significant characters). Returns null
+// on anything less than a clean match, leaving the caller to fall back to
+// today's honest "marker not found" failure rather than guess further.
+function insertLineMarker(fileContent, field, markerName) {
+  const fmLen = frontMatterLength(fileContent);
+  if (fmLen == null) return null;
+  const frontMatter = fileContent.slice(0, fmLen);
+  const rest = fileContent.slice(fmLen);
+  const fieldLineRe = new RegExp(`^(${escapeRegExp(field)}:\\s*)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2\\s*$`, 'm');
+  if (!fieldLineRe.test(frontMatter)) return null;
+  const newFrontMatter = frontMatter.replace(fieldLineRe, (_m, prefix, q, val) => `${prefix}${q}${val}${q} # SEOAI:${markerName}`);
+  return newFrontMatter + rest;
+}
+
+// Appends an empty block marker at the very end of the file — purely
+// additive, so it can never disturb existing template syntax, front
+// matter, or layout regardless of framework. The same position every
+// block marker has been manually placed at by hand this session.
+function insertBlockMarker(fileContent, markerName) {
+  const sep = fileContent.length > 0 && !fileContent.endsWith('\n') ? '\n' : '';
+  return `${fileContent}${sep}<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->\n`;
+}
+
+// Auto-creates any marker referenced in markerMap that isn't already
+// present in fileContent, so a draft never has to wait on a human
+// hand-placing an empty marker first. Never touches an existing marker
+// (hasMarker guard) — only ever adds genuinely missing ones. A LINE marker
+// that can't be safely placed (see insertLineMarker) is simply skipped,
+// leaving spliceMarkers()'s existing "marker not found" failure as the
+// honest fallback for that one field.
+export function ensureMarkers(fileContent, markerMap) {
+  let content = fileContent;
+  const inserted = [];
+  for (const [field, markerName] of Object.entries(markerMap)) {
+    if (hasMarker(content, markerName)) continue;
+    if (LINE_CONVENTION_FIELDS.has(field)) {
+      const updated = insertLineMarker(content, field, markerName);
+      if (updated) { content = updated; inserted.push(markerName); }
+      continue;
+    }
+    content = insertBlockMarker(content, markerName);
+    inserted.push(markerName);
+  }
+  return { content, inserted };
+}
+
 // Whatever's currently sitting inside a marker, verbatim — used to show an
 // implemented draft's real, live content (routes/action-center.js's preview
 // for an already-merged draft) without recomputing anything: the marker

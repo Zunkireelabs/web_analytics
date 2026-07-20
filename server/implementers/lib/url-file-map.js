@@ -136,11 +136,20 @@ export function resolveMarkers(site, pageUrl, actionType) {
 // (which framework-specific code owns writing the change), not a content-
 // placement judgment call — so unlike render mode below, it stays explicit,
 // static config; there's no "evidence in the page" that tells you which
-// adapter to use. `url_file_map.pages[url].adapters` shape:
-// { [actionType]: 'adapter-id' }. No config → no adapter, default routing.
+// adapter to use. `url_file_map.pages[url].adapters` (or `.patterns[].adapters`
+// for a whole family of pages sharing one data-driven target, e.g. every
+// /locations/:slug/ page routing to the same generic data-array adapter)
+// shape: { [actionType]: { id: 'adapter-id', ...adapter-specific params } }
+// — e.g. data-array-content.js expects { id, format, dataFile, idField,
+// itemsField }. The object (not just a bare id string) is what makes the
+// adapter itself generic/reusable across tenants: which FILE and which
+// FIELD NAMES to use are per-site config, never hardcoded in the adapter's
+// own code. Page-level wins over pattern-level. No config → no adapter,
+// default routing.
 export function resolveAdapter(site, pageUrl, actionType) {
   const entry = getPageEntry(site, pageUrl);
-  return entry?.adapters?.[actionType] || null;
+  if (entry?.adapters?.[actionType]) return entry.adapters[actionType];
+  return getMatchingPattern(site, pageUrl)?.adapters?.[actionType] || null;
 }
 
 // Render mode (visible vs. schema-only) is NOT resolved here, and

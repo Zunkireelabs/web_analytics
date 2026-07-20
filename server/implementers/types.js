@@ -158,4 +158,20 @@
  *   different slots/markers), and any priority/ordering scheme for two
  *   content types targeting the same slot.
  */
+
+/**
+ * Sitemap regeneration: intentionally NOT this platform's job, for any
+ * tenant. No implementer/adapter here ever reads or writes a sitemap file.
+ * A real static-site build (Eleventy, Next.js, Hugo, Gatsby, ...) already
+ * regenerates its own sitemap from its own page collection on every build,
+ * and `stage` already auto-deploys (rebuilds) on every merge (company-wide
+ * CI/CD convention, not app-specific — see
+ * ~/Travel/ci-cd-deployment-master-guide). So once a draft's merge lands,
+ * the target repo's own build produces an up-to-date sitemap without this
+ * app doing anything extra. If a future tenant's build pipeline does NOT
+ * auto-regenerate its sitemap, that's a gap in THEIR CI/CD to fix, not
+ * something to work around by having this app hand-edit a sitemap file
+ * directly — doing so would fight the site's own build the next time it
+ * runs.
+ */
 export {};
