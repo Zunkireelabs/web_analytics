@@ -49,13 +49,15 @@ const STAGE_COLOR = {
   pr_opened: '#2563eb', implemented: '#10b981',
 };
 
+// No 'implemented' entry — implemented drafts live only on the dedicated
+// Implemented tab (see implementedDrafts below), never inside the Drafts
+// tab's own list, "All Drafts" included.
 const STATUS_FILTERS = [
   { value: '', label: 'All Drafts' },
   { value: 'submitted_for_approval', label: 'Pending Approval' },
   { value: 'approved', label: 'Approved' },
   { value: 'branch_pushed', label: 'Branch Pushed' },
   { value: 'merged_to_stage', label: 'Merged to Stage' },
-  { value: 'implemented', label: 'Implemented' },
 ];
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
@@ -144,7 +146,10 @@ export default function ActionCenter() {
     setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true });
   }, [drafts, searchParams]);
 
-  const visibleDrafts = statusFilter ? (drafts || []).filter((d) => d.status === statusFilter) : drafts;
+  // Implemented drafts belong on the Implemented tab only — never mixed
+  // into the Drafts tab's own list, "All Drafts" included.
+  const nonImplementedDrafts = drafts === null ? null : drafts.filter((d) => d.status !== 'implemented');
+  const visibleDrafts = statusFilter ? (nonImplementedDrafts || []).filter((d) => d.status === statusFilter) : nonImplementedDrafts;
 
   const refresh = async () => {
     setRefreshing(true);
@@ -238,7 +243,7 @@ export default function ActionCenter() {
         <div className="lg:col-span-4 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
           {[
             { key: 'recommendations', label: 'Recs', count: recs?.items.length },
-            { key: 'drafts', label: 'Drafts', count: drafts?.length },
+            { key: 'drafts', label: 'Drafts', count: nonImplementedDrafts?.length },
             { key: 'implemented', label: 'Done', count: implementedDrafts.length }
           ].map((t) => (
             <button 
@@ -334,7 +339,7 @@ export default function ActionCenter() {
           )}
 
           {/* Pipelines status list (Drafts tab) */}
-          {tab === 'drafts' && drafts && drafts.length > 0 && (
+          {tab === 'drafts' && nonImplementedDrafts && nonImplementedDrafts.length > 0 && (
             <div className="space-y-1">
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
                 <SlidersHorizontal size={11} className="text-indigo-550" />
@@ -343,9 +348,9 @@ export default function ActionCenter() {
               <div className="flex flex-wrap gap-1.5">
                 {STATUS_FILTERS.map((f) => {
                   const active = statusFilter === f.value;
-                  const count = f.value 
-                    ? drafts.filter((d) => d.status === f.value).length 
-                    : drafts.length;
+                  const count = f.value
+                    ? nonImplementedDrafts.filter((d) => d.status === f.value).length
+                    : nonImplementedDrafts.length;
                   return (
                     <button 
                       key={f.value} 

@@ -72,23 +72,51 @@ function frontMatterLength(fileContent) {
   return match ? match[0].length : null;
 }
 
+// A plain (unquoted) YAML scalar is unsafe to mechanically wrap in double
+// quotes without a real YAML parser if it contains an unescaped '"' (we
+// don't escape it), a '#' (ambiguous comment-start once quoted), or opens
+// with a flow/anchor/tag/block-scalar indicator that changes meaning once
+// quoted (e.g. `[`, `{`, `&`, `*`, `!`, `|`, `>`, `%`, `@`, backtick).
+// Anything matching this bails out to the honest "marker not found"
+// failure instead of risking a wrong rewrite — same conservatism as the
+// quoted-value path, just drawing the safe boundary around a wider (and,
+// on this site's own real pages, at least as common) case.
+const UNSAFE_UNQUOTED_VALUE = /["#]|^[[{&*!|>%@`]/;
+
 // Auto-inserts a trailing `# SEOAI:<name>` comment onto an existing
-// `field: "value"` front-matter line — deliberately conservative: only
-// proceeds when front matter exists AND the field's value is already
-// quoted (this site's real pages use both quoted and unquoted title
-// values; rewriting an unquoted YAML scalar risks corrupting it if the
-// value contains ":" or other YAML-significant characters). Returns null
-// on anything less than a clean match, leaving the caller to fall back to
-// today's honest "marker not found" failure rather than guess further.
+// `field: value` front-matter line — deliberately conservative: only
+// proceeds when front matter exists. Two forms, tried in order:
+//   1. `field: "value"` / `field: 'value'` (already quoted) — the marker
+//      comment is simply appended after the closing quote.
+//   2. `field: value` (a plain, unquoted scalar) — wrapping it in double
+//      quotes doesn't change its parsed value, so this is safe to do
+//      automatically UNLESS the value itself needs real YAML-aware
+//      escaping/interpretation (see UNSAFE_UNQUOTED_VALUE) — that case is
+//      left for a human to quote and mark by hand, same as before this
+//      form existed at all.
+// Returns null on anything less than a clean, safe match, leaving the
+// caller to fall back to today's honest "marker not found" failure rather
+// than guess further.
 function insertLineMarker(fileContent, field, markerName) {
   const fmLen = frontMatterLength(fileContent);
   if (fmLen == null) return null;
   const frontMatter = fileContent.slice(0, fmLen);
   const rest = fileContent.slice(fmLen);
-  const fieldLineRe = new RegExp(`^(${escapeRegExp(field)}:\\s*)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2\\s*$`, 'm');
-  if (!fieldLineRe.test(frontMatter)) return null;
-  const newFrontMatter = frontMatter.replace(fieldLineRe, (_m, prefix, q, val) => `${prefix}${q}${val}${q} # SEOAI:${markerName}`);
-  return newFrontMatter + rest;
+
+  const quotedRe = new RegExp(`^(${escapeRegExp(field)}:\\s*)(["'])((?:(?!\\2)[^\\\\]|\\\\.)*)\\2\\s*$`, 'm');
+  if (quotedRe.test(frontMatter)) {
+    const newFrontMatter = frontMatter.replace(quotedRe, (_m, prefix, q, val) => `${prefix}${q}${val}${q} # SEOAI:${markerName}`);
+    return newFrontMatter + rest;
+  }
+
+  const unquotedRe = new RegExp(`^(${escapeRegExp(field)}:\\s*)(\\S.*?)\\s*$`, 'm');
+  const unquoted = unquotedRe.exec(frontMatter);
+  if (unquoted && !UNSAFE_UNQUOTED_VALUE.test(unquoted[2])) {
+    const newFrontMatter = frontMatter.replace(unquotedRe, (_m, prefix, val) => `${prefix}"${val}" # SEOAI:${markerName}`);
+    return newFrontMatter + rest;
+  }
+
+  return null;
 }
 
 // Appends an empty block marker at the very end of the file — purely

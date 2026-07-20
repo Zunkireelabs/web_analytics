@@ -1,5 +1,6 @@
 import { getLatestFindings } from '../../store/agent-runs.js';
 import { getQueriesForPage } from '../../store/read.js';
+import { getImplementedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
@@ -27,7 +28,10 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const runs = await getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS);
+  const [runs, implementedFindingIds] = await Promise.all([
+    getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
+    getImplementedFindingIds(siteId),
+  ]);
   const lookupQuery = makeQueryLookup(siteId);
   const items = [];
   const lastAnalyzedAt = {};
@@ -35,6 +39,7 @@ export async function buildRecommendations(siteId) {
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     for (const f of run.findings) {
+      if (implementedFindingIds.has(f.id)) continue; // already shipped — don't resurface until the agent's own next re-check organically drops it
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
       const params = { ...action.params };
