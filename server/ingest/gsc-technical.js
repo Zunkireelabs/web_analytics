@@ -1,4 +1,5 @@
 import { getSearchConsole } from '../auth/google.js';
+import { prioritizeForRecheck } from '../store/technical-seo-checks.js';
 
 // GSC's URL Inspection + Sitemaps APIs — both already covered by the
 // existing `webmasters.readonly` OAuth scope (server/auth/google.js), never
@@ -67,4 +68,60 @@ export async function listSitemaps(site) {
   } catch (err) {
     return { ok: false, sitemaps: [], error: String(err?.message || err) };
   }
+}
+
+// Real "please recheck this sitemap soon" nudge — the legitimate, policy-
+// safe mechanism for asking Google to reprocess changed content (unlike
+// the Indexing API, which Google officially restricts to JobPosting/
+// BroadcastEvent content; calling it for ordinary pages isn't reliably
+// honored and risks the property being flagged for misuse). NOT a
+// guarantee of immediate reindexing, and NOT per-URL — it's whole-sitemap.
+//
+// This is a WRITE call; the OAuth grant configured today (SCOPES in
+// server/auth/google.js) only requests `webmasters.readonly`, so this will
+// honestly fail with `reason: 'insufficient-scope'` until that's upgraded
+// (per-site re-consent) — never thrown, never silently absent. Built ready
+// now so nothing else needs to change once the scope is granted.
+export async function submitSitemap(site, feedpath) {
+  try {
+    const sc = await getSearchConsole(site);
+    await sc.sitemaps.submit({ siteUrl: site.gsc_property, feedpath });
+    return { ok: true };
+  } catch (err) {
+    const status = err?.code || err?.response?.status;
+    const insufficientScope = status === 403 || String(err?.message || '').includes('insufficient authentication scopes');
+    return {
+      ok: false,
+      reason: insufficientScope ? 'insufficient-scope' : 'google-api-error',
+      error: insufficientScope
+        ? 'This site\'s Search Console connection only has read access — ask an admin to grant write (webmasters) scope before sitemap resubmission can work.'
+        : String(err?.message || err),
+    };
+  }
+}
+
+// Called after a draft's merge actually lands — the real "tell Search
+// Console about this" step (multi-tenant refactor, Part 3). Two real,
+// independent actions, both best-effort (never throws, so a notification
+// failure never blocks the merge response that already succeeded):
+//   1. Prioritize the changed page for technical-seo's next rotation batch
+//      (see prioritizeForRecheck's doc comment for why this, not a
+//      synchronous inspectUrl call, is the quota-safe choice).
+//   2. Attempt real sitemap resubmission against whatever sitemap(s) this
+//      site's OWN Search Console property already has registered (never a
+//      guessed path) — honestly reports insufficient-scope today (see
+//      submitSitemap) rather than silently no-op'ing.
+// No site.gsc_property configured at all -> real no-op, not an error (the
+// same "insufficient-data" discipline every agent in this codebase uses).
+export async function notifyOfPageChange(site, page) {
+  if (!site.gsc_property) return { skipped: true, reason: 'no-gsc-property' };
+
+  await prioritizeForRecheck(site.id, page);
+
+  const sitemaps = await listSitemaps(site);
+  if (!sitemaps.ok || !sitemaps.sitemaps.length) {
+    return { prioritizedRecheck: true, sitemapSubmit: { ok: false, reason: 'no-sitemap-registered', error: sitemaps.error || 'No sitemap registered in Search Console for this property yet.' } };
+  }
+  const sitemapSubmit = await submitSitemap(site, sitemaps.sitemaps[0].path);
+  return { prioritizedRecheck: true, sitemapSubmit };
 }
