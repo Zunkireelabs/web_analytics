@@ -14,11 +14,14 @@
   --neg:        #e11d48;
 }
 
-html, body {
-  overflow-x: hidden;
-}
-
+/* Only body, never html too — html AND body both carrying a non-visible
+   overflow at the same time is a documented Chromium/WebKit quirk that
+   silently breaks `position: sticky` for every descendant (confirmed via
+   Playwright repro: Sidebar.jsx's sticky sidebar scrolled away entirely on
+   a tall page instead of staying pinned). body alone still clips the same
+   accidental horizontal overflow this was added to prevent. */
 body {
+  overflow-x: hidden;
   margin: 0;
   background: radial-gradient(at 0% 0%, rgba(108, 99, 255, 0.05) 0px, transparent 50%),
               radial-gradient(at 50% 0%, rgba(139, 92, 246, 0.04) 0px, transparent 50%),
