@@ -70,6 +70,14 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
+            # Shares OPENAI_API_KEY above but requires this separate flag
+            # before it fires (server/agents/ai-recommendation.js) — a
+            # deliberate opt-in so it never silently activates just because
+            # OPENAI_API_KEY happens to be set for the daily-narrative
+            # feature above. Explicitly turned on for staging.
+            AI_RECOMMENDATION_ENABLED=true
+
             # ── Email (shared) ──────────────────────────────────────────────
             SMTP_HOST=${{ vars.SMTP_HOST }}
             SMTP_PORT=${{ vars.SMTP_PORT }}
