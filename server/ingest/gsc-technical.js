@@ -1,9 +1,8 @@
 import { getSearchConsole } from '../auth/google.js';
 import { prioritizeForRecheck } from '../store/technical-seo-checks.js';
 
-// GSC's URL Inspection + Sitemaps APIs — both already covered by the
-// existing `webmasters.readonly` OAuth scope (server/auth/google.js), never
-// called anywhere until now. Real per-page index status (the "Coverage"
+// GSC's URL Inspection + Sitemaps APIs — covered by the `webmasters` OAuth
+// scope (server/auth/google.js). Real per-page index status (the "Coverage"
 // report's modern replacement) and real sitemap submission/processing
 // health, for server/agents/technical-seo.js.
 //
@@ -77,11 +76,11 @@ export async function listSitemaps(site) {
 // honored and risks the property being flagged for misuse). NOT a
 // guarantee of immediate reindexing, and NOT per-URL — it's whole-sitemap.
 //
-// This is a WRITE call; the OAuth grant configured today (SCOPES in
-// server/auth/google.js) only requests `webmasters.readonly`, so this will
-// honestly fail with `reason: 'insufficient-scope'` until that's upgraded
-// (per-site re-consent) — never thrown, never silently absent. Built ready
-// now so nothing else needs to change once the scope is granted.
+// This is a WRITE call, requiring the `webmasters` (not `.readonly`) scope
+// (SCOPES in server/auth/google.js). A site whose connection still predates
+// that scope upgrade — or a per-site service-account credential that was
+// never granted write access — gets a clean `reason: 'insufficient-scope'`
+// here rather than a thrown error.
 export async function submitSitemap(site, feedpath) {
   try {
     const sc = await getSearchConsole(site);

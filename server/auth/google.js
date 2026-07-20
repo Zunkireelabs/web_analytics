@@ -5,11 +5,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 
-// Scopes: read-only for the data APIs, plus Docs write for the weekly report doc.
+// Scopes: read-only for GA4, full read/write for Search Console (sitemap
+// resubmission needs write — see submitSitemap in server/ingest/gsc-technical.js),
+// plus Docs write for the weekly report doc.
 const SCOPES = [
-  'https://www.googleapis.com/auth/webmasters.readonly',   // Search Console
-  'https://www.googleapis.com/auth/analytics.readonly',    // GA4 Data API
-  'https://www.googleapis.com/auth/documents',             // Google Docs (weekly report)
+  'https://www.googleapis.com/auth/webmasters',          // Search Console (read/write)
+  'https://www.googleapis.com/auth/analytics.readonly',  // GA4 Data API
+  'https://www.googleapis.com/auth/documents',           // Google Docs (weekly report)
 ];
 
 const here = dirname(fileURLToPath(import.meta.url));
