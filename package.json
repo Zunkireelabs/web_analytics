@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Daily GSC + GA4 analytics agent and dashboard",
   "scripts": {
+    "test": "node --test server/",
     "migrate": "node server/migrations/run.js",
     "get-token": "node server/scripts/get-oauth-token.js",
     "ingest": "node server/scripts/ingest.js",
@@ -45,6 +46,7 @@
     "recharts": "^2.13.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.0.0",
