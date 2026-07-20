@@ -20,6 +20,7 @@ import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
+import { getImplementedFindingIds } from './store/drafts.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
@@ -145,7 +146,8 @@ export async function runDailyAgentAnalysisForSite(site) {
     narrative: result.narrative, error: null, tookMs: null,
   });
 
-  const { score } = computeHealthScore(result.findings);
+  const implementedFindingIds = await getImplementedFindingIds(site.id);
+  const { score } = computeHealthScore(result.findings, implementedFindingIds);
   const today = new Date().toISOString().slice(0, 10);
   await saveHealthScoreSnapshot(site.id, today, score)
     .catch((err) => console.error(`[job] site ${site.id} health score snapshot failed:`, err.message));

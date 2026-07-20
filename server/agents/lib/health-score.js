@@ -47,8 +47,19 @@ function dedupeKey(f) {
 // produce). Findings with no recognized priority tier are ignored rather
 // than crashing — defensive against future agents whose findings don't set
 // priority for some reason.
-export function computeHealthScore(findings) {
-  const scoreable = (findings || []).filter((f) => TIER_WEIGHT[f.priority] != null);
+//
+// `implementedFindingIds` (a Set, same shape as buildRecommendations'
+// getImplementedFindingIds — see agents/lib/recommendations.js) excludes any
+// finding with an already-implemented draft BEFORE dedup, not just from the
+// final list — otherwise an already-shipped finding could still win the
+// page+category dedup slot over a still-open one from a different agent,
+// silently continuing to penalize a page for an issue that's actually
+// fixed. Optional/defaults to empty so existing callers that don't pass it
+// keep today's behavior unchanged.
+export function computeHealthScore(findings, implementedFindingIds = new Set()) {
+  const scoreable = (findings || [])
+    .filter((f) => TIER_WEIGHT[f.priority] != null)
+    .filter((f) => !implementedFindingIds.has(f.id));
   if (!scoreable.length) return { score: 100, penalty: 0, findingsConsidered: 0, findingsReported: 0 };
 
   const bestByKey = new Map();

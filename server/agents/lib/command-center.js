@@ -10,6 +10,7 @@ import { listWatchlist } from '../../store/watchlist.js';
 import { listCompetitorProfiles } from '../../store/competitor-profiles.js';
 import { getAuthoritySnapshotHistory } from '../../store/authority.js';
 import { getMentionRateHistory } from '../../store/ai-recommendation.js';
+import { getImplementedFindingIds } from '../../store/drafts.js';
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 const OPEN_WATCHLIST_STATUSES = new Set(['new', 'in_progress']);
@@ -125,7 +126,7 @@ export async function getAgentActivityFeed(siteId, agentIds, limit = 12) {
 // never triggers a live agent run; use the /command-center/refresh route for
 // that, same split as Action Center's recommendations vs recommendations/refresh.
 export async function getCommandCenterData(siteId) {
-  const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory] = await Promise.all([
+  const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory, implementedFindingIds] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
@@ -135,6 +136,7 @@ export async function getCommandCenterData(siteId) {
     listCompetitorProfiles(siteId),
     getAuthoritySnapshotHistory(siteId, 12),
     getMentionRateHistory(siteId, 12),
+    getImplementedFindingIds(siteId),
   ]);
   const execRuns = execAndCompetitorRuns.filter((r) => r.agent_id === 'executive-report');
   const competitorRun = execAndCompetitorRuns.find((r) => r.agent_id === 'competitor-intelligence') || null;
@@ -146,7 +148,7 @@ export async function getCommandCenterData(siteId) {
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
 
-  const { score, penalty, findingsConsidered } = computeHealthScore(allFindings);
+  const { score, penalty, findingsConsidered } = computeHealthScore(allFindings, implementedFindingIds);
   const today = new Date().toISOString().slice(0, 10);
   await saveHealthScoreSnapshot(siteId, today, score)
     .catch((e) => console.error('[command-center] failed to save health score snapshot:', e.message));
