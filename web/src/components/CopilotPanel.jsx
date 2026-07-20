@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { 
   Sparkles, 
@@ -25,7 +26,7 @@ const STARTER_CARDS = [
   { text: 'Which pages have wins?', desc: 'Quick SEO gains', icon: Award, color: '#0ea5e9', bg: 'from-sky-50 to-sky-100/30' },
 ];
 
-function Bubble({ msg }) {
+function Bubble({ msg, onGenerateDraft, generatingId }) {
   const isUser = msg.role === 'user';
   return (
     <div className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'} animate-fade-in`}>
@@ -35,19 +36,31 @@ function Bubble({ msg }) {
         </span>
       )}
       <div className={`max-w-[78%] rounded-[20px] px-4 py-3 text-[13px] leading-relaxed shadow-sm relative border ${
-        isUser 
-          ? 'text-white bg-gradient-to-br from-indigo-650 via-indigo-500 to-violet-500 border-indigo-500/30 rounded-tr-none' 
+        isUser
+          ? 'text-white bg-gradient-to-br from-indigo-650 via-indigo-500 to-violet-500 border-indigo-500/30 rounded-tr-none'
           : 'bg-white/80 border-slate-200/60 text-slate-800 rounded-tl-none'
       }`}>
         <p className="whitespace-pre-line font-medium">{msg.content}</p>
 
-        {!isUser && msg.cited_finding_ids?.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-3 pt-2.5 border-t border-slate-150">
-            {msg.cited_finding_ids.slice(0, 5).map((id, i) => (
-              <span key={id} title={id}
-                className="text-[9px] font-black uppercase tracking-wider text-slate-450 bg-slate-50 border border-slate-200/50 rounded-full px-2 py-0.5">
-                Evidence {i + 1}
-              </span>
+        {!isUser && msg.cited_findings?.length > 0 && (
+          <div className="flex flex-col gap-1.5 mt-3 pt-2.5 border-t border-slate-150">
+            {msg.cited_findings.slice(0, 5).map((f, i) => (
+              <div key={f.id} className="flex items-center gap-1.5 flex-wrap">
+                <span title={f.id}
+                  className="text-[9px] font-black uppercase tracking-wider text-slate-450 bg-slate-50 border border-slate-200/50 rounded-full px-2 py-0.5 shrink-0">
+                  Evidence {i + 1}
+                </span>
+                {f.actionable && (
+                  <button
+                    type="button"
+                    onClick={() => onGenerateDraft(f)}
+                    disabled={generatingId === f.id}
+                    className="text-[9px] font-black uppercase tracking-wider text-indigo-650 bg-indigo-50 border border-indigo-150 hover:border-indigo-300 disabled:opacity-50 rounded-full px-2.5 py-0.5 transition active:scale-95 focus:outline-none"
+                  >
+                    {generatingId === f.id ? 'Generating…' : 'Generate Draft →'}
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -57,6 +70,7 @@ function Bubble({ msg }) {
 }
 
 export default function CopilotPanel({ open, onClose }) {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [conversationId, setConversationId] = useState(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -66,6 +80,7 @@ export default function CopilotPanel({ open, onClose }) {
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState(null);
   const [followUps, setFollowUps] = useState([]);
+  const [generatingId, setGeneratingId] = useState(null);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -97,7 +112,7 @@ export default function CopilotPanel({ open, onClose }) {
       }
       setMessages((m) => [...m, {
         role: 'assistant', content: res.answer, created_at: new Date().toISOString(),
-        cited_finding_ids: (res.citedFindings || []).map((f) => f.id),
+        cited_findings: res.citedFindings || [],
       }]);
       setFollowUps(res.followUps || []);
     } catch (e) {
@@ -105,6 +120,27 @@ export default function CopilotPanel({ open, onClose }) {
       setMessages((m) => m.slice(0, -1));
     } finally {
       setAsking(false);
+    }
+  };
+
+  // Same generator call Action Center's own "Generate Draft" button makes
+  // (api.actionCenter.generate), then reuses the exact ?openDraft= deep
+  // link NotificationBell already relies on (ActionCenter.jsx consumes it,
+  // lands on the right tab, opens DraftModal) instead of inventing a
+  // second way to land on a specific draft.
+  const generateFromChat = async (finding) => {
+    if (!finding.actionable || generatingId) return;
+    setGeneratingId(finding.id);
+    setError(null);
+    try {
+      const { generatorId, params, tag, source } = finding.actionable;
+      const draft = await api.actionCenter.generate(generatorId, params, source || 'copilot', finding.id);
+      onClose();
+      navigate(`/action-center?openDraft=${draft.id}`);
+    } catch (e) {
+      setError(`${finding.actionable.tag || 'Draft'}: ${e.message || 'Generation failed'}`);
+    } finally {
+      setGeneratingId(null);
     }
   };
 
@@ -179,7 +215,7 @@ export default function CopilotPanel({ open, onClose }) {
             </div>
           )}
 
-          {messages.map((m, i) => <Bubble key={i} msg={m} />)}
+          {messages.map((m, i) => <Bubble key={i} msg={m} onGenerateDraft={generateFromChat} generatingId={generatingId} />)}
           
           {asking && (
             <div className="flex justify-start gap-3 animate-pulse">

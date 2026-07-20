@@ -4,6 +4,7 @@ import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js
 import { saveMessage } from '../../store/copilot.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { callLLM } from '../../llm.js';
+import { buildRecommendations } from './recommendations.js';
 
 // "Reuse cached intelligence whenever possible. Only run agents when
 // information is stale or unavailable." — matches the daily ingest cadence,
@@ -156,9 +157,24 @@ export async function answerQuestion({ siteId, conversationId, message, history 
 
   await saveMessage(conversationId, 'assistant', answer, { citedFindingIds, followUps, agentIdsUsed: result.ranAgentIds });
 
+  // Same real-actionability check Action Center's own Findings List uses
+  // (buildRecommendations already excludes already-implemented findings and
+  // ungrounded meta-title/faq params — see recommendations.js) — a cited
+  // finding only gets a "Generate Draft" affordance in chat when it's a
+  // finding that Action Center itself would let you generate a draft for,
+  // never a guess at what might be actionable.
+  const grounded = await buildRecommendations(siteId);
+  const groundedById = new Map(grounded.items.map((item) => [item.id, item]));
+
   return {
     answer,
-    citedFindings: result.findings.slice(0, 5).map((f) => ({ id: f.id, whyItMatters: f.whyItMatters, evidence: f.evidence })),
+    citedFindings: result.findings.slice(0, 5).map((f) => {
+      const item = groundedById.get(f.id);
+      return {
+        id: f.id, whyItMatters: f.whyItMatters, evidence: f.evidence,
+        actionable: item ? { generatorId: item.generatorId, params: item.params, tag: item.tag, source: item.source } : null,
+      };
+    }),
     followUps,
   };
 }

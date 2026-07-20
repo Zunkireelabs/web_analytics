@@ -35,14 +35,21 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
 
   if (!geoIntelligence) {
     return (
-      <div className="flex items-center gap-3 rounded-3xl border border-amber-200/60 bg-gradient-to-r from-amber-500/[0.03] to-amber-500/[0.01] p-5 text-xs text-slate-500 font-semibold shadow-sm relative overflow-hidden min-h-[140px]">
-        <div className="absolute left-0 inset-y-0 w-1.5 bg-amber-500" />
-        <span className="w-8 h-8 rounded-xl grid place-items-center bg-amber-550/10 text-amber-600 shrink-0">
-          <AlertTriangle size={15} strokeWidth={2.5} />
+      <div className="relative overflow-hidden card bg-gradient-to-br from-white to-amber-50/20 border border-amber-200/60 p-6 flex items-start gap-4 shadow-sm hover:shadow-md transition-all duration-300 min-h-[130px]">
+        {/* Amber left accent border */}
+        <div className="absolute left-0 inset-y-0 w-1 bg-gradient-to-b from-amber-400 to-amber-600" />
+        
+        {/* Glow circle */}
+        <div className="absolute -right-8 -bottom-8 w-20 h-20 rounded-full blur-2xl opacity-40 bg-amber-400" />
+
+        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-amber-50 text-amber-600 border border-amber-100/80 shrink-0 shadow-inner">
+          <AlertTriangle size={16} strokeWidth={2.25} className="animate-pulse" />
         </span>
-        <div className="min-w-0 flex-1">
-          <span className="font-black text-amber-700 block text-[10px] uppercase tracking-wider mb-0.5">Analysis Pending</span>
-          <span className="leading-relaxed text-slate-500">{emptyMessage(meta)}</span>
+        <div className="min-w-0 flex-1 relative z-10">
+          <span className="font-black text-amber-800 block text-[10px] uppercase tracking-wider mb-1 leading-none">Analysis Pending</span>
+          <p className="text-[11.5px] leading-relaxed text-slate-505 font-bold">
+            {emptyMessage(meta)}
+          </p>
         </div>
       </div>
     );
