@@ -38,7 +38,11 @@ let cache = null;
 
 async function loadAll() {
   if (cache) return cache;
-  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !NON_ADAPTER_FILES.has(f));
+  // .test.js files (node:test suites living alongside their adapter, e.g.
+  // data-array-content.test.js) never export the adapter shape — excluded
+  // by suffix rather than added one-by-one to NON_ADAPTER_FILES, so a
+  // future adapter's own test file doesn't need a matching registry edit.
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js') && !NON_ADAPTER_FILES.has(f));
 
   const adapters = new Map();
   for (const file of files) {

@@ -1,0 +1,114 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { computeChange } from './data-array-content.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const locationsFixture = readFileSync(join(HERE, 'lib', '__fixtures__', 'locations.js'), 'utf8');
+const comparisonsFixture = readFileSync(join(HERE, 'lib', '__fixtures__', 'comparisons.js'), 'utf8');
+
+const fetchLocations = async () => ({ content: locationsFixture });
+const fetchComparisons = async () => ({ content: comparisonsFixture });
+
+// Three different tenants, three different configs, same adapter code —
+// this is the whole point of the generic refactor.
+const tenantA = {
+  id: 1,
+  url_file_map: {
+    patterns: [
+      { match: '^/locations/([^/]+)$', adapters: { faq: { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', itemsField: 'faqs' } } },
+    ],
+  },
+};
+const tenantB = {
+  id: 2,
+  url_file_map: {
+    patterns: [
+      { match: '^/compare/([^/]+)$', adapters: { faq: { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/comparisons.js', idField: 'id', itemsField: 'faqs' } } },
+    ],
+  },
+};
+
+describe('data-array-content computeChange — real zunkireelabs-web fixtures via generic config', () => {
+  test('tenant A: resolves a real location purely from config, no hardcoded path', async () => {
+    const r = await computeChange(tenantA, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/locations.js');
+    assert.equal(r.faqDiff.added.length, 1);
+  });
+
+  test('tenant B: resolves a real comparison from a DIFFERENT config, same adapter code', async () => {
+    const r = await computeChange(tenantB, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/compare/zunkiree-vs-algolia/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchComparisons);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/comparisons.js');
+  });
+
+  test('no adapter config for this page -> honest no-file-mapping, not a crash', async () => {
+    const r = await computeChange(tenantA, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/compare/zunkiree-vs-algolia/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+
+  test('id derived from last URL path segment matches a real entry', async () => {
+    const r = await computeChange(tenantA, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+  });
+
+  test('nonexistent id -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantA, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/nowhere/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+});
+
+describe('data-array-content computeChange — json-array format, synthetic fixture', () => {
+  const jsonFixture = JSON.stringify([
+    { id: 'widget-a', name: 'Widget A', faqs: [{ question: 'Hand-authored', answer: 'Kept as-is' }] },
+    { id: 'widget-b', name: 'Widget B' },
+  ]);
+  const tenantC = {
+    id: 3,
+    url_file_map: {
+      patterns: [{ match: '^/products/([^/]+)$', adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'data/products.json', idField: 'id', itemsField: 'faqs' } } }],
+    },
+  };
+  const fetchJson = async () => ({ content: jsonFixture });
+
+  test('appends to an existing faqs array, hand-authored item preserved', async () => {
+    const r = await computeChange(tenantC, {
+      action_type: 'faq',
+      content: { page: 'https://example.com/products/widget-a/', items: [{ question: 'New?', answer: 'Yes.' }] },
+    }, fetchJson);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    assert.equal(parsed[0].faqs.length, 2);
+    assert.ok(parsed[0].faqs.some((f) => f.question === 'Hand-authored'));
+  });
+
+  test('creates a brand-new faqs field when absent', async () => {
+    const r = await computeChange(tenantC, {
+      action_type: 'faq',
+      content: { page: 'https://example.com/products/widget-b/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchJson);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    assert.equal(parsed[1].faqs.length, 1);
+  });
+});

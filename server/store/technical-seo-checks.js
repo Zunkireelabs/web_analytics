@@ -18,6 +18,20 @@ export async function getCheckedAtForPages(siteId, pages) {
   return new Map(rows.map((r) => [r.page, r.checked_at]));
 }
 
+// Prioritizes a page for its next technical-seo rotation batch by resetting
+// it to "never checked" — sortByRotation (agents/lib/rotation.js) already
+// treats an absent/null checked_at as highest priority, sorting it first.
+// Reuses that existing bounded-rotation mechanism instead of firing a new
+// synchronous inspectUrl() call per merge, which would risk exhausting the
+// shared, quota-limited Search Console credential across every tenant on
+// the platform (see gsc-technical.js's inspectUrl doc comment) — especially
+// once more clients are connected, which is the whole point of this being
+// generic. A real, automatic recheck still happens, just on
+// technical-seo's next scheduled run rather than instantly.
+export async function prioritizeForRecheck(siteId, page) {
+  await query('UPDATE technical_seo_checks SET checked_at = NULL WHERE site_id = $1 AND page = $2', [siteId, page]);
+}
+
 export async function upsertTechnicalSeoCheck(siteId, page, { indexStatus, coreWebVitals, technicalAudit, brokenLinks, lastImpressions }) {
   const { rows } = await query(
     `INSERT INTO technical_seo_checks (site_id, page, checked_at, index_status, core_web_vitals, technical_audit, broken_links, last_impressions)

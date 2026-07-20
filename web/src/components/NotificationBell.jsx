@@ -80,12 +80,17 @@ export default function NotificationBell() {
     await api.notifications.markAllRead().catch(() => {});
   };
 
-  // Every notification is about something on Command Center — a specific
-  // finding (critical-issue/opportunity, via finding_ids) or, for
-  // health-drop (which has no single finding), the Health Score card
-  // itself. CommandCenter.jsx reads `?highlight=` and scrolls/rings the
-  // matching card (see its data-finding-id wrappers).
+  // "Where the agent decided how to fix it" — if a real draft already
+  // exists for this finding (n.draft_id, resolved server-side in
+  // store/notifications.js), that decision lives in Action Center, so go
+  // straight there with it open. Only findings with a generator ever get a
+  // draft (some are structural-only, no generatorId — see
+  // agents/ai-visibility.js's RECOMMENDATION_RULES) — for those, fall back
+  // to today's behavior: highlight the finding's card on Command Center
+  // (which offers a "Generate" action where applicable), same as
+  // health-drop (which has no single finding at all).
   const targetFor = (n) => {
+    if (n.draft_id) return `/action-center?openDraft=${n.draft_id}`;
     if (n.finding_ids?.length) return `/ai-growth?highlight=${encodeURIComponent(n.finding_ids[0])}`;
     if (n.type === 'health-drop') return '/ai-growth?highlight=health-score';
     return null;

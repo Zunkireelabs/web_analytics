@@ -7,15 +7,32 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftBranchPushed, markDraftMergedToStage, recordApplyFailure, recordMergeFailure,
-  MERGE_MANDATORY_TYPES,
+  recordGscNotification, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
-import { STAGE_BRANCH } from '../implementers/lib/github-ops.js';
+import { STAGE_BRANCH, mergeBranchToStage } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
+import { notifyOfPageChange } from '../ingest/gsc-technical.js';
+
+// Best-effort post-merge Search Console notification (multi-tenant
+// refactor Part 3) — never blocks or fails the caller's response, since
+// the merge itself already succeeded by the time this runs; a
+// notification failure is real but secondary information, recorded for
+// visibility (recordGscNotification) rather than surfaced as an error.
+async function notifyGscBestEffort(site, draft) {
+  const page = draft.content?.page || draft.input?.page;
+  if (!page) return;
+  try {
+    const result = await notifyOfPageChange(site, page);
+    await recordGscNotification(site.id, draft.id, result);
+  } catch (err) {
+    console.error(`[action-center] GSC notification failed for draft ${draft.id}:`, err.message);
+  }
+}
 
 // Best-effort, informational only — shown right after generation so staff
 // see the likely render mode before even submitting for approval. Never
@@ -130,47 +147,78 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
 // Approval now auto-publishes: the moment a draft is approved, it's pushed
 // to a real branch and merged straight into `stage` (auto-completing to
 // 'implemented') in the same request — no separate manual Push Branch/Merge
-// to Stage clicks. Safe to automate because the real file diff this would
-// produce is already previewable (GET .../preview) any time before approval,
-// so nothing is lost by skipping the extra post-approval review clicks. Any
-// failure below (no repo configured, no implementer wired, GitHub error)
-// simply leaves the draft at 'approved' or 'branch_pushed' with the same
-// apply_error the manual /push-branch and /merge-to-stage routes already
-// set — those routes remain as manual retry options for that case.
+// to Stage clicks.
+//
+// Gated on a real deployability check BEFORE the status flip: resolves the
+// implementer and, if it exposes preview(), runs the exact same zero-write
+// dry run GET .../preview already uses — a page with no file mapping, no
+// markers configured, or an uncertain render mode gets rejected here,
+// status staying at 'submitted_for_approval', instead of flipping to
+// 'approved' and only then discovering it can't actually deploy (which
+// used to leave "Approved" not really meaning "confirmed deployable," for
+// any page, any client — the exact root cause behind the homepage-FAQ and
+// /compare/-FAQ drafts that got stuck this way). preview() and apply()'s
+// internal computeChange() do end up computing the same thing twice (a
+// second live GitHub read) — an accepted, minor cost for closing this gap,
+// not worth a bigger refactor to avoid.
+//
+// Once past that, any failure below (GitHub API hiccup, a genuinely
+// transient error) is a legitimate post-approval concern — same retryable
+// apply_error path as before, via /push-branch and /merge-to-stage.
 router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
   try {
-    let draft = await approveDraft(req.siteId, req.params.id, req.userId);
-    if (!draft) return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft || draft.status !== 'submitted_for_approval') {
+      return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
+    }
 
     const site = await getSiteById(req.siteId);
-    if (!site.repo_owner || !site.repo_name) return res.json(draft);
+    let resolved = null;
+    if (site.repo_owner && site.repo_name) {
+      resolved = await resolveImplementerForApply(site, draft);
+      if (resolved.error) return res.status(400).json({ error: resolved.error });
+      if (typeof resolved.implementer.preview === 'function') {
+        const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: req.body?.renderMode });
+        if (!previewResult.ok) {
+          return res.status(422).json({
+            error: previewResult.error, reason: previewResult.reason,
+            confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
+          });
+        }
+      }
+    }
 
-    const resolved = await resolveImplementerForApply(site, draft);
-    if (resolved.error) return res.json(draft);
+    const approvedDraft = await approveDraft(req.siteId, draft.id, req.userId);
+    if (!approvedDraft) return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
+    if (!resolved) return res.json(approvedDraft);
+
     const { implementer, implementerId } = resolved;
-
-    const applyResult = await implementer.apply(site, draft, { renderModeOverride: req.body?.renderMode });
+    const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: req.body?.renderMode });
     if (!applyResult.ok) {
-      await recordApplyFailure(req.siteId, draft.id, applyResult.error);
+      await recordApplyFailure(req.siteId, approvedDraft.id, applyResult.error);
       if (applyResult.reason === 'render-mode-uncertain') {
         return res.status(422).json({
           error: applyResult.error, reason: applyResult.reason,
           confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode,
         });
       }
-      return res.json(await getDraft(req.siteId, draft.id));
+      return res.json(await getDraft(req.siteId, approvedDraft.id));
     }
-    draft = await markDraftBranchPushed(req.siteId, draft.id, { branchName: applyResult.branchName, implementerId });
+    const branchPushedDraft = await markDraftBranchPushed(req.siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId });
 
-    if (typeof implementer.mergeToStage !== 'function') return res.json(draft);
+    if (typeof implementer.mergeToStage !== 'function') return res.json(branchPushedDraft);
 
-    const mergeResult = await implementer.mergeToStage(site, draft);
+    const mergeResult = await implementer.mergeToStage(site, branchPushedDraft);
     if (!mergeResult.ok) {
-      await recordMergeFailure(req.siteId, draft.id, mergeResult.error);
-      return res.json(await getDraft(req.siteId, draft.id));
+      await recordMergeFailure(req.siteId, branchPushedDraft.id, mergeResult.error);
+      return res.json(await getDraft(req.siteId, branchPushedDraft.id));
     }
-    await markDraftMergedToStage(req.siteId, draft.id, { mergeSha: mergeResult.mergeSha, mergeUrl: mergeResult.mergeUrl });
-    res.json(await finalizeImplemented(req.siteId, draft.id, site));
+    await markDraftMergedToStage(req.siteId, branchPushedDraft.id, {
+      mergeSha: mergeResult.mergeSha, mergeUrl: mergeResult.mergeUrl,
+      rollbackSnapshot: mergeResult.previousContent != null ? { filePath: mergeResult.filePath, content: mergeResult.previousContent } : null,
+    });
+    notifyGscBestEffort(site, branchPushedDraft);
+    res.json(await finalizeImplemented(req.siteId, branchPushedDraft.id, site));
   } catch (e) { next(e); }
 });
 
@@ -302,9 +350,42 @@ router.post('/action-center/drafts/:id/merge-to-stage', async (req, res, next) =
       await recordMergeFailure(req.siteId, draft.id, result.error);
       return res.status(422).json({ error: result.error, reason: result.reason });
     }
-    await markDraftMergedToStage(req.siteId, draft.id, { mergeSha: result.mergeSha, mergeUrl: result.mergeUrl });
+    await markDraftMergedToStage(req.siteId, draft.id, {
+      mergeSha: result.mergeSha, mergeUrl: result.mergeUrl,
+      rollbackSnapshot: result.previousContent != null ? { filePath: result.filePath, content: result.previousContent } : null,
+    });
+    notifyGscBestEffort(site, draft);
     const updated = await finalizeImplemented(req.siteId, draft.id, site);
     res.json(updated);
+  } catch (e) { next(e); }
+});
+
+// Restores a merged draft's target file to exactly what it was right
+// before this draft's merge — only available for draft types whose writer
+// captured a rollback_snapshot at merge time (currently data-array-content.js,
+// the generic data-file adapter). Never a silent/direct revert: pushes a
+// real new branch with the restored content, then merges it through the
+// same real, auditable flow as every other change — the merge commit
+// itself is the record of what happened and when.
+router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Draft not found' });
+    if (!draft.rollback_snapshot) return res.status(400).json({ error: 'No rollback snapshot available for this draft.' });
+
+    const site = await getSiteById(req.siteId);
+    const resolved = await resolveImplementerForMerge(draft);
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    const { implementer } = resolved;
+    if (typeof implementer.rollback !== 'function') return res.status(400).json({ error: `No rollback available for "${draft.action_type}" yet.` });
+
+    const pushed = await implementer.rollback(site, draft);
+    if (!pushed.ok) return res.status(422).json({ error: pushed.error, reason: pushed.reason });
+
+    const merged = await mergeBranchToStage(site, draft, pushed.branchName);
+    if (!merged.ok) return res.status(422).json({ error: merged.error, reason: merged.reason });
+
+    res.json({ ok: true, mergeSha: merged.mergeSha, mergeUrl: merged.mergeUrl, branchName: pushed.branchName });
   } catch (e) { next(e); }
 });
 

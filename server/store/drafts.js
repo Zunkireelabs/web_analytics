@@ -98,15 +98,33 @@ export async function markDraftBranchPushed(siteId, id, { branchName, implemente
 // merge commit on `stage`, which auto-deploys per the company's real CI/CD
 // convention — no PR involved) — this persists real evidence, it doesn't
 // create it.
-export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl }) {
+// `rollbackSnapshot` ({filePath, content}) is optional — only writers that
+// implement rollback() (see server/implementers/adapters/) supply one, by
+// fetching the file's content BEFORE their mergeToStage() actually merges.
+// null for every other draft type, same as before this column existed.
+export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl, rollbackSnapshot = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'merged_to_stage', stage_merge_sha = $3, stage_merge_url = $4,
-       stage_merged_at = now(), apply_error = NULL, updated_at = now()
+       stage_merged_at = now(), apply_error = NULL, updated_at = now(),
+       rollback_snapshot = COALESCE($5, rollback_snapshot)
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
-    [siteId, id, mergeSha, mergeUrl]
+    [siteId, id, mergeSha, mergeUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]
   );
   return rows[0] || null;
+}
+
+// Best-effort record of the post-merge Search Console notification result
+// (multi-tenant refactor Part 3) — does not gate or change draft status;
+// this is pure audit visibility for Action Center, called after
+// markDraftMergedToStage has already succeeded. No WHERE-status guard like
+// the other transition functions since this never represents a lifecycle
+// transition, just an annotation on whichever row already exists.
+export async function recordGscNotification(siteId, id, result) {
+  await query(
+    'UPDATE drafts SET gsc_notification = $3 WHERE site_id = $1 AND id = $2',
+    [siteId, id, JSON.stringify({ ...result, attemptedAt: new Date().toISOString() })]
+  );
 }
 
 // Records a push-branch (apply()) failure without changing status, so

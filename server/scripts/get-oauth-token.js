@@ -17,7 +17,7 @@ import { google } from 'googleapis';
 const PORT = 3055;
 const REDIRECT = `http://localhost:${PORT}/oauth2callback`;
 const SCOPES = [
-  'https://www.googleapis.com/auth/webmasters.readonly',
+  'https://www.googleapis.com/auth/webmasters',
   'https://www.googleapis.com/auth/analytics.readonly',
   'https://www.googleapis.com/auth/documents',
 ];

@@ -8,10 +8,26 @@ export async function saveNotification(siteId, { type, severity, title, body, fi
   );
 }
 
+// draft_id: the most recent real draft already generated for any of this
+// notification's finding_ids, if one exists — lets the frontend send a
+// click straight to "where the agent decided how to fix it" (Action
+// Center, that draft opened) instead of just highlighting the finding.
+// Not every finding has a draft (some are structural-only, no generator),
+// so this is null for those — the frontend falls back to today's
+// highlight-on-Command-Center behavior in that case.
 export async function listNotifications(siteId, limit = 30) {
   const { rows } = await query(
-    `SELECT id, type, severity, title, body, finding_ids, read_at, created_at
-       FROM notifications WHERE site_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    `SELECT n.id, n.type, n.severity, n.title, n.body, n.finding_ids, n.read_at, n.created_at,
+            d.id AS draft_id
+       FROM notifications n
+       LEFT JOIN LATERAL (
+         SELECT id FROM drafts
+          WHERE site_id = n.site_id AND finding_id = ANY(n.finding_ids)
+          ORDER BY created_at DESC
+          LIMIT 1
+       ) d ON true
+      WHERE n.site_id = $1
+      ORDER BY n.created_at DESC LIMIT $2`,
     [siteId, limit]
   );
   return rows;

@@ -24,6 +24,7 @@ export default function App() {
   const [isInternal, setIsInternal] = useState(false);
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
+  const [sitesLoaded, setSitesLoaded] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -40,7 +41,7 @@ export default function App() {
     api.sites().then((list) => {
       setSites(list);
       if (list.length) setSiteId(list[0].id);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setSitesLoaded(true));
   }, [authed]);
 
   const logout = async () => {
@@ -98,6 +99,14 @@ export default function App() {
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
             </Routes>
           </Suspense>
+        ) : !sitesLoaded ? (
+          // Distinct from the genuinely-no-site state below — on a fresh
+          // page load (hard refresh, deep link, bookmark) this app-level
+          // site-list fetch is still in flight for a real, if brief,
+          // window; without this the "No site configured" message below
+          // flashed misleadingly during that gap, on every single fresh
+          // load, not just a real no-site account.
+          <div className="p-8 text-gray-400">Loading…</div>
         ) : (
           <div className="max-w-7xl mx-auto px-4 py-10 text-gray-500">
             No site configured yet. Run the migration to seed your site, then ingest some data.

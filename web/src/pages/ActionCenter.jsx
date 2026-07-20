@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import DraftModal from '../components/DraftModal.jsx';
@@ -81,6 +82,7 @@ function DraftStepper({ status }) {
 }
 
 export default function ActionCenter() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts' | 'implemented'
   const [recs, setRecs] = useState(null); // null = loading
   const [drafts, setDrafts] = useState(null);
@@ -122,6 +124,25 @@ export default function ActionCenter() {
 
   useEffect(() => { loadRecs(); loadDrafts(); }, []);
   useEffect(() => { if (tab === 'drafts' || tab === 'implemented') loadDrafts(); }, [tab]);
+
+  // Deep link from a notification's "where the agent decided how to fix
+  // it" click (NotificationBell.jsx's targetFor) — ?openDraft=<id> lands
+  // straight on that specific draft, modal open, instead of the default
+  // recommendations view. Consumed once drafts has actually loaded (so the
+  // target draft is guaranteed present in the list to select), then
+  // stripped from the URL so switching tabs/refreshing drafts afterward
+  // doesn't re-trigger it.
+  useEffect(() => {
+    const openId = searchParams.get('openDraft');
+    if (!openId || drafts === null) return;
+    const target = drafts.find((d) => String(d.id) === openId);
+    if (target) {
+      setTab(target.status === 'implemented' ? 'implemented' : 'drafts');
+      setSelectedDraftItem(target);
+      setActiveDraft(target);
+    }
+    setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true });
+  }, [drafts, searchParams]);
 
   const visibleDrafts = statusFilter ? (drafts || []).filter((d) => d.status === statusFilter) : drafts;
 

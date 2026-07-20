@@ -1,7 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, mergeBranchToStage, STAGE_BRANCH } from './lib/github-ops.js';
 import { getFileContent } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers } from './lib/marker-merge.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 
 export const meta = {
@@ -105,7 +105,16 @@ async function computeMarkerMerge(site, draft, renderModeOverride) {
   const built = buildMergeValues(draft.action_type, draft.content, mode);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
-  const spliced = spliceMarkers(file.content, markerMap, built.values);
+  // Auto-creates any marker in markerMap that isn't already in the live
+  // file — see lib/marker-merge.js's ensureMarkers for the two placement
+  // strategies. `oldContent` below stays the true original fetch, so the
+  // diff a reviewer sees includes the marker's own creation alongside the
+  // content splice, not just the content — nothing here skips review, it
+  // only removes the separate manual "push an empty marker first" step
+  // that used to have to happen before a draft could even reach preview.
+  const ensured = ensureMarkers(file.content, markerMap);
+
+  const spliced = spliceMarkers(ensured.content, markerMap, built.values);
   if (!spliced.ok) {
     const names = spliced.missingMarkers.map((m) => `SEOAI:${m}`).join(', ');
     return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.` };
