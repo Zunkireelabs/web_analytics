@@ -201,6 +201,12 @@ export default function Login({ onAuthed }) {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-3">
+              <a
+                href="/seo-audit/"
+                className="text-xs font-black uppercase tracking-widest text-slate-700 hover:text-slate-950 bg-white/80 hover:bg-white border border-slate-300/80 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+              >
+                Free SEO Audit
+              </a>
               <button
                 type="button"
                 onClick={() => setAuthModal('login')}
