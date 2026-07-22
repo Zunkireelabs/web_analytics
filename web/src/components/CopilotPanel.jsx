@@ -18,7 +18,8 @@ import {
   Target,
   Globe,
   BrainCircuit,
-  AlertCircle
+  AlertCircle,
+  Eye
 } from 'lucide-react';
 
 const STORAGE_KEY = 'copilot-conversation-id';
