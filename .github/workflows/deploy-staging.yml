@@ -78,6 +78,42 @@ jobs:
             # feature above. Explicitly turned on for staging.
             AI_RECOMMENDATION_ENABLED=true
 
+            # ── Growth Plan Narrative (opt-in, Milestones' "Your Growth Plan") ──
+            # Same double-gate reasoning as AI_RECOMMENDATION_ENABLED above —
+            # shares ANTHROPIC_API_KEY/OPENAI_API_KEY but needs this explicit
+            # flag too. Without it, Milestones simply omits this section.
+            GROWTH_PLAN_NARRATIVE_ENABLED=true
+
+            # ── Agentic Orchestration (opt-in, smarter agent-selection loop) ──
+            # Same double-gate pattern — without this, Copilot/Action Center
+            # refresh fall back to their fixed-agent-list behavior, not a
+            # crash either way.
+            AGENTIC_ORCHESTRATION_ENABLED=true
+
+            # ── Competitor Intelligence (free real-SERP alternative to DataForSEO) ──
+            # Without these, competitor-intelligence.js falls back to
+            # LLM-only reasoning instead of real, SERP-verified competitor
+            # discovery.
+            COMPETITOR_PROVIDER=google-cse
+            GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
+            GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
+
+            # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
+            # Without this, technical-seo.js still reports real GSC index
+            # status/broken links — just without Core Web Vitals findings.
+            PAGESPEED_API_KEY=${{ secrets.PAGESPEED_API_KEY }}
+
+            # ── Authority Score (full 5-signal backlink score) ───────────────
+            # Pending real DataForSEO account/credentials — these secrets
+            # don't exist yet, so this resolves to empty and authority.js
+            # correctly falls back to its insufficient-data state (or the
+            # Common Crawl fallback, once that data is populated) rather than
+            # crashing. Add DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD as real repo
+            # secrets once a DataForSEO account exists — no other change
+            # needed, authority.js already picks them up automatically.
+            DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}
+            DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}
+
             # ── Email (shared) ──────────────────────────────────────────────
             SMTP_HOST=${{ vars.SMTP_HOST }}
             SMTP_PORT=${{ vars.SMTP_PORT }}
