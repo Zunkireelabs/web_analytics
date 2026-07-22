@@ -43,7 +43,7 @@ export function isPrivateOrLocalHost(hostname) {
   return false;
 }
 
-async function fetchHtml(url) {
+export async function fetchHtml(url) {
   let hostname;
   try { hostname = new URL(url).hostname; } catch { return { ok: false, error: 'invalid URL' }; }
   if (isPrivateOrLocalHost(hostname)) return { ok: false, error: 'blocked: private/local address' };
@@ -126,6 +126,70 @@ function analyzePage(html, pageUrl) {
   const hasComparisonTable = $('table').filter((_, el) => /\bvs\.?\b|\bversus\b|\bcomparison\b/i.test($(el).text())).length > 0;
   const hasComparisonHeading = /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b/i.test(headingText);
 
+  // Real resolved target, not just tag presence — a canonical tag can exist
+  // and still be wrong (e.g. accidentally pointing at a different domain,
+  // often a leftover from a staging/template copy). Resolved against
+  // pageUrl the same way internalLinks above is, so a relative href
+  // (e.g. href="/pricing") still yields a real absolute URL to compare.
+  const canonicalHref = $('link[rel="canonical"]').first().attr('href') || null;
+  let canonicalUrl = null;
+  if (canonicalHref) {
+    try { canonicalUrl = new URL(canonicalHref, pageUrl).href; } catch { /* leave null — malformed href */ }
+  }
+
+  // Accessibility signals checkable statically from real fetched HTML — no
+  // headless browser needed. Color contrast, computed tap-target size, and
+  // rendered font size genuinely require a rendering engine and are NOT
+  // checked here — see accessibility.js's dataSources for that honest gap
+  // (PageSpeed Insights' Lighthouse accessibility/seo audit categories would
+  // cover them for real, but technical-seo.js's existing PSI integration
+  // only requests category=performance today; adding more categories here
+  // would multiply PSI's already-slow per-page call across three agents —
+  // deferred, not silently skipped).
+  const htmlLang = ($('html').first().attr('lang') || '').trim() || null;
+
+  const LABELABLE_INPUT_TYPES = new Set(['text', 'email', 'tel', 'url', 'search', 'password', 'number', 'date', 'textarea']);
+  const labeledIds = new Set($('label[for]').map((_, el) => $(el).attr('for')).get());
+  let formInputsMissingLabel = 0;
+  $('input, textarea').each((_, el) => {
+    const type = ($(el).attr('type') || 'text').toLowerCase();
+    if ($(el).is('input') && !LABELABLE_INPUT_TYPES.has(type)) return; // hidden/submit/button/checkbox etc. — not a missing-label concern the same way
+    const id = $(el).attr('id');
+    const hasLabel = (id && labeledIds.has(id)) || $(el).attr('aria-label') || $(el).attr('aria-labelledby') || $(el).closest('label').length > 0;
+    if (!hasLabel) formInputsMissingLabel++;
+  });
+
+  const hasAccessibleName = (el) => $(el).text().trim().length > 0 || !!$(el).attr('aria-label') || !!$(el).attr('title') || $(el).find('img[alt]').filter((_, img) => ($(img).attr('alt') || '').trim()).length > 0;
+  const emptyInteractiveElements = $('button, a[href]').filter((_, el) => !hasAccessibleName(el)).length;
+
+  const idCounts = new Map();
+  $('[id]').each((_, el) => {
+    const id = $(el).attr('id');
+    if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  });
+  const duplicateIdCount = [...idCounts.values()].filter((n) => n > 1).length;
+
+  // A heading sequence skipping a level (e.g. h1 straight to h3, no h2) is a
+  // real, commonly-flagged a11y structure issue — screen-reader users
+  // navigate by heading level and a skip reads as a missing section.
+  const headingLevels = $('h1, h2, h3, h4, h5, h6').map((_, el) => Number(el.tagName[1])).get();
+  let headingLevelSkips = 0;
+  for (let i = 1; i < headingLevels.length; i++) {
+    if (headingLevels[i] - headingLevels[i - 1] > 1) headingLevelSkips++;
+  }
+
+  // Mobile-usability signals checkable statically — real viewport meta
+  // content, not guessed. Tap-target sizing and legible-font-size genuinely
+  // need rendering (same PSI-category gap noted above for accessibility).
+  const viewportContent = ($('meta[name="viewport"]').first().attr('content') || '').trim() || null;
+  const hasViewportMeta = !!viewportContent;
+  const viewportHasDeviceWidth = /width\s*=\s*device-width/i.test(viewportContent || '');
+  // 'no' or a maximum-scale of 1 (or less) both block pinch-zoom — a real,
+  // common anti-pattern that actively hurts low-vision users, not merely a
+  // missing best-practice.
+  const viewportBlocksZoom = /user-scalable\s*=\s*no/i.test(viewportContent || '')
+    || /maximum-scale\s*=\s*(0(\.\d+)?|1(\.0*)?)\b/i.test(viewportContent || '');
+
   return {
     title,
     metaDescription, // raw text — hasMetaDescription below is the boolean other callers already rely on
@@ -142,6 +206,8 @@ function analyzePage(html, pageUrl) {
     imagesTotal: images.length,
     imagesWithoutAlt,
     hasCanonical: $('link[rel="canonical"]').length > 0,
+    canonicalUrl, // real resolved target, null if absent or unparseable — see contentGapChecks' cross-domain check
+    pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
     hasOpenGraph: $('meta[property="og:title"]').length > 0 || $('meta[property="og:description"]').length > 0,
     listCount: $('ul, ol').length,
     tableCount: $('table').length,
@@ -149,6 +215,15 @@ function analyzePage(html, pageUrl) {
     internalLinks, // transient, like bodyText — real hrefs for the technical-seo crawler, not meant for persisted facts on other callers
     wordCount,
     bodyText, // transient — callers should not persist this into stored facts (used only for LLM context)
+    htmlLang, // accessibility.js: null means no <html lang> attribute
+    formInputsMissingLabel, // accessibility.js
+    emptyInteractiveElements, // accessibility.js
+    duplicateIdCount, // accessibility.js
+    headingLevelSkips, // accessibility.js
+    viewportContent, // mobile-usability.js: raw <meta name="viewport"> content, null if absent
+    hasViewportMeta, // mobile-usability.js
+    viewportHasDeviceWidth, // mobile-usability.js
+    viewportBlocksZoom, // mobile-usability.js
   };
 }
 
@@ -180,6 +255,32 @@ function robotsAllowsAiCrawlers(robotsTxt) {
   return !blockedAny;
 }
 
+// Response headers only — never reads the body — for security-headers.js.
+// A deliberately separate, lighter fetch than fetchHtml: that one exists to
+// hand back parsed HTML content, this one only ever needs whatever the
+// server sent back in its response headers, which are available on the
+// Response object before the body is even read.
+export async function fetchResponseHeaders(url) {
+  let hostname;
+  try { hostname = new URL(url).hostname; } catch { return { ok: false, error: 'invalid URL' }; }
+  if (isPrivateOrLocalHost(hostname)) return { ok: false, error: 'blocked: private/local address' };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +security-headers-agent)' },
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true, headers: res.headers, status: res.status };
+  } catch (err) {
+    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Exported for reuse by site-discovery.js (fetching robots.txt for crawl
 // politeness, and each sitemap path) — same generic "fetch text from a URL,
 // honestly report if it doesn't exist" shape those need, rather than a
@@ -194,6 +295,13 @@ export async function fetchTextIfExists(url) {
   try {
     const res = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0)' } });
     if (!res.ok) return { ok: false };
+    // A 200 alone isn't proof the file exists — a client-side-routed site with
+    // a catch-all fallback route returns its homepage (200, text/html) for any
+    // unknown path, including llms.txt/robots.txt/sitemap.xml. None of those
+    // are ever legitimately served as HTML, so that content-type is treated
+    // the same as a real 404: file not found.
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.toLowerCase().includes('text/html')) return { ok: false };
     return { ok: true, text: await res.text() };
   } catch {
     return { ok: false };
@@ -255,6 +363,7 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Missing comparisons': null,
   'Missing alt text': null,
   'Missing canonical tag': null,
+  'Canonical points to a different domain': null,
   'Missing Open Graph tags': null,
   'Missing structured lists': null,
   'Missing question-style headings': null,
@@ -324,7 +433,9 @@ function contentGapChecks(analysis, queryTexts = []) {
   else if (titleLen < MIN_TITLE_LEN) gaps.push({ type: 'Title length', detail: `Title is ${titleLen} characters — usually too short/generic (target ${MIN_TITLE_LEN}-${MAX_TITLE_LEN}).` });
   else if (titleLen > MAX_TITLE_LEN) gaps.push({ type: 'Title length', detail: `Title is ${titleLen} characters — Google typically truncates past ${MAX_TITLE_LEN}.` });
 
-  if (analysis.hasMetaDescription) {
+  if (!analysis.hasMetaDescription) {
+    gaps.push({ type: 'Meta description length', detail: analysis.metaDescription.length === 0 ? 'No meta description found.' : `Meta description is ${analysis.metaDescription.length} characters — below the ${MIN_META_DESCRIPTION_LEN}-character recommended minimum.` });
+  } else {
     const descLen = analysis.metaDescription.length;
     if (descLen > MAX_META_DESCRIPTION_LEN) gaps.push({ type: 'Meta description length', detail: `Meta description is ${descLen} characters — Google typically truncates past ${MAX_META_DESCRIPTION_LEN}.` });
   }
@@ -337,7 +448,22 @@ function contentGapChecks(analysis, queryTexts = []) {
   if (analysis.imagesTotal > 0 && analysis.imagesWithoutAlt > 0) {
     gaps.push({ type: 'Missing alt text', detail: `${analysis.imagesWithoutAlt}/${analysis.imagesTotal} images have no alt text.` });
   }
-  if (!analysis.hasCanonical) gaps.push({ type: 'Missing canonical tag', detail: 'No rel="canonical" link found.' });
+  if (!analysis.hasCanonical) {
+    gaps.push({ type: 'Missing canonical tag', detail: 'No rel="canonical" link found.' });
+  } else if (analysis.canonicalUrl && analysis.pageHost) {
+    // A canonical present but resolving to a different domain is almost
+    // always an accident (a leftover from a staging/template copy) rather
+    // than intentional — a real, distinct issue from "no canonical at all,"
+    // and one GSC's own index-status check (technical-seo.js) can't catch on
+    // its own since it only compares Google's chosen canonical against
+    // whatever this page declares, not whether that declaration itself
+    // looks like a mistake.
+    let canonicalHost = null;
+    try { canonicalHost = new URL(analysis.canonicalUrl).hostname; } catch { /* leave null — already-invalid canonicalUrl */ }
+    if (canonicalHost && canonicalHost !== analysis.pageHost) {
+      gaps.push({ type: 'Canonical points to a different domain', detail: `Canonical tag points to "${analysis.canonicalUrl}" — a different domain than this page (${analysis.pageHost}).` });
+    }
+  }
   if (!analysis.hasOpenGraph) gaps.push({ type: 'Missing Open Graph tags', detail: 'No og:title/og:description found.' });
   if (analysis.listCount === 0) gaps.push({ type: 'Missing structured lists', detail: 'No ordered/unordered lists — lists help answer-engine extraction.' });
   if (analysis.questionHeadingCount === 0) gaps.push({ type: 'Missing question-style headings', detail: 'No headings phrased as questions — reduces AEO/featured-snippet eligibility.' });

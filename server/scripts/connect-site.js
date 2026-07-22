@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { extname } from 'node:path';
 import { pool, updateSiteConnection } from '../db.js';
 import { getSiteById } from '../store/read.js';
+import { discoverLogo } from '../agents/lib/logo-discovery.js';
 
 // Attach GSC/GA4 (and optionally a report email recipient / logo) to a site
 // that was already created via `npm run create-client` with no properties
@@ -13,6 +14,9 @@ import { getSiteById } from '../store/read.js';
 //     --ga4-property-id 123456789 \
 //     [--email-to client-contact@example.com] \
 //     [--logo path/to/logo.svg]
+//
+// If --logo isn't passed and the site has a website_domain on file, the
+// logo is auto-detected from that site instead — pass --logo to override.
 
 const MIME_BY_EXT = { '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
 
@@ -58,7 +62,18 @@ async function main() {
   if (flags['gsc-property'] != null) update.gscProperty = flags['gsc-property'];
   if (flags['ga4-property-id'] != null) update.ga4PropertyId = flags['ga4-property-id'];
   if (flags['email-to'] != null) update.reportEmailTo = flags['email-to'];
-  if (flags.logo != null) update.logoDataUrl = logoToDataUrl(flags.logo);
+
+  if (flags.logo != null) {
+    update.logoDataUrl = logoToDataUrl(flags.logo);
+  } else if (site.website_domain) {
+    const detected = await discoverLogo(site.website_domain);
+    if (detected.ok) {
+      update.logoDataUrl = detected.dataUrl;
+      console.log(`Logo auto-detected (${detected.source}) from ${detected.candidateUrl}`);
+    } else {
+      console.log(`Logo auto-detection skipped: ${detected.error}`);
+    }
+  }
 
   if (!Object.keys(update).length) {
     throw new Error('Pass at least one of --gsc-property, --ga4-property-id, --email-to, --logo.');

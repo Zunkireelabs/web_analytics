@@ -59,15 +59,17 @@ export default function Compare({ siteId }) {
 
   const [data, setData] = useState(null);
   const [series, setSeries] = useState([]);
+  const [error, setError] = useState(false);
 
   // Fetch comparison totals
   useEffect(() => {
     if (!siteId) return;
     setData(null);
+    setError(false);
     if (mode === 'month') {
-      api.compare(siteId, a, b).then(setData).catch(() => setData(null));
+      api.compare(siteId, a, b).then(setData).catch(() => { setData(null); setError(true); });
     } else {
-      api.compareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6)).then(setData).catch(() => setData(null));
+      api.compareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6)).then(setData).catch(() => { setData(null); setError(true); });
     }
   }, [siteId, mode, a, b, wA, wB]);
 
@@ -101,6 +103,12 @@ export default function Compare({ siteId }) {
         <div className="absolute top-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[145px] bg-indigo-500/10 opacity-50 pulse-glow" />
         <div className="absolute bottom-10 left-1/4 w-[500px] h-[500px] rounded-full blur-[125px] bg-purple-500/8 opacity-45 pulse-glow" />
       </div>
+
+      {error && (
+        <div className="card p-4 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 text-center">
+          Unable to load this comparison right now. Try refreshing.
+        </div>
+      )}
 
       {/* Page Header and Comparison Controls combined */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-2">
@@ -193,9 +201,8 @@ export default function Compare({ siteId }) {
                   <span className="text-emerald-500 font-extrabold">+{biggestGain.pct}%</span>.{' '}
                 </>
               ) : (
-                <>Almost all metrics softened over this period.{' '} </>
+                <>Almost all metrics softened over this period.</>
               )}
-              To recover, prioritize updating search metadata on high-impression pages that show low click-through rates.
             </p>
           )}
         </div>

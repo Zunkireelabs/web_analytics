@@ -31,6 +31,7 @@ const SOURCE = {
   both: { label: 'Google rankings + AI market research agree', short: 'Verified', color: '#16A34A', bg: '#f0fdf4', icon: '✓' },
   serp: { label: 'Real Google rankings for your top queries', short: 'Google ranking', color: '#16A34A', bg: '#f0fdf4', icon: '✓' },
   llm: { label: 'AI market research — not keyword-verified', short: 'AI research', color: '#f59e0b', bg: '#fffbeb', icon: '⚠' },
+  forced: { label: 'Manually specified, not from automatic discovery', short: 'Manually added', color: '#6b7280', bg: '#f9fafb', icon: '•' },
 };
 
 // A real leaderboard, not a grid of near-identical cards — ranks this site

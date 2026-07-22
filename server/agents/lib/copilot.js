@@ -5,6 +5,7 @@ import { saveMessage } from '../../store/copilot.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { callLLM } from '../../llm.js';
 import { buildRecommendations } from './recommendations.js';
+import { agenticOrchestrationEnabled, runAgenticLoop } from './agentic-orchestrator.js';
 
 // "Reuse cached intelligence whenever possible. Only run agents when
 // information is stale or unavailable." — matches the daily ingest cadence,
@@ -139,6 +140,23 @@ export async function answerQuestion({ siteId, conversationId, message, history 
       narrative: execRun?.narrative || 'No analysis has run yet — check back after the first daily analysis completes.',
       ranAgentIds: ['executive-report'],
     };
+  } else if (agenticOrchestrationEnabled()) {
+    // classifyIntent's own agentIds guess is discarded here — the agentic
+    // loop does its own fresh, iterative, tool-based selection instead of
+    // trusting a one-shot classification, which is exactly the behavior
+    // being replaced. Falls back to the legacy classify+orchestrate path on
+    // any failure (bad key, network, model misbehavior) rather than ever
+    // surfacing a hard error to the user.
+    const { start, end } = last7Days();
+    try {
+      result = await runAgenticLoop({ siteId, start, end, question: message, history, persistSubAgentRuns: true });
+    } catch (err) {
+      console.warn('[copilot] agentic loop failed, falling back to classify+orchestrate:', err.message);
+      const stale = await staleAgentIds(siteId, routing.agentIds);
+      result = stale.length
+        ? await runOrchestration({ siteId, start, end, agentIds: routing.agentIds, persistSubAgentRuns: true, question: message })
+        : await answerFromCache(siteId, routing.agentIds, message);
+    }
   } else {
     const stale = await staleAgentIds(siteId, routing.agentIds);
     if (stale.length) {

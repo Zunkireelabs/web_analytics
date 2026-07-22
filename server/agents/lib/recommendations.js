@@ -2,6 +2,7 @@ import { getLatestFindings } from '../../store/agent-runs.js';
 import { getQueriesForPage } from '../../store/read.js';
 import { getImplementedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
+import { categoryByAgentId } from './command-center.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -28,9 +29,10 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, implementedFindingIds] = await Promise.all([
+  const [runs, implementedFindingIds, catByAgent] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     getImplementedFindingIds(siteId),
+    categoryByAgentId(),
   ]);
   const lookupQuery = makeQueryLookup(siteId);
   const items = [];
@@ -49,7 +51,8 @@ export async function buildRecommendations(siteId) {
         if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
       items.push({
-        id: f.id, source: run.agentId, tag: action.label, generatorId: action.generatorId,
+        id: f.id, source: run.agentId, agentName: catByAgent.get(run.agentId)?.name || run.agentId,
+        tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
       });
     }

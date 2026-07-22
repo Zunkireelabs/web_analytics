@@ -2,6 +2,8 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { getUserByEmail } from '../store/users.js';
 import { createSignupRequest } from '../store/signup-requests.js';
+import { createContactRequest } from '../store/contact-requests.js';
+import { sendContactLeadEmail } from '../report/email.js';
 
 // Per-client login. One user account per site (see
 // server/migrations/011_users_and_site_profile.sql) — provisioned via
@@ -52,6 +54,49 @@ router.post('/signup-requests', async (req, res, next) => {
       passwordHash,
       message: message ? String(message).trim() : null,
     });
+    res.status(201).json({ id: request.id, status: request.status });
+  } catch (e) { next(e); }
+});
+
+// Public — same no-auth, honeypot-anti-spam treatment as POST
+// /signup-requests above, but for a lightweight "get in touch" lead: no
+// password, never becomes a real account. Only ever creates a
+// contact_requests row — the sales team is notified by email (below), not
+// through a staff review page in this app.
+router.post('/contact-requests', async (req, res, next) => {
+  try {
+    const { companyName, websiteDomain, contactEmail, message, honeypot } = req.body || {};
+    if (honeypot) return res.status(200).json({ ok: true }); // silently pretend success to the bot
+
+    if (!companyName || !String(companyName).trim()) return res.status(400).json({ error: 'companyName is required.' });
+    if (!contactEmail || !String(contactEmail).trim()) return res.status(400).json({ error: 'contactEmail is required.' });
+
+    const normalizedCompanyName = String(companyName).trim();
+    const normalizedWebsiteDomain = websiteDomain ? String(websiteDomain).trim() : null;
+    const normalizedContactEmail = String(contactEmail).trim().toLowerCase();
+    const normalizedMessage = message ? String(message).trim() : null;
+
+    const request = await createContactRequest({
+      companyName: normalizedCompanyName,
+      websiteDomain: normalizedWebsiteDomain,
+      contactEmail: normalizedContactEmail,
+      message: normalizedMessage,
+    });
+
+    // Best-effort — same swallow-and-log pattern job.js uses around
+    // sendDailyEmail — an SMTP hiccup should never turn a successful lead
+    // submission into an error response for the visitor.
+    try {
+      await sendContactLeadEmail({
+        companyName: normalizedCompanyName,
+        websiteDomain: normalizedWebsiteDomain,
+        contactEmail: normalizedContactEmail,
+        message: normalizedMessage,
+      });
+    } catch (err) {
+      console.error('[contact-requests] lead notification email failed:', err.message);
+    }
+
     res.status(201).json({ id: request.id, status: request.status });
   } catch (e) { next(e); }
 });

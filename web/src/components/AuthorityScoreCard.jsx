@@ -5,7 +5,7 @@ import Sparkline from './Sparkline.jsx';
 import { AlertTriangle, Award, Link2, Info, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 function emptyMessage(meta) {
-  if (!meta?.dataForSeoBacklinksConfigured) return 'Not configured — needs a real DataForSEO Backlinks API connection (DATAFORSEO_LOGIN/PASSWORD) to compute a real score.';
+  if (!meta?.dataForSeoBacklinksConfigured) return 'DataForSEO not configured, and no Common Crawl data imported for this domain yet — run npm run refresh-commoncrawl-graph for a coarser free estimate, or connect DataForSEO for the full score.';
   if (!meta?.hasRun) return 'Not analyzed yet — runs monthly.';
   if (meta.status === 'error') return 'Last run failed — check Integration Health below.';
   if (meta.status === 'insufficient-data') return `Last run (${timeAgo(meta.lastRunAt)}) had no usable backlink data for this domain yet.`;
@@ -32,19 +32,21 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
 
   if (!authority) {
     return (
-      <div className="relative overflow-hidden card bg-gradient-to-br from-white to-amber-50/20 border border-amber-200/60 p-6 flex items-start gap-4 shadow-sm hover:shadow-md transition-all duration-300 min-h-[130px]">
-        {/* Amber left accent border */}
-        <div className="absolute left-0 inset-y-0 w-1 bg-gradient-to-b from-amber-400 to-amber-600" />
-        
-        {/* Glow circle */}
-        <div className="absolute -right-8 -bottom-8 w-20 h-20 rounded-full blur-2xl opacity-40 bg-amber-400" />
+      <div className="relative overflow-hidden card bg-gradient-to-br from-indigo-50/70 via-purple-50/30 to-white border border-indigo-150 p-5 flex items-start gap-3.5 shadow-2xs hover:shadow-md hover:border-indigo-300 transition-all duration-300 min-h-[140px]">
+        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-indigo-500 to-purple-500" />
+        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-40 bg-indigo-200" />
 
-        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-amber-50 text-amber-600 border border-amber-100/80 shrink-0 shadow-inner">
-          <AlertTriangle size={16} strokeWidth={2.25} className="animate-pulse" />
+        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-indigo-100/80 text-indigo-600 border border-indigo-200/60 shrink-0 shadow-2xs mt-0.5">
+          <Award size={18} strokeWidth={2.25} />
         </span>
-        <div className="min-w-0 flex-1 relative z-10">
-          <span className="font-black text-amber-800 block text-[10px] uppercase tracking-wider mb-1 leading-none">Configuration Pending</span>
-          <p className="text-[11.5px] leading-relaxed text-slate-505 font-bold">
+        <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-black text-indigo-950 text-[11px] uppercase tracking-wider">SEO Domain Authority</span>
+            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200/80 shadow-2xs">
+              Pending Setup
+            </span>
+          </div>
+          <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
             {emptyMessage(meta)}
           </p>
         </div>
@@ -69,6 +71,11 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
             <span className="text-4xl font-black tracking-tight text-slate-900 tabular-nums">{animatedScore}</span>
             <span className="text-xs font-bold text-slate-400">/100</span>
           </div>
+          {authority.dataSource === 'commoncrawl' && (
+            <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border text-amber-700 bg-amber-50 border-amber-100">
+              <Info size={10} strokeWidth={3} /> Coarse estimate — referring domains only
+            </span>
+          )}
           {authority.scoreDelta != null && authority.scoreDelta !== 0 && (
             <span className={`inline-flex items-center gap-0.5 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full mt-2 border ${
               trendGood 

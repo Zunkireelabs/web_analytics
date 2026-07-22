@@ -43,6 +43,33 @@ export async function synthesizeFindings(findings, perAgent, question) {
     .catch((err) => { console.warn('[orchestrator] synthesis failed:', err.message); return null; });
 }
 
+// Turns a batch of [id, AgentOutput] pairs into the {findings, perAgent}
+// shape every OrchestratorOutput carries — shared by runOrchestration below
+// and the agentic tool-calling loop (agents/lib/agentic-orchestrator.js),
+// which invokes agents one at a time via LLM tool calls rather than a single
+// Promise.all fan-out, but needs the exact same result shape so downstream
+// consumers (citedFindings grounding, buildRecommendations, the weekly
+// executive Google Doc) never need to know which path produced it.
+export function summarizeAgentRuns(ran) {
+  // perAgent carries each sub-agent's full output (status/facts/narrative/
+  // message), not just a summary — report/executive-doc.js's weekly Google
+  // Doc synthesis needs the full real facts (gainers, growing markets,
+  // estimatedTrafficGain, etc.) of every sub-agent, not a lightweight digest.
+  const perAgent = {};
+  const findings = [];
+  for (const [id, out] of ran) {
+    perAgent[id] = {
+      status: out.status, facts: out.facts ?? null, narrative: out.narrative ?? null,
+      message: out.message ?? null, findingsCount: out.facts?.findings?.length || 0,
+    };
+    if (out.status === 'ok') {
+      for (const f of out.facts?.findings || []) findings.push({ ...f, agentId: id });
+    }
+  }
+  findings.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+  return { findings, perAgent };
+}
+
 export async function runOrchestration({ siteId, start, end, agentIds, question, persistSubAgentRuns = false } = {}) {
   const ids = agentIds?.length
     ? agentIds
@@ -62,23 +89,7 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
     }
   }));
 
-  // perAgent carries each sub-agent's full output (status/facts/narrative/
-  // message), not just a summary — report/executive-doc.js's weekly Google
-  // Doc synthesis needs the full real facts (gainers, growing markets,
-  // estimatedTrafficGain, etc.) of every sub-agent, not a lightweight digest.
-  const perAgent = {};
-  const findings = [];
-  for (const [id, out] of ran) {
-    perAgent[id] = {
-      status: out.status, facts: out.facts ?? null, narrative: out.narrative ?? null,
-      message: out.message ?? null, findingsCount: out.facts?.findings?.length || 0,
-    };
-    if (out.status === 'ok') {
-      for (const f of out.facts?.findings || []) findings.push({ ...f, agentId: id });
-    }
-  }
-  findings.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
-
+  const { findings, perAgent } = summarizeAgentRuns(ran);
   const narrative = await synthesizeFindings(findings, perAgent, question);
 
   return { ranAgentIds: ids, generatedAt: new Date().toISOString(), findings, perAgent, narrative };

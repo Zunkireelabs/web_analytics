@@ -14,6 +14,12 @@ const MAX_REDIRECT_HOPS = 8;
 const REDIRECT_HOP_TIMEOUT_MS = 5000;
 const LONG_CHAIN_HOP_THRESHOLD = 3;
 const UA_HEADER = { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +technical-seo-agent)' };
+// Soft-404 detection guardrail: a fully client-side-rendered site can serve
+// the identical shell for every route, real or not — in that world this
+// heuristic would flag everything, so a suspiciously high match rate across
+// a real sample disables it for the run rather than flooding false positives.
+const SOFT_404_MIN_SAMPLE = 5;
+const SOFT_404_BAILOUT_RATIO = 0.5;
 
 // Per page: real page fetch/analysis (reused for the technical audit AND
 // the link crawl below — one fetch, not two), real GSC index status, and
@@ -111,6 +117,57 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS) {
   return { chain, finalStatus: null, hops: maxHops, error: 'exceeded max redirect hops' };
 }
 
+function normalizeBody(text) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// A 2xx status alone doesn't prove a link is real — a static-host/SPA
+// catch-all misconfig (confirmed on at least one real site this codebase
+// tracks) serves the homepage for ANY unmatched path instead of a true 404.
+// Fetches one deliberately-nonexistent path once per crawl run and records
+// its status + body, so real internal links can be compared against what
+// "doesn't exist" actually looks like on this specific site. Returns null on
+// any failure — soft-404 detection is additive, never blocks the real crawl.
+async function fetchSoftNotFoundFingerprint(origin) {
+  let hostname;
+  try { hostname = new URL(origin).hostname; } catch { return null; }
+  if (isPrivateOrLocalHost(hostname)) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REDIRECT_HOP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${origin}/__seo-audit-nonexistent-check__`, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
+    const text = await res.text();
+    return { status: res.status, text: normalizeBody(text) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// The homepage legitimately renders the same shell a catch-all fallback
+// does — that's not brokenness, so it's never compared against the
+// fingerprint. Anything else matching the fingerprint's exact status + body
+// is treated as a soft 404: it 200'd, but with the "nothing's here" content.
+async function isSoftNotFound(url, fingerprint) {
+  if (!fingerprint) return false;
+  try { if (new URL(url).pathname === '/') return false; } catch { return false; }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REDIRECT_HOP_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
+    if (res.status !== fingerprint.status) return false;
+    const text = normalizeBody(await res.text());
+    return text === fingerprint.text;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Crawls only the real internal links found ON this run's rotation batch —
 // not an exhaustive whole-site crawl (that's a real queue+politeness
 // subsystem, out of scope for a synchronous daily agent run). Bounded to
@@ -126,12 +183,32 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   }
   const hrefs = [...sourcesByHref.keys()].slice(0, maxChecks);
 
+  let origin = null;
+  for (const r of pageResults) {
+    try { origin = new URL(r.page).origin; break; } catch { /* try next page */ }
+  }
+  const fingerprint = origin ? await fetchSoftNotFoundFingerprint(origin) : null;
+
   const results = await Promise.all(hrefs.map(async (href) => {
     const r = await followRedirects(href);
-    return { href, sourcePages: [...sourcesByHref.get(href)], ...r };
+    const eligible = !r.error && r.finalStatus != null && r.finalStatus >= 200 && r.finalStatus < 300;
+    const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
+    return { href, sourcePages: [...sourcesByHref.get(href)], ...r, softNotFound };
   }));
 
-  const broken = results.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400));
-  const redirectChains = results.filter((r) => !r.error && r.hops >= LONG_CHAIN_HOP_THRESHOLD);
-  return { checked: results.length, broken, redirectChains };
+  // Bail out on the soft-404 signal entirely if it fired for most of a real
+  // sample — that pattern means every route (real or not) looks identical,
+  // i.e. a true client-rendered SPA this heuristic can't distinguish, not a
+  // site actually full of dead links.
+  const eligibleCount = results.filter((r) => !r.error && r.finalStatus >= 200 && r.finalStatus < 300).length;
+  const softNotFoundCount = results.filter((r) => r.softNotFound).length;
+  const unreliable = eligibleCount >= SOFT_404_MIN_SAMPLE && softNotFoundCount / eligibleCount > SOFT_404_BAILOUT_RATIO;
+  if (unreliable) {
+    console.warn(`[agents] technical-seo: soft-404 signal looked unreliable (${softNotFoundCount}/${eligibleCount} eligible links matched the fallback fingerprint) — discarding it for this run.`);
+  }
+  const finalResults = unreliable ? results.map((r) => ({ ...r, softNotFound: false })) : results;
+
+  const broken = finalResults.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400) || r.softNotFound);
+  const redirectChains = finalResults.filter((r) => !r.error && r.hops >= LONG_CHAIN_HOP_THRESHOLD);
+  return { checked: finalResults.length, broken, redirectChains };
 }

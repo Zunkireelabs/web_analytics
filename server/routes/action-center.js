@@ -1,8 +1,11 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
+import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
+import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
@@ -56,7 +59,7 @@ async function buildRenderModeHint(siteId, actionType, page) {
 }
 
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth);
 
 // Most recent persisted recommendations — instant, may be stale. `Refresh`
 // below re-runs the agents fresh.
@@ -70,11 +73,44 @@ router.get('/action-center/recommendations', async (req, res, next) => {
 // real page fetches + LLM calls) for the given range via the shared
 // orchestrator (persisting each sub-agent run like any other agent run),
 // then rebuilds the recommendation list from the fresh data.
+// One line per recommendation-bearing agent: its real description and how
+// long ago it last ran (or "never run") — the only signal the agentic
+// selection loop has to decide what's worth refreshing, mirroring
+// copilot.js's staleAgentIds 24h-staleness convention.
+// Exported so server/routes/command-center.js's own refresh route can reuse
+// the exact same real staleness signal instead of re-deriving it.
+export async function buildStalenessContext(siteId) {
+  const [meta, runs] = await Promise.all([
+    listAgentMeta(),
+    getLatestAgentRuns(siteId, RECOMMENDATION_AGENT_IDS),
+  ]);
+  const nameById = new Map(meta.map((m) => [m.id, m]));
+  const byId = new Map(runs.map((r) => [r.agent_id, r]));
+  return RECOMMENDATION_AGENT_IDS.map((id) => {
+    const run = byId.get(id);
+    const age = run ? `last ran ${Math.round((Date.now() - new Date(run.created_at).getTime()) / 3600000)}h ago` : 'never run';
+    return `- ${id}: ${nameById.get(id)?.description || ''} (${age})`;
+  }).join('\n');
+}
+
 router.post('/action-center/recommendations/refresh', async (req, res, next) => {
   try {
     const { start, end } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end are required' });
-    await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+
+    if (agenticOrchestrationEnabled()) {
+      try {
+        const staleness = await buildStalenessContext(req.siteId);
+        const { ranAgentIds } = await runAgenticLoop({ siteId: req.siteId, start, end, staleness, persistSubAgentRuns: true });
+        console.log('[action-center] agentic loop selected:', ranAgentIds.length ? ranAgentIds.join(', ') : '(nothing needed refreshing)');
+      } catch (e) {
+        console.warn('[action-center] agentic selection failed, falling back to full refresh:', e.message);
+        await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+      }
+    } else {
+      await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+    }
+
     res.json(await buildRecommendations(req.siteId));
   } catch (e) { next(e); }
 });
@@ -197,9 +233,17 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
     if (!applyResult.ok) {
       await recordApplyFailure(req.siteId, approvedDraft.id, applyResult.error);
       if (applyResult.reason === 'render-mode-uncertain') {
+        // approveDraft() above already flipped this draft's real status to
+        // 'approved' before implementer.apply() hit this — unlike the
+        // earlier preview() check (which fires while still
+        // submitted_for_approval), a retry against this exact draft can no
+        // longer re-run approveDraft(). Including the real current status
+        // lets the frontend refresh instead of showing a stale retry prompt
+        // for a state that's no longer true.
         return res.status(422).json({
           error: applyResult.error, reason: applyResult.reason,
           confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode,
+          status: approvedDraft.status,
         });
       }
       return res.json(await getDraft(req.siteId, approvedDraft.id));

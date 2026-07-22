@@ -1,4 +1,4 @@
-import { getAgent } from '../registry.js';
+import { listAgentMeta } from '../registry.js';
 import { getLatestFindings, getLatestAgentRuns, getRecentActivity } from '../../store/agent-runs.js';
 import { getHealthScoreOnOrBefore } from '../../store/read.js';
 import { saveHealthScoreSnapshot } from '../../store/upsert.js';
@@ -11,6 +11,7 @@ import { listCompetitorProfiles } from '../../store/competitor-profiles.js';
 import { getAuthoritySnapshotHistory } from '../../store/authority.js';
 import { getMentionRateHistory } from '../../store/ai-recommendation.js';
 import { getImplementedFindingIds } from '../../store/drafts.js';
+import { competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 const OPEN_WATCHLIST_STATUSES = new Set(['new', 'in_progress']);
@@ -29,6 +30,11 @@ const ACTIVITY_LABEL = {
   'technical-seo': 'Checked index status, Core Web Vitals, and technical page health',
   authority: 'Computed real backlink-based Authority Score',
   'ai-recommendation': 'Checked real ChatGPT prompts for AI recommendation visibility',
+  'security-headers': 'Checked real HTTP security headers across ranking pages',
+  'internal-linking': 'Analyzed real internal link structure for link-equity dead ends',
+  'duplicate-content': 'Hashed real page content to find byte-identical duplicates',
+  accessibility: 'Checked real form labels, heading structure, and page-language attributes',
+  'mobile-usability': 'Checked real viewport configuration for mobile rendering issues',
   'executive-report': 'Generated executive briefing across all specialist agents',
 };
 
@@ -37,16 +43,21 @@ const shiftYmd = (ymd, days) => {
   return d.toISOString().slice(0, 10);
 };
 
+// Scans every REGISTERED agent (not just RECOMMENDATION_AGENT_IDS) so a new
+// agent gets a correct category/name here the moment its file exists, even
+// before anyone remembers to add its id to RECOMMENDATION_AGENT_IDS or
+// OPPORTUNITY_AGENT_IDS — those two lists still separately gate which
+// agents' findings actually populate Command Center's sections (a
+// deliberate curatorial choice, not something to derive automatically), but
+// display metadata (category/name, used by the activity feed and any
+// already-shown finding) shouldn't silently mislabel an agent as 'seo' just
+// because it hasn't been added to those lists yet.
 let categoryByAgentIdCache = null;
-async function categoryByAgentId() {
+export async function categoryByAgentId() {
   if (categoryByAgentIdCache) return categoryByAgentIdCache;
-  const map = new Map();
-  for (const id of [...RECOMMENDATION_AGENT_IDS, 'executive-report']) {
-    const agent = await getAgent(id);
-    map.set(id, { category: agent?.meta?.category || 'seo', name: agent?.meta?.name || id });
-  }
-  categoryByAgentIdCache = map;
-  return map;
+  const agents = await listAgentMeta();
+  categoryByAgentIdCache = new Map(agents.map((meta) => [meta.id, { category: meta.category || 'seo', name: meta.name || meta.id }]));
+  return categoryByAgentIdCache;
 }
 
 // Caps how many items from the same source contribute before the final
@@ -148,7 +159,7 @@ export async function getCommandCenterData(siteId) {
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
 
-  const { score, penalty, findingsConsidered } = computeHealthScore(allFindings, implementedFindingIds);
+  const { score, penalty, findingsConsidered } = computeHealthScore(allFindings, implementedFindingIds, catByAgent);
   const today = new Date().toISOString().slice(0, 10);
   await saveHealthScoreSnapshot(siteId, today, score)
     .catch((e) => console.error('[command-center] failed to save health score snapshot:', e.message));
@@ -250,7 +261,39 @@ export async function getCommandCenterData(siteId) {
       hasRun: !!competitorRun,
       status: competitorRun?.status ?? null,
       lastRunAt: competitorRun?.created_at ?? null,
-      dataForSeoConfigured: !!(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD),
+      // Whether a real Google SERP provider (DataForSEO or the free Google
+      // Custom Search provider) is configured — not specific to DataForSEO
+      // anymore, see server/ingest/competitor-providers/index.js.
+      dataForSeoConfigured: competitorProviderConfigured(),
+    },
+    // Real Google-SERP "who outranks you" comparison (server/agents/
+    // competitor-intelligence.js's rankingComparison) — deliberately never a
+    // 0-100 score, only real query/domain/position/impressions facts.
+    // Distinct from competitors/competitorsMeta (structural/AI-readiness
+    // score) above and from backlinkComparison (Common Crawl) below. Exposed
+    // even when its own status is 'insufficient-data' — the frontend needs
+    // serpProviderConfigured/checked/message to tell "not configured" apart
+    // from "configured but never checked" apart from "checked, you lead".
+    rankingComparison: competitorRun?.status === 'ok' ? (competitorRun.facts?.rankingComparison ?? null) : null,
+    rankingComparisonMeta: {
+      hasRun: !!competitorRun,
+      lastRunAt: competitorRun?.created_at ?? null,
+    },
+    // Free Common Crawl referring-domain comparison vs. tracked competitors
+    // (server/agents/lib/competitor-backlinks.js, Phase 6) — a distinct,
+    // no-credential-needed signal from the structural comparison above and
+    // from the paid DataForSEO-backed Authority Score below. Same
+    // null-when-not-'ok' discipline as authority/aiRecommendation: never a
+    // fabricated comparison when the site's own domain or every competitor
+    // is absent from the Common Crawl dataset.
+    backlinkComparison: competitorRun?.status === 'ok' && competitorRun.facts?.backlinkComparison?.status === 'ok'
+      ? competitorRun.facts.backlinkComparison
+      : null,
+    backlinkComparisonMeta: {
+      hasRun: !!competitorRun,
+      status: competitorRun?.facts?.backlinkComparison?.status ?? null,
+      message: competitorRun?.facts?.backlinkComparison?.message ?? null,
+      lastRunAt: competitorRun?.created_at ?? null,
     },
     // Real backlink-based Authority Score (server/agents/authority.js) —
     // runs monthly, same empty-state discipline as competitorsMeta above:
@@ -260,6 +303,7 @@ export async function getCommandCenterData(siteId) {
       score: authorityRun.facts.authorityScore, priorScore: authorityRun.facts.priorScore,
       scoreDelta: authorityRun.facts.scoreDelta, breakdown: authorityRun.facts.scoreBreakdown,
       topLinkedPages: authorityRun.facts.topLinkedPages,
+      dataSource: authorityRun.facts.dataSource,
       history: authorityHistory.map((r) => ({ date: r.snapshot_date, score: r.authority_score })),
     } : null,
     authorityMeta: {
@@ -297,10 +341,6 @@ export async function getCommandCenterData(siteId) {
       decliningMarkets: countryIntelligenceRun.facts.decliningMarkets,
       topLanguages: countryIntelligenceRun.facts.topLanguages,
       lowCtrCountries: countryIntelligenceRun.facts.lowCtrCountries,
-      history: (countryIntelligenceRun.facts.topCountries || []).slice(0, 5).map((c, i) => ({
-        date: c.country,
-        sessions: c.sessions
-      })),
     } : null,
     geoIntelligenceMeta: {
       hasRun: !!countryIntelligenceRun,

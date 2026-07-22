@@ -33,6 +33,7 @@ export default function Insights({ siteId }) {
   const [device, setDevice] = useState([]);
   const [country, setCountry] = useState({ visitors: [], search: [] });
   const [movers, setMovers] = useState({ gainers: [], droppers: [] });
+  const [error, setError] = useState(false);
 
   // Auto-pick the freshest finalized day as the range end.
   useEffect(() => {
@@ -41,7 +42,7 @@ export default function Insights({ siteId }) {
       setRange(r);
       const latest = r.latest_visitor || r.freshest;
       if (latest) { setEnd(latest); setStart(shiftYmd(latest, 30)); }
-    }).catch(() => {});
+    }).catch(() => setError(true));
   }, [siteId]);
 
   useEffect(() => {
@@ -52,21 +53,32 @@ export default function Insights({ siteId }) {
     // whichever of the two requests resolves last wins, regardless of
     // which date range is actually still selected.
     let cancelled = false;
-    api.series(siteId, start, end).then((s) => { if (!cancelled) setSeries(s); }).catch(() => {});
-    api.device(siteId, start, end).then((d) => { if (!cancelled) setDevice(d); }).catch(() => {});
-    api.country(siteId, start, end).then((c) => { if (!cancelled) setCountry(c); }).catch(() => {});
-    api.movers(siteId, start, end).then((m) => { if (!cancelled) setMovers(m); }).catch(() => {});
+    setError(false);
+    api.series(siteId, start, end).then((s) => { if (!cancelled) setSeries(s); }).catch(() => { if (!cancelled) setError(true); });
+    api.device(siteId, start, end).then((d) => { if (!cancelled) setDevice(d); }).catch(() => { if (!cancelled) setError(true); });
+    api.country(siteId, start, end).then((c) => { if (!cancelled) setCountry(c); }).catch(() => { if (!cancelled) setError(true); });
+    api.movers(siteId, start, end).then((m) => { if (!cancelled) setMovers(m); }).catch(() => { if (!cancelled) setError(true); });
     return () => { cancelled = true; };
   }, [siteId, start, end]);
 
   const deviceData = device.map((d) => ({ name: cap(d.dim_value), value: Number(d.sessions) }));
   const sv = (k) => series.map((r) => Number(r[k] ?? 0));
   const total = (k) => sv(k).reduce((a, b) => a + b, 0);
-  const loading = series.length === 0;
+  // series.length === 0 alone can't tell "still loading" apart from "a real
+  // fetch failure" — getDailySeries always returns one row per day
+  // regardless of data presence, so a genuinely empty series only happens
+  // on error. error is checked first so a real failure shows a message
+  // instead of an endless loading skeleton.
+  const loading = !error && series.length === 0;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 fade-up">
-      <PageHeader 
+      {error && (
+        <div className="card p-4 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 text-center">
+          Unable to load some real data right now. Try refreshing.
+        </div>
+      )}
+      <PageHeader
         title="Insights" 
         subtitle="Deep dive into search query movements, devices, and user geography" 
         icon="🔍" 

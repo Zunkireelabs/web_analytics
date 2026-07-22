@@ -1,13 +1,23 @@
 import { getAgent } from '../registry.js';
 import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js';
 
-// The 7 specialist agents whose output carries real, per-item structured
+// The specialist agents whose output carries real, per-item structured
 // findings (agents/types.js `Finding`) — shared by Action Center (draft
 // generation, internal-only) and the client-facing Reports page (read-only
-// display). executive-report is excluded: it synthesizes these same 7
-// agents' findings into its own topFindings, so including it here would
-// double-count every finding under two agent ids.
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation'];
+// display). executive-report is excluded: it synthesizes these same agents'
+// findings into its own topFindings, so including it here would double-count
+// every finding under two agent ids.
+//
+// NEW AGENT CHECKLIST: a new agent file is auto-discovered by registry.js
+// with zero code changes there, but does NOT automatically show up in
+// Command Center/Action Center/Reports until its id is added HERE (a
+// deliberate curatorial list, not every registered agent — see
+// OPPORTUNITY_AGENT_IDS below for why this isn't made automatic). Also add
+// it to server/job.js's DAILY_AGENT_IDS or MONTHLY_AGENT_IDS so it actually
+// gets scheduled. categoryByAgentId() (agents/lib/command-center.js) already
+// picks up its category/name automatically from meta — no change needed
+// there.
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability'];
 
 // Findings from these agents are inherently upside-framed (growth,
 // striking-distance, localization, AI-recommendation visibility a
@@ -68,6 +78,26 @@ async function statFor(agentId, facts) {
   if (agentId === 'technical-seo') {
     const n = facts.findings?.length || 0;
     return n ? `${n} technical issue${n === 1 ? '' : 's'} found` : null;
+  }
+  if (agentId === 'security-headers') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} missing header${n === 1 ? '' : 's'}` : null;
+  }
+  if (agentId === 'internal-linking') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} link dead end${n === 1 ? '' : 's'}` : null;
+  }
+  if (agentId === 'duplicate-content') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} duplicate group${n === 1 ? '' : 's'}` : null;
+  }
+  if (agentId === 'accessibility') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} a11y issue${n === 1 ? '' : 's'}` : null;
+  }
+  if (agentId === 'mobile-usability') {
+    const n = facts.findings?.length || 0;
+    return n ? `${n} viewport issue${n === 1 ? '' : 's'}` : null;
   }
   if (agentId === 'authority') {
     return facts.authorityScore != null ? `${facts.authorityScore}/100 authority` : null;

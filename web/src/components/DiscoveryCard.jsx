@@ -5,9 +5,8 @@ import {
   Globe, 
   FileText, 
   BrainCircuit, 
-  ChevronDown, 
-  ChevronUp, 
-  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   TrendingUp,
   AlertCircle
 } from 'lucide-react';
@@ -41,6 +40,9 @@ export const EVIDENCE_LABEL = {
   ctrDeviationPct: 'CTR Variance %', gapType: 'Gap Type', detail: 'Technical Details', entity: 'Identified Entity',
   competitorsWithThisFeature: 'Competitors with citation', competitorsTracked: 'Competitors Tracked',
   agentName: 'Assigned Agent', confidence: 'LLM Confidence Score', estimate: 'Expected Return basis',
+  domain: 'Domain', referringDomains: 'Referring Domains', graphRank: 'Graph Rank',
+  graphRelease: 'Graph Release', source: 'Data Source', ownDomain: 'Your Domain',
+  referringDomainGap: 'Referring Domain Gap',
 };
 
 export default function DiscoveryCard({ finding }) {
@@ -81,10 +83,6 @@ export default function DiscoveryCard({ finding }) {
               {pr.label}
             </span>
           </div>
-
-          <span className="text-emerald-500 text-[10px] flex items-center gap-0.5 font-bold">
-            <CheckCircle2 size={10} /> Verified
-          </span>
         </div>
 
         {/* Row 2: Headline & Description */}

@@ -32,19 +32,23 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
 
   if (!aiRecommendation) {
     return (
-      <div className="relative overflow-hidden card bg-gradient-to-br from-white to-amber-50/20 border border-amber-200/60 p-6 flex items-start gap-4 shadow-sm hover:shadow-md transition-all duration-300 min-h-[130px]">
-        {/* Amber left accent border */}
-        <div className="absolute left-0 inset-y-0 w-1 bg-gradient-to-b from-amber-400 to-amber-600" />
-        
-        {/* Glow circle */}
-        <div className="absolute -right-8 -bottom-8 w-20 h-20 rounded-full blur-2xl opacity-40 bg-amber-400" />
+      <div className="relative overflow-hidden card-dark p-6 flex items-start gap-4 shadow-md hover:border-teal-500/50 transition-all duration-300 min-h-[140px]">
+        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-teal-400 to-indigo-500" />
+        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-20 bg-teal-500" />
 
-        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-amber-50 text-amber-600 border border-amber-100/80 shrink-0 shadow-inner">
-          <AlertTriangle size={16} strokeWidth={2.25} className="animate-pulse" />
+        <span className="w-10 h-10 rounded-2xl grid place-items-center bg-teal-500/20 text-teal-400 border border-teal-500/30 shrink-0 shadow-inner mt-0.5">
+          <Sparkles size={20} className="animate-pulse" />
         </span>
-        <div className="min-w-0 flex-1 relative z-10">
-          <span className="font-black text-amber-800 block text-[10px] uppercase tracking-wider mb-1 leading-none">Configuration Pending</span>
-          <p className="text-[11.5px] leading-relaxed text-slate-505 font-bold">
+        <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-black text-teal-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
+              <span>✦</span> AI Recommendation Rate
+            </span>
+            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              Pending Setup
+            </span>
+          </div>
+          <p className="text-xs leading-relaxed text-slate-300 font-medium">
             {emptyMessage(meta)}
           </p>
         </div>

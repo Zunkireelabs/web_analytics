@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth } from './login.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { runAgent } from '../agents/runner.js';
 import { getAgentRunHistory, getLatestAgentRuns } from '../store/agent-runs.js';
@@ -7,7 +7,7 @@ import { getAgentActivityFeed } from '../agents/lib/command-center.js';
 import { subscribeActivity } from '../agents/lib/activity-bus.js';
 
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth);
 
 // List every registered agent's metadata (id/name/description/category/dataSources).
 router.get('/agents', async (req, res, next) => {

@@ -18,14 +18,17 @@ function pickProvider() {
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 500;
 
-function isRetryable(err) {
+export function isRetryable(err) {
   const status = err?.status ?? err?.response?.status;
   if (status === 429 || status >= 500) return true;
   if (!status && ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN'].includes(err?.code)) return true;
   return false;
 }
 
-async function withRetry(fn) {
+// Exported so other direct OpenAI/Anthropic callers (e.g. agentic-orchestrator.js's
+// tool-calling loop) get the same one-retry-on-transient-failure behavior as callLLM,
+// instead of reimplementing it.
+export async function withRetry(fn) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       return await fn();

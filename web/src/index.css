@@ -46,6 +46,17 @@ body {
     0 8px 20px -6px rgba(15, 23, 42, 0.04),
     0 24px 48px -12px rgba(15, 23, 42, 0.05);
 }
+.card-dark {
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%) !important;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 24px;
+  color: #ffffff !important;
+  box-shadow: 
+    0 4px 20px rgba(15, 23, 42, 0.25),
+    0 10px 30px -5px rgba(0, 0, 0, 0.3);
+}
 .card-hover {
   transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -78,6 +89,14 @@ body {
 }
 .fade-up {
   animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+.animate-slide-down {
+  animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes pulseGlow {

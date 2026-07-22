@@ -61,6 +61,8 @@ const MAX_CRAWL_PAGES = 300;
 const MAX_CRAWL_DEPTH = 4;
 const CRAWL_CONCURRENCY = 5; // small concurrent chunks, not serial and not unbounded — politeness
 
+export { MAX_CRAWL_PAGES, MAX_CRAWL_DEPTH, CRAWL_CONCURRENCY };
+
 // A real, good-faith robots.txt Disallow/Allow parser for the crawler's own
 // politeness — deliberately separate from page-content.js's
 // robotsAllowsAiCrawlers, which only checks a blanket "/" block for named
@@ -105,12 +107,19 @@ export function parseRobotsDisallowRules(robotsTxt) {
 
 // Real homepage-outward BFS crawl, reusing analyzePageUrl (page-content.js)
 // per page — its analysis.internalLinks is exactly the crawl frontier.
-// Bounded (MAX_CRAWL_PAGES/MAX_CRAWL_DEPTH), deduped at enqueue time (not
-// just fetch time, to prevent loops), fetched in small concurrent chunks.
-// A URL robots.txt disallows is still recorded as a known page (a real link
-// pointed at it) but never fetched or expanded further — respects
-// politeness without losing the fact that the URL exists.
-export async function crawlSite(site) {
+// Bounded (maxPages/maxDepth), deduped at enqueue time (not just fetch time,
+// to prevent loops), fetched in small concurrent chunks. A URL robots.txt
+// disallows is still recorded as a known page (a real link pointed at it)
+// but never fetched or expanded further — respects politeness without
+// losing the fact that the URL exists.
+//
+// Caps are caller-supplied options, defaulting to the original weekly-
+// discovery constants (MAX_CRAWL_PAGES/MAX_CRAWL_DEPTH/CRAWL_CONCURRENCY) so
+// runSiteDiscoveryIfDue (job.js) is completely unaffected — bulk-audit.js's
+// Full Site Audit is the caller that raises maxPages for exhaustive coverage
+// while keeping concurrency at the same polite default regardless of site
+// size (raise the page ceiling, not the request rate).
+export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = MAX_CRAWL_DEPTH, concurrency = CRAWL_CONCURRENCY } = {}) {
   const origin = originForSite(site);
   if (!origin) return [];
 
@@ -121,8 +130,8 @@ export async function crawlSite(site) {
   const visited = new Set([origin]);
   let frontier = [{ url: origin, depth: 0 }];
 
-  while (frontier.length && discovered.size < MAX_CRAWL_PAGES) {
-    const batch = frontier.splice(0, CRAWL_CONCURRENCY);
+  while (frontier.length && discovered.size < maxPages) {
+    const batch = frontier.splice(0, concurrency);
     const nextFrontier = [];
 
     await Promise.all(batch.map(async ({ url, depth }) => {
@@ -132,10 +141,10 @@ export async function crawlSite(site) {
       if (!robots.isAllowed(path)) return; // known, but not crawled further
 
       const fetched = await analyzePageUrl(url);
-      if (!fetched.ok || depth >= MAX_CRAWL_DEPTH) return;
+      if (!fetched.ok || depth >= maxDepth) return;
 
       for (const href of fetched.analysis.internalLinks || []) {
-        if (visited.has(href) || visited.size >= MAX_CRAWL_PAGES) continue;
+        if (visited.has(href) || visited.size >= maxPages) continue;
         visited.add(href);
         nextFrontier.push({ url: href, depth: depth + 1 });
       }
