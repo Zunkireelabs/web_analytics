@@ -6,7 +6,7 @@
 -- are the planned "here". Replacing a target never overwrites target_value
 -- in place -- the old row is marked superseded and a new active row is
 -- inserted, so target history stays queryable for reporting.
-CREATE TABLE growth_targets (
+CREATE TABLE IF NOT EXISTS growth_targets (
   id SERIAL PRIMARY KEY,
   site_id INTEGER NOT NULL REFERENCES sites(id),
   metric TEXT NOT NULL CHECK (metric IN (
@@ -22,5 +22,5 @@ CREATE TABLE growth_targets (
 );
 
 -- Only one active target per site+metric at a time.
-CREATE UNIQUE INDEX growth_targets_active_unique ON growth_targets (site_id, metric) WHERE status = 'active';
-CREATE INDEX idx_growth_targets_site_metric ON growth_targets (site_id, metric);
+CREATE UNIQUE INDEX IF NOT EXISTS growth_targets_active_unique ON growth_targets (site_id, metric) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_growth_targets_site_metric ON growth_targets (site_id, metric);
