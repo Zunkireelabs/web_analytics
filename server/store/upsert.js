@@ -125,6 +125,18 @@ export async function saveMonthlyReportNarrative(siteId, ym, narrative) {
   );
 }
 
+// Milestones' agent-written growth-plan narrative (server/agents/lib/
+// growth-plan.js) — auditRunId is the audit_runs.id it was generated from,
+// read back by buildGrowthReport to decide whether a newer completed audit
+// has made the cached narrative stale.
+export async function saveGrowthPlanNarrative(siteId, { sections, auditRunId }) {
+  await query(
+    `UPDATE sites SET growth_plan_narrative = $1, growth_plan_narrative_generated_at = now(),
+       growth_plan_narrative_audit_run_id = $2 WHERE id = $3`,
+    [JSON.stringify(sections), auditRunId, siteId]
+  );
+}
+
 // One row per (site, date, query, domain) — see migrations/018 and
 // ingest/competitors.js. Re-running the same week overwrites (never
 // duplicates), same convention as every other upsert in this file.
@@ -152,14 +164,16 @@ export async function saveHealthScoreSnapshot(siteId, date, score) {
   );
 }
 
-// Sets the real "day 0" anchor for a client — called exactly once, right
-// after the first real baseline agent run completes during onboarding
-// (server/routes/clients.js). Idempotent to call again (e.g. a retried
-// connect step) — always reflects the most recent real baseline run, never
-// backfilled or guessed.
+// Sets the real "day 0" anchor for a client — the first real baseline agent
+// run completing during onboarding (server/routes/clients.js). Safe to call
+// again (e.g. /connect or /retry-baseline re-run after an earlier attempt
+// failed before onboarded_at was ever set) — but only ever WRITES on that
+// first successful call: the `onboarded_at IS NULL` guard makes this a true
+// once-only anchor, so re-running /connect or /retry-baseline against a site
+// that's already onboarded can never silently reset its real history.
 export async function setOnboardingBaseline(siteId, baselineRunId) {
   await query(
-    `UPDATE sites SET onboarded_at = now(), baseline_run_id = $2 WHERE id = $1`,
+    `UPDATE sites SET onboarded_at = now(), baseline_run_id = $2 WHERE id = $1 AND onboarded_at IS NULL`,
     [siteId, baselineRunId]
   );
 }

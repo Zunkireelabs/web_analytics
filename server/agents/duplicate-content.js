@@ -1,0 +1,118 @@
+import { createHash } from 'crypto';
+import { getSearchPerformanceForPages } from '../store/read.js';
+import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { analyzePageUrl } from './lib/page-content.js';
+import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
+import { updatePageContentHashBatch, listContentHashesForSite } from '../store/page-inventory.js';
+import { callLLM } from '../llm.js';
+
+export const meta = {
+  id: 'duplicate-content',
+  name: 'Duplicate Content Agent',
+  description: 'Finds pages whose full body content is byte-identical to another page on the site — the same content reachable at two different URLs, a real, common crawl-budget and ranking-dilution problem.',
+  category: 'seo',
+  version: 1,
+};
+
+const MAX_PAGES = 20;
+// Below this word count, an exact-hash match is more likely two genuinely
+// thin/near-empty pages (e.g. both mostly boilerplate) than real duplicate
+// content worth flagging — same MIN_WORD_COUNT threshold page-content.js's
+// own contentGapChecks() uses for "Expand content."
+const MIN_WORDS_FOR_HASH = 300;
+
+// SHA-256 of the page's full real fetched body text (already whitespace-
+// normalized by analyzePage). Deliberately exact, not fuzzy/similarity-based
+// — shared nav/header/footer boilerplate across a site's own template does
+// NOT cause a false match here, since the hash only collides when the
+// ENTIRE body (boilerplate AND main content) is byte-identical, which in
+// practice means the same content really is being served at two URLs
+// (pagination artifacts, trailing-slash/query-param variants, printer-
+// friendly duplicates, staging leftovers) — not just "similar-looking pages."
+function hashContent(bodyText) {
+  return createHash('sha256').update(bodyText).digest('hex');
+}
+
+export async function run({ siteId, start, end, pageCache, params }) {
+  const { batch, impressionsByPage } = params?.pages?.length
+    ? await getSearchPerformanceForPages(siteId, start, end, params.pages).then((rows) => ({
+      batch: params.pages,
+      impressionsByPage: new Map(rows.map((r) => [r.dim_value, Number(r.impressions)])),
+    }))
+    : await selectCandidatePages(siteId, 'duplicate-content', { start, end, batchSize: MAX_PAGES });
+
+  if (!batch.length) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: 'No page performance data yet to select pages from.',
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const fetchPage = pageCache || analyzePageUrl;
+  const fetched = await Promise.all(batch.map(async (page) => ({ page, result: await fetchPage(page) })));
+  if (!params?.pages?.length) await markPagesChecked(siteId, 'duplicate-content', batch);
+
+  // Only pages with real, substantial content get hashed — thin pages are
+  // excluded from the comparison pool entirely (never recorded with a hash
+  // that could coincidentally match another thin page).
+  const hashByPage = new Map();
+  for (const { page, result } of fetched) {
+    if (!result.ok || result.analysis.wordCount < MIN_WORDS_FOR_HASH) continue;
+    hashByPage.set(page, hashContent(result.analysis.bodyText));
+  }
+  if (hashByPage.size) await updatePageContentHashBatch(siteId, hashByPage);
+
+  // Compares against the site's own real accumulated coverage (every page
+  // ever hashed by a past run, not just today's rotation batch) — same
+  // "merge today's fresh data with everything already known" pattern
+  // technical-seo.js's detectDuplicateTitles already uses for titles.
+  const known = await listContentHashesForSite(siteId);
+  const byHash = new Map();
+  for (const { page, content_hash: hash } of known) {
+    if (!byHash.has(hash)) byHash.set(hash, new Set());
+    byHash.get(hash).add(page);
+  }
+  for (const [page, hash] of hashByPage) {
+    if (!byHash.has(hash)) byHash.set(hash, new Set());
+    byHash.get(hash).add(page);
+  }
+
+  const duplicateGroups = [...byHash.entries()]
+    .filter(([, pages]) => pages.size >= 2)
+    .map(([hash, pages]) => ({ hash, pages: [...pages] }));
+
+  const sumImpressions = (pages) => pages.reduce((s, p) => s + (impressionsByPage.get(p) || 0), 0);
+  const rankedGroups = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
+  const priorities = priorityByRank(rankedGroups);
+  const findings = rankedGroups.map((g, i) => {
+    const target = [...g.pages].sort()[0]; // deterministic id anchor, not a "which is canonical" judgment
+    return makeFinding({
+      id: `duplicate-content:${target}`,
+      evidence: { pages: g.pages },
+      whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
+      priority: priorities[i],
+      recommendedAction: null, // picking a canonical URL / merging pages is a real editorial decision, not draftable content
+      expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
+    });
+  });
+
+  const facts = {
+    rangeStart: start, rangeEnd: end,
+    batchSize: batch.length,
+    pagesHashedThisRun: hashByPage.size,
+    totalPagesTracked: known.length + hashByPage.size, // approximate — known already excludes this run's fresh hashes until persisted, so this is real coverage right after this run's writes land
+    findings,
+  };
+
+  const system = 'You are a technical SEO specialist writing for a non-technical site owner. Given real groups of ' +
+    'pages whose content is byte-identical (found via hashing, not guessed), write 2-3 sentences naming the ' +
+    'group with the most real search traffic and recommend picking one canonical URL for that content. Use ONLY ' +
+    'the pages/data given, never invent a page not present in the facts. Plain text, no markdown, no bullets.';
+  const narrative = findings.length
+    ? await callLLM(system, `Facts: ${JSON.stringify(facts)}`, { maxTokens: 250 })
+      .catch((err) => { console.warn('[agents] duplicate-content narrative failed:', err.message); return null; })
+    : null;
+
+  return { meta, status: 'ok', facts, narrative, generatedAt: new Date().toISOString() };
+}

@@ -4,11 +4,13 @@ import { requireAuth, requireInternalSite } from './login.js';
 import { createClientSite, updateSiteConnection, updateSiteRepoConfig } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { getUserByEmail, createUser } from '../store/users.js';
-import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed } from '../store/signup-requests.js';
+import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
+import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
 import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
+import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 
 // Client provisioning, exposed as real routes for the first time this
 // session — previously only reachable via server/scripts/create-client.js /
@@ -38,6 +40,22 @@ router.get('/internal/clients', async (req, res, next) => {
       repoConnected: !!(s.repo_owner && s.repo_name),
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
     })));
+  } catch (e) { next(e); }
+});
+
+// "All Clients" toggle on the Milestones page (web/src/pages/GrowthReport.jsx,
+// staff-only) — every onboarded site's AI-projected growth trajectory in one
+// request. Sites with no real baseline are skipped rather than shown broken,
+// same honesty rule buildGrowthReport itself applies for a single site.
+// Deliberately uses the lighter buildGrowthSummary (3 queries/site), not
+// buildGrowthReport (9-10 queries/site) — this view doesn't need full
+// historical series, just the current-vs-projected numbers.
+router.get('/internal/clients/growth-summary', async (req, res, next) => {
+  try {
+    const sites = await listSites();
+    const onboarded = sites.filter((s) => s.onboarded_at);
+    const summaries = await Promise.all(onboarded.map(buildGrowthSummary));
+    res.json(summaries);
   } catch (e) { next(e); }
 });
 
@@ -95,22 +113,33 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
     const requestId = Number(req.params.id);
     const request = await getSignupRequestById(requestId);
     if (!request) return res.status(404).json({ error: `No signup request found with id ${requestId}.` });
-    if (request.status !== 'pending') return res.status(409).json({ error: `This request was already ${request.status}.` });
 
     const existing = await getUserByEmail(request.contact_email);
     if (existing) return res.status(409).json({ error: `A user with email "${request.contact_email}" already exists.` });
+
+    // Atomic claim BEFORE creating anything — closes the real race where two
+    // staff approving the same request within milliseconds of each other
+    // could otherwise both pass a read-only status check and each create a
+    // full duplicate site (see markSignupRequestReviewed's guard).
+    const claimed = await markSignupRequestReviewed(requestId, 'approved');
+    if (!claimed) {
+      const current = await getSignupRequestById(requestId);
+      return res.status(409).json({ error: `This request was already ${current?.status}.` });
+    }
 
     const site = await createClientSite({ name: request.company_name, websiteDomain: request.website_domain, timezone: undefined });
     try {
       await createUser({ siteId: site.id, email: request.contact_email, passwordHash: request.password_hash });
     } catch (err) {
       // Site created but login failed — same orphaned-but-harmless recovery
-      // shape as POST /internal/clients above; the request stays pending
-      // (not marked approved) so it's still visible to retry.
+      // shape as POST /internal/clients above (siteId is returned so staff
+      // can finish it via `npm run create-client -- <email> <password>
+      // --site-id <id>`). The request is already claimed 'approved' above
+      // and can't be re-approved — that's the race guard working as intended.
       return res.status(500).json({ error: `Site #${site.id} was created, but the login failed: ${err.message}`, siteId: site.id });
     }
 
-    await markSignupRequestReviewed(requestId, 'approved', site.id);
+    await setSignupRequestCreatedSite(requestId, site.id);
     res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
   } catch (e) { next(e); }
 });
@@ -120,9 +149,12 @@ router.post('/internal/signup-requests/:id/reject', async (req, res, next) => {
     const requestId = Number(req.params.id);
     const request = await getSignupRequestById(requestId);
     if (!request) return res.status(404).json({ error: `No signup request found with id ${requestId}.` });
-    if (request.status !== 'pending') return res.status(409).json({ error: `This request was already ${request.status}.` });
 
-    await markSignupRequestReviewed(requestId, 'rejected');
+    const reviewed = await markSignupRequestReviewed(requestId, 'rejected');
+    if (!reviewed) {
+      const current = await getSignupRequestById(requestId);
+      return res.status(409).json({ error: `This request was already ${current?.status}.` });
+    }
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -159,6 +191,15 @@ async function runBaselineSequence(siteId, site) {
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
 
+  // Real "where you stand today" findings for Milestones — fire-and-forget
+  // like the manual /site-audit trigger: resolves once the audit_runs row
+  // exists, the actual crawl+audit keeps running well past this request's
+  // response. Best-effort — a failed audit start shouldn't fail onboarding
+  // itself, same as the discovery step above.
+  startFullSiteAudit(siteId, { triggeredBy: 'onboarding' }).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding site audit failed to start:`, err.message);
+  });
+
   const today = new Date().toISOString().slice(0, 10);
   const healthScore = await getHealthScoreOnOrBefore(siteId, today);
   const finalSite = await getSiteById(siteId);
@@ -174,12 +215,14 @@ async function runBaselineSequence(siteId, site) {
 router.post('/internal/clients/:id/connect', async (req, res, next) => {
   try {
     const siteId = Number(req.params.id);
-    const { gscProperty, ga4PropertyId, reportEmailTo } = req.body || {};
+    const { gscProperty: rawGscProperty, ga4PropertyId: rawGa4PropertyId, reportEmailTo } = req.body || {};
+    const gscProperty = String(rawGscProperty || '').trim();
+    const ga4PropertyId = String(rawGa4PropertyId || '').trim();
 
-    if (!gscProperty || !GSC_PROPERTY_RE.test(String(gscProperty))) {
+    if (!gscProperty || !GSC_PROPERTY_RE.test(gscProperty)) {
       return res.status(400).json({ error: 'gscProperty must be the exact string from Search Console → Settings → Property (e.g. "sc-domain:example.com" or a full URL).' });
     }
-    if (!ga4PropertyId || !/^\d+$/.test(String(ga4PropertyId))) {
+    if (!ga4PropertyId || !/^\d+$/.test(ga4PropertyId)) {
       return res.status(400).json({ error: 'ga4PropertyId must be the numeric GA4 property ID (GA4 Admin → Property Settings).' });
     }
 
@@ -188,7 +231,7 @@ router.post('/internal/clients/:id/connect', async (req, res, next) => {
 
     let site;
     try {
-      site = await updateSiteConnection({ siteId, gscProperty: String(gscProperty).trim(), ga4PropertyId: String(ga4PropertyId).trim(), reportEmailTo });
+      site = await updateSiteConnection({ siteId, gscProperty, ga4PropertyId, reportEmailTo });
     } catch (err) {
       if (err.code === '23505') {
         return res.status(409).json({ error: 'Another site is already connected to this exact GSC + GA4 property pair.' });

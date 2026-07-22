@@ -1,12 +1,13 @@
-import { getSiteById } from '../store/read.js';
+import { getSiteById, getSearchPerformanceForPages } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
-import { effortForGenerator, inferSchemaType } from './lib/page-content.js';
+import { effortForGenerator, inferSchemaType, fetchTextIfExists } from './lib/page-content.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
 import { listOrphanedPages } from '../store/page-inventory.js';
 import { recordIntegrationCheck } from '../store/upsert.js';
 import { listSitemaps } from '../ingest/gsc-technical.js';
+import { discoverFromSitemaps, parseRobotsDisallowRules, originForSite } from './lib/site-discovery.js';
 import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
 
@@ -15,7 +16,13 @@ export const meta = {
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 1,
+  version: 2,
+  // v2 adds two real, previously-uncovered checks: sitemap URLs resolving to
+  // a different domain than the site itself (a common sitemap-generation
+  // bug GSC's own per-sitemap error/warning counts don't catch), and real
+  // GSC top-traffic pages that robots.txt actually disallows — both reuse
+  // site-discovery.js's existing sitemap-fetch/robots-parse primitives
+  // rather than a second implementation of either.
   dataSources: [
     { id: 'gsc-url-inspection', status: 'connected', description: 'Real per-page index status and sitemap health via Google Search Console\'s URL Inspection + Sitemaps APIs — already covered by the existing Search Console connection.' },
     { id: 'pagespeed-insights', status: pagespeedConfigured() ? 'connected' : 'not-connected', description: 'Real Core Web Vitals (LCP/INP/CLS) via Google PageSpeed Insights. Without this configured, every other check below still runs — Core Web Vitals findings just don\'t appear.' },
@@ -28,19 +35,30 @@ function sumImpressions(pages) {
   return pages.reduce((s, p) => s + (p.impressions || 0), 0);
 }
 
-export async function run({ siteId, start, end, pageCache }) {
+export async function run({ siteId, start, end, pageCache, params }) {
   const site = await getSiteById(siteId);
-  // Merges real GSC top pages with the site-wide page inventory (sitemap +
-  // crawl) — a page with zero search traffic (often exactly the pages worth
-  // checking: is it deindexed, slow, broken?) now gets rotated in too, not
-  // just whatever already has GSC traffic. Rotation source stays
-  // technical_seo_checks (migration 026, this agent's own table) via the
-  // injected adapter below — one rotation ledger per agent, not a second
-  // competing one in agent_page_rotation.
-  const { batch, impressionsByPage } = await selectCandidatePages(siteId, 'technical-seo', {
-    start, end, batchSize: BATCH_SIZE,
-    getCheckedAtForPages: (sId, _agentId, pages) => getTechnicalSeoCheckedAt(sId, pages),
-  });
+  // params.pages (from the bulk full-site-audit engine, agents/lib/bulk-audit.js)
+  // bypasses the normal rotation entirely and checks exactly the given pages
+  // — a full audit wants exhaustive coverage of a caller-chosen set, not this
+  // agent's own ~20-page rotation pick. Real impressions still come from GSC
+  // for the given pages, not guessed. Same params-bypass pattern as
+  // content-gap.js's params.page pilot, just pluralized for the bulk case.
+  const { batch, impressionsByPage } = params?.pages?.length
+    ? await getSearchPerformanceForPages(siteId, start, end, params.pages).then((rows) => ({
+      batch: params.pages,
+      impressionsByPage: new Map(rows.map((r) => [r.dim_value, Number(r.impressions)])),
+    }))
+    // Merges real GSC top pages with the site-wide page inventory (sitemap +
+    // crawl) — a page with zero search traffic (often exactly the pages worth
+    // checking: is it deindexed, slow, broken?) now gets rotated in too, not
+    // just whatever already has GSC traffic. Rotation source stays
+    // technical_seo_checks (migration 026, this agent's own table) via the
+    // injected adapter below — one rotation ledger per agent, not a second
+    // competing one in agent_page_rotation.
+    : await selectCandidatePages(siteId, 'technical-seo', {
+      start, end, batchSize: BATCH_SIZE,
+      getCheckedAtForPages: (sId, _agentId, pages) => getTechnicalSeoCheckedAt(sId, pages),
+    });
 
   if (!batch.length) {
     return {
@@ -94,6 +112,16 @@ export async function run({ siteId, start, end, pageCache }) {
   }).catch(() => {});
 
   const sitemapResult = await listSitemaps(site);
+  // Real sitemap URL content (not just GSC's error/warning counts, already
+  // captured above) and real robots.txt rules — both reuse site-discovery.js's
+  // existing crawl-politeness primitives rather than a second sitemap/robots
+  // fetcher, just applied here as validation checks instead of crawl input.
+  const origin = originForSite(site);
+  const [sitemapUrls, robotsFetch] = await Promise.all([
+    discoverFromSitemaps(site).catch((err) => { console.error('[agents] technical-seo: sitemap fetch failed:', err.message); return []; }),
+    origin ? fetchTextIfExists(`${origin}/robots.txt`) : Promise.resolve({ ok: false }),
+  ]);
+  const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
 
   // --- Findings ---
 
@@ -144,23 +172,32 @@ export async function run({ siteId, start, end, pageCache }) {
     });
   });
 
+  // The "no canonical tag" branch needs our own page fetch to have succeeded
+  // (it reads technicalAudit.hasCanonical); the "Google-detected mismatch"
+  // branch needs only GSC's indexStatus, which is independent of our fetch —
+  // gating both behind technicalAudit.ok dropped a real, Google-confirmed
+  // mismatch whenever our own fetch failed (bot-blocked, timeout) even though
+  // GSC's data alone was enough to report it.
   const canonicalCandidates = pageResults
-    .filter((r) => r.technicalAudit.ok && (
-      !r.technicalAudit.hasCanonical
+    .filter((r) =>
+      (r.technicalAudit.ok && !r.technicalAudit.hasCanonical)
       || (r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical)
-    ))
+    )
     .sort((a, b) => b.impressions - a.impressions);
   const canonicalPriorities = priorityByRank(canonicalCandidates);
-  const canonicalFindings = canonicalCandidates.map((r, i) => makeFinding({
-    id: `technical-seo:canonical:${r.page}`,
-    evidence: { page: r.page, hasCanonical: r.technicalAudit.hasCanonical, googleCanonical: r.indexStatus.googleCanonical ?? null, userCanonical: r.indexStatus.userCanonical ?? null, impressions: r.impressions },
-    whyItMatters: r.technicalAudit.hasCanonical
-      ? `Google's chosen canonical ("${r.indexStatus.googleCanonical}") disagrees with this page's own declared canonical ("${r.indexStatus.userCanonical}").`
-      : 'No canonical tag found on this page.',
-    priority: canonicalPriorities[i],
-    recommendedAction: null,
-    expectedImpact: { label: impactFromPriority(canonicalPriorities[i]), basis: 'computed', value: r.impressions },
-  }));
+  const canonicalFindings = canonicalCandidates.map((r, i) => {
+    const hasMismatch = r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical;
+    return makeFinding({
+      id: `technical-seo:canonical:${r.page}`,
+      evidence: { page: r.page, hasCanonical: r.technicalAudit.ok ? r.technicalAudit.hasCanonical : null, googleCanonical: r.indexStatus.googleCanonical ?? null, userCanonical: r.indexStatus.userCanonical ?? null, impressions: r.impressions },
+      whyItMatters: hasMismatch
+        ? `Google's chosen canonical ("${r.indexStatus.googleCanonical}") disagrees with this page's own declared canonical ("${r.indexStatus.userCanonical}").`
+        : 'No canonical tag found on this page.',
+      priority: canonicalPriorities[i],
+      recommendedAction: null,
+      expectedImpact: { label: impactFromPriority(canonicalPriorities[i]), basis: 'computed', value: r.impressions },
+    });
+  });
 
   const schemaCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasSchema).sort((a, b) => b.impressions - a.impressions);
   const schemaPriorities = priorityByRank(schemaCandidates);
@@ -179,10 +216,12 @@ export async function run({ siteId, start, end, pageCache }) {
   const brokenPriorities = priorityByRank(brokenCandidates);
   const brokenFindings = brokenCandidates.map((c, i) => makeFinding({
     id: `technical-seo:broken-link:${c.sourcePages[0]}:${c.href}`,
-    evidence: { sourcePages: c.sourcePages, href: c.href, status: c.finalStatus, error: c.error },
+    evidence: { sourcePages: c.sourcePages, href: c.href, status: c.finalStatus, error: c.error, softNotFound: c.softNotFound || false },
     whyItMatters: c.error
       ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) failed: ${c.error}.`
-      : `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus}.`,
+      : c.softNotFound
+        ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus} but serves the same fallback content as a nonexistent page on this site — likely a dead/broken link.`
+        : `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus}.`,
     priority: brokenPriorities[i],
     recommendedAction: null,
     expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
@@ -225,9 +264,45 @@ export async function run({ siteId, start, end, pageCache }) {
     expectedImpact: { label: impactFromPriority(sitemapPriorities[i]), basis: 'computed', value: s.errors },
   }));
 
+  // Real sitemap URLs on a different domain than the site itself — a common,
+  // genuinely serious sitemap-generation bug (leftover staging domain, a
+  // migration that never updated the generator) that GSC's own per-sitemap
+  // error/warning counts above don't necessarily catch (a malformed-but-
+  // wrong-domain URL can still be individually well-formed).
+  const siteHostname = origin ? new URL(origin).hostname : null;
+  const crossDomainUrls = siteHostname
+    ? sitemapUrls.filter((u) => { try { return new URL(u).hostname !== siteHostname; } catch { return false; } })
+    : [];
+  const crossDomainSitemapFindings = crossDomainUrls.length ? [makeFinding({
+    id: 'technical-seo:sitemap-cross-domain',
+    evidence: { count: crossDomainUrls.length, sample: crossDomainUrls.slice(0, 5) },
+    whyItMatters: `${crossDomainUrls.length} URL(s) in the sitemap point to a different domain than ${siteHostname} — likely a sitemap-generation mistake (a leftover staging domain, or a migration the generator was never updated for).`,
+    priority: 'high',
+    recommendedAction: null,
+    expectedImpact: { label: 'High', basis: 'estimate', value: crossDomainUrls.length },
+  })] : [];
+
+  // Real GSC top-traffic pages that robots.txt actually disallows — a
+  // genuinely serious, common misconfiguration (an overly broad Disallow
+  // rule accidentally catching pages meant to rank) that's cheap to check
+  // since pageResults already has real impressions for this run's batch.
+  const robotsBlockedCandidates = pageResults
+    .filter((r) => { try { return !robots.isAllowed(new URL(r.page).pathname); } catch { return false; } })
+    .sort((a, b) => b.impressions - a.impressions);
+  const robotsBlockedPriorities = priorityByRank(robotsBlockedCandidates);
+  const robotsBlockedFindings = robotsBlockedCandidates.map((r, i) => makeFinding({
+    id: `technical-seo:robots-blocked:${r.page}`,
+    evidence: { page: r.page, impressions: r.impressions },
+    whyItMatters: `robots.txt disallows this page (${r.impressions} impressions) — if that's not intentional, it can stop Google from crawling a page it should be indexing.`,
+    priority: robotsBlockedPriorities[i],
+    recommendedAction: null,
+    expectedImpact: { label: impactFromPriority(robotsBlockedPriorities[i]), basis: 'computed', value: r.impressions },
+  }));
+
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
+    ...crossDomainSitemapFindings, ...robotsBlockedFindings,
   ];
 
   const facts = {
@@ -242,6 +317,10 @@ export async function run({ siteId, start, end, pageCache }) {
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
     linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length },
     orphanedPageCount: orphanedPages.length,
+    sitemapUrlCount: sitemapUrls.length,
+    crossDomainSitemapUrlCount: crossDomainUrls.length,
+    robotsTxtFound: robotsFetch.ok,
+    robotsBlockedTopPageCount: robotsBlockedFindings.length,
     findings,
   };
 

@@ -183,11 +183,37 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       onSaved(updated);
     } catch (e) {
       if (e.reason === 'render-mode-uncertain' && !renderMode) {
-        setRenderModeConfirm({ call, reason: e.message, confidence: e.confidence, suggestedMode: e.suggestedMode });
+        if (e.status && e.status !== 'submitted_for_approval') {
+          // The backend told us this draft's real status already moved past
+          // what the retry prompt assumes (approve() flipped it to
+          // 'approved' before apply() hit this error) — refresh from the
+          // server instead of showing a stale "Use Visible"/"Use
+          // Schema-only" prompt for a state that's no longer true.
+          setRenderModeConfirm(null);
+          api.actionCenter.draft(draft.id).then(onSaved).catch(() => setError(e.message || 'Action failed'));
+        } else {
+          setRenderModeConfirm({ call, reason: e.message, confidence: e.confidence, suggestedMode: e.suggestedMode });
+        }
       } else {
         setRenderModeConfirm(null);
         setError(e.message || 'Action failed');
       }
+    } finally {
+      setTransitioning(false);
+    }
+  };
+
+  // Not a plain transition() — POST .../rollback returns {ok, mergeSha,
+  // mergeUrl, branchName}, not a draft row, so onSaved needs a real re-fetch
+  // of the draft afterward rather than that response shape directly.
+  const rollback = async () => {
+    setTransitioning(true);
+    setError(null);
+    try {
+      await api.actionCenter.rollback(draft.id);
+      onSaved(await api.actionCenter.draft(draft.id));
+    } catch (e) {
+      setError(e.message || 'Rollback failed');
     } finally {
       setTransitioning(false);
     }
@@ -290,6 +316,22 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
             <span className="font-extrabold text-emerald-600 flex items-center gap-1">
               <Check size={12} strokeWidth={3} /> Merged to stage
             </span>
+          </div>
+        )}
+
+        {draft.gsc_notification && !draft.gsc_notification.skipped && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-slate-50 text-xs text-slate-500 flex items-center gap-2">
+            {draft.gsc_notification.sitemapSubmit?.ok ? (
+              <>
+                <Check size={12} className="text-emerald-500 shrink-0" strokeWidth={3} />
+                <span>Sitemap resubmitted to Search Console — this page is prioritized for a faster recrawl.</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle size={12} className="text-amber-500 shrink-0" />
+                <span>Search Console sitemap resubmission didn't go through: {draft.gsc_notification.sitemapSubmit?.error || 'unknown error'}.</span>
+              </>
+            )}
           </div>
         )}
 
@@ -518,6 +560,16 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
                       Live on staging.
                     </span>
+                    {draft.rollback_snapshot && (
+                      <button
+                        onClick={rollback}
+                        disabled={transitioning}
+                        title="Restore this file to exactly what it was right before this draft's merge"
+                        className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
+                      >
+                        <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
+                      </button>
+                    )}
                     <button
                       onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
                       disabled={transitioning}
@@ -527,6 +579,21 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       Mark Implemented
                     </button>
                   </>
+                )}
+
+                {/* implemented is terminal for the transitions above, but a real
+                    rollback_snapshot (captured at merge time) is still valid — the
+                    merge that snapshot reverts happened regardless of whether this
+                    draft was additionally marked implemented afterward. */}
+                {draft.status === 'implemented' && draft.rollback_snapshot && (
+                  <button
+                    onClick={rollback}
+                    disabled={transitioning}
+                    title="Restore this file to exactly what it was right before this draft's merge"
+                    className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
+                  >
+                    <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
+                  </button>
                 )}
               </>
             )}

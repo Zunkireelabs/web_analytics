@@ -1,24 +1,23 @@
 import { useEffect, useState } from 'react';
 import { api, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
-import { 
-  Building, 
-  Globe, 
-  Clock, 
-  CheckCircle2, 
-  AlertTriangle, 
-  GitBranch, 
-  Key, 
-  Mail, 
-  Lock, 
-  Plus, 
-  FolderPlus, 
-  RefreshCw, 
-  FileSpreadsheet, 
-  ShieldCheck, 
+import {
+  Building,
+  Globe,
+  Clock,
+  CheckCircle2,
+  AlertTriangle,
+  GitBranch,
+  Key,
+  Mail,
+  Lock,
+  Plus,
+  FolderPlus,
+  RefreshCw,
+  FileSpreadsheet,
+  ShieldCheck,
   Settings,
   ChevronRight,
-  TrendingUp,
   Sliders
 } from 'lucide-react';
 
@@ -101,7 +100,9 @@ function ConnectStep({ client, onConnected }) {
     }
   };
 
-  if (state === 'done' && result) return <BaselineResult result={result} />;
+  if (state === 'done' && result) {
+    return <BaselineResult result={result} />;
+  }
 
   return (
     <form onSubmit={submit} className="space-y-4 mt-3">
@@ -303,7 +304,7 @@ export default function ClientOnboarding() {
 
   const load = () => api.clients.list().then(setClients).catch(() => setClients([]));
   const loadRequests = () => api.clients.signupRequests.list().then(setRequests).catch(() => setRequests([]));
-  
+
   useEffect(() => { load(); loadRequests(); }, []);
 
   const approveRequest = async (request) => {

@@ -62,9 +62,10 @@ waiting on one field when the rest could move forward.
 - **Daily report recipient email** (one address, or comma-separated for a
   distribution list) — this is per-site (`sites.report_email_to`), never the
   same inbox as another client.
-- Optional: **logo** (svg/png/jpg — see §5 on where to source one) and
-  **website domain** (display only). Timezone defaults to `Asia/Kolkata` if
-  not given.
+- **Website domain** (display only, also used to auto-detect the client's
+  logo — see §2). Optional: a **logo** file, only needed if you want to
+  override the auto-detected one. Timezone defaults to `Asia/Kolkata` if not
+  given.
 - Confirm the client already has Google Search Console **and** GA4 set up on
   that property (this tool reads existing data — it does not set either up).
 
@@ -78,14 +79,20 @@ Creates the `sites` row + a bcrypt-hashed login in one step
 the next command.
 
 ```
-npm run connect-site -- --site-id <id> --gsc-property "sc-domain:client.com" --ga4-property-id 123456789 --email-to contact@client.com --logo path/to/logo.png
+npm run connect-site -- --site-id <id> --gsc-property "sc-domain:client.com" --ga4-property-id 123456789 --email-to contact@client.com
 ```
-Attaches GSC/GA4/email/logo (`server/scripts/connect-site.js`). Only `.svg`,
-`.png`, `.jpg`/`.jpeg` are supported for `--logo` — convert first if the
-client's asset is `.webp` or another format (e.g. macOS: `sips -s format png
-in.webp --out out.png`). Confirm the command's own output says **"Both GSC
-and GA4 are connected"** — that's what makes `listConnectedSites()` start
-including this site in automated jobs.
+Attaches GSC/GA4/email (`server/scripts/connect-site.js`). If a `--domain`
+was given at step 1 and you don't pass `--logo` here, the logo is
+auto-detected from the client's own site (checked in order: an `<img>` with
+"logo" in its class/id/alt, an apple-touch-icon, `og:image`, then the
+favicon) and stored automatically — the command's own output tells you what
+it found (or why it skipped, e.g. no candidates or the site was
+unreachable). Pass `--logo path/to/logo.png` to override with a specific
+file instead — only `.svg`, `.png`, `.jpg`/`.jpeg` are supported (convert
+first if the client's asset is `.webp` or another format, e.g. macOS: `sips
+-s format png in.webp --out out.png`). Confirm the command's own output says
+**"Both GSC and GA4 are connected"** — that's what makes
+`listConnectedSites()` start including this site in automated jobs.
 
 Any field can be set later by re-running `connect-site` with just that flag
 (it only touches fields you pass).
@@ -96,11 +103,13 @@ Any field can be set later by re-running `connect-site` with just that flag
   is shared, global, and the same for every client — this is not a
   white-label product. Never edit this per client.
 - **Client-level branding** (company name + optional logo) is per-`sites`-row
-  data, set via `connect-site --logo` (stored as a data URL in
-  `sites.logo_data_url`) and the `--company` name from `create-client`. It's
-  fetched at runtime after login (`GET /api/sites`), not baked into any
-  build — `Header.jsx` renders it next to the product logo automatically.
-  Nothing to edit in `web/` for a new client, ever.
+  data — the `--company` name from `create-client`, and a logo stored as a
+  data URL in `sites.logo_data_url`, either auto-detected from the client's
+  site or set manually via `connect-site --logo` (`server/agents/lib/
+  logo-discovery.js` does the auto-detection). It's fetched at runtime after
+  login (`GET /api/sites`), not baked into any build — `Header.jsx` renders
+  it next to the product logo automatically. Nothing to edit in `web/` for a
+  new client, ever.
 
 ## 4. Google Search Console access
 

@@ -18,8 +18,11 @@ import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
 import clientsRouter from './routes/clients.js';
 import growthReportRouter from './routes/growth-report.js';
+import siteAuditRouter from './routes/site-audit.js';
+import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
+import { reapStaleAuditRuns } from './store/audit-runs.js';
 import { pool } from './db.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -50,18 +53,33 @@ app.use(
 );
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
+// Mount order matters here and isn't just cosmetic: every router below gates
+// itself with an unscoped `router.use(requireAuth, ...)` (no path prefix),
+// so once Express hands a request to a mounted router, that router's blanket
+// middleware runs before Express ever checks whether a route inside it
+// actually matches the URL — a non-matching path still gets rejected there
+// instead of falling through to the router that actually owns it. Any
+// router gated by requireInternalSite must therefore be mounted AFTER every
+// client-facing router, or it silently 404s legitimate client requests for
+// routes it has nothing to do with (confirmed live: an authenticated client
+// hitting /api/growth-report was rejected by copilot.js's blanket internal
+// gate before ever reaching growth-report.js, despite growth-report.js
+// itself being correctly client-scoped).
 app.use('/api', loginRouter);
 app.use('/api', metricsRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
+app.use('/api', growthReportRouter);
+app.use('/api', siteAuditRouter);
+// Internal-only (requireInternalSite-gated) — must stay last, see above.
 app.use('/api', copilotRouter);
 app.use('/api', integrationsRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', watchlistRouter);
 app.use('/api', clientsRouter);
-app.use('/api', growthReportRouter);
+app.use('/api', commoncrawlBacklinksRouter);
 
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);
@@ -97,4 +115,9 @@ httpServer.listen(port, () => {
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
   runStartupCatchup();
+  // Reap any audit_runs left stuck 'running' by a previous process that
+  // died/restarted mid-audit (non-blocking).
+  reapStaleAuditRuns()
+    .then((reaped) => { if (reaped.length) console.log(`[server] reaped ${reaped.length} stale audit run(s)`); })
+    .catch((err) => console.error('[server] reapStaleAuditRuns failed:', err.message));
 });

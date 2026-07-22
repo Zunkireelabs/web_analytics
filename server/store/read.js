@@ -422,12 +422,17 @@ export async function getMonthlyDocUrl(siteId) {
 }
 
 // Aggregate totals for any explicit date range — used by week comparison.
+// avg_position deliberately has NO COALESCE: 0 is a real (the best possible)
+// rank, so coercing "no GSC rows this period" to 0 would fabricate a perfect
+// position instead of honestly reporting no data — same rule Overview.jsx's
+// position handling already follows. Real NULL flows through to the
+// frontend, which already renders it as "—".
 export async function getRangeTotals(siteId, start, end) {
   const { rows } = await query(
     `SELECT
         COALESCE(SUM(g.clicks),0)       AS clicks,
         COALESCE(SUM(g.impressions),0)  AS impressions,
-        COALESCE(AVG(g.position),0)     AS avg_position,
+        AVG(g.position)                 AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,
@@ -447,7 +452,7 @@ export async function getMonthlyTotals(siteId, year, month) {
     `SELECT
         COALESCE(SUM(g.clicks),0)       AS clicks,
         COALESCE(SUM(g.impressions),0)  AS impressions,
-        COALESCE(AVG(g.position),0)     AS avg_position,
+        AVG(g.position)                 AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,

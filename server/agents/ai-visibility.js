@@ -29,17 +29,32 @@ const MAX_PAGES = 20;
 // null = a real, worthwhile recommendation with no matching draft generator
 // today (a structural fix, not content to draft).
 const RECOMMENDATION_RULES = [
-  { test: (c) => c.schema < 50, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
-  { test: (c) => c.structuredContent < 67, label: 'Fix heading structure: exactly one H1, add H2 subheadings, and add a list or table.', generatorId: null },
+  // schemaScore only ever produces {0,25,50,75,100} (schemaTypes.length * 25)
+  // — <=50 (not <50) so exactly 2 schema types still gets the "add more"
+  // nudge instead of silently passing at the halfway point.
+  { test: (c) => c.schema <= 50, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
+  // structuredContentScore only ever produces {0,33,34,66,67,100} — the label
+  // requires all three of H1/H2/list-or-table, so "not 100" is the correct
+  // condition, not an arbitrary 67 cutoff that misses both 2-of-3 states that
+  // land on exactly 67 (H1+H2 no list, or H1+list no H2).
+  { test: (c) => c.structuredContent < 100, label: 'Fix heading structure: exactly one H1, add H2 subheadings, and add a list or table.', generatorId: null },
   { test: (c) => c.faq === 0, label: 'Add an FAQ section.', generatorId: 'faq' },
   { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
   { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
   { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: null },
-  { test: (c) => c.llmsReadiness != null && c.llmsReadiness < 50, label: 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).', generatorId: 'llms-txt' },
+  // Checks the real fetched hasLlmsTxt/robotsAllowsAiCrawlers facts directly,
+  // not the derived 0/50/100 score — that score is a legitimate coarse
+  // display number, but re-deriving a decision from it let this recommendation
+  // silently drift out of sync with the real site state (a site missing
+  // llms.txt but not blocking AI crawlers landed on exactly 50, which the old
+  // `< 50` threshold missed). Every other rule here scores an inherently
+  // graded signal where a threshold is the right fit; this is the one rule
+  // built from two hard booleans, so it can check ground truth instead.
+  { test: (c, raw) => raw?.llmsReadiness != null && (!raw.llmsReadiness.hasLlmsTxt || raw.llmsReadiness.robotsAllowsAiCrawlers === false), label: 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).', generatorId: 'llms-txt' },
 ];
 
-function recommendationsFor(categories) {
-  return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
+function recommendationsFor(categories, raw) {
+  return RECOMMENDATION_RULES.filter((r) => r.test(categories, raw)).map(({ label, generatorId }) => ({ label, generatorId }));
 }
 
 export async function run({ siteId, start, end, pageCache }) {
@@ -79,7 +94,7 @@ export async function run({ siteId, start, end, pageCache }) {
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
-    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
+    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories, { llmsReadiness }), fetchError: null };
   });
 
   const scoredPages = pages.filter((p) => p.score?.overall != null);

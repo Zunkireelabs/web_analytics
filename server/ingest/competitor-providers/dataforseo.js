@@ -11,6 +11,10 @@ export const id = 'dataforseo';
 
 const ENDPOINT = 'https://api.dataforseo.com/v3/serp/google/organic/live/advanced';
 
+export function configured() {
+  return !!(process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD);
+}
+
 function authHeader() {
   const { DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD } = process.env;
   if (!DATAFORSEO_LOGIN || !DATAFORSEO_PASSWORD) {

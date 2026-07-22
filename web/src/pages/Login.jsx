@@ -185,37 +185,54 @@ export default function Login({ onAuthed }) {
       <div className="relative z-10 flex flex-col min-h-screen">
         
         {/* Top Navbar */}
-        <header className="w-full px-6 sm:px-12 py-4 border-b border-slate-300/40 bg-white/40 backdrop-blur-md">
-          <div className="max-w-6xl mx-auto flex items-center justify-between">
+        <header className="w-full px-4 sm:px-8 py-3.5 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl sticky top-0 z-40 shadow-2xs">
+          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
+            {/* Brand Identity */}
             <div className="flex items-center gap-3">
-              <div className="bg-slate-900 p-2.5 rounded-2xl shadow-md border border-slate-850">
-                <Logo size={24} color="#ffffff" />
+              <div className="bg-slate-900 p-2 rounded-2xl shadow-md border border-slate-800 shrink-0">
+                <Logo size={22} color="#ffffff" />
               </div>
               <div className="text-left hidden sm:block">
                 <div className="text-xs font-black tracking-widest text-slate-900 uppercase leading-none">Search Analytics</div>
                 <div className="text-[9px] text-[#ea580c] font-black tracking-widest uppercase mt-1">Zunkiree Labs</div>
               </div>
-              <span className="ml-1 hidden sm:inline-flex items-center gap-1 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-slate-900/10 text-slate-800 border border-slate-900/20">
+              <span className="ml-1 hidden md:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-slate-900/10 text-slate-800 border border-slate-900/15">
                 <Sparkles size={9} strokeWidth={3} className="text-orange-500" /> AI Agency
               </span>
             </div>
 
-            <div className="flex items-center gap-1.5 sm:gap-3">
+            {/* Header Actions Navigation Group */}
+            <div className="flex items-center gap-2 sm:gap-2.5">
+              <a
+                href="/seo-audit/"
+                className="text-[11px] font-extrabold uppercase tracking-wider text-amber-700 hover:text-amber-900 bg-gradient-to-r from-amber-500/10 to-orange-500/10 hover:from-amber-500/20 hover:to-orange-500/20 border border-amber-500/30 rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5 shadow-2xs transition active:scale-95 flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <Sparkles size={12} className="text-amber-600" />
+                <span>Free Audit</span>
+              </a>
+              <button
+                type="button"
+                onClick={() => setAuthModal('contact')}
+                className="text-[11px] font-extrabold uppercase tracking-wider text-slate-700 hover:text-slate-950 bg-white/90 hover:bg-white border border-slate-200/80 rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5 shadow-2xs transition active:scale-95 flex items-center gap-1.5 cursor-pointer hidden sm:flex"
+              >
+                <Mail size={12} strokeWidth={2.25} />
+                <span>Contact</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setAuthModal('login')}
-                className="text-xs font-black uppercase tracking-widest text-slate-700 hover:text-slate-950 bg-white/80 hover:bg-white border border-slate-300/80 rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                className="text-[11px] font-extrabold uppercase tracking-wider text-slate-700 hover:text-slate-950 bg-white/90 hover:bg-white border border-slate-200/80 rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5 shadow-2xs transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
               >
-                <LogIn size={13} strokeWidth={2.5} /> Log In
+                <LogIn size={12} strokeWidth={2.25} />
+                <span>Log In</span>
               </button>
               <button
                 type="button"
                 onClick={() => setAuthModal('request')}
-                className="text-xs font-black uppercase tracking-widest text-white rounded-xl px-3 sm:px-4.5 py-2.5 sm:py-3 transition active:scale-95 shadow-md shadow-slate-900/10 hover:shadow-slate-900/25 flex items-center gap-1.5 cursor-pointer"
-                style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
+                className="text-[11px] font-black uppercase tracking-wider text-white rounded-xl px-3.5 py-2 sm:px-4 sm:py-2.5 transition active:scale-95 shadow-sm hover:shadow-md flex items-center gap-1.5 cursor-pointer bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-slate-800"
               >
                 <span>Request Access</span>
-                <ArrowRight size={13} strokeWidth={2.5} className="hidden sm:inline text-orange-500" />
+                <ArrowRight size={12} strokeWidth={2.5} className="text-orange-400 hidden sm:inline" />
               </button>
             </div>
           </div>
@@ -270,7 +287,7 @@ export default function Login({ onAuthed }) {
               All access requests undergo manual verification. Setup your credentials now to instantly login upon approval.
             </p>
 
-            <div className="pt-4">
+            <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => setAuthModal('request')}
@@ -279,6 +296,14 @@ export default function Login({ onAuthed }) {
               >
                 <span>Request Access Portal</span>
                 <ArrowRight size={14} strokeWidth={2.5} className="text-orange-500" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthModal('contact')}
+                className="inline-flex items-center gap-2.5 text-xs font-black uppercase tracking-widest text-slate-800 rounded-xl px-7 py-4.5 transition duration-300 hover:scale-105 active:scale-95 cursor-pointer bg-white/70 hover:bg-white border border-slate-300/80 shadow-sm"
+              >
+                <Mail size={14} strokeWidth={2.5} />
+                <span>Contact Us</span>
               </button>
             </div>
           </div>
@@ -626,6 +651,32 @@ function LoginModal({ initialMode = 'login', onClose, onAuthed }) {
     );
   }
 
+  if (mode === 'contact') {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
+        <div aria-hidden className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="w-full max-w-[460px] max-h-[85vh] rounded-[32px] shadow-2xl relative overflow-hidden backdrop-blur-xl border border-slate-300 bg-slate-100/95 text-slate-800 animate-slide-up flex flex-col"
+        >
+          {/* aura */}
+          <div className="absolute -top-24 -left-24 w-48 h-48 rounded-full bg-indigo-500/10 blur-3xl pointer-events-none" />
+
+          <button type="button" onClick={onClose} aria-label="Close"
+            className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full border border-slate-250 hover:border-slate-350 grid place-items-center text-slate-450 hover:text-slate-850 hover:bg-slate-200/50 transition duration-150 focus:outline-none cursor-pointer">
+            <X size={15} strokeWidth={2.25} />
+          </button>
+
+          {/* Scrolls internally when content is taller than the viewport,
+              instead of the page behind the modal scrolling. */}
+          <div className="overflow-y-auto overscroll-contain p-6 sm:p-8">
+            <ContactForm onBack={() => setMode('login')} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
       <div aria-hidden className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" />
@@ -896,6 +947,138 @@ function RequestAccessForm({ onBack }) {
           style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
         >
           {busy ? 'Submitting Application…' : 'Submit Access Request'}
+        </button>
+        <button type="button" onClick={onBack}
+          className="w-full text-center text-[10px] font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest cursor-pointer">
+          ← Back to Login
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/* ───────────────────────── CONTACT US FORM ───────────────────────── */
+
+function ContactForm({ onBack }) {
+  const [companyName, setCompanyName] = useState('');
+  const [websiteDomain, setWebsiteDomain] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [message, setMessage] = useState('');
+  const [honeypot, setHoneypot] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr('');
+    setBusy(true);
+    try {
+      await api.submitContactRequest({ companyName, websiteDomain, contactEmail, message, honeypot });
+      setDone(true);
+    } catch (e2) {
+      setErr(e2.message || 'Could not submit your message.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="relative z-[1] text-center space-y-4 py-4">
+        <div className="flex justify-center">
+          <div className="bg-slate-900 p-2.5 rounded-2xl border border-slate-800 shadow-md">
+            <Logo size={28} color="#ffffff" />
+          </div>
+        </div>
+        <h2 className="text-base font-black text-slate-850 uppercase tracking-wider">Message Sent</h2>
+        <p className="text-xs text-slate-500 leading-relaxed font-bold">
+          Thanks for reaching out — our team will get back to you shortly.
+        </p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-xs font-black uppercase tracking-wider text-indigo-650 hover:text-indigo-800 cursor-pointer"
+        >
+          ← Return to Login
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative z-[1] space-y-4">
+      <div className="flex flex-col items-center text-center">
+        <div className="bg-slate-900 p-2.5 rounded-2xl border border-slate-800 shadow-md">
+          <Logo size={28} color="#ffffff" />
+        </div>
+        <div className="mt-3.5">
+          <h2 className="text-sm font-black text-slate-850 uppercase tracking-widest leading-none">Contact Us</h2>
+          <p className="text-[10px] text-slate-500 font-bold mt-1.5 leading-relaxed">
+            Have a question or just want to talk before requesting access? Send us a message.
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={submit} className="space-y-3.5">
+        <div aria-hidden="true" style={{ position: 'absolute', left: '-9999px', width: 1, height: 1, overflow: 'hidden' }}>
+          <label htmlFor="contact_company_url">Company URL</label>
+          <input id="contact_company_url" type="text" tabIndex={-1} autoComplete="off"
+            value={honeypot} onChange={(e) => setHoneypot(e.target.value)} />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-500 mb-1">Company Name</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Building size={12} />
+              </span>
+              <input type="text" required autoFocus value={companyName} onChange={(e) => setCompanyName(e.target.value)}
+                placeholder="Acme Corp" className="w-full text-base sm:text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Website</label>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                <Globe size={12} />
+              </span>
+              <input type="text" value={websiteDomain} onChange={(e) => setWebsiteDomain(e.target.value)}
+                placeholder="acme.com" className="w-full text-base sm:text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Work Email</label>
+          <div className="relative">
+            <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+              <Mail size={12} />
+            </span>
+            <input type="email" required autoComplete="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)}
+              placeholder="you@acme.com" className="w-full text-base sm:text-xs font-semibold border border-slate-250 rounded-xl pl-9 pr-3 py-2.5 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-800 placeholder:text-slate-400" />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-[9.5px] font-black uppercase tracking-widest text-slate-505 mb-1">Message</label>
+          <textarea rows={3} value={message} onChange={(e) => setMessage(e.target.value)}
+            placeholder="What would you like to know?" className="w-full text-base sm:text-xs font-semibold border border-slate-250 rounded-xl p-3 bg-white/80 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500/10 focus:border-orange-500 text-slate-850 placeholder:text-slate-400 resize-none" />
+        </div>
+
+        {err && (
+          <div className="bg-rose-50 border border-rose-100 text-rose-700 px-3.5 py-2.5 rounded-xl text-[11px] flex items-center gap-2">
+            <AlertCircle size={14} className="shrink-0 text-rose-500" />
+            <span>{err}</span>
+          </div>
+        )}
+
+        <button type="submit" disabled={busy}
+          className="w-full text-[10px] font-black uppercase tracking-wider py-3.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-slate-900/10 disabled:opacity-50 cursor-pointer"
+          style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)' }}
+        >
+          {busy ? 'Sending…' : 'Send Message'}
         </button>
         <button type="button" onClick={onBack}
           className="w-full text-center text-[10px] font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest cursor-pointer">

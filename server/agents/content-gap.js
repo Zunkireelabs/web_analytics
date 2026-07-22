@@ -1,4 +1,4 @@
-import { getQueriesForPage } from '../store/read.js';
+import { getQueriesForPage, getSearchPerformanceForPages } from '../store/read.js';
 import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
@@ -10,15 +10,18 @@ export const meta = {
   name: 'Content Gap Agent',
   description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
-  version: 3,
+  version: 4,
   // True topical/SERP-based gap detection (a specific topic a competitor
   // ranks for that this site has no page for at all) still has no real data
   // source — that's a different, still-unbuilt question from what's below.
-  // What v3 adds: real structural-signal cross-referencing against
+  // v3 added: real structural-signal cross-referencing against
   // competitor-intelligence's tracked competitors (FAQ/schema/comparison-
   // content presence, from their actual crawled homepages) — degrades
   // honestly to no competitive framing when competitor-intelligence hasn't
   // run yet or found fewer than 2 reachable competitors.
+  // v4 adds: a real canonical-target check (not just tag presence) — flags
+  // a canonical pointing at a different domain, the most common real-world
+  // canonical mistake (see lib/page-content.js's contentGapChecks).
   dataSources: [
     { id: 'competitor-analysis', status: 'connected', description: 'Real structural signals (FAQ/schema/comparison-content presence) from competitor-intelligence\'s monthly crawl of tracked competitor homepages — used to note when most tracked competitors have a feature a page lacks. Needs at least 2 reachable competitor profiles to produce a meaningful ratio; degrades to no competitive framing otherwise, never fabricated.' },
     { id: 'serp-api', status: 'not-connected', description: 'SERP results for true topical gap detection (a specific topic/query a competitor ranks for that this site has no page for at all)' },
@@ -67,19 +70,31 @@ async function suggestMissingEntities(bodyText, queryText) {
   }
 }
 
-export async function run({ siteId, start, end, pageCache }) {
+export async function run({ siteId, start, end, pageCache, params }) {
   // Falls back to a direct (uncached) fetch when run standalone, outside an
   // orchestrated run — keeps this agent independently runnable/testable
   // with identical output either way (see lib/fetch-cache.js).
   const fetchPage = pageCache || analyzePageUrl;
-  // Merges real GSC top pages with the site-wide page inventory (sitemap +
-  // crawl) so a page with real content but no search traffic yet — often
-  // exactly why it has no traffic — still gets checked, rotated in over
-  // time rather than every run. getQueriesForPage legitimately returns []
-  // for a zero-traffic page; suggestMissingEntities already degrades to its
-  // 'no-context' path when that happens, so no special-casing needed here.
+  // params.page (from the agentic tool-calling loop) bypasses the normal
+  // rotation entirely and checks exactly that one page — the caller already
+  // knows which page they care about, so there's no reason to make them wait
+  // for it to come up in rotation. Real impressions still come from GSC, not
+  // guessed; markPagesChecked is skipped below so this ad-hoc check doesn't
+  // perturb the normal rotation order for every other page.
   const [{ batch, impressionsByPage }, competitorProfiles] = await Promise.all([
-    selectCandidatePages(siteId, 'content-gap', { start, end, batchSize: MAX_PAGES }),
+    params?.page
+      ? getSearchPerformanceForPages(siteId, start, end, [params.page]).then((rows) => ({
+        batch: [params.page],
+        impressionsByPage: new Map(rows.map((r) => [r.dim_value, Number(r.impressions)])),
+      }))
+      // Merges real GSC top pages with the site-wide page inventory (sitemap
+      // + crawl) so a page with real content but no search traffic yet —
+      // often exactly why it has no traffic — still gets checked, rotated in
+      // over time rather than every run. getQueriesForPage legitimately
+      // returns [] for a zero-traffic page; suggestMissingEntities already
+      // degrades to its 'no-context' path when that happens, so no special-
+      // casing needed here.
+      : selectCandidatePages(siteId, 'content-gap', { start, end, batchSize: MAX_PAGES }),
     listCompetitorProfiles(siteId),
   ]);
 
@@ -117,7 +132,7 @@ export async function run({ siteId, start, end, pageCache }) {
     };
   }));
 
-  await markPagesChecked(siteId, 'content-gap', batch);
+  if (!params?.page) await markPagesChecked(siteId, 'content-gap', batch);
 
   // AI-inferred entity suggestions only for the top-impression pages that
   // fetched successfully — bounds LLM cost while still analyzing every

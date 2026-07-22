@@ -23,6 +23,9 @@ export const api = {
   // Public — no session required to call this (same as /login). Only ever
   // creates a pending signup_requests row, never a real account.
   submitSignupRequest: (body) => req('/signup-requests', { method: 'POST', body: JSON.stringify(body) }),
+  // Public — no session required to call this (same as /login). Only ever
+  // creates a contact_requests row: a lightweight lead, never an account.
+  submitContactRequest: (body) => req('/contact-requests', { method: 'POST', body: JSON.stringify(body) }),
   logout: () => req('/logout', { method: 'POST' }),
   sites: () => req('/sites'),
   agents: () => req('/agents'),
@@ -35,6 +38,12 @@ export const api = {
   reportInsights: (site) => req(`/report-insights?site=${site}`),
   series: (site, start, end) => req(`/series?site=${site}&start=${start}&end=${end}`),
   growthReport: () => req('/growth-report'),
+  growthTargets: {
+    set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
+    setBatch: (targets) => req('/growth-targets/batch', { method: 'POST', body: JSON.stringify({ targets }) }),
+    history: (metric) => req(`/growth-targets/${metric}/history`),
+  },
+  runAiRecommendation: () => req('/growth-report/run-ai-recommendation', { method: 'POST' }),
   compare: (site, a, b) => req(`/compare?site=${site}&a=${a}&b=${b}`),
   compareRange: (site, aS, aE, bS, bE) => req(`/compare-range?site=${site}&a_start=${aS}&a_end=${aE}&b_start=${bS}&b_end=${bE}`),
   channels: (site, start, end) => req(`/channels?site=${site}&start=${start}&end=${end}`),
@@ -55,9 +64,14 @@ export const api = {
     setStatus: (id, status) => req(`/watchlist/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   },
 
+  commonCrawlBacklinks: {
+    summary: (domain) => req(`/commoncrawl-backlinks/summary?domain=${encodeURIComponent(domain)}`),
+  },
+
   commandCenter: {
     get: () => req('/command-center'),
     refresh: (start, end) => req('/command-center/refresh', { method: 'POST', body: JSON.stringify({ start, end }) }),
+    agenticStats: () => req('/command-center/agentic-stats'),
   },
 
   notifications: {
@@ -77,6 +91,7 @@ export const api = {
     connect: (id, body) => req(`/internal/clients/${id}/connect`, { method: 'POST', body: JSON.stringify(body) }),
     connectRepo: (id, body) => req(`/internal/clients/${id}/connect-repo`, { method: 'POST', body: JSON.stringify(body) }),
     retryBaseline: (id) => req(`/internal/clients/${id}/retry-baseline`, { method: 'POST' }),
+    growthSummary: () => req('/internal/clients/growth-summary'),
     signupRequests: {
       list: () => req('/internal/signup-requests'),
       approve: (id) => req(`/internal/signup-requests/${id}/approve`, { method: 'POST' }),
@@ -99,6 +114,13 @@ export const api = {
     pushBranch: (id, renderMode) => req(`/action-center/drafts/${id}/push-branch`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
     mergeToStage: (id) => req(`/action-center/drafts/${id}/merge-to-stage`, { method: 'POST' }),
     previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
+    rollback: (id) => req(`/action-center/drafts/${id}/rollback`, { method: 'POST' }),
+  },
+
+  siteAudit: {
+    trigger: (maxPages) => req('/site-audit/run', { method: 'POST', body: JSON.stringify(maxPages ? { maxPages } : {}) }),
+    list: () => req('/site-audit/runs'),
+    get: (id) => req(`/site-audit/runs/${id}`),
   },
 };
 

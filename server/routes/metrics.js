@@ -86,7 +86,12 @@ router.get('/report-summary', async (req, res, next) => {
       const matches = site.daily_report_narrative_date === date;
       const series = await getDailySeries(site.id, shiftYmd(date, -10), date); // 11 days, oldest→newest (first day is the delta baseline for the Recent Report History rail, leaving 10 rows shown)
       const { gainers, droppers } = await getTopMovers(site.id, { start: date, end: date }, { start: shiftYmd(date, -1), end: shiftYmd(date, -1) }, 8);
-      const history = withDeltaPct(series.slice(1).map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse());
+      // Compute deltas over the full 11-entry (newest-first) series BEFORE
+      // slicing to 10 — withDeltaPct compares entries[i] to entries[i+1], so
+      // the oldest displayed day (index 9) needs the baseline day (index 10)
+      // still present to get a real delta. Slicing first (as this used to)
+      // threw the baseline away before that comparison could happen.
+      const history = withDeltaPct(series.map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse()).slice(0, 10);
       return res.json({
         period, date,
         metrics: row && {

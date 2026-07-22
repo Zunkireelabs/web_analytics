@@ -23,13 +23,14 @@ export async function getAuthoritySnapshotHistory(siteId, limit = 12) {
 export async function saveAuthoritySnapshot(siteId, snapshotDate, data) {
   const { rows } = await query(
     `INSERT INTO authority_snapshots (
-       site_id, snapshot_date, scoring_version, referring_domains, referring_main_domains,
+       site_id, snapshot_date, scoring_version, data_source, referring_domains, referring_main_domains,
        total_backlinks, follow_backlinks, nofollow_backlinks, referring_ips, referring_subnets,
        new_backlinks_30d, lost_backlinks_30d, anchor_diversity_score, authority_score,
        score_breakdown, top_linked_pages, raw_summary
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
      ON CONFLICT (site_id, snapshot_date) DO UPDATE SET
-       scoring_version = EXCLUDED.scoring_version, referring_domains = EXCLUDED.referring_domains,
+       scoring_version = EXCLUDED.scoring_version, data_source = EXCLUDED.data_source,
+       referring_domains = EXCLUDED.referring_domains,
        referring_main_domains = EXCLUDED.referring_main_domains, total_backlinks = EXCLUDED.total_backlinks,
        follow_backlinks = EXCLUDED.follow_backlinks, nofollow_backlinks = EXCLUDED.nofollow_backlinks,
        referring_ips = EXCLUDED.referring_ips, referring_subnets = EXCLUDED.referring_subnets,
@@ -39,7 +40,7 @@ export async function saveAuthoritySnapshot(siteId, snapshotDate, data) {
        raw_summary = EXCLUDED.raw_summary
      RETURNING *`,
     [
-      siteId, snapshotDate, data.scoringVersion, data.referringDomains ?? null, data.referringMainDomains ?? null,
+      siteId, snapshotDate, data.scoringVersion, data.dataSource, data.referringDomains ?? null, data.referringMainDomains ?? null,
       data.totalBacklinks ?? null, data.followBacklinks ?? null, data.nofollowBacklinks ?? null,
       data.referringIps ?? null, data.referringSubnets ?? null, data.newBacklinks30d ?? null,
       data.lostBacklinks30d ?? null, data.anchorDiversityScore ?? null, data.authorityScore,

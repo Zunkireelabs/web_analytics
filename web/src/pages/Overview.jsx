@@ -36,10 +36,12 @@ export default function Overview({ siteId }) {
   const [rangePages, setRangePages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [rangeReady, setRangeReady] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     if (!siteId) return;
     setRangeReady(false);
+    setError(false);
     api.range(siteId).then((r) => {
       setRange(r);
       const latest = r.latest_visitor || r.freshest;
@@ -47,7 +49,7 @@ export default function Overview({ siteId }) {
         setEnd(latest);
         setStart(shiftYmd(latest, 3));
       }
-    }).catch(() => {}).finally(() => setRangeReady(true));
+    }).catch(() => setError(true)).finally(() => setRangeReady(true));
   }, [siteId]);
 
   useEffect(() => {
@@ -76,7 +78,7 @@ export default function Overview({ siteId }) {
         setRangeQueries(q);
         setRangePages(p);
       })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [siteId, start, end, rangeReady]);
@@ -151,6 +153,12 @@ export default function Overview({ siteId }) {
         <div className="absolute bottom-10 left-1/4 w-[500px] h-[500px] rounded-full blur-[125px] bg-purple-500/8 opacity-45 pulse-glow" />
         <div className="absolute top-1/2 left-1/3 w-[300px] h-[300px] rounded-full blur-[100px] bg-sky-500/5 opacity-30 pulse-glow" />
       </div>
+
+      {error && (
+        <div className="card p-4 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 text-center">
+          Unable to load some real data right now — numbers below may be incomplete. Try refreshing.
+        </div>
+      )}
 
       {/* Page Header + Compact Date Selector combined */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-2">

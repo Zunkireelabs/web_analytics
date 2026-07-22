@@ -15,12 +15,19 @@
 
 /**
  * @typedef {Object} CompetitorProvider
- * @property {string} id              stable slug, e.g. "dataforseo"
+ * @property {string} id              stable slug, e.g. "dataforseo", "google-cse"
+ * @property {() => boolean} configured  whether this provider has what it needs
+ *              (credentials/keys) to attempt serving real data — checked before
+ *              ever calling fetchRankings, same convention as
+ *              ingest/dataforseo-backlinks.js's own configured().
  * @property {(query: string, opts: { locationCode: number, languageCode: string }) =>
  *              Promise<SerpResult[]>} fetchRankings
  *              Real organic SERP results for one query, position-ordered.
  *              Must throw on a hard failure (bad credentials, provider
  *              outage) — callers decide how to degrade, a provider must
- *              never silently return an empty/fabricated result set.
+ *              never silently return an empty/fabricated result set. `opts`
+ *              is DataForSEO's own numeric/string location system — a
+ *              provider that doesn't use that system (e.g. google-cse) is
+ *              free to ignore it and use its own env-based config instead.
  */
 export {};

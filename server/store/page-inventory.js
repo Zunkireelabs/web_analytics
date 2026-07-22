@@ -55,6 +55,40 @@ export async function listOrphanedPages(siteId, limit = 20) {
   return rows;
 }
 
+// Content-hash writes are UPDATE-only, never an upsert that would create a
+// row — duplicate-content.js only ever hashes pages selectCandidatePages
+// already surfaced (GSC top pages + existing inventory), which are
+// overwhelmingly already-known pages; a page with no inventory row yet
+// simply gets no hash recorded this run rather than a synthetic
+// discovered_via being invented to satisfy the NOT NULL constraint.
+export async function updatePageContentHash(siteId, page, contentHash) {
+  await query(
+    'UPDATE page_inventory SET content_hash = $1 WHERE site_id = $2 AND page = $3',
+    [contentHash, siteId, page]
+  );
+}
+
+const CONTENT_HASH_CHUNK_SIZE = 25;
+export async function updatePageContentHashBatch(siteId, hashByPage) {
+  const entries = [...hashByPage.entries()];
+  for (let i = 0; i < entries.length; i += CONTENT_HASH_CHUNK_SIZE) {
+    const chunk = entries.slice(i, i + CONTENT_HASH_CHUNK_SIZE);
+    await Promise.all(chunk.map(([page, hash]) => updatePageContentHash(siteId, page, hash)));
+  }
+}
+
+// Real, accumulated site-wide coverage (not just today's rotation batch) —
+// same "merge today's fresh batch with everything already known" shape as
+// store/technical-seo-checks.js's listTitlesForSite, applied to content
+// hashes instead of titles.
+export async function listContentHashesForSite(siteId) {
+  const { rows } = await query(
+    'SELECT page, content_hash FROM page_inventory WHERE site_id = $1 AND content_hash IS NOT NULL',
+    [siteId]
+  );
+  return rows;
+}
+
 export async function listPageInventory(siteId, { limit = 500 } = {}) {
   const { rows } = await query(
     'SELECT page, discovered_via, first_seen_at, last_seen_at FROM page_inventory WHERE site_id = $1 ORDER BY last_seen_at DESC LIMIT $2',

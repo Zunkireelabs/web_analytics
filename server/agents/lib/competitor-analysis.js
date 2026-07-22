@@ -1,7 +1,7 @@
 import { analyzePageUrl } from './page-content.js';
 import { scorePageCategories } from './visibility-score.js';
 import { getSearchPerformanceRange, getSiteById } from '../../store/read.js';
-import { getCompetitorProvider } from '../../ingest/competitor-providers/index.js';
+import { getCompetitorProvider, competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 import { callLLM } from '../../llm.js';
 import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
 
@@ -117,6 +117,17 @@ export async function detectCompetitors(ownDomain, topPages, topQueries, busines
   }
 }
 
+// Same normalization + allowlist regex already applied inline to LLM-returned
+// domains above (lowercase, strip www, must look like a real domain) —
+// factored out so agentic-orchestrator.js can apply the identical sanitizing
+// to a model-supplied params.competitor value before it's ever used to build
+// a URL or trusted downstream.
+export function normalizeCompetitorDomain(raw) {
+  if (!raw) return null;
+  const d = String(raw).trim().toLowerCase().replace(/^www\./, '');
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) ? d : null;
+}
+
 // Step 2 (crawl) + 3 (compare) — fetch one candidate's real homepage and, if
 // it resolves, ask an LLM to compare it against the site's own already-
 // fetched analysis using only the real structural signals given.
@@ -166,7 +177,7 @@ export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore
 // Full pipeline: detect -> crawl -> compare. Returns every candidate,
 // successful or not, so a caller can report "identified but couldn't reach
 // X" instead of a competitor silently vanishing.
-export async function runCompetitorDiscovery(siteId, start, end) {
+export async function runCompetitorDiscovery(siteId, start, end, { forceDomain } = {}) {
   const [site, topPagesRaw, topQueries] = await Promise.all([
     getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', TOP_PAGES_FOR_CONTEXT),
@@ -194,7 +205,7 @@ export async function runCompetitorDiscovery(siteId, start, end) {
   // competitive landscape than either alone; a domain both lenses agree on
   // is the strongest signal available.
   const [serpDomains, llmDomains] = await Promise.all([
-    (process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD)
+    competitorProviderConfigured()
       ? detectCompetitorsFromSerp(ownDomain, queryTexts, { locationCode, languageCode }).catch(() => [])
       : Promise.resolve([]),
     detectCompetitors(ownDomain, topPageUrls, queryTexts, businessContext).catch(() => []),
@@ -209,13 +220,21 @@ export async function runCompetitorDiscovery(siteId, start, end) {
   // keeps the most-confirmed candidates first when the combined list is
   // larger than MAX_COMPETITORS.
   const CONFIDENCE_RANK = { both: 0, serp: 1, llm: 2 };
-  const candidateDomains = [...sourceByDomain.keys()]
+  const discoveredDomains = [...sourceByDomain.keys()]
     .sort((a, b) => CONFIDENCE_RANK[sourceByDomain.get(a)] - CONFIDENCE_RANK[sourceByDomain.get(b)])
     .slice(0, MAX_COMPETITORS);
 
+  // A caller-forced domain (e.g. the agentic loop's params.competitor) always
+  // gets analyzed even if discovery didn't surface it — unshifted ahead of
+  // the cap rather than added on top of it, so this never exceeds
+  // MAX_COMPETITORS worth of real analysis calls.
+  const candidateDomains = forceDomain && forceDomain !== ownDomain
+    ? [forceDomain, ...discoveredDomains.filter((d) => d !== forceDomain)].slice(0, MAX_COMPETITORS)
+    : discoveredDomains;
+
   const competitors = await Promise.all(candidateDomains.map((d) =>
     analyzeCompetitor(d, ownPageFetch.analysis, ownDomain, ownScore)
-      .then((c) => ({ ...c, discoverySource: sourceByDomain.get(d) }))
+      .then((c) => ({ ...c, discoverySource: sourceByDomain.get(d) || 'forced' }))
   ));
 
   return { ownDomain, ownScore, competitors };

@@ -18,6 +18,7 @@ const CommandCenter = lazy(() => import('./pages/CommandCenter.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
+const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
 
 export default function App() {
   const [authed, setAuthed] = useState(null); // null = still checking
@@ -88,14 +89,18 @@ export default function App() {
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
               <Route path="/reports" element={<Reports siteId={siteId} />} />
-              <Route path="/growth" element={<GrowthReport />} />
+              <Route path="/milestones" element={<GrowthReport isInternal={isInternal} />} />
               {/* AI Command Center is the default /ai-growth landing experience;
                   /ai-orchestration is the orchestration diagram — how the 10
                   specialist agents actually connect (AiGrowth.jsx) — and still
-                  the place to run or inspect one agent directly. */}
-              {isInternal && <Route path="/ai-growth" element={<CommandCenter />} />}
-              {isInternal && <Route path="/ai-orchestration" element={<AiGrowth />} />}
-              {isInternal && <Route path="/action-center" element={<ActionCenter />} />}
+                  the place to run or inspect one agent directly. Client-facing
+                  like the rest of the routes above — each is server-scoped to
+                  req.session.siteId, never a cross-client view. */}
+              <Route path="/ai-growth" element={<CommandCenter />} />
+              <Route path="/ai-orchestration" element={<AiGrowth />} />
+              <Route path="/action-center" element={<ActionCenter />} />
+              <Route path="/site-audit" element={<SiteAudit />} />
+              {/* Staff-only — operates across every client's site, not just this session's own. */}
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
             </Routes>
           </Suspense>

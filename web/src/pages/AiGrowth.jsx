@@ -14,8 +14,6 @@ import {
   BrainCircuit,
   AlertTriangle,
   RotateCw,
-  Eye,
-  Sliders,
   ChevronRight,
   Target,
   Globe,
@@ -27,23 +25,6 @@ import {
 const FALLBACK_POLL_MS = 45000;
 const REFRESH_START = daysAgo(7);
 const REFRESH_END = daysAgo(0);
-
-// Keyed by the real agent ids (server/agents/*.js meta.id) — a prior version
-// of this map used made-up ids that matched nothing, so every real SSE event
-// silently fell back to showing the raw id instead of a label.
-const AGENT_META = {
-  'technical-seo': { label: 'Technical SEO Audit', icon: Target, color: '#6C63FF' },
-  'opportunity': { label: 'SEO Opportunity Finder', icon: Target, color: '#a855f7' },
-  'query-intelligence': { label: 'Query Intelligence', icon: Target, color: '#6366f1' },
-  'device-intelligence': { label: 'Device Intelligence', icon: Sliders, color: '#10b981' },
-  'country-intelligence': { label: 'Geo Market Analyst', icon: Globe, color: '#0ea5e9' },
-  'ai-visibility': { label: 'AI Visibility Auditor', icon: Globe, color: '#ec4899' },
-  'content-gap': { label: 'Content Gap Analyzer', icon: FileText, color: '#14b8a6' },
-  'competitor-intelligence': { label: 'Competitor Intelligence', icon: Eye, color: '#f59e0b' },
-  'authority': { label: 'Authority Score Auditor', icon: Sliders, color: '#ef4444' },
-  'ai-recommendation': { label: 'AI Recommendation Auditor', icon: BrainCircuit, color: '#8b5cf6' },
-  'executive-report': { label: 'Executive Report', icon: FileText, color: '#0f172a' },
-};
 
 // Category → icon for the Live Agent Findings Feed cards (findings are keyed
 // by CATEGORY, a smaller set than the per-agent AGENT_META above).
@@ -94,11 +75,27 @@ export default function AiGrowth() {
     api.agentsActivity(12).then(setActivity).catch(() => setActivity((a) => a ?? []));
   }, []);
 
+  // The SSE handler below is set up once (mount-only effect) and must always
+  // read the LATEST agent list, not whatever `agents` was when the effect
+  // first ran — a ref sidesteps the stale-closure trap without forcing an
+  // SSE reconnect every time `agents` refreshes.
+  const agentsRef = useRef([]);
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
+
   useEffect(() => {
     refresh();
     const poll = setInterval(refresh, FALLBACK_POLL_MS);
     return () => clearInterval(poll);
   }, [refresh]);
+
+  // Real, already-persisted telemetry for the agentic tool-calling loop
+  // (only populated once AGENTIC_ORCHESTRATION_ENABLED is on and a refresh
+  // has actually used it) — null while loading/unavailable, never shown as
+  // if it were the only execution mode.
+  const [agenticStats, setAgenticStats] = useState(null);
+  useEffect(() => {
+    api.commandCenter.agenticStats().then(setAgenticStats).catch(() => {});
+  }, []);
 
   // Load findings already persisted from prior runs on mount — without this,
   // the feed only ever shows findings from a run triggered in this exact
@@ -117,7 +114,7 @@ export default function AiGrowth() {
       let event;
       try { event = JSON.parse(raw.data); } catch { return; }
       
-      const agentLabel = AGENT_META[event.agentId]?.label || event.agentId;
+      const agentLabel = agentsRef.current.find((a) => a.id === event.agentId)?.name || event.agentId;
 
       if (event.type === 'start') {
         setRunningAgents((m) => new Map(m).set(event.agentId, new Date(event.at).getTime()));
@@ -474,6 +471,15 @@ export default function AiGrowth() {
                 <p className="text-xs text-slate-600 leading-relaxed font-medium mb-4">
                   This view illustrates the parallel execution path. The status of each agent reacts live to system runner calls.
                 </p>
+                {agenticStats?.byMode?.length > 0 && (
+                  <p className="text-[11px] text-indigo-600 font-semibold mb-4 -mt-2">
+                    Agentic mode also ran {agenticStats.byMode.reduce((s, m) => s + m.sessions, 0)} time(s) in the last 30 days
+                    {(() => {
+                      const agentic = agenticStats.byMode.find((m) => m.mode !== 'question');
+                      return agentic ? ` (avg ${agentic.avg_rounds} rounds, ${agentic.avg_tool_calls} tool calls)` : '';
+                    })()} — the diagram above reflects the fixed parallel path only.
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center gap-x-5 gap-y-2 pt-4 border-t border-slate-200">
                   <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 mr-1">Node status</span>
                   <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-600">

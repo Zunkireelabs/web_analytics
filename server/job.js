@@ -2,6 +2,7 @@ import { getOrCreateSite, query } from './db.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
 import { fetchCompetitorRankings } from './ingest/competitors.js';
+import { competitorProviderConfigured } from './ingest/competitor-providers/index.js';
 import { upsertGsc, upsertGa4, saveNarrative, markDailyDocDone, saveCompetitorRankings, saveHealthScoreSnapshot, recordIntegrationCheck } from './store/upsert.js';
 import { getDay, getNarrative, listSites, getCompetitorRankingDates, getHealthScoreOnOrBefore } from './store/read.js';
 import { generateNarrative } from './report/narrative.js';
@@ -36,6 +37,10 @@ import { runDueVerifications } from './agents/lib/fix-verification.js';
 // spend for no real signal gain). content-gap runs weekly (via
 // executive-report's requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID
 // — real content-completeness gaps don't meaningfully shift day to day).
+// A new agent added to RECOMMENDATION_AGENT_IDS (agents/lib/insights.js)
+// lands here in DAILY_AGENT_IDS automatically unless it's added to
+// MONTHLY_AGENT_IDS below or given its own WEEKLY_ONLY_AGENT_ID-style
+// exclusion — pick the cadence deliberately, don't leave it to default.
 const MONTHLY_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !MONTHLY_AGENT_IDS.has(id) && id !== 'content-gap');
 
@@ -337,11 +342,12 @@ export async function runWeeklyIfDueForAllSites() {
 // runCompetitorIntelligenceIfDue below). Its own marker:
 // getCompetitorRankingDates (real persisted check dates) instead of a
 // sites column, since competitor_rankings already records when it last ran.
-// Silently no-ops if DataForSEO isn't configured — the competitor-
-// intelligence agent already reports "insufficient-data" plainly in that
-// case, so there's nothing to force here.
+// Silently no-ops if no SERP provider (DataForSEO or the free Google Custom
+// Search provider) is configured — the competitor-intelligence agent
+// already reports "insufficient-data" plainly in that case, so there's
+// nothing to force here.
 export async function runCompetitorCheckIfDue(site) {
-  if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) return null;
+  if (!competitorProviderConfigured()) return null;
 
   const { start, end } = previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
   const { year, month } = previousMonth(site.timezone);

@@ -2,16 +2,17 @@ import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import Logo from './Logo.jsx';
 import NotificationBell from './NotificationBell.jsx';
-import { 
-  BarChart3, 
-  Search, 
-  TrendingUp, 
-  FileText, 
-  Sprout, 
-  Bot, 
-  Zap, 
-  Network, 
-  Building2 
+import {
+  BarChart3,
+  Search,
+  TrendingUp,
+  FileText,
+  Sprout,
+  Bot,
+  Zap,
+  Network,
+  Building2,
+  Radar
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -21,13 +22,22 @@ const NAV = [
   { to: '/insights', label: 'Insights', icon: Search },
   { to: '/compare', label: 'Compare', icon: TrendingUp },
   { to: '/reports', label: 'Reports', icon: FileText },
-  { to: '/growth', label: 'Milestones', icon: Sprout },
+  { to: '/milestones', label: 'Milestones', icon: Sprout },
 ];
 
-const INTERNAL_NAV = [
+// Client-facing growth tooling — same page for staff and clients alike,
+// each session server-scoped to its own site (req.session.siteId), never a
+// staff-only cross-client view.
+const GROWTH_TOOLS_NAV = [
   { to: '/ai-growth', label: 'AI Growth', icon: Bot },
   { to: '/action-center', label: 'Action Center', icon: Zap },
   { to: '/ai-orchestration', label: 'Orchestration', icon: Network },
+  { to: '/site-audit', label: 'Site Audit', icon: Radar },
+];
+
+// The one remaining staff-only page — operates across every client's site,
+// not just the session's own, so it stays behind isInternal.
+const INTERNAL_NAV = [
   { to: '/clients', label: 'Clients', icon: Building2 },
 ];
 
@@ -102,6 +112,7 @@ export default function Sidebar({ sites, siteId, isInternal, onSite, onLogout, m
 
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+            {GROWTH_TOOLS_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
             {isInternal && (
               <>
