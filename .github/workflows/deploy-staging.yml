@@ -38,6 +38,16 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            # Without this, a failed step (e.g. `docker compose build` running
+            # out of disk space) doesn't stop the script — it falls through to
+            # `up -d`, which happily recreates the container from whatever
+            # image already exists locally (the OLD one), passes its health
+            # check, and the whole job reports success even though nothing
+            # new was actually deployed. Confirmed real: a real deploy did
+            # exactly this on 2026-07-22 (VPS out of disk space), silently
+            # serving stale code while CI showed green.
+            set -eo pipefail
+
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
 
             # First-push bootstrap: create directory and clone if missing
