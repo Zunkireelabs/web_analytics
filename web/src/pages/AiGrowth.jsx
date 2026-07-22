@@ -26,8 +26,9 @@ const FALLBACK_POLL_MS = 45000;
 const REFRESH_START = daysAgo(7);
 const REFRESH_END = daysAgo(0);
 
-// Category → icon for the Live Agent Findings Feed cards (findings are keyed
-// by CATEGORY, a smaller set than the per-agent AGENT_META above).
+// Category → icon for the Live Agent Findings Feed cards — findings are
+// keyed by CATEGORY, a small fixed set, unlike the live per-agent lookup
+// used for SSE log labels (agentsRef, below).
 const ICONS = { seo: Target, geo: Globe, content: FileText, meta: BrainCircuit };
 
 // The real, fixed shape of the pipeline (server/agents/orchestrator.js ->
