@@ -15,7 +15,7 @@ export const meta = {
   // both wasteful and impolite. Its findings still surface everywhere
   // Command Center/Action Center read RECOMMENDATION_AGENT_IDS — this
   // narrative just doesn't force a fresh competitor check every week.
-  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo'],
+  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability'],
 };
 
 // content-gap runs weekly-only (server/job.js's DAILY_AGENT_IDS deliberately
@@ -24,15 +24,15 @@ export const meta = {
 // re-crawling every candidate page daily). This weekly report is its ONLY
 // chance to persist a real agent_runs row. Every other sub-agent here
 // already persists its own row daily via job.js's runDailyAgentAnalysisForSite,
-// so persisting all 7 here would just create redundant daily-duplicate rows
-// for those 6 — only content-gap gets the explicit write.
+// so persisting all 12 here would just create redundant daily-duplicate rows
+// for those 11 — only content-gap gets the explicit write.
 const WEEKLY_ONLY_AGENT_ID = 'content-gap';
 
 // Thin config over the shared orchestrator (orchestrator.js) — this agent no
 // longer hand-rolls its own fan-out + synthesis; it just tells the
 // orchestrator which agents to run. persistSubAgentRuns stays false so
 // running the executive report still doesn't write redundant agent_runs
-// rows for the 6 daily agents, same intent as the original direct
+// rows for the 11 daily agents, same intent as the original direct
 // agent.run() calls.
 export async function run(input) {
   const result = await runOrchestration({ ...input, agentIds: meta.requires, persistSubAgentRuns: false });

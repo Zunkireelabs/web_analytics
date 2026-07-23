@@ -90,11 +90,11 @@ export async function runExecutiveDocReport(site, anchorDate) {
   const label = weekLabel(start, end);
 
   const digest = { week: label, site: site.name, sections: agentOutput.facts.sections };
+  const specialistAgentNames = Object.keys(digest.sections).map((id) => id.replace(/-/g, ' ')).join(', ');
 
   const system = 'You are a growth strategist writing a WEEKLY AI Executive Report for a non-technical site ' +
-    'owner\'s leadership team. You are given `sections`, the real, already-computed output of seven specialist ' +
-    'agents (query intelligence, opportunity, country intelligence, device intelligence, AI visibility, content ' +
-    'gap, technical SEO) for this week — every number in it is real, already-verified data. Competitor ' +
+    'owner\'s leadership team. You are given `sections`, the real, already-computed output of this week\'s ' +
+    `specialist agents (${specialistAgentNames}) — every number in it is real, already-verified data. Competitor ` +
     'intelligence runs on its own monthly cadence and is not included every week — never invent a competitor ' +
     'claim in its absence. Some ' +
     'sections may have status "insufficient-data" or "error" — name that plainly as a gap, never guess around it.\n\n' +
