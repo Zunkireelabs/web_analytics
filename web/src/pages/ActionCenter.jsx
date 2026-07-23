@@ -42,7 +42,7 @@ const DRAFT_STATUS_LABEL = {
   pr_opened: 'PR opened', implemented: 'implemented',
 };
 
-const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'implemented'];
+const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented'];
 const STAGE_COLOR = {
   draft: '#94a3b8', edited: '#f59e0b', submitted_for_approval: '#f59e0b',
   approved: '#10b981', branch_pushed: '#7c3aed', merged_to_stage: '#2563eb',
@@ -57,7 +57,7 @@ const STATUS_FILTERS = [
   { value: 'submitted_for_approval', label: 'Pending Approval' },
   { value: 'approved', label: 'Approved' },
   { value: 'branch_pushed', label: 'Branch Pushed' },
-  { value: 'merged_to_stage', label: 'Merged to Stage' },
+  { value: 'pr_opened', label: 'PR Opened' },
 ];
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };

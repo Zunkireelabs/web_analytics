@@ -42,9 +42,10 @@ const STATUS_INFO = {
   edited: { label: 'Edited draft · never published', color: '#f59e0b', bg: '#f59e0b0c', border: '#f59e0b20' },
   submitted_for_approval: { label: 'Submitted for approval', color: '#f59e0b', bg: '#f59e0b0c', border: '#f59e0b20' },
   approved: { label: 'Approved · not yet live', color: '#059669', bg: '#0596690c', border: '#05966920' },
-  branch_pushed: { label: 'Branch pushed · review before merge', color: '#7c3aed', bg: '#7c3aed0c', border: '#7c3aed20' },
+  branch_pushed: { label: 'Branch pushed · review before opening PR', color: '#7c3aed', bg: '#7c3aed0c', border: '#7c3aed20' },
   merged_to_stage: { label: 'Merged to stage', color: '#2563eb', bg: '#2563eb0c', border: '#2563eb20' },
-  implemented: { label: 'Implemented · live on stage', color: '#16a34a', bg: '#16a34a0c', border: '#16a34a20' },
+  pr_opened: { label: 'PR opened · review & merge on GitHub', color: '#2563eb', bg: '#2563eb0c', border: '#2563eb20' },
+  implemented: { label: 'Implemented · live on main', color: '#16a34a', bg: '#16a34a0c', border: '#16a34a20' },
 };
 
 function FileDiffPreview({ result }) {
@@ -319,6 +320,23 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
           </div>
         )}
 
+        {draft.pr_url && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
+            <a href={draft.pr_url} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
+              View PR on GitHub <ExternalLink size={12} />
+            </a>
+            {draft.status === 'implemented' ? (
+              <span className="font-extrabold text-emerald-600 flex items-center gap-1">
+                <Check size={12} strokeWidth={3} /> Merged to main
+              </span>
+            ) : (
+              <span className="font-extrabold text-amber-600">
+                {draft.pr_state === 'closed' ? 'PR closed' : 'Awaiting merge'}
+              </span>
+            )}
+          </div>
+        )}
+
         {draft.gsc_notification && !draft.gsc_notification.skipped && (
           <div className="px-6 py-3 border-b border-slate-100 bg-slate-50 text-xs text-slate-500 flex items-center gap-2">
             {draft.gsc_notification.sitemapSubmit?.ok ? (
@@ -366,7 +384,15 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
                       <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
                       <p>
-                        This branch has been pushed to GitHub. Review the real file diff below. Merging this PR deploys it to staging and completes the pipeline in one step.
+                        This branch has been pushed to GitHub. Review the real file diff below, then open a PR — a human still needs to review and merge it into <code>main</code> on GitHub before it's live.
+                      </p>
+                    </div>
+                  )}
+                  {draft.status === 'pr_opened' && (
+                    <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
+                      <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
+                      <p>
+                        A PR is open against <code>main</code>. Review and merge it on GitHub, then click Check PR Status here to mark this draft implemented.
                       </p>
                     </div>
                   )}
@@ -545,12 +571,28 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       {draft.branch_name}
                     </span>
                     <button
-                      onClick={() => transition(() => api.actionCenter.mergeToStage(draft.id))}
+                      onClick={() => transition(() => api.actionCenter.openPr(draft.id))}
                       disabled={transitioning}
                       className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
-                      <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Merging…' : 'Merge to Stage'}
+                      <GitBranch size={12} /> {transitioning ? 'Opening PR…' : 'Open PR'}
+                    </button>
+                  </>
+                )}
+
+                {draft.status === 'pr_opened' && (
+                  <>
+                    <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
+                      Waiting on a human to review and merge the PR on GitHub.
+                    </span>
+                    <button
+                      onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id))}
+                      disabled={transitioning}
+                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                    >
+                      <Check size={12} strokeWidth={2.5} /> {transitioning ? 'Checking…' : 'Check PR Status'}
                     </button>
                   </>
                 )}

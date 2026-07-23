@@ -114,6 +114,39 @@ export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl, r
   return rows[0] || null;
 }
 
+// branch_pushed -> pr_opened. Only ever called after an implementer's
+// mergeToStage() has already succeeded in opening a real PR against the
+// real GitHub repo (branch_name unchanged, now paired with a real PR number/
+// URL) — this persists real evidence, it doesn't create it. `pr_number`/
+// `pr_url`/`pr_state` are pre-existing columns from migration 029 (an
+// earlier, abandoned PR-based design) reused here rather than adding new
+// ones. `rollbackSnapshot` follows the same optional, writer-supplied
+// pattern as markDraftMergedToStage below.
+export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackSnapshot = null }) {
+  const { rows } = await query(
+    `UPDATE drafts SET status = 'pr_opened', pr_number = $3, pr_url = $4, pr_state = 'open',
+       apply_error = NULL, updated_at = now(),
+       rollback_snapshot = COALESCE($5, rollback_snapshot)
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
+     RETURNING *`,
+    [siteId, id, prNumber, prUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]
+  );
+  return rows[0] || null;
+}
+
+// Pure annotation write, no status guard — same pattern as
+// recordGscNotification below. Used by the Check PR Status action to record
+// GitHub's real current PR state ('open'/'closed') when it hasn't merged
+// yet; the 'merged' case instead goes through markDraftImplemented (below),
+// since that's a real lifecycle transition, not just an annotation.
+export async function recordPrState(siteId, id, prState) {
+  const { rows } = await query(
+    'UPDATE drafts SET pr_state = $3, updated_at = now() WHERE site_id = $1 AND id = $2 RETURNING *',
+    [siteId, id, prState]
+  );
+  return rows[0] || null;
+}
+
 // Best-effort record of the post-merge Search Console notification result
 // (multi-tenant refactor Part 3) — does not gate or change draft status;
 // this is pure audit visibility for Action Center, called after
@@ -164,19 +197,21 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 // ever apply today).
 export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation'];
 
-// approved -> implemented. Two distinct evidence paths, both real:
+// approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real
 //     merge strategy at all (see MERGE_MANDATORY_TYPES above) —
 //     "implemented" still means a person put the content live and said so.
-//   - merge-to-stage path (mandatory for MERGE_MANDATORY_TYPES):
-//     status='merged_to_stage' — real, GitHub-confirmed evidence the change
-//     is live on staging. Called automatically (chained right after
-//     markDraftMergedToStage, see server/routes/action-center.js's
-//     /merge-to-stage) rather than waiting on a separate human click —
-//     promoting stage -> main/production is entirely manual and outside
-//     this platform's visibility (~/Travel/ci-cd-deployment-master-guide),
-//     so there's no further real signal this app could ever wait on; a real
-//     stage merge IS the real evidence.
+//   - merge-to-stage path: status='merged_to_stage' — real, GitHub-confirmed
+//     evidence a HISTORICAL draft (from before the PR-based flow below
+//     replaced this) is live on staging. No new draft reaches this status
+//     going forward; kept only so old rows still finalize correctly.
+//   - PR-merged path (current, mandatory for MERGE_MANDATORY_TYPES):
+//     status='pr_opened' AND pr_state='merged' — real, GitHub-confirmed
+//     evidence a human reviewed and merged the draft's PR into `main`.
+//     Called by the Check PR Status action (server/routes/action-center.js's
+//     /check-pr-status) once getPullRequest() reports merged:true — there's
+//     no way to know earlier, since merging is now a manual human action on
+//     GitHub, not something this app triggers.
 // This is the real evidence hasDraftSince() below (and the Watchlist's
 // completion check) requires — a draft merely existing, or even being
 // approved, isn't the same as the change actually being live on the site.
@@ -192,6 +227,7 @@ export async function markDraftImplemented(siteId, id) {
      WHERE site_id = $1 AND id = $2 AND (
        (status = 'approved' AND branch_name IS NULL AND NOT (action_type = ANY($3)))
        OR status = 'merged_to_stage'
+       OR (status = 'pr_opened' AND pr_state = 'merged')
      )
      RETURNING *`,
     [siteId, id, MERGE_MANDATORY_TYPES]

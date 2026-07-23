@@ -5,7 +5,7 @@ import {
   findObjectRange, findArrayFieldRange, spliceMarkedArray, insertNewArrayField,
   assertValidContent, dedupeAndValidateFaqItems, diffFaqItems, parseManagedFaqItems,
 } from './lib/js-data-splice.js';
-import { mergeToStageWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
+import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
 
 // Generic, config-driven writer for "array of objects, one per URL"
 // content files (Eleventy pagination data, a plain JSON collection,
@@ -95,7 +95,7 @@ export async function apply(site, draft) {
 export async function mergeToStage(site, draft) {
   const page = draft.content?.page || draft.input?.page;
   const config = resolveAdapter(site, page, draft.action_type);
-  return mergeToStageWithSnapshot(site, draft, config?.dataFile);
+  return openPrWithSnapshot(site, draft, config?.dataFile);
 }
 
 export async function rollback(site, draft) {

@@ -1,5 +1,5 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
-import { pushDraftBranch, mergeBranchToStage, STAGE_BRANCH } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, STAGE_BRANCH } from './lib/github-ops.js';
 import { getFileContent } from '../github/client.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers } from './lib/marker-merge.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
@@ -182,12 +182,15 @@ export async function apply(site, draft, opts = {}) {
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${draft.action_type}".` };
 }
 
-// branch_pushed -> merged into stage (real deploy). draft.branch_name is
+// branch_pushed -> PR opened into main (human merges on GitHub). Despite the
+// name — kept as-is because implementers/registry.js checks for this exact
+// export name at load time (see server/implementers/registry.js) — this no
+// longer merges into stage, it opens a PR into main. draft.branch_name is
 // already real (persisted by markDraftBranchPushed after apply() above
-// succeeded) — this step only merges, no new file writes.
+// succeeded) — this step only opens the PR, no new file writes.
 export async function mergeToStage(site, draft) {
   if (!draft.branch_name) return { ok: false, reason: 'no-branch', error: 'No branch has been pushed for this draft yet.' };
-  return mergeBranchToStage(site, draft, draft.branch_name);
+  return openPrForBranch(site, draft, draft.branch_name);
 }
 
 // Zero-write dry run — the real diff a reviewer sees before approving,
