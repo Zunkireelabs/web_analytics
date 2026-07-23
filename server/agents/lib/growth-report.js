@@ -4,7 +4,7 @@ import { getAuthoritySnapshotHistory } from '../../store/authority.js';
 import { getMentionRateHistory } from '../../store/ai-recommendation.js';
 import { getActiveGrowthTargets } from '../../store/growth-targets.js';
 import { configured as openaiConfigured } from './model-providers/openai.js';
-import { getLatestFindings } from '../../store/agent-runs.js';
+import { getLatestFindings } from './fresh-runs.js';
 import { getImplementedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';

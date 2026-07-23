@@ -1,4 +1,4 @@
-import { getLatestFindings } from '../../store/agent-runs.js';
+import { getLatestFindings } from './fresh-runs.js';
 import { getQueriesForPage } from '../../store/read.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';

@@ -1,5 +1,6 @@
 import { listAgentMeta } from '../registry.js';
-import { getLatestFindings, getLatestAgentRuns, getRecentActivity } from '../../store/agent-runs.js';
+import { getLatestFindings, getLatestAgentRuns } from './fresh-runs.js';
+import { getRecentActivity } from '../../store/agent-runs.js';
 import { getHealthScoreOnOrBefore } from '../../store/read.js';
 import { saveHealthScoreSnapshot } from '../../store/upsert.js';
 import { computeHealthScore } from './health-score.js';
