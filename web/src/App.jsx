@@ -1,5 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
@@ -21,6 +21,7 @@ const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
 
 export default function App() {
+  const navigate = useNavigate();
   const [authed, setAuthed] = useState(null); // null = still checking
   const [isInternal, setIsInternal] = useState(false);
   const [sites, setSites] = useState([]);
@@ -35,6 +36,27 @@ export default function App() {
 
   // Check session on load.
   useEffect(() => { checkSession(); }, []);
+
+  // A 401 from ANY data call (api.js) means the session is no longer valid —
+  // treat it the same as an explicit logout instead of leaving it to whatever
+  // page happened to make the failing call.
+  useEffect(() => {
+    const onUnauthorized = () => setAuthed(false);
+    window.addEventListener('api:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('api:unauthorized', onUnauthorized);
+  }, []);
+
+  // The authed/unauthed swap below (`if (!authed) return <Login/>`) happens
+  // outside <Routes>, so React Router never gets a chance to reconcile the
+  // URL on its own — without this, the address bar keeps showing whatever
+  // protected path (e.g. /action-center) was last loaded even after the
+  // rendered content becomes the logged-out Login page. Whenever we're not
+  // authed, force the URL back to '/' so it always matches what's on screen —
+  // covers explicit logout, a mid-session expiry caught above, and a stale
+  // session landing on a protected URL from a fresh load/hard refresh alike.
+  useEffect(() => {
+    if (authed === false) navigate('/', { replace: true });
+  }, [authed, navigate]);
 
   // Load sites once authenticated.
   useEffect(() => {
@@ -83,8 +105,8 @@ export default function App() {
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes>
-              {/* No standalone marketing homepage in the authenticated app — land straight on Overview. */}
-              <Route path="/" element={<Navigate to="/overview" replace />} />
+              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth. */}
+              <Route path="/" element={<Navigate to="/ai-growth" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
