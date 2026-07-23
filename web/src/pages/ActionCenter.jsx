@@ -177,6 +177,10 @@ export default function ActionCenter() {
     try {
       const draft = await api.actionCenter.generate(item.generatorId, item.params, item.source, item.id);
       setActiveDraft(draft);
+      // The backend now excludes any already-drafted finding from
+      // recommendations — refresh recs too so this item disappears from the
+      // list immediately instead of only in the Drafts tab.
+      loadRecs();
       loadDrafts();
     } catch (e) {
       setError(`${item.tag}: ${e.message || 'Generation failed'}`);
@@ -189,11 +193,6 @@ export default function ActionCenter() {
     (acc[item.generatorId] ||= []).push(item);
     return acc;
   }, {});
-
-  const draftsByFindingId = new Map();
-  for (const d of drafts || []) {
-    if (d.finding_id && !draftsByFindingId.has(d.finding_id)) draftsByFindingId.set(d.finding_id, d);
-  }
 
   const implementedDrafts = (drafts || []).filter((d) => d.status === 'implemented')
     .sort((a, b) => new Date(b.implemented_at) - new Date(a.implemented_at));
@@ -394,7 +393,6 @@ export default function ActionCenter() {
                     {(showAllRecommendations ? sortedItems : sortedItems.slice(0, 4)).map((item) => {
                       const pr = PRIORITY[item.priority] || PRIORITY.low;
                       const selected = selectedRecommendation?.id === item.id;
-                      const existingDraft = draftsByFindingId.get(item.id);
                       return (
                         <button
                           key={item.id}
@@ -407,11 +405,6 @@ export default function ActionCenter() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-xs font-black text-slate-800 leading-snug truncate">{item.tag}</span>
-                              {existingDraft && (
-                                <span className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 border border-emerald-150 leading-none shadow-sm">
-                                  Draft ok
-                                </span>
-                              )}
                             </div>
                             <p className="text-[10px] font-bold text-slate-450 mt-1 truncate">{item.reason}</p>
                           </div>
@@ -580,23 +573,14 @@ export default function ActionCenter() {
                   </div>
 
                   <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex justify-end">
-                    {draftsByFindingId.has(selectedRecommendation.id) ? (
-                      <button
-                        onClick={() => setActiveDraft(draftsByFindingId.get(selectedRecommendation.id))}
-                        className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition duration-150 shadow-sm active:scale-[0.98] cursor-pointer"
-                      >
-                        View Existing Draft
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => generate(selectedRecommendation)}
-                        disabled={generatingId === selectedRecommendation.id}
-                        className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
-                        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                      >
-                        {generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'}
-                      </button>
-                    )}
+                    <button
+                      onClick={() => generate(selectedRecommendation)}
+                      disabled={generatingId === selectedRecommendation.id}
+                      className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
+                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                    >
+                      {generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'}
+                    </button>
                   </div>
                 </div>
               ) : (

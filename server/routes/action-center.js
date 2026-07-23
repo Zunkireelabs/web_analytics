@@ -8,7 +8,7 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
-  createDraft, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
@@ -129,6 +129,19 @@ router.post('/action-center/generate', async (req, res, next) => {
     if (!generatorId) return res.status(400).json({ error: 'generatorId is required' });
     const generator = await getGenerator(generatorId);
     if (!generator) return res.status(404).json({ error: `Unknown generator "${generatorId}"` });
+
+    // Idempotent per finding: a retry, double-click, or a second tab must
+    // never create a second draft row for the same finding — return the
+    // one that already exists instead of generating (and billing an LLM
+    // call for) a duplicate.
+    if (findingId) {
+      const existing = await getDraftByFindingId(req.siteId, findingId);
+      if (existing) {
+        const hintPage = existing.input?.page || existing.content?.page;
+        const renderModeHint = await buildRenderModeHint(req.siteId, existing.action_type, hintPage);
+        return res.json({ ...existing, renderModeHint });
+      }
+    }
 
     const { content, summary } = await generator.generate({ siteId: req.siteId, params: params || {} });
     const draft = await createDraft(req.siteId, {

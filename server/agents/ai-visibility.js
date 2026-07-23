@@ -1,4 +1,5 @@
 import { analyzePageUrl, checkLlmsReadiness, effortForGenerator, inferSchemaType } from './lib/page-content.js';
+import { getQueriesForPage } from '../store/read.js';
 import { scorePageCategories, scoreLlmsReadiness, combineScores } from './lib/visibility-score.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
@@ -96,10 +97,14 @@ export async function run({ siteId, start, end, pageCache }) {
   // identically to a high-traffic one.
   const { batch, impressionsByPage } = await selectCandidatePages(siteId, 'ai-visibility', { start, end, batchSize: MAX_PAGES });
 
+  // Real per-page top query — grounds the FAQ generator's own required
+  // query/topic param the same way content-gap.js already does, instead of
+  // relying entirely on recommendations.js's downstream fallback lookup.
   const fetched = await Promise.all(batch.map(async (page) => ({
     page,
     impressions: impressionsByPage.get(page) || 0,
     result: await fetchPage(page),
+    topQuery: (await getQueriesForPage(siteId, start, end, page, 1))[0]?.query || '',
   })));
   await markPagesChecked(siteId, 'ai-visibility', batch);
 
@@ -115,7 +120,7 @@ export async function run({ siteId, start, end, pageCache }) {
   const llmsScore = llmsReadiness ? scoreLlmsReadiness(llmsReadiness) : null;
 
   const pages = fetched.map((f) => {
-    const base = { page: f.page, impressions: f.impressions, schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [] };
+    const base = { page: f.page, impressions: f.impressions, topQuery: f.topQuery, schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [] };
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
@@ -150,7 +155,17 @@ export async function run({ siteId, start, end, pageCache }) {
       evidence: { page: p.page, score: p.score.overall, impressions: p.impressions },
       whyItMatters: `AI Visibility score ${p.score.overall}/100 for this page (${p.impressions} impressions).`,
       priority,
-      recommendedAction: { label: rec.label, generatorId: rec.generatorId, params: { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) }, effort: effortForGenerator(rec.generatorId) },
+      recommendedAction: {
+        label: rec.label,
+        generatorId: rec.generatorId,
+        // faq.js needs a real query/topic, never schemaType (which it never
+        // reads) — everything else keeps the page+schemaType shape schema.js
+        // actually consumes.
+        params: rec.generatorId === 'faq'
+          ? { page: p.page, query: p.topQuery }
+          : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
+        effort: effortForGenerator(rec.generatorId),
+      },
       expectedImpact,
     }));
   });

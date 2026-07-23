@@ -359,7 +359,8 @@ export const TAG_TO_GENERATOR = {
 export const GAP_TYPE_TO_GENERATOR = {
   'Missing FAQ': 'faq',
   'Missing schema': 'schema',
-  'Missing headings': null,
+  'Missing H1': null,
+  'Missing H2': null,
   'Missing comparisons': null,
   'Missing alt text': null,
   'Missing canonical tag': null,
@@ -421,9 +422,9 @@ export function inferSchemaType(pageUrl, schemaTypes = []) {
 function contentGapChecks(analysis, queryTexts = []) {
   const queries = Array.isArray(queryTexts) ? queryTexts : [queryTexts];
   const gaps = [];
-  if (analysis.h1Count === 0) gaps.push({ type: 'Missing headings', detail: 'No H1 heading found.' });
-  else if (analysis.h1Count > 1) gaps.push({ type: 'Missing headings', detail: `${analysis.h1Count} H1 tags found — should be exactly one.` });
-  if (analysis.h2Count === 0) gaps.push({ type: 'Missing headings', detail: 'No H2 subheadings — thin content structure.' });
+  if (analysis.h1Count === 0) gaps.push({ type: 'Missing H1', detail: 'No H1 heading found.' });
+  else if (analysis.h1Count > 1) gaps.push({ type: 'Missing H1', detail: `${analysis.h1Count} H1 tags found — should be exactly one.` });
+  if (analysis.h2Count === 0) gaps.push({ type: 'Missing H2', detail: 'No H2 subheadings — thin content structure.' });
 
   if (!analysis.hasFaq) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema or FAQ heading detected.' });
   if (!analysis.hasSchema) gaps.push({ type: 'Missing schema', detail: 'No structured data (JSON-LD) found on the page.' });
