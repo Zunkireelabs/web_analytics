@@ -276,3 +276,30 @@ export async function getImplementedFindingIds(siteId) {
   );
   return new Set(rows.map((r) => r.finding_id));
 }
+
+// Every finding_id with a draft in ANY status — a superset of
+// getImplementedFindingIds above, since implemented is itself just one
+// status among draft/edited/submitted_for_approval/approved/branch_pushed/
+// merged_to_stage/pr_opened/implemented. Used by buildRecommendations to
+// stop showing a recommendation the moment a draft exists for it, so it
+// only ever shows in the Drafts tab from then on — not still in
+// Recommendations too. Deleting a draft naturally un-hides its finding
+// again, since the row is gone.
+export async function getDraftedFindingIds(siteId) {
+  const { rows } = await query(
+    'SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL',
+    [siteId]
+  );
+  return new Set(rows.map((r) => r.finding_id));
+}
+
+// Most recent draft for a finding, any status — used to make
+// /action-center/generate idempotent so a retry, double-click, or a second
+// browser tab can never create a second draft row for the same finding.
+export async function getDraftByFindingId(siteId, findingId) {
+  const { rows } = await query(
+    'SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2 ORDER BY created_at DESC LIMIT 1',
+    [siteId, findingId]
+  );
+  return rows[0] || null;
+}

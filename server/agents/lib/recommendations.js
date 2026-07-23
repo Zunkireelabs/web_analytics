@@ -1,6 +1,6 @@
 import { getLatestFindings } from '../../store/agent-runs.js';
 import { getQueriesForPage } from '../../store/read.js';
-import { getImplementedFindingIds } from '../../store/drafts.js';
+import { getDraftedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 
@@ -29,9 +29,9 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, implementedFindingIds, catByAgent] = await Promise.all([
+  const [runs, draftedFindingIds, catByAgent] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    getImplementedFindingIds(siteId),
+    getDraftedFindingIds(siteId),
     categoryByAgentId(),
   ]);
   const lookupQuery = makeQueryLookup(siteId);
@@ -41,7 +41,7 @@ export async function buildRecommendations(siteId) {
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     for (const f of run.findings) {
-      if (implementedFindingIds.has(f.id)) continue; // already shipped — don't resurface until the agent's own next re-check organically drops it
+      if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
       const params = { ...action.params };

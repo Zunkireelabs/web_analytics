@@ -1,4 +1,4 @@
-import { getSiteById, getSearchPerformanceForPages } from '../store/read.js';
+import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { effortForGenerator, inferSchemaType, fetchTextIfExists } from './lib/page-content.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
@@ -160,14 +160,23 @@ export async function run({ siteId, start, end, pageCache, params }) {
 
   const rankedDupes = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const dupePriorities = priorityByRank(rankedDupes);
+  const dupeTargets = rankedDupes.map((g) => [...g.pages].sort((a, b) => a.impressions - b.impressions)[0]);
+  // Real per-page top query, same primitive content-gap.js/opportunity.js
+  // already ground their own meta-title findings with — without this, the
+  // meta-title generator's own required `query` param was left entirely to
+  // recommendations.js's downstream fallback lookup, which silently drops
+  // the finding if that lookup also comes up empty (more likely here since
+  // `target` is deliberately the lowest-impression page in the group).
+  const dupeQueryRows = await Promise.all(dupeTargets.map((t) => getQueriesForPage(siteId, start, end, t.page, 1)));
+  const dupeQueryByPage = new Map(dupeTargets.map((t, i) => [t.page, dupeQueryRows[i][0]?.query || '']));
   const duplicateFindings = rankedDupes.map((g, i) => {
-    const target = [...g.pages].sort((a, b) => a.impressions - b.impressions)[0];
+    const target = dupeTargets[i];
     return makeFinding({
       id: `technical-seo:duplicate-title:${target.page}`,
       evidence: { title: g.title, pages: g.pages.map((p) => p.page) },
       whyItMatters: `"${g.title}" is used as the title on ${g.pages.length} different pages — search engines can't tell them apart.`,
       priority: dupePriorities[i],
-      recommendedAction: { label: 'Improve title', generatorId: 'meta-title', params: { page: target.page }, effort: effortForGenerator('meta-title') },
+      recommendedAction: { label: 'Improve title', generatorId: 'meta-title', params: { page: target.page, query: dupeQueryByPage.get(target.page) || '' }, effort: effortForGenerator('meta-title') },
       expectedImpact: { label: impactFromPriority(dupePriorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
     });
   });
