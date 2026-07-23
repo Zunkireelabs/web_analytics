@@ -8,7 +8,10 @@ export const meta = {
   recommendationTags: ['Add schema', 'Missing schema'],
 };
 
-const ALLOWED_TYPES = ['Article', 'Product', 'Organization', 'LocalBusiness', 'HowTo', 'BreadcrumbList'];
+// Must stay a superset of every value inferSchemaType() (page-content.js) can
+// return — AboutPage/ContactPage/FAQPage come from its URL-path hints, the
+// rest from its existing-schema/blog-path/default logic.
+const ALLOWED_TYPES = ['Article', 'Product', 'Organization', 'LocalBusiness', 'HowTo', 'BreadcrumbList', 'AboutPage', 'ContactPage', 'FAQPage'];
 const PLACEHOLDER_NOTE = '[NEEDS INPUT — not found on the page]';
 
 // params: { page: string, schemaType: string }
