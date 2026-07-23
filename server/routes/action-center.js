@@ -9,12 +9,12 @@ import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftBranchPushed, markDraftMergedToStage, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
-import { getFileContent } from '../github/client.js';
+import { getFileContent, getPullRequest } from '../github/client.js';
 import { STAGE_BRANCH, mergeBranchToStage } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
@@ -180,10 +180,13 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Approval now auto-publishes: the moment a draft is approved, it's pushed
-// to a real branch and merged straight into `stage` (auto-completing to
-// 'implemented') in the same request — no separate manual Push Branch/Merge
-// to Stage clicks.
+// Approval auto-publishes as far as it safely can: the moment a draft is
+// approved, it's pushed to a real branch and a real PR is opened against
+// `main` in the same request — but it stops there. Merging that PR is now a
+// manual human action on GitHub (see server/implementers/lib/github-ops.js's
+// openPrForBranch), so this route can't auto-complete to 'implemented'
+// anymore; that only happens once the Check PR Status action
+// (POST .../check-pr-status below) confirms GitHub reports the PR merged.
 //
 // Gated on a real deployability check BEFORE the status flip: resolves the
 // implementer and, if it exposes preview(), runs the exact same zero-write
@@ -200,7 +203,7 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
 //
 // Once past that, any failure below (GitHub API hiccup, a genuinely
 // transient error) is a legitimate post-approval concern — same retryable
-// apply_error path as before, via /push-branch and /merge-to-stage.
+// apply_error path as before, via /push-branch and /open-pr.
 router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
@@ -252,17 +255,16 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 
     if (typeof implementer.mergeToStage !== 'function') return res.json(branchPushedDraft);
 
-    const mergeResult = await implementer.mergeToStage(site, branchPushedDraft);
-    if (!mergeResult.ok) {
-      await recordMergeFailure(req.siteId, branchPushedDraft.id, mergeResult.error);
+    const prResult = await implementer.mergeToStage(site, branchPushedDraft);
+    if (!prResult.ok) {
+      await recordMergeFailure(req.siteId, branchPushedDraft.id, prResult.error);
       return res.json(await getDraft(req.siteId, branchPushedDraft.id));
     }
-    await markDraftMergedToStage(req.siteId, branchPushedDraft.id, {
-      mergeSha: mergeResult.mergeSha, mergeUrl: mergeResult.mergeUrl,
-      rollbackSnapshot: mergeResult.previousContent != null ? { filePath: mergeResult.filePath, content: mergeResult.previousContent } : null,
+    const prOpenedDraft = await markDraftPrOpened(req.siteId, branchPushedDraft.id, {
+      prNumber: prResult.prNumber, prUrl: prResult.prUrl,
+      rollbackSnapshot: prResult.previousContent != null ? { filePath: prResult.filePath, content: prResult.previousContent } : null,
     });
-    notifyGscBestEffort(site, branchPushedDraft);
-    res.json(await finalizeImplemented(req.siteId, branchPushedDraft.id, site));
+    res.json(prOpenedDraft);
   } catch (e) { next(e); }
 });
 
@@ -369,16 +371,14 @@ router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// branch_pushed -> merged_to_stage -> implemented, in one real action.
-// Merges the branch already pushed above directly into `stage` — no PR
-// (see server/implementers/lib/github-ops.js and
-// ~/Travel/ci-cd-deployment-master-guide: stage has no protection rules and
-// deploys automatically). A real merge into stage IS the real evidence this
-// platform can ever have — promoting stage -> main/production is entirely
-// manual and outside this app's visibility, so there's no further real
-// signal worth waiting on a separate human click for. Auto-completes
-// straight through to 'implemented' the moment the merge succeeds.
-router.post('/action-center/drafts/:id/merge-to-stage', async (req, res, next) => {
+// branch_pushed -> pr_opened. Opens a real PR from the branch already
+// pushed above into `main` (see server/implementers/lib/github-ops.js's
+// openPrForBranch) — this is the manual retry path for when /approve's
+// auto-cascade pushed a branch but failed to open the PR. Does NOT merge
+// anything and does NOT mark the draft implemented — merging is now a
+// manual human action on GitHub; see /check-pr-status below for how the app
+// learns the PR merged.
+router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
     if (!draft || draft.status !== 'branch_pushed') return res.status(404).json({ error: 'Draft not found, or has no pushed branch yet' });
@@ -387,19 +387,50 @@ router.post('/action-center/drafts/:id/merge-to-stage', async (req, res, next) =
     const resolved = await resolveImplementerForMerge(draft);
     if (resolved.error) return res.status(400).json({ error: resolved.error });
     const { implementer } = resolved;
-    if (typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No merge step wired for "${draft.action_type}" yet` });
+    if (typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No PR step wired for "${draft.action_type}" yet` });
 
     const result = await implementer.mergeToStage(site, draft);
     if (!result.ok) {
       await recordMergeFailure(req.siteId, draft.id, result.error);
       return res.status(422).json({ error: result.error, reason: result.reason });
     }
-    await markDraftMergedToStage(req.siteId, draft.id, {
-      mergeSha: result.mergeSha, mergeUrl: result.mergeUrl,
+    const updated = await markDraftPrOpened(req.siteId, draft.id, {
+      prNumber: result.prNumber, prUrl: result.prUrl,
       rollbackSnapshot: result.previousContent != null ? { filePath: result.filePath, content: result.previousContent } : null,
     });
-    notifyGscBestEffort(site, draft);
-    const updated = await finalizeImplemented(req.siteId, draft.id, site);
+    res.json(updated);
+  } catch (e) { next(e); }
+});
+
+// pr_opened -> implemented, once GitHub confirms the PR was actually merged.
+// Staff-triggered (no webhook/polling infrastructure exists in this app) —
+// reads the PR's real current state straight from GitHub every call
+// (getPullRequest), never inferred locally. Not merged yet just records the
+// current open/closed state for visibility; merged fires the same
+// post-publish steps /merge-to-stage used to (GSC notification, finalize to
+// 'implemented'), now gated on real human-confirmed evidence instead of an
+// automatic merge.
+router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) => {
+  try {
+    const draft = await getDraft(req.siteId, req.params.id);
+    if (!draft || draft.status !== 'pr_opened' || !draft.pr_number) {
+      return res.status(404).json({ error: 'Draft not found, or has no open PR to check' });
+    }
+
+    const site = await getSiteById(req.siteId);
+    let pr;
+    try {
+      pr = await getPullRequest(site, draft.pr_number);
+    } catch (e) {
+      return res.status(502).json({ error: `Could not read PR status from GitHub: ${e.message}` });
+    }
+
+    if (pr.merged) {
+      await recordPrState(req.siteId, draft.id, 'merged');
+      notifyGscBestEffort(site, draft);
+      return res.json(await finalizeImplemented(req.siteId, draft.id, site));
+    }
+    const updated = await recordPrState(req.siteId, draft.id, pr.state);
     res.json(updated);
   } catch (e) { next(e); }
 });

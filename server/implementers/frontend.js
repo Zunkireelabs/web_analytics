@@ -1,6 +1,6 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
-import { pushDraftBranch, mergeBranchToStage, STAGE_BRANCH } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, STAGE_BRANCH } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody } from './lib/newpage-render.js';
 
 export const meta = {
@@ -59,12 +59,15 @@ export async function apply(site, draft) {
   return pushDraftBranch(site, draft, [{ path: resolved.filePath, content: resolved.body }]);
 }
 
-// branch_pushed -> merged into stage (real deploy). draft.branch_name is
+// branch_pushed -> PR opened into main (human merges on GitHub). Despite the
+// name — kept as-is because implementers/registry.js checks for this exact
+// export name at load time (see server/implementers/registry.js) — this no
+// longer merges into stage, it opens a PR into main. draft.branch_name is
 // already real (persisted by markDraftBranchPushed after apply() above
-// succeeded) — this step only merges, no new file writes.
+// succeeded) — this step only opens the PR, no new file writes.
 export async function mergeToStage(site, draft) {
   if (!draft.branch_name) return { ok: false, reason: 'no-branch', error: 'No branch has been pushed for this draft yet.' };
-  return mergeBranchToStage(site, draft, draft.branch_name);
+  return openPrForBranch(site, draft, draft.branch_name);
 }
 
 // Zero-write dry run, same shared-computation principle as backend.js's
