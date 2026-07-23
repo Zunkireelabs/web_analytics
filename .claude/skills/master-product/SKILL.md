@@ -1,6 +1,6 @@
 ---
 name: master-product
-description: Authoritative, verified reference for the Zunkiree Analytics codebase. Covers the reusable Core Dashboard product (GSC + GA4 ingestion, Postgres store, AI narratives, Google Doc reports, email, React dashboard) that is the shared foundation for any future client build, plus a separate internal-only AI Growth Platform section for company-only capabilities not part of the client template. Use this whenever working in this repository — to understand architecture, find the right file, follow existing conventions, or reason about extending it. Documents the current implementation as-is; proposed/not-yet-built ideas live in "Future Improvements" sections, clearly marked and never treated as already implemented.
+description: Authoritative, verified reference for the Zunkiree Analytics codebase. Covers the reusable Core Dashboard product (GSC + GA4 ingestion, Postgres store, AI narratives, Google Doc reports, email, React dashboard) that is the shared foundation for any future client build, plus a separate AI Growth Platform section — mostly available to every onboarded client now, with a small remaining company-only surface (AI Copilot, Clients console). Use this whenever working in this repository — to understand architecture, find the right file, follow existing conventions, or reason about extending it. Documents the current implementation as-is; proposed/not-yet-built ideas live in "Future Improvements" sections, clearly marked and never treated as already implemented.
 ---
 
 # Zunkiree Analytics — Master Product Reference
@@ -750,27 +750,31 @@ genuinely outstanding.
 # Part 2 — AI Growth Platform (Internal / Company Only)
 ---
 
-**Everything from here on documents an internal-only capability that runs
-only on our own dashboard. It is not part of the Core Dashboard client
-template described in Part 1. Do not assume a client build has any of this
-unless productizing it is made an explicit, separate decision later (§23).**
+**Updated (commit `b1bfdc4`) — this used to be a fully internal-only system.
+It no longer is.** `/ai-growth` (Command Center), `/ai-orchestration`
+(orchestration diagram), `/action-center`, and `/site-audit` were
+deliberately opened up to every onboarded client session, each scoped to
+that session's own `siteId` — `requireInternalSite` was removed from
+`server/routes/agents.js`, `server/routes/command-center.js`,
+`server/routes/action-center.js`, and `server/routes/site-audit.js`, which
+now only carry `requireAuth`. `web/src/App.jsx` registers those routes
+unconditionally for any authed session, and `Sidebar.jsx`'s
+`GROWTH_TOOLS_NAV` renders for everyone (comment there: "Client-facing
+growth tooling — same page for staff and clients alike"). The default
+post-login landing page (`App.jsx`'s `/` redirect) is `/ai-growth`, for the
+same reason.
 
-**A full frontend exists** (`/ai-growth` Command Center, `/ai-orchestration`
-orchestration diagram, `/action-center`, `/clients` — all with nav entries in
-`Sidebar.jsx`), and it is **enforced internal-only** rather than merely
-undocumented — this is a real access-control boundary, not just a
-convention. `COMPANY_SITE_ID` (env var) names the one `sites.id` that counts
-as "internal." `requireInternalSite` middleware (`server/routes/login.js`,
-applied after `requireAuth` in `server/routes/agents.js`,
-`server/routes/command-center.js`, and `server/routes/action-center.js`) 404s
-any other site's session. The frontend mirrors this: `GET /api/me` returns
-`isInternal` (computed server-side, never trusted from the client), and
-`App.jsx`/`Sidebar.jsx` only register those four routes and nav items when
-`isInternal` is true. A new client site (via `create-client.js`) is
-internal-only-gated by default — nothing has to be done per-client to keep
-this hidden from them. `server/routes/action-center.js` also depends on
-`server/generators/` (9 content-draft generators) and `server/store/drafts.js`
-(migration 014) — see §22 for the current structural reference.
+**What's still genuinely internal-only**: AI Copilot (`server/routes/copilot.js`)
+and the Clients console (`/clients`, `server/routes/clients.js`) still carry
+`requireAuth, requireInternalSite` — `COMPANY_SITE_ID` (env var) names the
+one `sites.id` that counts as "internal," and that middleware still 404s any
+other site's session for those two surfaces only. `GET /api/me`'s
+`isInternal` flag (computed server-side, never trusted from the client)
+still gates just those: `App.jsx`/`Sidebar.jsx` only register `/clients` and
+the Copilot panel when `isInternal` is true. `server/routes/action-center.js`
+also depends on `server/generators/` (9 content-draft generators) and
+`server/store/drafts.js` (migration 014) — see §22 for the current
+structural reference.
 
 ## 22. AI Agents framework (`server/agents/`)
 
@@ -819,7 +823,7 @@ server/
 │                                    growth-report.js, insights.js, recommendations.js, page-content.js,
 │                                    site-discovery.js, fix-verification.js, technical-seo-analysis.js,
 │                                    model-providers/openai.js, etc.
-├── routes/agents.js                 /api/agents* routes, requireAuth + requireInternalSite-gated
+├── routes/agents.js                 /api/agents* routes, requireAuth-gated (open to any client session)
 ├── routes/command-center.js         Separate router for the Command Center aggregate view
 ├── routes/action-center.js          Separate router; depends on server/generators/ (9 content generators)
 │                                    and server/store/drafts.js (migration 014) for implementable drafts
@@ -833,14 +837,14 @@ server/
 └── migrations/036_ai_recommendation_tracking.sql
 ```
 
-**Wiring**: `server/index.js` mounts `app.use('/api', agentsRouter)`. Unlike
-the Part 1 client routes, this surface (and `command-center`/`action-center`)
-is gated by `requireInternalSite` (`server/routes/login.js`), keyed on the
-`COMPANY_SITE_ID` env var — every non-internal site's session gets a `404`.
-`GET /api/me` computes `isInternal` server-side (never trusted from the
-client), and `web/src/App.jsx` only registers the `/ai-growth`,
-`/ai-orchestration`, `/action-center`, `/clients` routes (and `Sidebar.jsx`
-only shows their nav items) when `isInternal` is true.
+**Wiring**: `server/index.js` mounts `app.use('/api', agentsRouter)`. This
+surface (and `command-center`/`action-center`/`site-audit`) only carries
+`requireAuth` — any authenticated client session can call it, scoped to its
+own `siteId`. `GET /api/me`'s `isInternal` flag is no longer involved in
+gating these; it's still used server- and client-side, but only for `/clients`
+(`requireInternalSite` on `server/routes/clients.js`) and the AI Copilot
+panel (`requireInternalSite` on `server/routes/copilot.js`) — see the Part 2
+intro above for the full current/legacy split.
 
 **Contract** (`server/agents/types.js`, documentation-only JSDoc): every
 agent module exports `meta` (id, name, description, category ∈

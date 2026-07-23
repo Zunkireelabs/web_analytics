@@ -5,7 +5,14 @@ async function req(path, opts = {}) {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   });
-  if (res.status === 401) throw new Error('UNAUTH');
+  if (res.status === 401) {
+    // Lets App.jsx react to a session going invalid on ANY data call, not
+    // just the ones that explicitly check for it — without this, mid-session
+    // expiry just left individual pages showing local error states while
+    // the URL/rendered-Login mismatch bug (see App.jsx) never got triggered.
+    window.dispatchEvent(new Event('api:unauthorized'));
+    throw new Error('UNAUTH');
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     // Most callers only ever read `.message` — this just makes any other
