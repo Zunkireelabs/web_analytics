@@ -38,6 +38,13 @@ export async function rollbackFromSnapshot(site, draft, filePath, format = 'js-e
   if (!check.ok) {
     return { ok: false, reason: 'invalid-edit', error: `Stored rollback snapshot is not valid content (${check.error}) — refusing to restore it.` };
   }
+  // Deliberately NOT the shared daily batch branch — a rollback restores one
+  // draft's exact prior file state and must land on its own isolated branch,
+  // unrelated to whatever else the batch branch holds (this route is only
+  // reachable when the draft is confirmed alone on its branch — see
+  // action-center.js's /rollback sibling-count guard — but the restore
+  // branch itself should never BE that shared branch regardless).
   const rollbackDraft = { action_type: draft.action_type, id: `${draft.id}-rollback` };
-  return pushDraftBranch(site, rollbackDraft, [{ path: filePath, content: snapshot.content }]);
+  const branchName = `action-center/${draft.action_type}-${draft.id}-rollback`;
+  return pushDraftBranch(site, rollbackDraft, [{ path: filePath, content: snapshot.content }], { branchName, exists: false });
 }

@@ -140,3 +140,14 @@ export async function getPullRequest(site, prNumber) {
   const data = await res.json();
   return { state: data.state, merged: data.merged };
 }
+
+// Lists open PRs whose head is exactly `branch` — used to detect "does
+// today's batch branch already have a PR open" before trying to open a new
+// one, since GitHub 422s on a second PR for the same head->base pair.
+export async function listOpenPullRequestsForBranch(site, branch) {
+  const owner = repoPath(site).split('/')[0];
+  const head = `${owner}:${branch}`;
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls?state=open&head=${encodeURIComponent(head)}`);
+  if (!res.ok) throw new Error(`listOpenPullRequestsForBranch failed (${res.status}): ${await res.text()}`);
+  return res.json();
+}

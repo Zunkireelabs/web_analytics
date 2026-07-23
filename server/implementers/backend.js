@@ -1,5 +1,5 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
-import { pushDraftBranch, openPrForBranch, STAGE_BRANCH } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, STAGE_BRANCH } from './lib/github-ops.js';
 import { getFileContent } from '../github/client.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers } from './lib/marker-merge.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
@@ -41,7 +41,7 @@ function markerConfigExample(actionType) {
 // this is a straight file write with zero content transformation needed. The
 // only unknown is *where* those files live in this site's repo, which
 // site.url_file_map.siteRoot answers explicitly.
-async function pushLlmsTxtBranch(site, draft) {
+async function pushLlmsTxtBranch(site, draft, batchInfo) {
   const llmsPath = resolveSiteRootFile(site, 'llmsTxt');
   if (!llmsPath) {
     return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
@@ -52,7 +52,7 @@ async function pushLlmsTxtBranch(site, draft) {
   if (robotsPath && draft.content.robotsDirectives) {
     files.push({ path: robotsPath, content: draft.content.robotsDirectives });
   }
-  return pushDraftBranch(site, draft, files);
+  return pushDraftBranch(site, draft, files, batchInfo);
 }
 
 // Real, marker-based merge for meta-title/faq (see lib/marker-merge.js) —
@@ -66,7 +66,7 @@ async function pushLlmsTxtBranch(site, draft) {
 // is the one way a human's already-confirmed choice re-enters this — passed
 // through from routes/action-center.js after a prior 'render-mode-uncertain'
 // stop, never persisted as site config.
-async function computeMarkerMerge(site, draft, renderModeOverride) {
+async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = STAGE_BRANCH) {
   const page = draft.content?.page || draft.input?.page;
   const filePath = resolveFile(site, page);
   if (!filePath) {
@@ -82,7 +82,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride) {
     };
   }
 
-  const branch = STAGE_BRANCH;
+  const branch = beforeRef;
   const file = await getFileContent(site, filePath, branch);
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${branch}" — confirm the path in url_file_map is correct.` };
@@ -173,11 +173,13 @@ async function previewLiveMarkerContent(site, draft) {
 // llms-txt (no mode concept) and simply unused for anything but marker-merge
 // types.
 export async function apply(site, draft, opts = {}) {
-  if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft);
+  const batchInfo = await getOrInitBatchBranch(site);
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
-    const merged = await computeMarkerMerge(site, draft, opts.renderModeOverride);
+    const merged = await computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
     if (!merged.ok) return merged;
-    return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }]);
+    return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
   }
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${draft.action_type}".` };
 }
@@ -210,13 +212,15 @@ export async function preview(site, draft, opts = {}) {
     return { ok: false, reason: 'merge-strategy-not-implemented', error: `No live view available for "${draft.action_type}" yet.` };
   }
 
+  const batchInfo = await getOrInitBatchBranch(site);
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+
   if (draft.action_type === 'llms-txt') {
     const llmsPath = resolveSiteRootFile(site, 'llmsTxt');
     if (!llmsPath) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured.' };
-    const branch = STAGE_BRANCH;
-    const file = await getFileContent(site, llmsPath, branch);
+    const file = await getFileContent(site, llmsPath, beforeRef);
     return { ok: true, filePath: llmsPath, oldContent: file?.content || '', newContent: draft.content.llmsTxt };
   }
-  if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride);
+  if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No preview available for "${draft.action_type}" yet.` };
 }

@@ -1,6 +1,6 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
-import { pushDraftBranch, openPrForBranch, STAGE_BRANCH } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, STAGE_BRANCH } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody } from './lib/newpage-render.js';
 
 export const meta = {
@@ -56,7 +56,8 @@ async function resolveTargetAndBody(site, draft) {
 export async function apply(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
-  return pushDraftBranch(site, draft, [{ path: resolved.filePath, content: resolved.body }]);
+  const batchInfo = await getOrInitBatchBranch(site);
+  return pushDraftBranch(site, draft, [{ path: resolved.filePath, content: resolved.body }], batchInfo);
 }
 
 // branch_pushed -> PR opened into main (human merges on GitHub). Despite the
@@ -77,7 +78,8 @@ export async function mergeToStage(site, draft) {
 export async function preview(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
-  const branch = STAGE_BRANCH;
+  const batchInfo = await getOrInitBatchBranch(site);
+  const branch = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
   const existing = await getFileContent(site, resolved.filePath, branch);
   return {
     ok: true,

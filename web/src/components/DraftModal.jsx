@@ -325,15 +325,25 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
             <a href={draft.pr_url} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
               View PR on GitHub <ExternalLink size={12} />
             </a>
-            {draft.status === 'implemented' ? (
-              <span className="font-extrabold text-emerald-600 flex items-center gap-1">
-                <Check size={12} strokeWidth={3} /> Merged to main
-              </span>
-            ) : (
-              <span className="font-extrabold text-amber-600">
-                {draft.pr_state === 'closed' ? 'PR closed' : 'Awaiting merge'}
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {draft.sibling_count > 0 && (
+                <span
+                  className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200"
+                  title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}
+                >
+                  Shared · +{draft.sibling_count}
+                </span>
+              )}
+              {draft.status === 'implemented' ? (
+                <span className="font-extrabold text-emerald-600 flex items-center gap-1">
+                  <Check size={12} strokeWidth={3} /> Merged to main
+                </span>
+              ) : (
+                <span className="font-extrabold text-amber-600">
+                  {draft.pr_state === 'closed' ? 'PR closed' : 'Awaiting merge'}
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -570,6 +580,14 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     >
                       {draft.branch_name}
                     </span>
+                    {draft.sibling_count > 0 && (
+                      <span
+                        className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200"
+                        title={`This branch also contains ${draft.sibling_count} other approved draft(s) pushed today.`}
+                      >
+                        Shared · +{draft.sibling_count}
+                      </span>
+                    )}
                     <button
                       onClick={() => transition(() => api.actionCenter.openPr(draft.id))}
                       disabled={transitioning}
@@ -602,7 +620,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
                       Live on staging.
                     </span>
-                    {draft.rollback_snapshot && (
+                    {draft.rollback_snapshot && !draft.sibling_count && (
                       <button
                         onClick={rollback}
                         disabled={transitioning}
@@ -611,6 +629,14 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       >
                         <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
                       </button>
+                    )}
+                    {draft.rollback_snapshot && draft.sibling_count > 0 && (
+                      <span
+                        className="text-[10px] font-semibold text-slate-400"
+                        title="Rollback is disabled because this branch is shared with other drafts."
+                      >
+                        Rollback unavailable (shared branch)
+                      </span>
                     )}
                     <button
                       onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
@@ -627,7 +653,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     rollback_snapshot (captured at merge time) is still valid — the
                     merge that snapshot reverts happened regardless of whether this
                     draft was additionally marked implemented afterward. */}
-                {draft.status === 'implemented' && draft.rollback_snapshot && (
+                {draft.status === 'implemented' && draft.rollback_snapshot && !draft.sibling_count && (
                   <button
                     onClick={rollback}
                     disabled={transitioning}
@@ -636,6 +662,14 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                   >
                     <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
                   </button>
+                )}
+                {draft.status === 'implemented' && draft.rollback_snapshot && draft.sibling_count > 0 && (
+                  <span
+                    className="text-[10px] font-semibold text-slate-400"
+                    title="Rollback is disabled because this branch is shared with other drafts."
+                  >
+                    Rollback unavailable (shared branch)
+                  </span>
                 )}
               </>
             )}
