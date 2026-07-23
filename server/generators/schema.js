@@ -8,18 +8,22 @@ export const meta = {
   recommendationTags: ['Add schema', 'Missing schema'],
 };
 
-// Must stay a superset of every value inferSchemaType() (page-content.js) can
-// return — AboutPage/ContactPage/FAQPage come from its URL-path hints, the
-// rest from its existing-schema/blog-path/default logic.
-const ALLOWED_TYPES = ['Article', 'Product', 'Organization', 'LocalBusiness', 'HowTo', 'BreadcrumbList', 'AboutPage', 'ContactPage', 'FAQPage'];
+// inferSchemaType() (page-content.js) deliberately passes through whatever
+// real @type is already on the page (e.g. "EducationalOrganization",
+// "Course") when one exists — it's not limited to its own URL-hint list, so
+// a fixed enum here can never stay in sync with it. Just sanity-check the
+// shape of a schema.org type name (PascalCase word, optionally dotted for
+// nested types like "schema:Product") to guard against garbage/injected
+// params, without rejecting legitimate real-page values.
+const SCHEMA_TYPE_RE = /^[A-Za-z][A-Za-z0-9]*$/;
 const PLACEHOLDER_NOTE = '[NEEDS INPUT — not found on the page]';
 
 // params: { page: string, schemaType: string }
 export async function generate({ params }) {
   const { page, schemaType } = params;
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
-  if (!ALLOWED_TYPES.includes(schemaType)) {
-    throw Object.assign(new Error(`schemaType must be one of: ${ALLOWED_TYPES.join(', ')}`), { status: 400 });
+  if (!schemaType || !SCHEMA_TYPE_RE.test(schemaType)) {
+    throw Object.assign(new Error('schemaType must be a valid schema.org type name'), { status: 400 });
   }
 
   const fetched = await analyzePageUrl(page);
