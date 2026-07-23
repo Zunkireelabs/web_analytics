@@ -42,19 +42,44 @@ const RECOMMENDATION_RULES = [
   { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
   { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
   { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: null },
-  // Checks the real fetched hasLlmsTxt/robotsAllowsAiCrawlers facts directly,
-  // not the derived 0/50/100 score — that score is a legitimate coarse
-  // display number, but re-deriving a decision from it let this recommendation
-  // silently drift out of sync with the real site state (a site missing
-  // llms.txt but not blocking AI crawlers landed on exactly 50, which the old
-  // `< 50` threshold missed). Every other rule here scores an inherently
-  // graded signal where a threshold is the right fit; this is the one rule
-  // built from two hard booleans, so it can check ground truth instead.
-  { test: (c, raw) => raw?.llmsReadiness != null && (!raw.llmsReadiness.hasLlmsTxt || raw.llmsReadiness.robotsAllowsAiCrawlers === false), label: 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).', generatorId: 'llms-txt' },
 ];
 
-function recommendationsFor(categories, raw) {
-  return RECOMMENDATION_RULES.filter((r) => r.test(categories, raw)).map(({ label, generatorId }) => ({ label, generatorId }));
+// llms.txt/robots readiness is a SITE-WIDE fact (one checkLlmsReadiness() call
+// per run, shared by every page — see `llmsReadiness` in run() below), not a
+// per-page signal. It used to live in RECOMMENDATION_RULES and get re-tested
+// inside the per-page loop, which emitted one duplicate "Publish an llms.txt
+// file..." finding per analyzed page — up to MAX_PAGES near-identical rows in
+// Action Center, all resolving to the exact same generated draft since the
+// generator only ever reads site-level facts anyway. Built once, after all
+// pages are scored, from the same real hasLlmsTxt/robotsAllowsAiCrawlers
+// ground truth the old per-page rule checked.
+const LLMS_TXT_LABEL = 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).';
+const LLMS_TXT_KEY_PAGES_LIMIT = 8;
+
+function llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end }) {
+  if (!llmsReadiness || (llmsReadiness.hasLlmsTxt && llmsReadiness.robotsAllowsAiCrawlers !== false)) return null;
+  const topPages = prioritized.slice(0, LLMS_TXT_KEY_PAGES_LIMIT).map((p) => p.page);
+  // prioritized/priorities are already worst-score-first — the same ranking
+  // every per-page finding's priority is drawn from, so this stays on the
+  // same scale rather than inventing a separate one.
+  const priority = priorities[0] || 'medium';
+  return makeFinding({
+    id: 'ai-visibility:site:llms-txt',
+    evidence: {
+      analyzedPages: prioritized.length,
+      hasLlmsTxt: llmsReadiness.hasLlmsTxt,
+      robotsAllowsAiCrawlers: llmsReadiness.robotsAllowsAiCrawlers,
+      topPages,
+    },
+    whyItMatters: `Site-wide: ${!llmsReadiness.hasLlmsTxt ? 'no llms.txt file found' : 'robots.txt blocks one or more AI answer-engine crawlers'}. This affects AI-citation readiness across all ${prioritized.length} analyzed page(s), not just one.`,
+    priority,
+    recommendedAction: { label: LLMS_TXT_LABEL, generatorId: 'llms-txt', params: { priorityPages: topPages, start, end }, effort: effortForGenerator('llms-txt') },
+    expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: prioritized.reduce((s, p) => s + p.impressions, 0) },
+  });
+}
+
+function recommendationsFor(categories) {
+  return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
 }
 
 export async function run({ siteId, start, end, pageCache }) {
@@ -94,7 +119,7 @@ export async function run({ siteId, start, end, pageCache }) {
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
-    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories, { llmsReadiness }), fetchError: null };
+    return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
   });
 
   const scoredPages = pages.filter((p) => p.score?.overall != null);
@@ -129,6 +154,9 @@ export async function run({ siteId, start, end, pageCache }) {
       expectedImpact,
     }));
   });
+
+  const siteFinding = llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end });
+  if (siteFinding) findings.push(siteFinding);
 
   const facts = {
     rangeStart: start,
