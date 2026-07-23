@@ -1,6 +1,6 @@
 import { listAgentMeta } from '../registry.js';
 import { runOrchestration, synthesizeFindings, PRIORITY_RANK } from '../orchestrator.js';
-import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js';
+import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 import { saveMessage } from '../../store/copilot.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { callLLM } from '../../llm.js';

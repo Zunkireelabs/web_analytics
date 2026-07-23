@@ -1,5 +1,5 @@
 import { getAgent } from '../registry.js';
-import { getLatestAgentRuns, getLatestFindings } from '../../store/agent-runs.js';
+import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 
 // The specialist agents whose output carries real, per-item structured
 // findings (agents/types.js `Finding`) — shared by Action Center (draft

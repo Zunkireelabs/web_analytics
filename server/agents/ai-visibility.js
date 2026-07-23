@@ -10,7 +10,12 @@ export const meta = {
   name: 'AI Visibility Agent',
   description: 'Scores how ready each ranking page is to be cited by AI answer engines (schema, FAQ, entities, structured content, citation readiness, LLMS readiness).',
   category: 'geo',
-  version: 2,
+  version: 3, // bumped for the llms.txt dedup fix below (site-wide finding now
+              // built once via llmsTxtFinding(), see lines ~60-80) — that fix
+              // shipped without a version bump at the time, which is exactly
+              // why agent_runs rows from before it were indistinguishable
+              // from after it. See agents/lib/fresh-runs.js for how this
+              // number is now enforced on read.
   // Whether a page is ACTUALLY cited in AI Overviews/ChatGPT/Perplexity still
   // has no real data source — unchanged from v1, that remains unverifiable
   // here. This version answers a different, buildable question instead: is
