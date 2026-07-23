@@ -4,6 +4,6 @@
 -- the dashboard) between "a real change exists on a branch" and "a PR is
 -- open" — see server/implementers/lib/github-ops.js's pushDraftBranch/
 -- openPrForBranch and server/store/drafts.js's markDraftBranchPushed.
-ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_status_check;
-ALTER TABLE drafts ADD CONSTRAINT drafts_status_check
-  CHECK (status IN ('draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'pr_opened', 'implemented'));
+--
+-- drafts_status_check itself is not touched here — see the note in
+-- 024_drafts_approval.sql; 039_draft_merged_to_stage.sql owns it now.

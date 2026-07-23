@@ -6,10 +6,9 @@
 -- Watchlist — see the updated markDraftImplemented in server/store/drafts.js.
 -- The legacy manual path (approved -> implemented with no PR ever attempted)
 -- stays intact for generator types with no implementer wired yet.
-ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_status_check;
-ALTER TABLE drafts ADD CONSTRAINT drafts_status_check
-  CHECK (status IN ('draft', 'edited', 'submitted_for_approval', 'approved', 'pr_opened', 'implemented'));
-
+--
+-- drafts_status_check itself is not touched here — see the note in
+-- 024_drafts_approval.sql; 039_draft_merged_to_stage.sql owns it now.
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS branch_name TEXT;
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS pr_url TEXT;
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS pr_number INT;

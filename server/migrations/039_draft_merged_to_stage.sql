@@ -7,6 +7,12 @@
 -- platform (see server/implementers/lib/github-ops.js). 'pr_opened' stays
 -- in the allowed list for any historical row, even though no new draft will
 -- use it going forward.
+--
+-- This is now the sole owner of drafts_status_check (024/029/038 used to
+-- each redefine it too, but every migration file replays on every deploy —
+-- see run.js — so an earlier, narrower redefinition would fail once live
+-- rows reached a status only a later one allows). Any future status must
+-- extend the CHECK list here, not add a new DROP/ADD elsewhere.
 ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_status_check;
 ALTER TABLE drafts ADD CONSTRAINT drafts_status_check
   CHECK (status IN ('draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented'));
