@@ -313,7 +313,8 @@ the rest of this architecture.
 
 - **The internal AI Growth Platform** (master-product Part 2) is not part of
   this roadmap. Nothing here proposes exposing `/api/agents*` to clients,
-  multi-tenant-izing `agent_runs`, or productizing any of the seven agents.
+  multi-tenant-izing `agent_runs`, or productizing any of the specialist
+  agents documented in master-product §22.
   That remains a fully separate, not-yet-made decision (master-product §22,
   §23) — this document doesn't move that decision forward one way or the
   other.

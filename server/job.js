@@ -131,11 +131,12 @@ export async function runDailyIngest() {
   return runDailyIngestForSite(site);
 }
 
-// Runs the 6 daily-cadence specialist agents fresh via the shared
-// orchestrator, persists an executive-report row from that same result
-// (same pattern as routes/command-center.js's refresh route — avoids a
-// second call to executive-report.js re-running all 6 agents again), then
-// detects and delivers any notification-worthy events from what changed.
+// Runs DAILY_AGENT_IDS' daily-cadence specialist agents (11 today, per the
+// constant above) fresh via the shared orchestrator, persists an
+// executive-report row from that same result (same pattern as
+// routes/command-center.js's refresh route — avoids a second call to
+// executive-report.js re-running every daily agent again), then detects and
+// delivers any notification-worthy events from what changed.
 // This is what makes the Command Center's "Daily Morning Brief" and Recent
 // Changes genuinely daily instead of only as fresh as the last manual
 // refresh or Copilot question.

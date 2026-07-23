@@ -883,9 +883,11 @@ actions. `CopilotPanel.jsx` is an internal chat UI reusing the orchestrator's
 which diffs agent findings run-over-run to surface new opportunities.
 
 **Triggers, in full:**
-1. **Cron** (`server/cron.js`) — daily job runs the 6 daily-cadence agents
-   (`query-intelligence`, `opportunity`, `country-intelligence`,
-   `device-intelligence`, `ai-visibility`, `technical-seo`); weekly job
+1. **Cron** (`server/cron.js`) — daily job runs `DAILY_AGENT_IDS` (11 agents
+   today — `query-intelligence`, `opportunity`, `country-intelligence`,
+   `device-intelligence`, `ai-visibility`, `technical-seo`,
+   `security-headers`, `internal-linking`, `duplicate-content`,
+   `accessibility`, `mobile-usability`; see `server/job.js`); weekly job
    (Thursdays by default) runs the 3 monthly-throttled agents
    (`competitor-intelligence`, `authority`, `ai-recommendation` — each only
    actually executes once per 30 days via `runAgentIfDue`) then
