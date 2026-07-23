@@ -4,7 +4,7 @@ import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
-import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
