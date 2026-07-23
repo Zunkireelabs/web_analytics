@@ -10,7 +10,7 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, MERGE_MANDATORY_TYPES,
+  recordGscNotification, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -460,6 +460,11 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
     const draft = await getDraft(req.siteId, req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found' });
     if (!draft.rollback_snapshot) return res.status(400).json({ error: 'No rollback snapshot available for this draft.' });
+
+    const siblingCount = await countSiblingDraftsOnBranch(req.siteId, draft.branch_name, draft.id);
+    if (siblingCount > 0) {
+      return res.status(400).json({ error: `This draft's branch (${draft.branch_name}) is shared with ${siblingCount} other draft(s) — rollback is disabled to avoid clobbering their changes.` });
+    }
 
     const site = await getSiteById(req.siteId);
     const resolved = await resolveImplementerForMerge(draft);

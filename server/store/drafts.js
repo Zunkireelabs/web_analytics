@@ -18,21 +18,47 @@ export async function createDraft(siteId, { actionType, source, input, content, 
   return rows[0];
 }
 
+// Correlated subquery, not a separate lookup — avoids an N+1 query on the
+// drafts list view. Naturally evaluates to 0 when branch_name IS NULL,
+// since NULL = NULL is never true in SQL.
+const SIBLING_COUNT_SELECT = `d.*, (
+  SELECT COUNT(*)::int FROM drafts d2
+  WHERE d2.site_id = d.site_id AND d2.branch_name = d.branch_name AND d2.id != d.id
+) AS sibling_count`;
+
 export async function listDrafts(siteId, { actionType, status } = {}) {
-  const conditions = ['site_id = $1'];
+  const conditions = ['d.site_id = $1'];
   const values = [siteId];
-  if (actionType) { values.push(actionType); conditions.push(`action_type = $${values.length}`); }
-  if (status) { values.push(status); conditions.push(`status = $${values.length}`); }
+  if (actionType) { values.push(actionType); conditions.push(`d.action_type = $${values.length}`); }
+  if (status) { values.push(status); conditions.push(`d.status = $${values.length}`); }
   const { rows } = await query(
-    `SELECT * FROM drafts WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+    `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE ${conditions.join(' AND ')} ORDER BY d.created_at DESC`,
     values
   );
   return rows;
 }
 
 export async function getDraft(siteId, id) {
-  const { rows } = await query('SELECT * FROM drafts WHERE site_id = $1 AND id = $2', [siteId, id]);
+  const { rows } = await query(
+    `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE d.site_id = $1 AND d.id = $2`,
+    [siteId, id]
+  );
   return rows[0] || null;
+}
+
+// Counts other draft rows on this site sharing this exact branch_name —
+// gates Rollback, since whole-file snapshot/restore is only safe when a
+// draft is genuinely alone on its branch; a shared batch branch may hold
+// sibling drafts' edits to the same or a different file that a whole-file
+// restore would silently clobber. Returns 0 for a draft with no branch_name
+// yet (nothing to share).
+export async function countSiblingDraftsOnBranch(siteId, branchName, excludeId) {
+  if (!branchName) return 0;
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND branch_name = $2 AND id != $3`,
+    [siteId, branchName, excludeId]
+  );
+  return rows[0].n;
 }
 
 // Content-only edit — only valid pre-approval. Without the status guard, this
