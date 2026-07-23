@@ -1,5 +1,5 @@
 import { getSearchPerformanceForPages } from '../store/read.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
@@ -61,32 +61,34 @@ export async function run({ siteId, start, end, pageCache, params }) {
     expectedImpact: { label: missingLang.length === reachable.length ? 'High' : 'Medium', basis: 'computed', value: missingLang.length },
   })] : [];
 
-  // These four are genuinely page-specific (one broken contact form doesn't
-  // mean every page's forms are broken) — ranked and prioritized per page,
-  // same pattern as technical-seo.js's per-page findings.
-  function perPageFindings(field, idPrefix, describe) {
-    const candidates = reachable.filter((r) => r.analysis[field] > 0).sort((a, b) => b.impressions - a.impressions);
-    const priorities = priorityByRank(candidates);
-    return candidates.map((r, i) => makeFinding({
-      id: `accessibility:${idPrefix}:${r.page}`,
-      evidence: { page: r.page, count: r.analysis[field], impressions: r.impressions },
-      whyItMatters: describe(r.analysis[field], r.impressions),
-      priority: priorities[i],
+  // These four can genuinely be page-specific (one broken contact form
+  // doesn't mean every page's forms are broken) — but any of them can also
+  // stem from one shared header/footer/nav component reused across the
+  // whole site, so they're reported as "N of M checked pages" aggregates
+  // rather than assumed sitewide the way missing-html-lang is above.
+  function aggregatedFinding(field, idPrefix, describe) {
+    const affected = reachable.filter((r) => r.analysis[field] > 0);
+    return aggregateSystemicFinding({
+      id: `accessibility:${idPrefix}`,
+      affected,
+      checkedCount: reachable.length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      whyItMatters: (n, c) => describe(n, c),
       recommendedAction: null,
-      expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: r.impressions },
-    }));
+    });
   }
 
-  const labelFindings = perPageFindings('formInputsMissingLabel', 'missing-label',
-    (n, imp) => `${n} form input(s) on this page have no associated label (nor aria-label) — screen-reader users can't tell what to enter (${imp} impressions).`);
-  const interactiveFindings = perPageFindings('emptyInteractiveElements', 'empty-interactive',
-    (n, imp) => `${n} button(s)/link(s) on this page have no accessible text (no visible text, aria-label, or title) — screen readers announce them as blank (${imp} impressions).`);
-  const duplicateIdFindings = perPageFindings('duplicateIdCount', 'duplicate-id',
-    (n, imp) => `${n} id attribute(s) on this page are used more than once — breaks aria-labelledby/for references pointing at them (${imp} impressions).`);
-  const headingSkipFindings = perPageFindings('headingLevelSkips', 'heading-skip',
-    (n, imp) => `This page's headings skip a level ${n} time(s) (e.g. H1 straight to H3, no H2) — screen-reader users navigating by heading level lose the section structure (${imp} impressions).`);
+  const labelFinding = aggregatedFinding('formInputsMissingLabel', 'missing-label',
+    (n, c) => `${n} of ${c} checked pages have a form input with no associated label (nor aria-label) — screen-reader users can't tell what to enter.`);
+  const interactiveFinding = aggregatedFinding('emptyInteractiveElements', 'empty-interactive',
+    (n, c) => `${n} of ${c} checked pages have a button/link with no accessible text (no visible text, aria-label, or title) — screen readers announce them as blank.`);
+  const duplicateIdFinding = aggregatedFinding('duplicateIdCount', 'duplicate-id',
+    (n, c) => `${n} of ${c} checked pages have an id attribute used more than once — breaks aria-labelledby/for references pointing at them.`);
+  const headingSkipFinding = aggregatedFinding('headingLevelSkips', 'heading-skip',
+    (n, c) => `${n} of ${c} checked pages have a heading structure that skips a level (e.g. H1 straight to H3, no H2) — screen-reader users navigating by heading level lose the section structure.`);
 
-  const findings = [...langFindings, ...labelFindings, ...interactiveFindings, ...duplicateIdFindings, ...headingSkipFindings];
+  const findings = [...langFindings, labelFinding, interactiveFinding, duplicateIdFinding, headingSkipFinding].filter(Boolean);
 
   const facts = {
     rangeStart: start, rangeEnd: end,

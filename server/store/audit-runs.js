@@ -121,6 +121,28 @@ export async function saveAuditPageFindingsBatch(auditRunId, siteId, agentId, fi
   }
 }
 
+// A full-site audit runs one agent once per ~20-page chunk (bulk-audit.js);
+// an aggregated-systemic finding (findings.js's aggregateSystemicFinding)
+// comes back from every chunk that has at least one failing page, each
+// time with only that chunk's own affectedCount/checkedCount. The first
+// occurrence is INSERTed by saveAuditPageFindingsBatch; every later
+// occurrence merges into that same row instead of creating a duplicate —
+// this is the write side of that merge.
+export async function updateAuditPageFinding(auditRunId, findingId, { priority, evidence, whyItMatters, recommendedAction, expectedImpact } = {}) {
+  await query(
+    `UPDATE audit_page_findings
+        SET priority = $3, evidence = $4, why_it_matters = $5, recommended_action = $6, expected_impact = $7
+      WHERE audit_run_id = $1 AND finding_id = $2`,
+    [
+      auditRunId, findingId, priority,
+      evidence != null ? JSON.stringify(evidence) : null,
+      whyItMatters ?? null,
+      recommendedAction != null ? JSON.stringify(recommendedAction) : null,
+      expectedImpact != null ? JSON.stringify(expectedImpact) : null,
+    ]
+  );
+}
+
 export async function getAuditPageFindings(auditRunId, { limit = 500 } = {}) {
   const { rows } = await query(
     'SELECT * FROM audit_page_findings WHERE audit_run_id = $1 ORDER BY priority, page LIMIT $2',

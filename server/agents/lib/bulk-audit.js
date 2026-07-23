@@ -8,7 +8,8 @@ import { listAgentMeta } from '../registry.js';
 import { createPageCache } from './fetch-cache.js';
 import { computeHealthScore } from './health-score.js';
 import {
-  createAuditRun, updateAuditRunProgress, completeAuditRun, saveAuditPageFindingsBatch, getAuditPageFindings,
+  createAuditRun, updateAuditRunProgress, completeAuditRun, saveAuditPageFindingsBatch, updateAuditPageFinding,
+  getAuditPageFindings,
 } from '../../store/audit-runs.js';
 
 // The deterministic, non-LLM bulk fan-out engine for Full Site Audit — a
@@ -40,6 +41,77 @@ function chunkPages(pages, size) {
   const out = [];
   for (let i = 0; i < pages.length; i += size) out.push(pages.slice(i, i + size));
   return out;
+}
+
+// A finding built by findings.js's aggregateSystemicFinding() carries
+// evidence.affectedCount/checkedCount — a real "N of M pages checked"
+// count that's only correct for the ~20-page chunk that produced it. Every
+// other chunk with at least one failing page in its own slice produces the
+// *same* finding.id again (the id no longer embeds a page), so naive
+// keep-first-occurrence dedup (correct for the genuinely idempotent
+// site-wide findings below, which recompute an identical value on every
+// chunk since they don't read from params.pages at all — orphaned pages,
+// sitemap errors, cross-domain-sitemap) would silently keep only one
+// chunk's count instead of the true sitewide total. Since chunkPages()
+// slices a deduped page list with no overlap, summing each chunk's local
+// affectedCount/checkedCount across all its occurrences is exactly the
+// sitewide total.
+function isAdditiveFinding(f) {
+  return f.evidence?.affectedCount != null && f.evidence?.checkedCount != null;
+}
+
+function mergeAdditive(prev, next) {
+  const affectedCount = prev.evidence.affectedCount + next.evidence.affectedCount;
+  const checkedCount = prev.evidence.checkedCount + next.evidence.checkedCount;
+  const priority = affectedCount === checkedCount ? 'high' : 'medium';
+  const value = (prev.expectedImpact?.value || 0) + (next.expectedImpact?.value || 0);
+  // Whichever occurrence's representative page has the higher real
+  // impressions keeps its recommendedAction — a single-page draft is only
+  // ever an example fix for a sitewide issue, so the most-trafficked real
+  // example is the most useful one to keep.
+  const prevRep = prev._repImpressions ?? -Infinity;
+  const nextRep = next._repImpressions ?? -Infinity;
+  const useNext = nextRep > prevRep;
+  return {
+    ...prev,
+    evidence: {
+      ...prev.evidence, ...next.evidence,
+      affectedCount, checkedCount,
+      samplePages: [...(prev.evidence.samplePages || []), ...(next.evidence.samplePages || [])].slice(0, 5),
+    },
+    whyItMatters: (prev._whyItMattersTemplate || next._whyItMattersTemplate)
+      ?.replace('{n}', affectedCount).replace('{c}', checkedCount) ?? prev.whyItMatters,
+    priority,
+    recommendedAction: useNext ? next.recommendedAction : prev.recommendedAction,
+    expectedImpact: { ...prev.expectedImpact, ...next.expectedImpact, value, label: priority === 'high' ? 'High' : 'Medium' },
+    _repImpressions: Math.max(prevRep, nextRep),
+  };
+}
+
+// Reconciles one chunk's findings against everything already persisted for
+// this agent earlier in this same run (`writtenById`, mutated in place so
+// the next chunk's reconciliation sees this chunk's result). A brand-new id
+// needs an INSERT; a repeat of an additive (aggregated-systemic) id needs
+// its summed totals written back over the row already created for it; a
+// repeat of anything else (a genuinely idempotent site-wide finding, or —
+// in practice impossible, since ids are page/group-unique — an exact
+// non-additive repeat) is already persisted and needs nothing further,
+// same as the old seenFindingIds keep-first behavior.
+function reconcileFindings(writtenById, fresh) {
+  const toInsert = [];
+  const toUpdate = [];
+  for (const f of fresh) {
+    const existing = writtenById.get(f.id);
+    if (!existing) {
+      writtenById.set(f.id, f);
+      toInsert.push(f);
+    } else if (isAdditiveFinding(f) && isAdditiveFinding(existing)) {
+      const merged = mergeAdditive(existing, f);
+      writtenById.set(f.id, merged);
+      toUpdate.push(merged);
+    }
+  }
+  return { toInsert, toUpdate };
 }
 
 // The Phase-5 "AuditContext": one fetch cache shared across every chunk call
@@ -108,12 +180,6 @@ export async function runFullSiteAudit(siteId, {
     const end = todayInTz(site.timezone);
     const start = daysAgoInTz(site.timezone, IMPRESSIONS_WINDOW_DAYS);
 
-    // Some findings (orphaned pages, sitemap errors) are recomputed
-    // identically by every chunk call — same deterministic finding.id each
-    // time, since they don't depend on which page chunk triggered the run.
-    // Dedupe by id within this one audit run rather than special-casing
-    // which findings are "site-wide" vs "per-page."
-    const seenFindingIds = new Set();
     // Distinct pages that got at least one agent's audit — not a sum across
     // agents. With multiple agents in agentIds, the same page chunk is
     // audited once per agent, so summing pageChunk.length per (agent,chunk)
@@ -135,6 +201,16 @@ export async function runFullSiteAudit(siteId, {
     // correct; mid-run flicker itself is still harmless/cosmetic.
 
     for (const agentId of agentIds) {
+      // Everything this agent has had persisted so far in this run, keyed
+      // by finding.id — lets each new chunk's reconcileFindings() tell a
+      // brand-new finding apart from a repeat of an aggregated-systemic one
+      // that needs its counts merged into the row already written for it.
+      const writtenById = new Map();
+      // Chunks themselves run concurrently (chunkConcurrency), but their DB
+      // writes are chained strictly in resolution order — required so a
+      // later chunk's UPDATE (merging into an existing row) can never land
+      // before the earlier chunk's INSERT that created that row.
+      let writeChain = Promise.resolve();
       await Promise.all(chunks.map((pageChunk) => limit(async () => {
         let out;
         try {
@@ -144,17 +220,20 @@ export async function runFullSiteAudit(siteId, {
           return;
         }
         pageChunk.forEach((p) => auditedPages.add(p));
-        const fresh = (out.facts?.findings || []).filter((f) => {
-          if (seenFindingIds.has(f.id)) return false;
-          seenFindingIds.add(f.id);
-          return true;
-        });
+        const fresh = out.facts?.findings || [];
         if (fresh.length) {
-          await saveAuditPageFindingsBatch(auditRun.id, siteId, agentId, fresh);
-          findingsWritten += fresh.length;
+          writeChain = writeChain.then(async () => {
+            const { toInsert, toUpdate } = reconcileFindings(writtenById, fresh);
+            if (toInsert.length) {
+              await saveAuditPageFindingsBatch(auditRun.id, siteId, agentId, toInsert);
+              findingsWritten += toInsert.length;
+            }
+            await Promise.all(toUpdate.map((f) => updateAuditPageFinding(auditRun.id, f.id, f)));
+          });
         }
         await updateAuditRunProgress(auditRun.id, { pagesAudited: auditedPages.size });
       })));
+      await writeChain;
     }
 
     const pagesAudited = auditedPages.size;

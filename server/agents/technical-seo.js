@@ -1,5 +1,5 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { effortForGenerator, inferSchemaType, fetchTextIfExists } from './lib/page-content.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
@@ -125,38 +125,53 @@ export async function run({ siteId, start, end, pageCache, params }) {
 
   // --- Findings ---
 
+  // A Google-reported coverage problem is usually a real, page-specific
+  // fact (each page has its own index history) — but it can also cluster
+  // sitewide (a bad redirect rule, a rogue noindex applied by the CMS
+  // template), so this is reported as one "N of M checked pages" aggregate
+  // rather than one card per affected page.
+  const indexCheckedCount = pageResults.filter((r) => r.indexStatus.ok).length;
   const deindexedCandidates = pageResults
-    .filter((r) => r.indexStatus.ok && (r.indexStatus.verdict === 'FAIL' || r.indexStatus.verdict === 'PARTIAL'))
-    .sort((a, b) => b.impressions - a.impressions);
-  const deindexedPriorities = priorityByRank(deindexedCandidates);
-  const deindexedFindings = deindexedCandidates.map((r, i) => makeFinding({
-    id: `technical-seo:index:${r.page}`,
-    evidence: { page: r.page, verdict: r.indexStatus.verdict, coverageState: r.indexStatus.coverageState, indexingState: r.indexStatus.indexingState, impressions: r.impressions },
-    whyItMatters: `Google's own index inspection reports "${r.indexStatus.coverageState}" for this page (verdict: ${r.indexStatus.verdict}, ${r.impressions} impressions).`,
-    priority: deindexedPriorities[i],
+    .filter((r) => r.indexStatus.ok && (r.indexStatus.verdict === 'FAIL' || r.indexStatus.verdict === 'PARTIAL'));
+  const deindexedFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:deindexed',
+    affected: deindexedCandidates,
+    checkedCount: indexCheckedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    extraEvidence: (affected) => ({ verdicts: affected.map((r) => ({ page: r.page, verdict: r.indexStatus.verdict, coverageState: r.indexStatus.coverageState })) }),
+    whyItMatters: (n, c) => `Google's own index inspection reports a coverage problem (FAIL or PARTIAL) for ${n} of ${c} checked pages.`,
     recommendedAction: null,
-    expectedImpact: { label: impactFromPriority(deindexedPriorities[i]), basis: 'computed', value: r.impressions },
-  }));
+  });
+  const deindexedFindings = deindexedFinding ? [deindexedFinding] : [];
 
-  // Compound sort: CWV tier first (a failing high-traffic page must always
-  // outrank a passing one), impressions second — never a naive
-  // impressions-only rank, which would let a POOR low-traffic page beat a
-  // NEEDS_IMPROVEMENT high-traffic one inconsistently with "worse is worse."
-  const cwvCandidates = pageResults
-    .filter((r) => r.coreWebVitals.ok && (r.coreWebVitals.category === 'POOR' || r.coreWebVitals.category === 'NEEDS_IMPROVEMENT'))
-    .sort((a, b) => {
-      const tier = (r) => (r.coreWebVitals.category === 'POOR' ? 1 : 0);
-      return tier(b) - tier(a) || b.impressions - a.impressions;
-    });
-  const cwvPriorities = priorityByRank(cwvCandidates);
-  const cwvFindings = cwvCandidates.map((r, i) => makeFinding({
-    id: `technical-seo:cwv:${r.page}`,
-    evidence: { page: r.page, lcp: r.coreWebVitals.lcp, inp: r.coreWebVitals.inp, cls: r.coreWebVitals.cls, category: r.coreWebVitals.category, dataSource: r.coreWebVitals.dataSource, impressions: r.impressions },
-    whyItMatters: `Core Web Vitals are ${r.coreWebVitals.category} for this page (${r.coreWebVitals.dataSource} data, ${r.impressions} impressions).`,
-    priority: cwvPriorities[i],
-    recommendedAction: null,
-    expectedImpact: { label: impactFromPriority(cwvPriorities[i]), basis: 'computed', value: r.impressions },
-  }));
+  // POOR and NEEDS_IMPROVEMENT are materially different severities, kept as
+  // two separate aggregates rather than merged into one bucket — CWV is
+  // often driven by one shared render-blocking asset/script, so each tier
+  // is one "N of M checked pages" finding, not one card per affected page.
+  const cwvCheckedCount = pageResults.filter((r) => r.coreWebVitals.ok).length;
+  const cwvPoorCandidates = pageResults.filter((r) => r.coreWebVitals.ok && r.coreWebVitals.category === 'POOR');
+  const cwvNeedsImprovementCandidates = pageResults.filter((r) => r.coreWebVitals.ok && r.coreWebVitals.category === 'NEEDS_IMPROVEMENT');
+  const cwvFindings = [
+    aggregateSystemicFinding({
+      id: 'technical-seo:site:cwv-poor',
+      affected: cwvPoorCandidates,
+      checkedCount: cwvCheckedCount,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      whyItMatters: (n, c) => `Core Web Vitals are POOR on ${n} of ${c} checked pages.`,
+      recommendedAction: null,
+    }),
+    aggregateSystemicFinding({
+      id: 'technical-seo:site:cwv-needs-improvement',
+      affected: cwvNeedsImprovementCandidates,
+      checkedCount: cwvCheckedCount,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      whyItMatters: (n, c) => `Core Web Vitals need improvement on ${n} of ${c} checked pages.`,
+      recommendedAction: null,
+    }),
+  ].filter(Boolean);
 
   const rankedDupes = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const dupePriorities = priorityByRank(rankedDupes);
@@ -186,38 +201,51 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // branch needs only GSC's indexStatus, which is independent of our fetch —
   // gating both behind technicalAudit.ok dropped a real, Google-confirmed
   // mismatch whenever our own fetch failed (bot-blocked, timeout) even though
-  // GSC's data alone was enough to report it.
-  const canonicalCandidates = pageResults
-    .filter((r) =>
-      (r.technicalAudit.ok && !r.technicalAudit.hasCanonical)
-      || (r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical)
-    )
-    .sort((a, b) => b.impressions - a.impressions);
-  const canonicalPriorities = priorityByRank(canonicalCandidates);
-  const canonicalFindings = canonicalCandidates.map((r, i) => {
-    const hasMismatch = r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical;
-    return makeFinding({
-      id: `technical-seo:canonical:${r.page}`,
-      evidence: { page: r.page, hasCanonical: r.technicalAudit.ok ? r.technicalAudit.hasCanonical : null, googleCanonical: r.indexStatus.googleCanonical ?? null, userCanonical: r.indexStatus.userCanonical ?? null, impressions: r.impressions },
-      whyItMatters: hasMismatch
-        ? `Google's chosen canonical ("${r.indexStatus.googleCanonical}") disagrees with this page's own declared canonical ("${r.indexStatus.userCanonical}").`
-        : 'No canonical tag found on this page.',
-      priority: canonicalPriorities[i],
+  // GSC's data alone was enough to report it. Kept as two separate
+  // aggregates (not merged into one candidate list) since they're distinct
+  // failure modes with different real causes — a missing tag is usually a
+  // shared template gap, a mismatch is usually a specific redirect/param
+  // issue — each reported as its own "N of M checked pages" finding.
+  const missingCanonicalCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasCanonical);
+  const canonicalMismatchCandidates = pageResults.filter((r) =>
+    r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical);
+  const canonicalFindings = [
+    aggregateSystemicFinding({
+      id: 'technical-seo:site:missing-canonical',
+      affected: missingCanonicalCandidates,
+      checkedCount: pageResults.filter((r) => r.technicalAudit.ok).length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have no canonical tag.`,
       recommendedAction: null,
-      expectedImpact: { label: impactFromPriority(canonicalPriorities[i]), basis: 'computed', value: r.impressions },
-    });
-  });
+    }),
+    aggregateSystemicFinding({
+      id: 'technical-seo:site:canonical-mismatch',
+      affected: canonicalMismatchCandidates,
+      checkedCount: pageResults.filter((r) => r.indexStatus.ok).length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.indexStatus.userCanonical })) }),
+      whyItMatters: (n, c) => `Google's chosen canonical disagrees with the page's own declared canonical on ${n} of ${c} checked pages.`,
+      recommendedAction: null,
+    }),
+  ].filter(Boolean);
 
-  const schemaCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasSchema).sort((a, b) => b.impressions - a.impressions);
-  const schemaPriorities = priorityByRank(schemaCandidates);
-  const schemaFindings = schemaCandidates.map((r, i) => makeFinding({
-    id: `technical-seo:schema:${r.page}`,
-    evidence: { page: r.page, impressions: r.impressions },
-    whyItMatters: `No structured data (JSON-LD) found on this page (${r.impressions} impressions).`,
-    priority: schemaPriorities[i],
-    recommendedAction: { label: 'Add schema', generatorId: 'schema', params: { page: r.page, schemaType: inferSchemaType(r.page, []) }, effort: effortForGenerator('schema') },
-    expectedImpact: { label: impactFromPriority(schemaPriorities[i]), basis: 'computed', value: r.impressions },
-  }));
+  // Near-always a shared page-template gap (the template never emits
+  // JSON-LD at all) — one "N of M checked pages" finding, not one card per
+  // affected page. The highest-impression affected page carries the one
+  // draftable action a sitewide finding can still offer.
+  const schemaCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasSchema);
+  const schemaFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:missing-schema',
+    affected: schemaCandidates,
+    checkedCount: pageResults.filter((r) => r.technicalAudit.ok).length,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages have no structured data (JSON-LD).`,
+    recommendedAction: (rep) => ({ label: 'Add schema', generatorId: 'schema', params: { page: rep.page, schemaType: inferSchemaType(rep.page, []) }, effort: effortForGenerator('schema') }),
+  });
+  const schemaFindings = schemaFinding ? [schemaFinding] : [];
 
   const sourceImpressions = (sourcePages) => Math.max(0, ...sourcePages.map((p) => impressionsByPage.get(p) || 0));
 
@@ -295,18 +323,20 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // genuinely serious, common misconfiguration (an overly broad Disallow
   // rule accidentally catching pages meant to rank) that's cheap to check
   // since pageResults already has real impressions for this run's batch.
+  // Usually one shared rule catching a whole path prefix, so this is one
+  // "N of M checked pages" finding, not one card per blocked page.
   const robotsBlockedCandidates = pageResults
-    .filter((r) => { try { return !robots.isAllowed(new URL(r.page).pathname); } catch { return false; } })
-    .sort((a, b) => b.impressions - a.impressions);
-  const robotsBlockedPriorities = priorityByRank(robotsBlockedCandidates);
-  const robotsBlockedFindings = robotsBlockedCandidates.map((r, i) => makeFinding({
-    id: `technical-seo:robots-blocked:${r.page}`,
-    evidence: { page: r.page, impressions: r.impressions },
-    whyItMatters: `robots.txt disallows this page (${r.impressions} impressions) — if that's not intentional, it can stop Google from crawling a page it should be indexing.`,
-    priority: robotsBlockedPriorities[i],
+    .filter((r) => { try { return !robots.isAllowed(new URL(r.page).pathname); } catch { return false; } });
+  const robotsBlockedFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:robots-blocked',
+    affected: robotsBlockedCandidates,
+    checkedCount: pageResults.length,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `robots.txt disallows ${n} of ${c} checked pages — if that's not intentional, it can stop Google from crawling pages it should be indexing.`,
     recommendedAction: null,
-    expectedImpact: { label: impactFromPriority(robotsBlockedPriorities[i]), basis: 'computed', value: r.impressions },
-  }));
+  });
+  const robotsBlockedFindings = robotsBlockedFinding ? [robotsBlockedFinding] : [];
 
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
@@ -329,7 +359,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     sitemapUrlCount: sitemapUrls.length,
     crossDomainSitemapUrlCount: crossDomainUrls.length,
     robotsTxtFound: robotsFetch.ok,
-    robotsBlockedTopPageCount: robotsBlockedFindings.length,
+    robotsBlockedTopPageCount: robotsBlockedCandidates.length,
     findings,
   };
 
