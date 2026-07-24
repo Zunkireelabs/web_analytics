@@ -94,13 +94,26 @@ export function parseRobotsDisallowRules(robotsTxt) {
     }
   }
 
+  function longestMatch(path) {
+    let best = null;
+    for (const r of rules) {
+      if (path.startsWith(r.path) && (!best || r.path.length > best.path.length)) best = r;
+    }
+    return best;
+  }
+
   return {
     isAllowed(path) {
-      let best = null;
-      for (const r of rules) {
-        if (path.startsWith(r.path) && (!best || r.path.length > best.path.length)) best = r;
-      }
+      const best = longestMatch(path);
       return !best || best.type === 'allow';
+    },
+    // The specific Disallow rule (if any) actually winning for this path —
+    // used by technical-seo.js's robots-blocked finding to ground a
+    // draftable Allow-override at the real offending pattern, not a guess.
+    // null when the path is allowed (no winning disallow rule).
+    matchingDisallow(path) {
+      const best = longestMatch(path);
+      return best && best.type === 'disallow' ? best.path : null;
     },
   };
 }

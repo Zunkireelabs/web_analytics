@@ -1,6 +1,6 @@
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { makeFinding } from './lib/findings.js';
-import { analyzePageUrl } from './lib/page-content.js';
+import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
@@ -66,7 +66,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       evidence: { affectedCount: missingViewport.length, checkedCount: reachable.length, samplePages: missingViewport.slice(0, 5).map((r) => r.page) },
       whyItMatters: `${missingViewport.length} of ${reachable.length} checked pages have no viewport meta tag at all — mobile browsers fall back to rendering a desktop-width layout and scaling it down, which reads as broken/tiny on a phone.`,
       priority: missingViewport.length === reachable.length ? 'high' : 'medium',
-      recommendedAction: null,
+      recommendedAction: { label: 'Fix viewport meta tag', generatorId: 'viewport', params: {}, effort: effortForGenerator('viewport') },
       expectedImpact: { label: missingViewport.length === reachable.length ? 'High' : 'Medium', basis: 'computed', value: sumImpressions(missingViewport) },
     }));
   }
@@ -76,7 +76,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       evidence: { affectedCount: wrongViewport.length, checkedCount: reachable.length, samplePages: wrongViewport.slice(0, 5).map((r) => ({ page: r.page, content: r.analysis.viewportContent })) },
       whyItMatters: `${wrongViewport.length} of ${reachable.length} checked pages have a viewport tag that doesn't include "width=device-width" — a fixed-width viewport still forces the desktop-scaled-down layout mobile browsers are supposed to avoid.`,
       priority: 'medium',
-      recommendedAction: null,
+      recommendedAction: { label: 'Fix viewport meta tag', generatorId: 'viewport', params: {}, effort: effortForGenerator('viewport') },
       expectedImpact: { label: 'Medium', basis: 'computed', value: sumImpressions(wrongViewport) },
     }));
   }
@@ -86,7 +86,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       evidence: { affectedCount: zoomBlocked.length, checkedCount: reachable.length, samplePages: zoomBlocked.slice(0, 5).map((r) => ({ page: r.page, content: r.analysis.viewportContent })) },
       whyItMatters: `${zoomBlocked.length} of ${reachable.length} checked pages block pinch-to-zoom (user-scalable=no or maximum-scale<=1) — a real accessibility and usability problem for low-vision users, not just a missed best practice.`,
       priority: 'high',
-      recommendedAction: null,
+      recommendedAction: { label: 'Fix viewport meta tag', generatorId: 'viewport', params: {}, effort: effortForGenerator('viewport') },
       expectedImpact: { label: 'High', basis: 'computed', value: sumImpressions(zoomBlocked) },
     }));
   }

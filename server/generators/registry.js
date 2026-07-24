@@ -15,7 +15,7 @@ let cache = null;
 
 async function loadAll() {
   if (cache) return cache;
-  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !NON_GENERATOR_FILES.has(f));
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js') && !NON_GENERATOR_FILES.has(f));
 
   const generators = new Map();
   for (const file of files) {

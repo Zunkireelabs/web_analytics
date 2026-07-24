@@ -63,6 +63,44 @@ export function hasMarker(fileContent, name) {
 // field (see module comment above). Everything else is a BLOCK marker.
 const LINE_CONVENTION_FIELDS = new Set(['title']);
 
+// Fields whose real HTML context is <head> specifically (canonical, Open
+// Graph tags, and any future head-metadata generator — meta description,
+// meta robots, hreflang, verification tags, ...). The default BLOCK
+// convention's EOF auto-insert (insertBlockMarker below) is safe for body
+// content, but a <link rel="canonical">/og:* tag placed in <body> or after
+// </html> is browser-tolerant yet SEO-invisible — a "successful" splice
+// that silently does nothing. These fields are therefore never auto-
+// inserted at EOF. They're only ever auto-created NESTED inside the site's
+// own one-time, human-placed <!-- SEOAI:HEAD:START/END --> region — safe
+// because a human confirmed that region is genuinely inside their real
+// <head>. If that region doesn't exist yet, this fails honestly (no draft
+// applied) rather than drafting a tag that will never take effect. A future
+// head-metadata generator just adds its field name here — no per-generator
+// placement code.
+const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph']);
+const HEAD_MARKER_NAME = 'HEAD';
+
+// Exposed so callers (backend.js's computeMarkerMerge) can give a more
+// specific "marker not found" error for a head-scoped field — pointing at
+// the missing HEAD region itself, not just the field's own marker name.
+export function isHeadScopedField(field) {
+  return HEAD_SCOPED_FIELDS.has(field);
+}
+
+// Auto-creates a head-scoped field's own empty marker, nested inside the
+// site's already-placed <!-- SEOAI:HEAD:START/END --> region — never at
+// EOF. Returns null when that region doesn't exist yet (an onboarding step
+// the operator hasn't done for this template), leaving spliceMarkers'
+// existing "marker not found" failure as the honest outcome, same
+// discipline as insertLineMarker's null-on-unsafe return below.
+function insertHeadScopedMarker(fileContent, markerName) {
+  const match = blockRegex(HEAD_MARKER_NAME).exec(fileContent);
+  if (!match) return null;
+  const [full, start, inner, end] = match;
+  const newInner = `${inner}\n<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  return fileContent.slice(0, match.index) + start + newInner + end + fileContent.slice(match.index + full.length);
+}
+
 // The front-matter block only, `---\n...\n---\n` at the very start of the
 // file — auto-insertion for a LINE marker is restricted to inside this
 // block so it can never mistake an unrelated `title:`-looking string
@@ -144,6 +182,11 @@ export function ensureMarkers(fileContent, markerMap) {
       const updated = insertLineMarker(content, field, markerName);
       if (updated) { content = updated; inserted.push(markerName); }
       continue;
+    }
+    if (HEAD_SCOPED_FIELDS.has(field)) {
+      const updated = insertHeadScopedMarker(content, markerName);
+      if (updated) { content = updated; inserted.push(markerName); }
+      continue; // no EOF fallback — an honest "marker not found" is correct here
     }
     content = insertBlockMarker(content, markerName);
     inserted.push(markerName);
@@ -230,6 +273,17 @@ function renderLinksHtml(suggestions) {
   return `<ul class="related-links">\n${items}\n</ul>`;
 }
 
+// Real, deterministic HTML for a content-expansion block (generators/
+// expand-content.js) — each section is a real, LLM-grounded heading+body
+// pair, escaped since it's untrusted LLM output same as internal-links'
+// anchor text above.
+function renderExpandedHtml(sections) {
+  const rendered = sections.map((s) =>
+    `  <h2>${escapeHtml(s.heading)}</h2>\n  <p>${escapeHtml(s.body)}</p>`
+  ).join('\n');
+  return `<section class="expanded-content">\n${rendered}\n</section>`;
+}
+
 // Turns one APPROVED draft's already-locked content into the literal
 // marker values to splice in — the only place that decides "what text goes
 // where." Every value here is either already-approved content verbatim
@@ -282,6 +336,25 @@ export function buildMergeValues(actionType, content, mode = 'visible') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
     return { ok: true, values: { links: renderLinksHtml(content.suggestions) } };
+  }
+
+  if (actionType === 'canonical') {
+    if (mode === 'schema-only') return { ok: false, error: '"canonical" has no schema-only representation.' };
+    if (!content.canonicalUrl) return { ok: false, error: 'This canonical draft has no URL.' };
+    return { ok: true, values: { canonical: `<link rel="canonical" href="${escapeHtml(content.canonicalUrl)}">` } };
+  }
+
+  if (actionType === 'open-graph') {
+    if (mode === 'schema-only') return { ok: false, error: '"open-graph" has no schema-only representation.' };
+    if (!content.ogTitle) return { ok: false, error: 'This Open Graph draft has no title.' };
+    const tags = `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">\n<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`;
+    return { ok: true, values: { openGraph: tags } };
+  }
+
+  if (actionType === 'expand-content') {
+    if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
+    if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
+    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections) } };
   }
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };

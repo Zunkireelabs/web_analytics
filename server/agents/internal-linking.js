@@ -1,7 +1,7 @@
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { flagBelowAverage } from './lib/ctr-anomaly.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
-import { analyzePageUrl } from './lib/page-content.js';
+import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
@@ -73,7 +73,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     evidence: { page: r.page, internalLinkCount: r.internalLinkCount, deviationPct: r.internalLinkCountDeviationPct, impressions: r.impressions },
     whyItMatters: `This page links to only ${r.internalLinkCount} other page(s) on the site — ${Math.abs(r.internalLinkCountDeviationPct)}% below this site's own average this run (${r.impressions} impressions). Pages it doesn't link to get less internal link equity from it.`,
     priority: priorities[i],
-    recommendedAction: null, // adding internal links is a real edit, not draftable content today
+    recommendedAction: { label: 'Add internal links', generatorId: 'internal-links', params: { page: r.page }, effort: effortForGenerator('internal-links') },
     expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: r.impressions },
   }));
 

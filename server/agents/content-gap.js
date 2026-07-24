@@ -1,6 +1,6 @@
 import { getQueriesForPage, getSearchPerformanceForPages } from '../store/read.js';
 import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerator, inferSchemaType } from './lib/page-content.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { listCompetitorProfiles } from '../store/competitor-profiles.js';
 import { callLLM } from '../llm.js';
@@ -32,9 +32,10 @@ export const meta = {
 // competitor-analysis.js's structuralSignals — headings/alt-text/canonical/
 // OG/lists/question-headings have no competitor-side equivalent captured
 // today, so they stay page-only findings rather than a forced comparison.
+// ('Missing schema' is aggregated site-wide below, so it no longer goes
+// through this per-page competitive framing.)
 const GAP_TYPE_TO_COMPETITOR_SIGNAL = {
   'Missing FAQ': 'hasFaq',
-  'Missing schema': 'hasSchema',
   'Missing comparisons': 'hasComparisonContent',
 };
 const MIN_TRACKED_COMPETITORS = 2; // below this, a "X of Y" ratio isn't a real market signal
@@ -170,9 +171,54 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const pagesWithGaps = pages.filter((p) => p.gaps?.length).sort((a, b) => b.impressions - a.impressions);
   const priorityByPage = new Map(priorityByRank(pagesWithGaps).map((pr, i) => [pagesWithGaps[i].page, pr]));
 
-  const findings = pages.flatMap((p) => {
+  // Schema/canonical/Open-Graph gaps are commonly a shared <head> template
+  // issue (the template never emits JSON-LD/canonical/OG tags), not a
+  // page-by-page authoring gap — aggregated into one finding per gap type
+  // instead of one per page. Every other gap type stays per-page: it's
+  // driven by that specific page's own authored content (headings, FAQ,
+  // alt text, ...), not a shared template attribute.
+  const AGGREGATED_GAP_TYPES = new Set(['Missing schema', 'Missing canonical tag', 'Missing Open Graph tags']);
+  const analyzedPages = pages.filter((p) => p.gaps != null);
+  const pagesWithGapType = (type) => analyzedPages.filter((p) => p.gaps.some((g) => g.type === type));
+
+  const siteWideGapFindings = [
+    aggregateSystemicFinding({
+      id: 'content-gap:site:missing-schema',
+      affected: pagesWithGapType('Missing schema'),
+      checkedCount: analyzedPages.length,
+      getPage: (p) => p.page,
+      getImpressions: (p) => p.impressions,
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have no structured data (JSON-LD) on the page.`,
+      recommendedAction: (rep) => ({
+        label: 'Missing schema',
+        generatorId: 'schema',
+        params: { page: rep.page, query: rep.topQueries?.[0] || '', schemaType: inferSchemaType(rep.page, rep.schemaTypes) },
+        effort: effortForGenerator('schema'),
+      }),
+    }),
+    aggregateSystemicFinding({
+      id: 'content-gap:site:missing-canonical',
+      affected: pagesWithGapType('Missing canonical tag'),
+      checkedCount: analyzedPages.length,
+      getPage: (p) => p.page,
+      getImpressions: (p) => p.impressions,
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have no rel="canonical" link.`,
+      recommendedAction: (rep) => ({ label: 'Add canonical', generatorId: 'canonical', params: { page: rep.page }, effort: effortForGenerator('canonical') }),
+    }),
+    aggregateSystemicFinding({
+      id: 'content-gap:site:missing-og',
+      affected: pagesWithGapType('Missing Open Graph tags'),
+      checkedCount: analyzedPages.length,
+      getPage: (p) => p.page,
+      getImpressions: (p) => p.impressions,
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have no og:title/og:description.`,
+      recommendedAction: (rep) => ({ label: 'Add Open Graph tags', generatorId: 'open-graph', params: { page: rep.page }, effort: effortForGenerator('open-graph') }),
+    }),
+  ].filter(Boolean);
+
+  const findings = [...siteWideGapFindings, ...pages.flatMap((p) => {
     const priority = priorityByPage.get(p.page) || 'low';
-    const gapFindings = (p.gaps || []).map((g) => {
+    const gapFindings = (p.gaps || []).filter((g) => !AGGREGATED_GAP_TYPES.has(g.type)).map((g) => {
       const generatorId = GAP_TYPE_TO_GENERATOR[g.type] ?? null;
       // Real competitive framing: only added when at least MIN_TRACKED_COMPETITORS
       // reachable competitor profiles exist AND most of them actually have
@@ -210,7 +256,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       expectedImpact: { label: 'Low', basis: 'estimate', value: null },
     }));
     return [...gapFindings, ...aiFindings];
-  });
+  })];
 
   const facts = {
     rangeStart: start,

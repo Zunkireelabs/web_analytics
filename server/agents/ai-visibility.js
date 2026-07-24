@@ -47,7 +47,7 @@ const RECOMMENDATION_RULES = [
   { test: (c) => c.faq === 0, label: 'Add an FAQ section.', generatorId: 'faq' },
   { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
   { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
-  { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: null },
+  { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: 'expand-content' },
 ];
 
 // llms.txt/robots readiness is a SITE-WIDE fact (one checkLlmsReadiness() call
@@ -164,11 +164,14 @@ export async function run({ siteId, start, end, pageCache }) {
         label: rec.label,
         generatorId: rec.generatorId,
         // faq.js needs a real query/topic, never schemaType (which it never
-        // reads) — everything else keeps the page+schemaType shape schema.js
-        // actually consumes.
+        // reads); expand-content needs the qa-subheadings focus for this
+        // specific rule (citationReadiness) — everything else keeps the
+        // page+schemaType shape schema.js actually consumes.
         params: rec.generatorId === 'faq'
           ? { page: p.page, query: p.topQuery }
-          : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
+          : rec.generatorId === 'expand-content'
+            ? { page: p.page, query: p.topQuery, focus: 'qa-subheadings' }
+            : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
         effort: effortForGenerator(rec.generatorId),
       },
       expectedImpact,

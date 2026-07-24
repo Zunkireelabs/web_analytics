@@ -1,6 +1,6 @@
-import { fetchResponseHeaders } from './lib/page-content.js';
+import { fetchResponseHeaders, effortForGenerator } from './lib/page-content.js';
 import { getSearchPerformanceForPages } from '../store/read.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { aggregateSystemicFinding, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
@@ -72,31 +72,56 @@ export async function run({ siteId, start, end, params }) {
 
   const reachable = fetched.filter((r) => r.result.ok);
 
-  // One candidate list per header — a page missing HSTS and a page missing
-  // CSP are different issues with different real severities, so they're
-  // ranked (and prioritized) within their own header's candidate pool, not
-  // pooled together where "which header" would get lost in a single sort.
+  // Response headers are set once at the server/CDN/middleware level, not
+  // per route — a header missing on one page is missing on virtually every
+  // page, so each header is one aggregated finding (how many of the real
+  // checked pages lack it), not N near-identical per-page findings for the
+  // same root config gap.
   const findings = CHECKS.flatMap((check) => {
     const missing = reachable.filter((r) => {
       const present = r.result.headers.has(check.key);
       return !present && !(check.satisfiedBy?.(r.result.headers));
     });
-    if (!missing.length) return [];
-    const ranked = [...missing].sort((a, b) => (impressionsByPage.get(b.page) || 0) - (impressionsByPage.get(a.page) || 0));
-    const priorities = priorityByRank(ranked);
-    return ranked.map((r, i) => {
-      const impressions = impressionsByPage.get(r.page) || 0;
-      const priority = priorities[i];
-      return makeFinding({
-        id: `security-headers:${check.key}:${r.page}`,
-        evidence: { page: r.page, header: check.key, impressions },
-        whyItMatters: `${check.label} is missing — it ${check.detail} (${impressions} impressions).`,
-        priority,
-        recommendedAction: null, // a response-header fix is a server/CDN config change, not draftable content
-        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: impressions },
-      });
+    const finding = aggregateSystemicFinding({
+      id: `security-headers:${check.key}`,
+      affected: missing,
+      checkedCount: reachable.length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => impressionsByPage.get(r.page) || 0,
+      whyItMatters: (n, c) => `${check.label} is missing on ${n} of ${c} checked pages — it ${check.detail}.`,
+      recommendedAction: null, // a response-header fix is a server/CDN config change, not draftable content
     });
+    return finding ? [finding] : [];
   });
+
+  // One combined, actionable finding covering every header found missing —
+  // deliberately separate from the five diagnostic per-header findings
+  // above (which stay recommendedAction: null). All missing headers live in
+  // the same nginx server {} block, so one Action Center draft that splices
+  // all of them in a single PR is correct; five separate per-header drafts
+  // would all race to splice the same marker region. No evidence.affectedCount
+  // here (only checkedCount) — deliberate, so bulk-audit.js's
+  // isAdditiveFinding() treats this as idempotent (same missing-headers set
+  // every chunk, since headers are set once at the server level, not
+  // per-page) rather than summing a count across chunks that would only be
+  // correct for a genuinely per-page fact.
+  const missingKeys = findings.map((f) => f.id.replace('security-headers:', ''));
+  if (missingKeys.length) {
+    const totalImpressions = reachable.reduce((sum, r) => sum + (impressionsByPage.get(r.page) || 0), 0);
+    findings.push(makeFinding({
+      id: 'security-headers:site:missing-security-headers',
+      evidence: { missingHeaders: missingKeys, checkedCount: reachable.length },
+      whyItMatters: `${missingKeys.length} recommended security header${missingKeys.length === 1 ? ' is' : 's are'} missing sitewide — a single nginx config block adds ${missingKeys.length === 1 ? 'it' : 'them all'}.`,
+      priority: 'high',
+      recommendedAction: {
+        label: 'Add security headers',
+        generatorId: 'security-headers',
+        params: { missingHeaders: missingKeys },
+        effort: effortForGenerator('security-headers'),
+      },
+      expectedImpact: { label: 'High', basis: 'computed', value: totalImpressions },
+    }));
+  }
 
   const facts = {
     rangeStart: start, rangeEnd: end,

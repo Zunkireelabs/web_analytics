@@ -19,6 +19,7 @@ const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
+const Settings = lazy(() => import('./pages/Settings.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
@@ -122,6 +123,8 @@ export default function App() {
               <Route path="/ai-orchestration" element={<AiGrowth />} />
               <Route path="/action-center" element={<ActionCenter />} />
               <Route path="/site-audit" element={<SiteAudit />} />
+              {/* Every account, not internal-only — same session's own password either way. */}
+              <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this session's own. */}
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
             </Routes>

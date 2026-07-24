@@ -215,13 +215,13 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 }
 
 // Every generator type now has a real, working merge-to-stage strategy (see
-// server/implementers/backend.js's MARKER_MERGE_TYPES + llms-txt, and
-// server/implementers/frontend.js for landing-page/blog-outline/translation)
-// — a real merge into stage is the ONLY path to 'implemented' for all 8.
-// The legacy manual bypass below is kept only as an escape hatch for a
-// draft whose type somehow isn't in this list (defensive, not expected to
-// ever apply today).
-export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation'];
+// server/implementers/backend.js's MARKER_MERGE_TYPES + llms-txt +
+// security-headers/html-lang, and server/implementers/frontend.js for
+// landing-page/blog-outline/translation) — a real merge into stage is the
+// ONLY path to 'implemented' for all 10. The legacy manual bypass below is
+// kept only as an escape hatch for a draft whose type somehow isn't in this
+// list (defensive, not expected to ever apply today).
+export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content'];
 
 // approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real

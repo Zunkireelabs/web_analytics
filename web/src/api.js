@@ -34,6 +34,8 @@ export const api = {
   // creates a contact_requests row: a lightweight lead, never an account.
   submitContactRequest: (body) => req('/contact-requests', { method: 'POST', body: JSON.stringify(body) }),
   logout: () => req('/logout', { method: 'POST' }),
+  changePassword: (currentPassword, newPassword) =>
+    req('/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   sites: () => req('/sites'),
   agents: () => req('/agents'),
   agentsStatus: () => req('/agents/status'),

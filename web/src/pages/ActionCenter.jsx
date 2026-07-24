@@ -34,6 +34,15 @@ const GENERATOR_META = {
   'landing-page': { label: 'Landing Pages', icon: '🚀', color: '#c2410c' },
   translation: { label: 'Translations', icon: '🌐', color: '#06b6d4' },
   'llms-txt': { label: 'llms.txt Files', icon: '🤖', color: '#10b981' },
+  'security-headers': { label: 'Security Headers', icon: '🛡️', color: '#ef4444' },
+  'html-lang': { label: 'Page Language', icon: '🌍', color: '#0891b2' },
+  viewport: { label: 'Viewport Meta Tag', icon: '📱', color: '#0d9488' },
+  canonical: { label: 'Canonical Tags', icon: '🔗', color: '#7c3aed' },
+  'robots-fix': { label: 'Robots.txt Fixes', icon: '🤖', color: '#059669' },
+  'open-graph': { label: 'Open Graph Tags', icon: '📣', color: '#db2777' },
+  'broken-link-fix': { label: 'Broken Link Removal', icon: '⛔', color: '#dc2626' },
+  'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
+  'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
 };
 
 const DRAFT_STATUS_LABEL = {
