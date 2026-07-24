@@ -14,3 +14,12 @@ export async function createUser({ siteId, email, passwordHash }) {
   );
   return rows[0];
 }
+
+export async function getUserById(id) {
+  const { rows } = await query('SELECT * FROM users WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
+export async function updateUserPassword(userId, passwordHash) {
+  await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+}

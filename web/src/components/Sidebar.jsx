@@ -12,7 +12,8 @@ import {
   Zap,
   Network,
   Building2,
-  Radar
+  Radar,
+  Settings as SettingsIcon
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -23,6 +24,7 @@ const NAV = [
   { to: '/compare', label: 'Compare', icon: TrendingUp },
   { to: '/reports', label: 'Reports', icon: FileText },
   { to: '/milestones', label: 'Milestones', icon: Sprout },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 // Client-facing growth tooling — same page for staff and clients alike,

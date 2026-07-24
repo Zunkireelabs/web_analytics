@@ -22,6 +22,10 @@ const ACTION_LABELS = {
   'meta-title': 'Meta Title & Description', faq: 'FAQ', schema: 'Schema Markup',
   'internal-links': 'Internal Links', 'blog-outline': 'Blog Outline',
   'landing-page': 'Landing Page', translation: 'Translation', 'llms-txt': 'llms.txt & AI-Crawler Robots.txt',
+  'security-headers': 'Security Headers', 'html-lang': 'Page Language',
+  viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
+  'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
+  'expand-content': 'Content Expansion',
 };
 
 const GENERATOR_COLORS = {
@@ -33,9 +37,21 @@ const GENERATOR_COLORS = {
   'landing-page': '#c2410c',
   translation: '#06b6d4',
   'llms-txt': '#10b981',
+  'security-headers': '#ef4444',
+  'html-lang': '#0891b2',
+  viewport: '#0d9488',
+  canonical: '#7c3aed',
+  'robots-fix': '#059669',
+  'open-graph': '#db2777',
+  'broken-link-fix': '#dc2626',
+  'redirect-fix': '#d97706',
+  'expand-content': '#4f46e5',
 };
 
-const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation'];
+// Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
+// type here has a real merge-to-stage strategy, so "mark implemented
+// manually" (the legacy bypass button) must never show for it.
+const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content'];
 
 const STATUS_INFO = {
   draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },

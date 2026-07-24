@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { getUserByEmail } from '../store/users.js';
+import { getUserByEmail, getUserById, updateUserPassword } from '../store/users.js';
 import { createSignupRequest } from '../store/signup-requests.js';
 import { createContactRequest } from '../store/contact-requests.js';
 import { sendContactLeadEmail } from '../report/email.js';
@@ -105,9 +105,36 @@ router.post('/logout', (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-router.get('/me', (req, res) => {
-  const authed = !!(req.session?.userId && req.session?.siteId);
-  res.json({ authed, isInternal: authed && isInternalSite(req.session.siteId) });
+// Every account can change its own password — same bcrypt convention as
+// /signup-requests above (10 rounds, 8-char minimum). Requires the current
+// password so an already-open, unattended session can't be used to silently
+// lock the real owner out. Leaves the session intact — this codebase has no
+// multi-session tracking to invalidate, so there's nothing else to do here.
+router.post('/change-password', requireAuth, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required.' });
+    }
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters.' });
+    }
+    const user = await getUserById(req.userId);
+    const valid = user && (await bcrypt.compare(currentPassword, user.password_hash));
+    if (!valid) return res.status(401).json({ error: 'Current password is incorrect.' });
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await updateUserPassword(req.userId, passwordHash);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+router.get('/me', async (req, res, next) => {
+  try {
+    const authed = !!(req.session?.userId && req.session?.siteId);
+    if (!authed) return res.json({ authed: false, isInternal: false });
+    const user = await getUserById(req.session.userId);
+    res.json({ authed: true, isInternal: isInternalSite(req.session.siteId), email: user?.email || null });
+  } catch (e) { next(e); }
 });
 
 // The AI Growth Platform (server/agents, server/routes/action-center.js) is

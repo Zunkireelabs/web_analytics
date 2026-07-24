@@ -203,7 +203,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getPage: (p) => p.page,
       getImpressions: (p) => p.impressions,
       whyItMatters: (n, c) => `${n} of ${c} checked pages have no rel="canonical" link.`,
-      recommendedAction: null,
+      recommendedAction: (rep) => ({ label: 'Add canonical', generatorId: 'canonical', params: { page: rep.page }, effort: effortForGenerator('canonical') }),
     }),
     aggregateSystemicFinding({
       id: 'content-gap:site:missing-og',
@@ -212,7 +212,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getPage: (p) => p.page,
       getImpressions: (p) => p.impressions,
       whyItMatters: (n, c) => `${n} of ${c} checked pages have no og:title/og:description.`,
-      recommendedAction: null,
+      recommendedAction: (rep) => ({ label: 'Add Open Graph tags', generatorId: 'open-graph', params: { page: rep.page }, effort: effortForGenerator('open-graph') }),
     }),
   ].filter(Boolean);
 

@@ -1,14 +1,18 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, STAGE_BRANCH } from './lib/github-ops.js';
 import { getFileContent } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField } from './lib/marker-merge.js';
+import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
+import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
+import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
+import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 
 export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
-  description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt'],
+  description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang) as a real pull request.',
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -18,7 +22,7 @@ export const meta = {
 // shape as faq's; internal-links renders its suggestion list to a
 // deterministic <ul> first (see marker-merge.js's renderLinksHtml) — neither
 // needs a different mechanism, just its own marker name and value-builder.
-const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links']);
+const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content']);
 
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
@@ -29,6 +33,9 @@ const MARKER_FIELD_BY_ACTION_TYPE = {
   faq: 'faq',
   schema: 'schema',
   'internal-links': 'links',
+  canonical: 'canonical',
+  'open-graph': 'openGraph',
+  'expand-content': 'expandedContent',
 };
 
 function markerConfigExample(actionType) {
@@ -53,6 +60,261 @@ async function pushLlmsTxtBranch(site, draft, batchInfo) {
     files.push({ path: robotsPath, content: draft.content.robotsDirectives });
   }
   return pushDraftBranch(site, draft, files, batchInfo);
+}
+
+// Real, hash-comment-marker splice for the nginx security-headers block —
+// nginx doesn't understand `<!-- -->`, so this can't reuse marker-merge.js's
+// BLOCK convention. No auto-insert of a missing marker (see
+// hash-marker-merge.js) and a string-level brace-balance guardrail
+// (validateNginxBraces) before this ever returns ok, since there's no way to
+// run a real `nginx -t` here (pure REST writes, no clone, no nginx binary).
+// Shared by preview() and apply(), same "can never diverge" discipline as
+// computeMarkerMerge.
+async function computeSecurityHeadersMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const spliced = spliceHashBlock(file.content, 'SECURITY-HEADERS', draft.content.nginxBlock);
+  if (!spliced.ok) return spliced;
+  const validated = validateNginxBraces(spliced.newContent);
+  if (!validated.ok) return validated;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: spliced.newContent,
+    changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', before: spliced.changedRegion.before, after: spliced.changedRegion.after }],
+  };
+}
+
+async function pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveSecurityHeaders(site, draft) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  const file = await getFileContent(site, path, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const content = getHashMarkerContent(file.content, 'SECURITY-HEADERS');
+  if (content === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', content }] };
+}
+
+// Real, hash-comment-marker splice for a robots.txt Allow-override — third
+// dedicated hash-marker special case alongside security-headers, reusing
+// the same hash-marker-merge.js (robots.txt uses `#` comments, same as
+// nginx) and the same site-root robotsTxt key llms-txt already uses.
+// Deliberately NOT the llms-txt full-overwrite path: that path already
+// carries acknowledged full-overwrite risk for this exact file, and
+// extending it here would let a future llms-txt draft silently clobber
+// this bounded marker region. No brace-balance check (robots.txt has no
+// braces) — spliceHashBlock's own single-marker-uniqueness check is the
+// guardrail.
+async function computeRobotsFixMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'robotsTxt');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const spliced = spliceHashBlock(file.content, 'ROBOTS-FIX', draft.content.robotsBlock);
+  if (!spliced.ok) return spliced;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: spliced.newContent,
+    changedRegions: [{ field: 'robotsBlock', markerName: 'ROBOTS-FIX', before: spliced.changedRegion.before, after: spliced.changedRegion.after }],
+  };
+}
+
+async function pushRobotsFixBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeRobotsFixMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveRobotsFix(site, draft) {
+  const path = resolveSiteRootFile(site, 'robotsTxt');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
+  const file = await getFileContent(site, path, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const content = getHashMarkerContent(file.content, 'ROBOTS-FIX');
+  if (content === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:ROBOTS-FIX marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'robotsBlock', markerName: 'ROBOTS-FIX', content }] };
+}
+
+// Direct attribute injection for the shared layout's <html> tag — no marker
+// convention needed (see html-lang-inject.js). `lang-already-present` is
+// remapped to a benign `already-applied` (nothing to do, not an error the
+// reviewer needs to act on); `no-html-tag` means the wrong file is mapped,
+// same shape as any other `no-file-mapping` failure.
+async function computeHtmlLangMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'layoutTemplate');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const injected = injectHtmlLang(file.content, draft.content.lang);
+  if (!injected.ok) {
+    if (injected.reason === 'lang-already-present') return { ok: false, reason: 'already-applied', error: injected.error };
+    if (injected.reason === 'no-html-tag') return { ok: false, reason: 'no-file-mapping', error: injected.error };
+    return injected;
+  }
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: injected.newContent,
+    changedRegions: [{ field: 'lang', before: injected.changedRegion.before, after: injected.changedRegion.after }],
+  };
+}
+
+async function pushHtmlLangBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeHtmlLangMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveHtmlLang(site, draft) {
+  const path = resolveSiteRootFile(site, 'layoutTemplate');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured.' };
+  const file = await getFileContent(site, path, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const tag = getHtmlTag(file.content);
+  if (tag === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No <html> tag found in ${path} — it may have moved since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'lang', content: tag }] };
+}
+
+// Direct insert-or-replace for the shared layout's <meta name="viewport">
+// tag — no marker convention needed (see viewport-inject.js). Unlike
+// html-lang, this also handles the "present but wrong" case by replacing
+// the whole content attribute, not just inserting when absent.
+// `viewport-already-correct` is remapped to a benign `already-applied`;
+// `no-head-tag` means the wrong file is mapped, same shape as `no-file-mapping`.
+async function computeViewportMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'layoutTemplate');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const set = setViewportMeta(file.content, draft.content.viewportContent);
+  if (!set.ok) {
+    if (set.reason === 'viewport-already-correct') return { ok: false, reason: 'already-applied', error: set.error };
+    if (set.reason === 'no-head-tag') return { ok: false, reason: 'no-file-mapping', error: set.error };
+    return set;
+  }
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: set.newContent,
+    changedRegions: [{ field: 'viewportContent', before: set.changedRegion.before, after: set.changedRegion.after }],
+  };
+}
+
+async function pushViewportBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeViewportMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveViewport(site, draft) {
+  const path = resolveSiteRootFile(site, 'layoutTemplate');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured.' };
+  const file = await getFileContent(site, path, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const tag = getViewportMeta(file.content);
+  if (tag === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No <meta name="viewport"> tag found in ${path} — it may have moved since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'viewportContent', content: tag }] };
+}
+
+// Targeted anchor rewrite/removal for a specific href on a specific page —
+// per-page like the marker-merge types below (resolveFile, not
+// resolveSiteRootFile), but not marker-based: there's no bounded region an
+// arbitrary <a> tag lives in, so this searches the whole file for an exact
+// href match instead (see href-rewrite-inject.js). `no-match` is an honest
+// failure (link already fixed/removed since detection, or lives in a
+// shared partial outside this page's own template file) — never guessed.
+async function computeRedirectFixMerge(site, draft, beforeRef) {
+  const filePath = resolveFile(site, draft.content.page);
+  if (!filePath) {
+    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}" — add one via \`npm run connect-repo\` before this can be applied.` };
+  }
+  const file = await getFileContent(site, filePath, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const rewritten = rewriteHref(file.content, draft.content.oldHref, draft.content.newHref);
+  if (!rewritten.ok) return rewritten;
+  return {
+    ok: true, filePath, oldContent: file.content, newContent: rewritten.newContent,
+    changedRegions: [{ field: 'href', before: draft.content.oldHref, after: draft.content.newHref }],
+  };
+}
+
+async function pushRedirectFixBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeRedirectFixMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveRedirectFix(site, draft) {
+  const filePath = resolveFile(site, draft.content.page);
+  if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}".` };
+  const file = await getFileContent(site, filePath, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${STAGE_BRANCH}".` };
+  const anchors = getAnchorsForHref(file.content, draft.content.newHref);
+  if (!anchors.length) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No <a href="${draft.content.newHref}"> found in ${filePath} — it may have changed since this draft was implemented.` };
+  }
+  return { ok: true, filePath, live: true, changedRegions: anchors.map((content) => ({ field: 'href', content })) };
+}
+
+async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
+  const filePath = resolveFile(site, draft.content.page);
+  if (!filePath) {
+    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}" — add one via \`npm run connect-repo\` before this can be applied.` };
+  }
+  const file = await getFileContent(site, filePath, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const stripped = stripLink(file.content, draft.content.href);
+  if (!stripped.ok) return stripped;
+  return {
+    ok: true, filePath, oldContent: file.content, newContent: stripped.newContent,
+    changedRegions: [{ field: 'href', before: draft.content.href, after: null }],
+  };
+}
+
+async function pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeBrokenLinkFixMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveBrokenLinkFix(site, draft) {
+  const filePath = resolveFile(site, draft.content.page);
+  if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}".` };
+  const file = await getFileContent(site, filePath, STAGE_BRANCH);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${STAGE_BRANCH}".` };
+  // Implemented means the anchor was already stripped — its live absence
+  // (getAnchorsForHref finds none left) IS the confirmation, not a failure.
+  const anchors = getAnchorsForHref(file.content, draft.content.href);
+  return { ok: true, filePath, live: true, changedRegions: [{ field: 'href', content: anchors.length ? anchors.join('\n') : '(link removed)' }] };
 }
 
 // Real, marker-based merge for meta-title/faq (see lib/marker-merge.js) —
@@ -117,7 +379,17 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = S
   const spliced = spliceMarkers(ensured.content, markerMap, built.values);
   if (!spliced.ok) {
     const names = spliced.missingMarkers.map((m) => `SEOAI:${m}`).join(', ');
-    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.` };
+    // A head-scoped field (canonical, open-graph, ...) is never auto-inserted
+    // at EOF — it can only be auto-created nested inside a human-placed
+    // SEOAI:HEAD region (see marker-merge.js). If its own marker is still
+    // missing after ensureMarkers ran, that region doesn't exist yet — tell
+    // the operator exactly what one-time step to do, not just which marker
+    // name is missing.
+    const missingFields = Object.entries(markerMap).filter(([, markerName]) => spliced.missingMarkers.includes(markerName)).map(([field]) => field);
+    const headHint = missingFields.some(isHeadScopedField)
+      ? ` This field must be placed inside a <!-- SEOAI:HEAD:START -->...<!-- SEOAI:HEAD:END --> region within <head> — add that region to ${filePath} first (a one-time step per template), then this field's own marker is created automatically.`
+      : '';
+    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.${headHint}` };
   }
 
   return {
@@ -176,6 +448,12 @@ export async function apply(site, draft, opts = {}) {
   const batchInfo = await getOrInitBatchBranch(site);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
+  if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
     const merged = await computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
     if (!merged.ok) return merged;
@@ -208,6 +486,12 @@ export async function preview(site, draft, opts = {}) {
       const file = await getFileContent(site, llmsPath, STAGE_BRANCH);
       return { ok: true, filePath: llmsPath, live: true, changedRegions: [{ field: 'llmsTxt', content: file?.content || '' }] };
     }
+    if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
+    if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
+    if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
+    if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
+    if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
+    if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
     if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
     return { ok: false, reason: 'merge-strategy-not-implemented', error: `No live view available for "${draft.action_type}" yet.` };
   }
@@ -221,6 +505,12 @@ export async function preview(site, draft, opts = {}) {
     const file = await getFileContent(site, llmsPath, beforeRef);
     return { ok: true, filePath: llmsPath, oldContent: file?.content || '', newContent: draft.content.llmsTxt };
   }
+  if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
+  if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No preview available for "${draft.action_type}" yet.` };
 }

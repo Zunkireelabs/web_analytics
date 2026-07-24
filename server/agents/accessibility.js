@@ -1,6 +1,6 @@
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
-import { analyzePageUrl } from './lib/page-content.js';
+import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
@@ -57,7 +57,16 @@ export async function run({ siteId, start, end, pageCache, params }) {
     evidence: { affectedCount: missingLang.length, checkedCount: reachable.length, samplePages: missingLang.slice(0, 5).map((r) => r.page) },
     whyItMatters: `${missingLang.length} of ${reachable.length} checked pages have no <html lang> attribute — screen readers can't reliably choose the right pronunciation/voice without it.`,
     priority: missingLang.length === reachable.length ? 'high' : 'medium',
-    recommendedAction: null,
+    recommendedAction: {
+      label: 'Set page language',
+      generatorId: 'html-lang',
+      // No explicit lang here — the generator resolves the real per-site
+      // language itself (url_file_map.siteRoot.htmlLang, falling back to
+      // 'en'), so this agent never has to guess/hardcode a language it has
+      // no real signal for.
+      params: {},
+      effort: effortForGenerator('html-lang'),
+    },
     expectedImpact: { label: missingLang.length === reachable.length ? 'High' : 'Medium', basis: 'computed', value: missingLang.length },
   })] : [];
 

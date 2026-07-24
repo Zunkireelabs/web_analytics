@@ -217,7 +217,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getPage: (r) => r.page,
       getImpressions: (r) => r.impressions,
       whyItMatters: (n, c) => `${n} of ${c} checked pages have no canonical tag.`,
-      recommendedAction: null,
+      recommendedAction: (rep) => ({ label: 'Add canonical', generatorId: 'canonical', params: { page: rep.page }, effort: effortForGenerator('canonical') }),
     }),
     aggregateSystemicFinding({
       id: 'technical-seo:site:canonical-mismatch',
@@ -260,20 +260,29 @@ export async function run({ siteId, start, end, pageCache, params }) {
         ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus} but serves the same fallback content as a nonexistent page on this site — likely a dead/broken link.`
         : `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus}.`,
     priority: brokenPriorities[i],
-    recommendedAction: null,
+    // Strips the dead link rather than guessing a replacement target — always
+    // safe (never worse than the current broken state), no fabricated URL.
+    recommendedAction: { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href }, effort: effortForGenerator('broken-link-fix') },
     expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
   }));
 
   const chainCandidates = [...crawl.redirectChains].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages) || b.hops - a.hops);
   const chainPriorities = priorityByRank(chainCandidates);
-  const chainFindings = chainCandidates.map((c, i) => makeFinding({
-    id: `technical-seo:redirect-chain:${c.sourcePages[0]}:${c.href}`,
-    evidence: { sourcePages: c.sourcePages, href: c.href, hops: c.hops, finalStatus: c.finalStatus },
-    whyItMatters: `A link to ${c.href} redirects ${c.hops} times before reaching ${c.finalStatus ?? 'an unknown status'} — wastes crawl budget and load time.`,
-    priority: chainPriorities[i],
-    recommendedAction: null,
-    expectedImpact: { label: impactFromPriority(chainPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
-  }));
+  const chainFindings = chainCandidates.map((c, i) => {
+    const finalUrl = c.chain?.[c.chain.length - 1]?.url ?? null;
+    return makeFinding({
+      id: `technical-seo:redirect-chain:${c.sourcePages[0]}:${c.href}`,
+      evidence: { sourcePages: c.sourcePages, href: c.href, hops: c.hops, finalStatus: c.finalStatus, finalUrl },
+      whyItMatters: `A link to ${c.href} redirects ${c.hops} times before reaching ${c.finalStatus ?? 'an unknown status'} — wastes crawl budget and load time.`,
+      priority: chainPriorities[i],
+      // Only ever a real, observed final URL — never fabricated when the
+      // chain data doesn't actually resolve one.
+      recommendedAction: finalUrl
+        ? { label: 'Update redirect link', generatorId: 'redirect-fix', params: { page: c.sourcePages[0], oldHref: c.href, newHref: finalUrl }, effort: effortForGenerator('redirect-fix') }
+        : null,
+      expectedImpact: { label: impactFromPriority(chainPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+    });
+  });
 
   // Site-wide, not limited to this run's rotation batch — real orphaned
   // pages (in the sitemap but never reached by the real homepage-outward
@@ -334,7 +343,13 @@ export async function run({ siteId, start, end, pageCache, params }) {
     getPage: (r) => r.page,
     getImpressions: (r) => r.impressions,
     whyItMatters: (n, c) => `robots.txt disallows ${n} of ${c} checked pages — if that's not intentional, it can stop Google from crawling pages it should be indexing.`,
-    recommendedAction: null,
+    extraEvidence: (affected) => ({ blockedRules: affected.slice(0, 5).map((r) => ({ page: r.page, pattern: robots.matchingDisallow(new URL(r.page).pathname) })) }),
+    recommendedAction: (rep) => ({
+      label: 'Un-block in robots.txt',
+      generatorId: 'robots-fix',
+      params: { pagePath: new URL(rep.page).pathname, blockedPattern: robots.matchingDisallow(new URL(rep.page).pathname) },
+      effort: effortForGenerator('robots-fix'),
+    }),
   });
   const robotsBlockedFindings = robotsBlockedFinding ? [robotsBlockedFinding] : [];
 

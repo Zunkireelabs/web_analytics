@@ -353,7 +353,7 @@ export const TAG_TO_GENERATOR = {
   'Add FAQ': 'faq',
   'Add schema': 'schema',
   'Add internal links': 'internal-links',
-  'Expand content': null,
+  'Expand content': 'expand-content',
 };
 
 export const GAP_TYPE_TO_GENERATOR = {
@@ -377,7 +377,10 @@ export const GAP_TYPE_TO_GENERATOR = {
 // honest, documented lookup instead of a per-agent guessed constant.
 const GENERATOR_EFFORT = {
   'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
-  'blog-outline': 'High', 'landing-page': 'High', translation: 'High',
+  'security-headers': 'Low', 'html-lang': 'Low',
+  viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
+  'broken-link-fix': 'Low', 'redirect-fix': 'Low',
+  'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
