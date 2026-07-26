@@ -199,12 +199,16 @@ export async function getDataRange(siteId) {
   return rows[0] || { earliest: null, freshest: null, latest_visitor: null };
 }
 
-// GSC breakdown aggregated over a date range (clicks/impressions by dim_value).
+// GSC breakdown aggregated over a date range (clicks/impressions/ctr/avg_position by dim_value).
 export async function getGscBreakdownRange(siteId, start, end, dimType, limit = 10) {
   const { rows } = await query(
     `SELECT dim_value,
             SUM(clicks)      AS clicks,
-            SUM(impressions) AS impressions
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN 0
+                 ELSE ROUND(SUM(clicks)::numeric / SUM(impressions), 5) END AS ctr,
+            CASE WHEN SUM(impressions) = 0 THEN NULL
+                 ELSE ROUND(SUM(position * impressions) / SUM(impressions), 2) END AS avg_position
        FROM gsc_breakdown
       WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4
       GROUP BY dim_value
