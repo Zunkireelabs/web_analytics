@@ -10,8 +10,9 @@ import { jsonResult, requireLevel, withErrorHandling } from './shared.js';
 // connected — same behavior the dashboard's "Approve" button has today,
 // just now reachable from an AI client holding an `automation`-tier token.
 //
-// rollback_draft is deliberately NOT here: unlike these four, it merges
-// directly to `stage` with no PR/review step in between — an infrequent,
+// rollback_draft is deliberately NOT here: it opens a PR just like these
+// four do (see openRollbackPr, server/implementers/lib/github-ops.js — no
+// direct/auto-merge onto production here either), but it's an infrequent,
 // high-impact recovery operation the product owner wants kept
 // dashboard-only for now, not exposed to an AI client even at this tier.
 export function registerAutomationTools(server, siteId, permissionLevel) {

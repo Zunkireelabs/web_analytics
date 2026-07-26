@@ -3,6 +3,7 @@ import { pool } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter } from '../implementers/lib/url-file-map.js';
+import { hasMarker } from '../implementers/lib/marker-merge.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
@@ -12,6 +13,20 @@ import { baseBranch } from '../implementers/lib/github-ops.js';
 // drafts get stuck ("No url_file_map entry matches...", "No markers
 // configured...") BEFORE an agent ever recommends a page nothing can
 // deploy to, instead of discovering it only at approve/push time.
+//
+// Config-completeness alone isn't enough, though — a real incident showed
+// url_file_map can still declare a marker name that config-wise looks fine
+// while the actual `SEOAI:<name>` comment has quietly vanished from the live
+// file (e.g. after a client-side template redesign that never touched this
+// app). ensureMarkers (marker-merge.js) auto-creates a missing BLOCK/marker
+// at apply-time for most fields, so this isn't fatal by itself — but for
+// LINE-convention fields (front-matter `title:`) and HEAD-scoped fields
+// (canonical/openGraph, which are never auto-inserted at EOF), a vanished
+// marker means every draft for that (page, actionType) is doomed to fail at
+// push time. This audit now fetches each configured file's real live
+// content and checks with hasMarker(), so that class of drift is caught
+// here, proactively, instead of burning generation + review time on a draft
+// that can never actually apply.
 //
 //   node server/scripts/audit-url-file-map.js --site-id <id>
 //
@@ -71,7 +86,8 @@ async function auditSite(siteId) {
   const noFileMapping = []; // { page, actionType }
   const noMarkers = Object.fromEntries(ACTION_TYPES.map((t) => [t, []])); // actionType -> [page]
   const adapterRouted = []; // { page, actionType, adapterId }
-  const fileExistsCache = new Map(); // filePath -> true | false | 'error'
+  const fileCache = new Map(); // filePath -> { content } | false | 'error'
+  const markersToCheck = []; // { page, actionType, filePath, markerField, markerName }
 
   for (const page of pageUrls) {
     const filePath = resolveFile(site, page);
@@ -89,24 +105,37 @@ async function auditSite(siteId) {
       }
 
       const markers = resolveMarkers(site, page, actionType);
-      if (!markers) noMarkers[actionType].push(page);
+      if (!markers) { noMarkers[actionType].push(page); continue; }
+
+      for (const [markerField, markerName] of Object.entries(markers)) {
+        markersToCheck.push({ page, actionType, filePath, markerField, markerName });
+      }
     }
 
     // One real, read-only GitHub read per unique file path (cached across
     // pages/action types) — confirms a configured path isn't stale/typo'd,
-    // without hammering the API once per (page, actionType) combination.
-    if (filePath && !fileExistsCache.has(filePath)) {
+    // and its real content is what the marker-presence check below runs
+    // against, without hammering the API once per (page, actionType) combo.
+    if (filePath && !fileCache.has(filePath)) {
       try {
         const file = await getFileContent(site, filePath, baseBranch(site));
-        fileExistsCache.set(filePath, !!file);
+        fileCache.set(filePath, file ? { content: file.content } : false);
       } catch (err) {
-        fileExistsCache.set(filePath, 'error');
+        fileCache.set(filePath, 'error');
         console.warn(`  (could not check ${filePath}: ${err.message})`);
       }
     }
   }
 
-  const missingFiles = [...fileExistsCache.entries()].filter(([, exists]) => exists === false).map(([p]) => p);
+  const missingFiles = [...fileCache.entries()].filter(([, v]) => v === false).map(([p]) => p);
+
+  // Real evidence, not config — only meaningful for a file that actually
+  // exists and was readable; a missing/errored file is already reported
+  // above and would just double-report as "marker missing" too.
+  const markersMissing = markersToCheck.filter(({ filePath, markerName }) => {
+    const cached = fileCache.get(filePath);
+    return cached && cached !== 'error' && !hasMarker(cached.content, markerName);
+  });
 
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);
   for (const { page, actionType } of noFileMapping) console.log(`  [${actionType}] ${page}`);
@@ -119,13 +148,19 @@ async function auditSite(siteId) {
   console.log(`\n-- FILE NOT FOUND IN REPO (${missingFiles.length}) --`);
   for (const filePath of missingFiles) console.log(`  ${filePath}`);
 
+  console.log(`\n-- MARKERS MISSING FROM LIVE FILE (configured, but SEOAI:<name> comment isn't actually in the file) (${markersMissing.length}) --`);
+  for (const { page, actionType, filePath, markerField, markerName } of markersMissing) {
+    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName})`);
+  }
+
   console.log(`\n-- ADAPTER-ROUTED, not deep-checked here (${adapterRouted.length}) --`);
   const byAdapter = adapterRouted.reduce((acc, r) => { (acc[r.adapterId] ||= []).push(`[${r.actionType}] ${r.page}`); return acc; }, {});
   for (const [adapterId, entries] of Object.entries(byAdapter)) {
     console.log(`  ${adapterId}: ${entries.length} page/type combination(s)`);
   }
 
-  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
+  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersMissing.length === 0
+    && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
   console.log(`\nSite #${siteId}: ${clean ? 'CLEAN — no gaps found.' : 'gaps found — see above.'}`);
 }
 

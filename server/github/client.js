@@ -105,6 +105,68 @@ export async function putFile(site, { path, content, message, branch, sha }) {
   return res.json();
 }
 
+// Merges `base`'s current tip INTO `branch` (GitHub's server-side merge
+// endpoint, not a PR) — used by getOrInitBatchBranch (implementers/lib/
+// github-ops.js) to keep a shared per-day batch branch continuously in sync
+// with the site's default branch throughout the day, instead of forking it
+// once in the morning and letting it silently drift while more drafts land
+// on it. Three real outcomes: 201 (merge commit created, branch now current),
+// 204 (branch already contains base's tip, nothing to do), 409 (real merge
+// conflict — cannot auto-sync, caller must surface this rather than splice
+// against stale content). This is the ONE place this app ever merges two
+// branches together outside of a human's own "Merge pull request" click on
+// GitHub — it only ever merges FROM the trusted default branch INTO a
+// disposable, not-yet-reviewed batch branch, never the other direction.
+export async function mergeBranchFromBase(site, branch, base) {
+  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/merges`, {
+    base: branch,
+    head: base,
+    commit_message: `Sync ${branch} with ${base}`,
+  });
+  if (res.status === 204) return { ok: true, conflicted: false, synced: false };
+  if (res.status === 201) return { ok: true, conflicted: false, synced: true };
+  if (res.status === 409) return { ok: false, conflicted: true };
+  throw new Error(`mergeBranchFromBase failed (${res.status}): ${await res.text()}`);
+}
+
+// Atomically writes N files to `branch` as ONE commit via the Git Data API
+// (tree -> commit -> ref update) instead of N sequential Contents-API PUTs.
+// Used in place of a putFile-per-file loop specifically for multi-file
+// draft types (llms-txt+robots.txt, broken-link-fix's multi-page strip) — a
+// real incident showed the sequential-loop approach can leave an earlier
+// file's commit permanently stranded on a shared batch branch, owned by no
+// draft, if a LATER file in the same loop fails (stale SHA, transient
+// GitHub 5xx). This way it's genuinely all-or-nothing: either every file
+// lands in one commit, or the ref never moves and nothing changed. Tree
+// entries take `content` directly (GitHub creates the blob for you) — no
+// per-file SHA lookup needed first, unlike putFile, since a tree diff
+// against `base_tree` handles create vs. update either way.
+export async function commitFilesAtomic(site, branch, files, message) {
+  const refSha = await getBranchSha(site, branch);
+
+  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${refSha}`);
+  if (!commitRes.ok) throw new Error(`commitFilesAtomic (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
+  const baseTree = (await commitRes.json()).tree.sha;
+
+  const treeRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/trees`, {
+    base_tree: baseTree,
+    tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
+  });
+  if (!treeRes.ok) throw new Error(`commitFilesAtomic (create tree) failed (${treeRes.status}): ${await treeRes.text()}`);
+  const newTree = (await treeRes.json()).sha;
+
+  const newCommitRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/commits`, {
+    message, tree: newTree, parents: [refSha],
+  });
+  if (!newCommitRes.ok) throw new Error(`commitFilesAtomic (create commit) failed (${newCommitRes.status}): ${await newCommitRes.text()}`);
+  const newCommitSha = (await newCommitRes.json()).sha;
+
+  const updateRefRes = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, { sha: newCommitSha });
+  if (!updateRefRes.ok) throw new Error(`commitFilesAtomic (update ref) failed (${updateRefRes.status}): ${await updateRefRes.text()}`);
+
+  return { sha: newCommitSha };
+}
+
 // Opens a PR from `branch` into the site's default branch. Never merges —
 // merging is always a human, on GitHub itself.
 export async function openPullRequest(site, { branch, title, body }) {
@@ -120,12 +182,18 @@ export async function openPullRequest(site, { branch, title, body }) {
 }
 
 // Real-evidence read for the "Check PR Status" action — reports GitHub's own
-// merged/state, never inferred locally.
+// merged/state, never inferred locally. Also surfaces GitHub's own
+// mergeable/mergeable_state (previously discarded here) — the only signal
+// this app has for "this PR can no longer auto-merge" (a batch branch that's
+// gone stale/conflicted relative to the default branch) without a human
+// having to open the PR on GitHub and see the red banner themselves.
+// `mergeable` is null immediately after a push while GitHub computes it in
+// the background — real-not-yet-known, not "not conflicted."
 export async function getPullRequest(site, prNumber) {
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/pulls/${prNumber}`);
   if (!res.ok) throw new Error(`getPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  return { state: data.state, merged: data.merged };
+  return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state };
 }
 
 // Last-resort candidate finder for broken-link-fix's Layer 2 (see

@@ -494,13 +494,19 @@ router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
 });
 
 // pr_opened -> implemented, once GitHub confirms the PR was actually merged.
-// Staff-triggered (no webhook/polling infrastructure exists in this app) —
-// reads the PR's real current state straight from GitHub every call
-// (getPullRequest), never inferred locally. Not merged yet just records the
-// current open/closed state for visibility; merged fires the same
-// post-publish steps /merge-to-stage used to (GSC notification, finalize to
-// 'implemented'), now gated on real human-confirmed evidence instead of an
-// automatic merge.
+// Triggered three ways: the manual "Check PR Status" button, the GitHub
+// webhook (routes/webhooks.js, fires on PR close/merge), and an hourly
+// polling fallback (job.js's runPrStatusPollForAllSites) for sites where the
+// webhook was never configured or a delivery was missed — all three call
+// this exact function, so behavior can never diverge between them. Reads the
+// PR's real current state straight from GitHub every call (getPullRequest),
+// never inferred locally. Not merged yet also records GitHub's own
+// mergeable_state, so a batch branch that's gone stale/conflicted (the root
+// cause of a real incident) is visible in the UI instead of silently
+// invisible until a human opens the PR on GitHub themselves. Merged fires
+// the same post-publish steps /merge-to-stage used to (GSC notification,
+// finalize to 'implemented'), now gated on real human-confirmed evidence
+// instead of an automatic merge.
 // Exported so the MCP `check_pr_status` tool reuses this exact logic.
 export async function checkDraftPrStatus(siteId, draftId) {
   const draft = await getDraft(siteId, draftId);
@@ -521,7 +527,7 @@ export async function checkDraftPrStatus(siteId, draftId) {
     notifyGscBestEffort(site, draft);
     return finalizeImplemented(siteId, draft.id, site);
   }
-  return recordPrState(siteId, draft.id, pr.state);
+  return recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
 }
 
 router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) => {

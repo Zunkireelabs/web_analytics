@@ -1,5 +1,5 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField } from './lib/marker-merge.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
@@ -553,6 +553,7 @@ async function previewLiveMarkerContent(site, draft) {
 // marker-merge types.
 export async function apply(site, draft, opts = {}) {
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
@@ -606,6 +607,7 @@ export async function preview(site, draft, opts = {}) {
   }
 
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
 
   if (draft.action_type === 'llms-txt') {

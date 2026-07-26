@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites } from './job.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -161,4 +161,17 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] fix verification scheduled (fires at :10 each hour)');
+
+  // PR-status polling fallback — independent safety net alongside the
+  // GitHub webhook (routes/webhooks.js) for sites where the webhook was
+  // never registered or a delivery was missed, so a merged PR's drafts
+  // don't stay stranded at 'pr_opened' forever with no automated recovery.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      await runPrStatusPollForAllSites();
+    } catch (err) {
+      console.error('[cron] pr-status poll error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
 }

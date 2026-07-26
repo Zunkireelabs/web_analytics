@@ -557,6 +557,46 @@ export async function runFixVerificationsForAllSites() {
   }
 }
 
+// Polling fallback for PR-merge detection — the GitHub webhook (routes/
+// webhooks.js) already handles this in real time when it fires, but webhook
+// registration on a client's repo is a fully manual GitHub-settings step
+// with nothing in this app that verifies it was actually done, and a
+// misconfigured/never-created webhook would otherwise strand a draft at
+// 'pr_opened' forever with no automated recovery. This is a safety net, not
+// a replacement — both stay active, and both call the exact same
+// checkDraftPrStatus so behavior can never diverge. Errors are logged per
+// draft, never fatal to the sweep — one bad PR read shouldn't block every
+// other site's check. Dynamic import avoids a static circular dependency
+// with routes/action-center.js (which already imports from this file).
+export async function runPrStatusPollForAllSites() {
+  const { listDrafts } = await import('./store/drafts.js');
+  const { checkDraftPrStatus } = await import('./routes/action-center.js');
+  // Repo-connected, not GSC/GA4-connected (listConnectedSites' filter) —
+  // whether a site has open GitHub PRs to check depends on repo_owner/
+  // repo_name, not analytics integration status.
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  let checked = 0;
+  for (const site of sites) {
+    let openDrafts;
+    try {
+      openDrafts = await listDrafts(site.id, { status: 'pr_opened' });
+    } catch (err) {
+      console.error(`[job] pr-status poll: could not list drafts for site ${site.id}:`, err.message);
+      continue;
+    }
+    for (const draft of openDrafts) {
+      try {
+        await checkDraftPrStatus(site.id, draft.id);
+        checked++;
+      } catch (err) {
+        console.error(`[job] pr-status poll: check failed for site ${site.id} draft ${draft.id}:`, err.message);
+      }
+    }
+  }
+  if (checked) console.log(`[job] pr-status poll: checked ${checked} open PR draft(s)`);
+  return checked;
+}
+
 // One-shot catch-up run on server boot: ingest recent days (backfills anything
 // missed while the machine was off/asleep) and write the weekly doc if it's
 // due, independently for every connected site. Guarded by DISABLE_CATCHUP.

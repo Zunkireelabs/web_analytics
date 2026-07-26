@@ -188,10 +188,10 @@ export async function listDraftsAwaitingPrCheck(siteId, prNumber) {
 // GitHub's real current PR state ('open'/'closed') when it hasn't merged
 // yet; the 'merged' case instead goes through markDraftImplemented (below),
 // since that's a real lifecycle transition, not just an annotation.
-export async function recordPrState(siteId, id, prState) {
+export async function recordPrState(siteId, id, prState, mergeableState = null) {
   const { rows } = await query(
-    'UPDATE drafts SET pr_state = $3, updated_at = now() WHERE site_id = $1 AND id = $2 RETURNING *',
-    [siteId, id, prState]
+    'UPDATE drafts SET pr_state = $3, pr_mergeable_state = $4, updated_at = now() WHERE site_id = $1 AND id = $2 RETURNING *',
+    [siteId, id, prState, mergeableState]
   );
   return rows[0] || null;
 }
