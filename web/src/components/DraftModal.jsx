@@ -411,6 +411,18 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
           </div>
         )}
 
+        {/* Real evidence from GitHub's own mergeable_state (recorded by
+            checkDraftPrStatus — manual click, webhook, or the hourly poll
+            fallback) — this is what would have caught today's incident days
+            earlier instead of only at merge time. 'dirty' is GitHub's own
+            "has real, unresolvable-by-GitHub conflicts" signal. */}
+        {draft.status === 'pr_opened' && draft.pr_mergeable_state === 'dirty' && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center gap-2">
+            <AlertTriangle size={14} className="text-rose-500 shrink-0" />
+            <span><span className="font-extrabold">This PR has conflicts:</span> its branch has diverged from the target branch and can no longer auto-merge on GitHub. Resolve the conflict there before merging.</span>
+          </div>
+        )}
+
         {rollbackPr && (
           <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
             <a href={rollbackPr.prUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">

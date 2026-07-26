@@ -1,4 +1,4 @@
-import { getBranchSha, createBranch, getFileSha, putFile, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName } from '../../github/client.js';
+import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase } from '../../github/client.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -30,15 +30,44 @@ export function batchBranchName(site, date = new Date()) {
 // site's default branch. GitHub's 404 body for a missing ref is the standard
 // `{"message":"Not Found",...}` shape — same body-sniffing convention
 // createBranch below already uses for its 422 case.
+//
+// A branch that already exists is also re-synced with the site's default
+// branch here, every call — without this, only the FIRST draft pushed on a
+// given day forks from main's live tip; every later draft that same day
+// would splice against whatever the batch branch already had that morning,
+// silently drifting further from main as the day goes on and any other work
+// (this app's own other merged PRs, or a human pushing directly) lands on
+// main in between. GitHub's own merge-conflict check was the only thing that
+// ever caught that drift before, and only at PR-review time — days later, in
+// one real incident. `conflicted: true` means the sync itself hit a real
+// merge conflict (base and the batch branch both touched the same lines) —
+// callers must fail fast on this rather than splice against stale content.
 export async function getOrInitBatchBranch(site, date = new Date()) {
   const branchName = batchBranchName(site, date);
+  let exists;
   try {
     await getBranchSha(site, branchName);
-    return { branchName, exists: true };
+    exists = true;
   } catch (err) {
-    if (/404|Not Found/i.test(err.message)) return { branchName, exists: false };
-    throw err;
+    if (/404|Not Found/i.test(err.message)) exists = false;
+    else throw err;
   }
+  if (!exists) return { branchName, exists: false, conflicted: false };
+
+  const synced = await mergeBranchFromBase(site, branchName, baseBranch(site));
+  return { branchName, exists: true, conflicted: !synced.ok };
+}
+
+// Shared, consistent failure shape for every apply()/preview() call site
+// that checks `batchInfo.conflicted` right after getOrInitBatchBranch —
+// same {ok, reason, error} contract as every other honest-failure return in
+// this app (e.g. render-mode-uncertain), so it flows through recordApply-
+// Failure/sendHttpError exactly like any other apply() failure.
+export function batchBranchConflictError(site, batchInfo) {
+  return {
+    ok: false, reason: 'batch-branch-conflicted',
+    error: `Today's batch branch (${batchInfo.branchName}) has diverged from ${baseBranch(site)} and couldn't be auto-synced — resolve the conflict manually on GitHub before more drafts can be pushed today.`,
+  };
 }
 
 // Two real, independently-triggered steps — deliberately NOT bundled. Staff
@@ -61,16 +90,17 @@ export async function pushDraftBranch(site, draft, files, target) {
       await createBranch(site, branchName, baseSha);
     }
 
-    for (const f of files) {
-      const sha = await getFileSha(site, f.path, branchName);
-      await putFile(site, {
-        path: f.path,
-        content: f.content,
-        message: `Action Center: apply ${draft.action_type} draft #${draft.id}`,
-        branch: branchName,
-        sha,
-      });
-    }
+    // One atomic commit for all of this draft's files (Git Data API:
+    // tree -> commit -> ref update) — either every file lands together or
+    // the branch never moves, so a mid-write failure can never leave an
+    // earlier file's change stranded on the shared batch branch owned by no
+    // draft (see commitFilesAtomic's comment). Replaces a previous
+    // sequential getFileSha+putFile-per-file loop, which had exactly that
+    // gap for multi-file draft types (llms-txt+robots.txt, broken-link-fix).
+    await commitFilesAtomic(
+      site, branchName, files,
+      `Action Center: apply ${draft.action_type} draft #${draft.id}`
+    );
 
     return { ok: true, branchName };
   } catch (err) {

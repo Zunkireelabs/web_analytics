@@ -8,10 +8,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // operation: drop `server/implementers/<id>.js` exporting
 // {meta: {id, handles}, apply(), mergeToStage()} and its generator ids are
 // immediately routed to it; nothing here needs editing. `apply()` pushes a
-// real branch (forked from stage) with the real change; `mergeToStage()`
-// merges that already-pushed branch directly into stage (no PR — see
-// server/implementers/lib/github-ops.js and
-// ~/Travel/ci-cd-deployment-master-guide for why stage doesn't need one).
+// real branch (one per site per calendar day, forked from — and kept in
+// sync with — the site's default branch); `mergeToStage()` (despite the
+// name) never touches a stage branch at all — it opens a real PR against
+// that same default branch (see server/implementers/lib/github-ops.js's
+// openPrForBranch). Merging is always a human, on GitHub itself; this app
+// never auto-merges anything onto production.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NON_IMPLEMENTER_FILES = new Set(['types.js', 'registry.js', 'resolve.js']);

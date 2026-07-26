@@ -1,5 +1,5 @@
 import { getFileContent } from '../../github/client.js';
-import { pushDraftBranch, getOrInitBatchBranch, baseBranch } from '../lib/github-ops.js';
+import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter } from '../lib/url-file-map.js';
 import {
   findObjectRange, findArrayFieldRange, spliceMarkedArray, insertNewArrayField,
@@ -84,12 +84,14 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
 export async function preview(site, draft) {
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   return computeChange(site, draft, getFileContent, beforeRef);
 }
 
 export async function apply(site, draft) {
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const computed = await computeChange(site, draft, getFileContent, beforeRef);
   if (!computed.ok) return computed;

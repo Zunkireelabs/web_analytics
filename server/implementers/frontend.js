@@ -1,6 +1,6 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody } from './lib/newpage-render.js';
 
 export const meta = {
@@ -57,6 +57,7 @@ export async function apply(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   return pushDraftBranch(site, draft, [{ path: resolved.filePath, content: resolved.body }], batchInfo);
 }
 
@@ -80,6 +81,7 @@ export async function preview(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
   const batchInfo = await getOrInitBatchBranch(site);
+  if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const branch = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const existing = await getFileContent(site, resolved.filePath, branch);
   return {
