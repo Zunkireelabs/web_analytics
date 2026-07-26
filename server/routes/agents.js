@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { requireAuth } from './login.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { runAgent } from '../agents/runner.js';
-import { getAgentRunHistory, getLatestAgentRuns } from '../store/agent-runs.js';
+import { getAgentRunHistory } from '../store/agent-runs.js';
 import { getAgentActivityFeed } from '../agents/lib/command-center.js';
+import { getAgentStatusList } from '../agents/lib/agent-status.js';
 import { subscribeActivity } from '../agents/lib/activity-bus.js';
 
 const router = Router();
@@ -22,18 +23,7 @@ router.get('/agents', async (req, res, next) => {
 // agent_runs). Same join pattern as /integrations/health.
 router.get('/agents/status', async (req, res, next) => {
   try {
-    const meta = await listAgentMeta();
-    const rows = await getLatestAgentRuns(req.siteId, meta.map((m) => m.id));
-    const byId = new Map(rows.map((r) => [r.agent_id, r]));
-    res.json(meta.map((m) => {
-      const row = byId.get(m.id);
-      return {
-        ...m,
-        lastRunStatus: row?.status || null,
-        lastRunAt: row?.created_at || null,
-        lastRunFindings: Array.isArray(row?.facts?.findings) ? row.facts.findings.length : null,
-      };
-    }));
+    res.json(await getAgentStatusList(req.siteId));
   } catch (e) { next(e); }
 });
 

@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { requireAuth, requireInternalSite } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig } from '../db.js';
+import { requireAuth, requirePlatformRole } from './login.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
+import { PERMISSION_LEVELS } from '../mcp/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
@@ -11,14 +12,15 @@ import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
 import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
+import { recordAuditEvent } from '../store/admin/audit-log.js';
 
 // Client provisioning, exposed as real routes for the first time this
 // session — previously only reachable via server/scripts/create-client.js /
 // connect-site.js / connect-repo.js (still preserved, still work, used by
-// this same underlying db.js functions). Staff-only (requireInternalSite),
+// this same underlying db.js functions). Staff-only (requirePlatformRole),
 // so gated identically to every other AI Growth Platform route.
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 const GSC_PROPERTY_RE = /^(sc-domain:.+|https?:\/\/.+)$/;
 
@@ -39,6 +41,10 @@ router.get('/internal/clients', async (req, res, next) => {
       baselined: !!s.onboarded_at,
       repoConnected: !!(s.repo_owner && s.repo_name),
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
+      oauthMaxPermissionLevel: s.oauth_max_permission_level,
+      status: s.status,
+      deactivatedAt: s.deactivated_at,
+      deletedAt: s.deleted_at,
     })));
   } catch (e) { next(e); }
 });
@@ -83,6 +89,16 @@ router.post('/internal/clients', async (req, res, next) => {
       // connected below) — same recovery shape create-client.js documents.
       return res.status(500).json({ error: `Site #${site.id} was created, but the login failed: ${err.message}`, siteId: site.id });
     }
+
+    await recordAuditEvent(req, {
+      action: 'tenant.created',
+      targetType: 'site',
+      targetId: String(site.id),
+      tenantSiteId: site.id,
+      tenantName: site.name,
+      metadata: { name: site.name, websiteDomain: site.website_domain, email: normalizedEmail },
+      success: true,
+    });
 
     res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
   } catch (e) { next(e); }
@@ -140,6 +156,17 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
     }
 
     await setSignupRequestCreatedSite(requestId, site.id);
+
+    await recordAuditEvent(req, {
+      action: 'signup_request.approved',
+      targetType: 'signup_request',
+      targetId: String(requestId),
+      tenantSiteId: site.id,
+      tenantName: site.name,
+      metadata: { signupRequestId: requestId, companyName: request.company_name, contactEmail: request.contact_email },
+      success: true,
+    });
+
     res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
   } catch (e) { next(e); }
 });
@@ -155,6 +182,16 @@ router.post('/internal/signup-requests/:id/reject', async (req, res, next) => {
       const current = await getSignupRequestById(requestId);
       return res.status(409).json({ error: `This request was already ${current?.status}.` });
     }
+
+    await recordAuditEvent(req, {
+      action: 'signup_request.rejected',
+      targetType: 'signup_request',
+      targetId: String(requestId),
+      tenantName: request.company_name,
+      metadata: { signupRequestId: requestId, companyName: request.company_name, contactEmail: request.contact_email },
+      success: true,
+    });
+
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -239,6 +276,16 @@ router.post('/internal/clients/:id/connect', async (req, res, next) => {
       throw err;
     }
 
+    await recordAuditEvent(req, {
+      action: 'tenant.connected',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { gscProperty, ga4PropertyId, reportEmailTo: reportEmailTo || null },
+      success: true,
+    });
+
     const result = await runBaselineSequence(siteId, site);
     if (result.error) return res.status(422).json({ ...result, site });
     res.json(result);
@@ -262,6 +309,17 @@ router.post('/internal/clients/:id/retry-baseline', async (req, res, next) => {
     }
 
     const result = await runBaselineSequence(siteId, site);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.baseline_retried',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { baselineSucceeded: !result.error },
+      success: true,
+    });
+
     if (result.error) return res.status(422).json({ ...result, site });
     res.json(result);
   } catch (e) { next(e); }
@@ -299,7 +357,54 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     }
 
     const site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.repo_connected',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { repoOwner, repoName, repoDefaultBranch: repoDefaultBranch || null, techStack: techStack || null },
+      success: true,
+    });
+
     res.json({ id: site.id, repoOwner: site.repo_owner, repoName: site.repo_name });
+  } catch (e) { next(e); }
+});
+
+// OAuth ceiling for this client's "Connect" flow (server/routes/oauth.js,
+// server/routes/oauth-consent.js) — the one and only place this value is
+// ever written. Deliberately excludes 'admin' from the accepted values (the
+// DB CHECK constraint from migration 061 would reject it anyway, but
+// failing here gives a clearer error than a raw constraint-violation would).
+// See server/mcp/oauth-provider.js's computeEffectivePermissionLevel for how
+// this is actually applied to an OAuth grant.
+const OAUTH_POLICY_LEVELS = PERMISSION_LEVELS.filter((level) => level !== 'admin');
+
+router.post('/internal/clients/:id/oauth-policy', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { oauthMaxPermissionLevel } = req.body || {};
+    if (!OAUTH_POLICY_LEVELS.includes(oauthMaxPermissionLevel)) {
+      return res.status(400).json({ error: `oauthMaxPermissionLevel must be one of: ${OAUTH_POLICY_LEVELS.join(', ')}.` });
+    }
+
+    const site = await updateSiteOauthPolicy({ siteId, oauthMaxPermissionLevel });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.oauth_policy_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { oauthMaxPermissionLevel },
+      success: true,
+    });
+
+    res.json({ id: site.id, oauthMaxPermissionLevel: site.oauth_max_permission_level });
   } catch (e) { next(e); }
 });
 
@@ -316,6 +421,175 @@ router.get('/internal/clients/:id/review', async (req, res, next) => {
 
     const review = await buildReviewReport(siteId);
     res.json(review);
+  } catch (e) { next(e); }
+});
+
+// Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §G.2, §K Phase 3). Path is
+// /internal/tenants/..., not /internal/clients/... like every route above —
+// deliberate per the design doc's naming, even though this file still
+// "extends clients.js" by living here. Hard-delete is Phase 3.5, not here.
+//
+// Every route below carries its own inline requirePlatformRole('platform_
+// admin') on top of this router's own router-level floor (line 22, same
+// value today) — so these specific destructive routes don't silently
+// inherit whatever the router-level floor becomes if it's ever loosened
+// (§G.1).
+const companySiteId = Number(process.env.COMPANY_SITE_ID);
+
+// Unconditional, server-side — not a UI-only restriction. Accidentally
+// suspending/deleting the company's own tenant would lock out every
+// platform staff member simultaneously, with no in-app path to undo it,
+// since the undo action itself requires an active platform session (§D).
+function rejectCompanySiteTarget(siteId, res) {
+  if (companySiteId && siteId === companySiteId) {
+    res.status(400).json({ error: 'The company site cannot be suspended or deleted.' });
+    return true;
+  }
+  return false;
+}
+
+router.post('/internal/tenants/:id/suspend', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    if (rejectCompanySiteTarget(siteId, res)) return;
+
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const site = await suspendSite(siteId);
+    if (!site) return res.status(409).json({ error: `Site is not currently active (status: ${existing.status}).` });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.suspended',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      success: true,
+    });
+
+    res.json({ id: site.id, status: site.status, deactivatedAt: site.deactivated_at });
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/tenants/:id/reactivate', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    if (rejectCompanySiteTarget(siteId, res)) return;
+
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const site = await reactivateSite(siteId);
+    if (!site) return res.status(409).json({ error: `Site is not currently suspended or soft-deleted (status: ${existing.status}).` });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.reactivated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { previousStatus: existing.status },
+      success: true,
+    });
+
+    res.json({ id: site.id, status: site.status });
+  } catch (e) { next(e); }
+});
+
+// Requires 'suspended' as the current state (§D's diagram: ACTIVE ->
+// SUSPENDED -> SOFT-DELETED) — a deliberate two-step path, not a shortcut
+// straight from active. Data is retained; reversible via /reactivate above
+// within a retention window whose exact length is an open design decision
+// (PLATFORM-ADMIN-DESIGN.md, "Remaining design decisions") — not enforced
+// here, since it hasn't been decided yet.
+router.post('/internal/tenants/:id/soft-delete', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    if (rejectCompanySiteTarget(siteId, res)) return;
+
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const site = await softDeleteSite(siteId);
+    if (!site) return res.status(409).json({ error: `Site must be suspended before it can be soft-deleted (status: ${existing.status}).` });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.soft_deleted',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      success: true,
+    });
+
+    res.json({ id: site.id, status: site.status, deletedAt: site.deleted_at });
+  } catch (e) { next(e); }
+});
+
+// Phase 3.5 — deliberately its own route, its own sign-off (PLATFORM-ADMIN-
+// DESIGN.md §D, §K): the single highest-blast-radius action in this whole
+// design. Irreversible. Only reachable from 'soft_deleted' — never directly
+// from 'active' or 'suspended' — and only ever from platform_admin: the
+// router-level floor and this route's own inline check are both hardcoded
+// to 'platform_admin', not parameterized, so loosening the floor elsewhere
+// can't silently widen this specific route.
+//
+// v1 confirmation bar, explicitly decided (not left ambiguous): typed
+// tenant-name re-entry, matching the GitHub/Vercel destructive-action
+// pattern. No mandatory reason field, no second-admin approval in v1 — see
+// the design doc's "Remaining design decisions" for why that's a stated
+// default, not an oversight.
+router.post('/internal/tenants/:id/hard-delete', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    if (rejectCompanySiteTarget(siteId, res)) return;
+
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (existing.status !== 'soft_deleted') {
+      return res.status(409).json({ error: `Site must be soft-deleted before it can be hard-deleted (status: ${existing.status}).` });
+    }
+
+    const { confirmName } = req.body || {};
+    if (typeof confirmName !== 'string' || confirmName.trim() !== existing.name) {
+      return res.status(400).json({ error: `Confirmation name does not match. Type the tenant's exact name ("${existing.name}") to confirm.` });
+    }
+
+    // Written BEFORE the irreversible DELETE, per §D — so the attempt is on
+    // record even if the DELETE below fails partway through. tenantSiteId
+    // still points at a real row here; migration 065's SET NULL FK (never
+    // CASCADE) is exactly what lets this specific row survive the DELETE
+    // that's about to happen.
+    await recordAuditEvent(req, {
+      action: 'tenant.hard_delete_attempted',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      success: true,
+    });
+
+    const deleted = await hardDeleteSite(siteId);
+    if (!deleted) {
+      // Status changed out from under this request between the read above
+      // and the DELETE itself (e.g. reactivated in the meantime) — fail
+      // closed rather than guessing at what happened.
+      return res.status(409).json({ error: 'Site status changed before the delete could complete — refresh and try again.' });
+    }
+
+    // tenantSiteId is deliberately null here, not siteId — that row no
+    // longer exists, so referencing it would violate audit_log's own FK.
+    await recordAuditEvent(req, {
+      action: 'tenant.hard_delete_completed',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: null,
+      tenantName: existing.name,
+      success: true,
+    });
+
+    res.json({ id: siteId, deleted: true });
   } catch (e) { next(e); }
 });
 

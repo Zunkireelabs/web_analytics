@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { listIntegrationMeta, getIntegration } from '../integrations/registry.js';
 import { getIntegrationHealth } from '../store/read.js';
 import { recordIntegrationCheck } from '../store/upsert.js';
@@ -8,7 +8,7 @@ import { recordIntegrationCheck } from '../store/upsert.js';
 // OAuth consent flow, rotating an API key) is developer/admin-only, so full
 // diagnostic detail isn't actionable for regular client logins.
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 // Joins registry meta with the latest persisted status for this site —
 // an integration never checked yet defaults to status: 'unknown', not an

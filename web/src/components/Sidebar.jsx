@@ -13,7 +13,11 @@ import {
   Network,
   Building2,
   Radar,
-  Settings as SettingsIcon
+  Settings as SettingsIcon,
+  Users,
+  KeyRound,
+  HeartPulse,
+  ScrollText
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -43,7 +47,18 @@ const INTERNAL_NAV = [
   { to: '/clients', label: 'Clients', icon: Building2 },
 ];
 
-export default function Sidebar({ sites, siteId, isInternal, onSite, onLogout, mobileOpen, onCloseMobile }) {
+// Platform Administration (PLATFORM-ADMIN-DESIGN.md §H, §K Phase 7) —
+// visually separate from Internal Console above, gated on the role
+// dimension (isPlatformAdmin), not isInternal — see App.jsx's own comment
+// on why those two are kept distinct even though they coincide today.
+const PLATFORM_ADMIN_NAV = [
+  { to: '/admin/users', label: 'Users', icon: Users },
+  { to: '/admin/mcp', label: 'MCP Tokens', icon: KeyRound },
+  { to: '/admin/system-health', label: 'System Health', icon: HeartPulse },
+  { to: '/admin/audit-log', label: 'Audit Log', icon: ScrollText },
+];
+
+export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, onSite, onLogout, mobileOpen, onCloseMobile }) {
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
 
@@ -114,12 +129,21 @@ export default function Sidebar({ sites, siteId, isInternal, onSite, onLogout, m
 
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+
+            <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Growth Tools</div>
             {GROWTH_TOOLS_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
             {isInternal && (
               <>
                 <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Internal Console</div>
                 {INTERNAL_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+              </>
+            )}
+
+            {isPlatformAdmin && (
+              <>
+                <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-[#6C63FF]">Platform Administration</div>
+                {PLATFORM_ADMIN_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
               </>
             )}
           </nav>
@@ -158,13 +182,13 @@ export default function Sidebar({ sites, siteId, isInternal, onSite, onLogout, m
 function SidebarLink({ to, label, icon: Icon, active }) {
   return (
     <Link to={to}
-      className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 ${
-        active 
-          ? 'text-indigo-600 bg-indigo-500/10 active-pill-shadow' 
+      className={`group flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all duration-200 ${
+        active
+          ? 'text-indigo-600 bg-indigo-500/10 active-pill-shadow'
           : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/60'
       }`}
     >
-      <Icon size={15} strokeWidth={active ? 2.5 : 2} className={active ? 'text-indigo-600' : 'text-slate-400 group-hover:text-slate-750 transition-colors'} />
+      <Icon size={15} strokeWidth={active ? 2.5 : 2} className={active ? 'text-indigo-600' : 'text-slate-400 group-hover:text-slate-600 transition-colors'} />
       {label}
     </Link>
   );

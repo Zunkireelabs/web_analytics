@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
+import McpTokensCard from '../components/McpTokensCard.jsx';
+import TeamCard from '../components/TeamCard.jsx';
 import { Lock, CheckCircle2 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
@@ -25,6 +27,7 @@ function Field({ label, hint, icon: Icon, ...props }) {
 
 export default function Settings() {
   const [email, setEmail] = useState(null);
+  const [role, setRole] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -35,7 +38,7 @@ export default function Settings() {
   const [formError, setFormError] = useState(null);
 
   useEffect(() => {
-    api.me().then((me) => setEmail(me.email)).catch(() => setError(true)).finally(() => setLoading(false));
+    api.me().then((me) => { setEmail(me.email); setRole(me.role); }).catch(() => setError(true)).finally(() => setLoading(false));
   }, []);
 
   const submit = async (e) => {
@@ -114,6 +117,10 @@ export default function Settings() {
           </button>
         </form>
       </div>
+
+      {!loading && <TeamCard role={role} />}
+
+      <McpTokensCard />
     </div>
   );
 }

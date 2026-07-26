@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { listWatchlist, setWatchlistStatus } from '../store/watchlist.js';
 
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 // Reads only already-synced data — sync itself happens as part of a fresh
 // analysis run (job.js's daily run, or Command Center's refresh route),

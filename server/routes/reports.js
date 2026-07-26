@@ -3,7 +3,7 @@ import { requireAuth } from './login.js';
 import { getAgentFindings, getPriorityRecommendations } from '../agents/lib/insights.js';
 
 // Client-facing, read-only. Unlike agents.js/action-center.js this router is
-// NOT gated by requireInternalSite — it only ever reads already-persisted
+// NOT gated by requirePlatformRole — it only ever reads already-persisted
 // agent_runs (via agents/insights.js), never triggers a run, a page-scrape,
 // or a live LLM call. "AI Growth runs agents; Reports consumes the results."
 const router = Router();

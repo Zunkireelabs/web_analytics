@@ -65,7 +65,10 @@ const LEADS_EMAIL_TO = 'info@zunkireelabs.com';
 // Contact form fields come straight from an unauthenticated public
 // endpoint — escape before interpolating into HTML so a submitted
 // name/message can't inject markup/links into the email staff read.
-function escapeHtml(str) {
+// Exported for reuse by the Phase 4 invitation/password-reset emails below,
+// which interpolate a site name and role that ultimately trace back to a
+// Platform/Tenant Admin's own input.
+export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
@@ -99,5 +102,66 @@ export async function sendContactLeadEmail({ companyName, websiteDomain, contact
     html,
   });
   console.log(`[email] contact lead notification sent to ${LEADS_EMAIL_TO}`);
+  return true;
+}
+
+// PLATFORM-ADMIN-DESIGN.md §E — invite/accept flow. acceptUrl already
+// carries the raw single-use token as a query param; this function never
+// sees or needs the token_hash, same "raw value only ever exists at the one
+// point it's minted" discipline as api_tokens/oauth tokens.
+export async function sendInvitationEmail({ to, siteName, role, acceptUrl }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log('[email] SMTP not fully configured — skipping invitation email.');
+    return false;
+  }
+
+  const safeSiteName = escapeHtml(siteName);
+  const safeRole = escapeHtml(role.replace(/_/g, ' '));
+  const safeUrl = escapeHtml(acceptUrl);
+
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px">
+    <h2 style="margin:0 0 4px">You've been invited to ${safeSiteName}</h2>
+    <p style="color:#555;margin:0 0 16px">as ${safeRole}</p>
+    <p style="margin:18px 0"><a href="${safeUrl}" style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">Accept invitation</a></p>
+    <p style="color:#999;font-size:12px">This link expires in 7 days. If you weren't expecting this, you can ignore this email.</p>
+  </div>`;
+
+  await transporter.sendMail({
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject: `You've been invited to ${siteName}`,
+    html,
+  });
+  console.log(`[email] invitation sent to ${to}`);
+  return true;
+}
+
+// PLATFORM-ADMIN-DESIGN.md §E — admin-triggered reset, completion half.
+export async function sendPasswordResetEmail({ to, resetUrl }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log('[email] SMTP not fully configured — skipping password reset email.');
+    return false;
+  }
+
+  const safeUrl = escapeHtml(resetUrl);
+
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px">
+    <h2 style="margin:0 0 4px">Reset your password</h2>
+    <p style="color:#555;margin:0 0 16px">A staff member requested a password reset for your account.</p>
+    <p style="margin:18px 0"><a href="${safeUrl}" style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">Set a new password</a></p>
+    <p style="color:#999;font-size:12px">This link expires in 1 hour. If you weren't expecting this, you can ignore this email — your password won't change.</p>
+  </div>`;
+
+  await transporter.sendMail({
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject: 'Reset your password',
+    html,
+  });
+  console.log(`[email] password reset sent to ${to}`);
   return true;
 }

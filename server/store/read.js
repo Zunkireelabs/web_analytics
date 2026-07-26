@@ -12,6 +12,17 @@ export async function getSiteById(id) {
   return rows[0] || null;
 }
 
+// Single-column lookup for the suspension check every authenticated/MCP
+// request now runs (PLATFORM-ADMIN-DESIGN.md §D, §I) — deliberately not
+// getSiteById's full row, since this runs on every request across all three
+// auth lanes and has nothing to do with the rest of the site record. Returns
+// null (not 'active') for a site id that no longer exists, so callers that
+// compare against 'active' fail closed by default.
+export async function getSiteStatus(id) {
+  const { rows } = await query('SELECT status FROM sites WHERE id = $1', [id]);
+  return rows[0]?.status ?? null;
+}
+
 // Combined GSC + GA4 daily series for a site over an inclusive date range.
 export async function getDailySeries(siteId, start, end) {
   const { rows } = await query(
