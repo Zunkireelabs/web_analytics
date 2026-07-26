@@ -12,6 +12,18 @@ export async function getSiteById(id) {
   return rows[0] || null;
 }
 
+// Reverse lookup for inbound GitHub webhooks (server/routes/webhooks.js),
+// which only carry the repo's owner/name in the payload, never our internal
+// site id. Case-insensitive since GitHub's own owner/repo casing can drift
+// from whatever was typed into `npm run connect-repo` at setup time.
+export async function getSiteByRepo(repoOwner, repoName) {
+  const { rows } = await query(
+    'SELECT * FROM sites WHERE lower(repo_owner) = lower($1) AND lower(repo_name) = lower($2)',
+    [repoOwner, repoName]
+  );
+  return rows[0] || null;
+}
+
 // Single-column lookup for the suspension check every authenticated/MCP
 // request now runs (PLATFORM-ADMIN-DESIGN.md §D, §I) — deliberately not
 // getSiteById's full row, since this runs on every request across all three

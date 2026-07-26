@@ -160,6 +160,20 @@ export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackS
   return rows[0] || null;
 }
 
+// Every draft still awaiting a merge confirmation for a given PR — a batch
+// branch can carry several drafts sharing one PR number (see
+// implementers/lib/github-ops.js's openPrForBranch), so a single "this PR
+// merged" event (the GitHub webhook, server/routes/webhooks.js) must fan out
+// to all of them, not just one. Scoped to status = 'pr_opened' so a draft
+// that's already implemented (or never got this far) is never touched twice.
+export async function listDraftsAwaitingPrCheck(siteId, prNumber) {
+  const { rows } = await query(
+    `SELECT * FROM drafts WHERE site_id = $1 AND pr_number = $2 AND status = 'pr_opened'`,
+    [siteId, prNumber]
+  );
+  return rows;
+}
+
 // Pure annotation write, no status guard — same pattern as
 // recordGscNotification below. Used by the Check PR Status action to record
 // GitHub's real current PR state ('open'/'closed') when it hasn't merged

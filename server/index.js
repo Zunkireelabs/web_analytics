@@ -22,6 +22,7 @@ import siteAuditRouter from './routes/site-audit.js';
 import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import mcpRouter from './routes/mcp.js';
+import webhooksRouter from './routes/webhooks.js';
 import oauthRouter from './routes/oauth.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
@@ -37,7 +38,13 @@ import { pool } from './db.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-app.use(express.json());
+// `verify` stashes the exact raw bytes on req.rawBody as a side effect of
+// parsing — needed by routes/webhooks.js, which must HMAC-verify GitHub's
+// signature against the untouched body, not a re-serialized JSON.stringify
+// of the parsed object (key order/whitespace differences would break the
+// signature). Cheap enough to do unconditionally for every request rather
+// than special-casing just the webhook route's body parsing.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.set('trust proxy', 1); // behind Traefik
 
 // Postgres-backed session store (reuses the existing pool from db.js) —
@@ -93,6 +100,11 @@ app.use('/api', userInvitationsRouter);
 // ever runs (confirmed live during verification: POST /api/mcp with a
 // valid bearer token still hit metricsRouter's requireAuth first and 401'd).
 app.use('/api', mcpRouter);
+// Public, GitHub-signature-authenticated (no session cookie, no bearer
+// token) — same mount-order hazard as mcpRouter above: must precede every
+// blanket-requireAuth router below, or requireAuth 401s the webhook before
+// this router's own route is ever checked.
+app.use('/api', webhooksRouter);
 // OAuth 2.1 surface for the client-facing "Connect" flow (see MCP-PLAN.md's
 // successor, the OAuth plan) — /oauth/* and /.well-known/* are OAuth-spec
 // paths at the app root, not under /api, and don't collide with any
