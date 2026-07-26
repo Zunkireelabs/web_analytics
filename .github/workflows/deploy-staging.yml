@@ -148,6 +148,13 @@ jobs:
             # secret is named GH_PAT instead, and only renamed to the
             # GITHUB_PAT env var the app code actually expects right here.
             GITHUB_PAT=${{ secrets.GH_PAT }}
+            # Verifies inbound POSTs to /api/webhooks/github really came from
+            # GitHub (server/routes/webhooks.js) — must be the exact same
+            # value entered as the webhook's "Secret" on each site's repo, or
+            # every delivery 401s. Same GITHUB_-prefix restriction as above:
+            # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
+            # GITHUB_WEBHOOK_SECRET env var the app code expects.
+            GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
 
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}
