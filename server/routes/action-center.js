@@ -10,7 +10,7 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
+  recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqDrafts, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -56,6 +56,7 @@ function sendHttpError(res, e) {
   if (e.confidence !== undefined) body.confidence = e.confidence;
   if (e.suggestedMode !== undefined) body.suggestedMode = e.suggestedMode;
   if (e.draftStatus !== undefined) body.status = e.draftStatus;
+  if (e.attempted !== undefined) body.attempted = e.attempted;
   res.status(e.status).json(body);
 }
 
@@ -74,7 +75,8 @@ async function buildRenderModeHint(siteId, actionType, page) {
     if (!filePath) return null;
     const file = await getFileContent(site, filePath, baseBranch(site));
     if (!file) return null;
-    return await inspectRenderMode(file.content, actionType);
+    const visibleFaqCount = await countVisibleFaqDrafts(siteId);
+    return await inspectRenderMode(file.content, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
   } catch {
     return null;
   }
@@ -288,7 +290,10 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   const { implementer, implementerId } = resolved;
   const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: renderMode });
   if (!applyResult.ok) {
-    await recordApplyFailure(siteId, approvedDraft.id, applyResult.error);
+    const renderModeInfo = applyResult.reason === 'render-mode-uncertain'
+      ? { reason: applyResult.error, confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode }
+      : null;
+    await recordApplyFailure(siteId, approvedDraft.id, applyResult.error, renderModeInfo);
     if (applyResult.reason === 'render-mode-uncertain') {
       // approveDraft() above already flipped this draft's real status to
       // 'approved' before implementer.apply() hit this — unlike the
@@ -304,7 +309,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     return getDraft(siteId, approvedDraft.id);
   }
-  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId });
+  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles });
 
   if (typeof implementer.mergeToStage !== 'function') return branchPushedDraft;
 
@@ -407,7 +412,7 @@ router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
     }
 
     const result = await implementer.preview(site, draft);
-    if (!result.ok) return res.status(422).json({ error: result.error, reason: result.reason });
+    if (!result.ok) return res.status(422).json({ error: result.error, reason: result.reason, attempted: result.attempted });
     res.json(result);
   } catch (e) { next(e); }
 });
@@ -432,10 +437,13 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
 
   const result = await implementer.apply(site, draft, { renderModeOverride: renderMode });
   if (!result.ok) {
-    await recordApplyFailure(siteId, draft.id, result.error);
-    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode });
+    const renderModeInfo = result.reason === 'render-mode-uncertain'
+      ? { reason: result.error, confidence: result.confidence, suggestedMode: result.suggestedMode }
+      : null;
+    await recordApplyFailure(siteId, draft.id, result.error, renderModeInfo);
+    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted });
   }
-  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId });
+  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });
 }
 
 router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {

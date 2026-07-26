@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { PERMISSION_LEVELS } from '../mcp/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
@@ -42,6 +42,7 @@ router.get('/internal/clients', async (req, res, next) => {
       repoConnected: !!(s.repo_owner && s.repo_name),
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
       oauthMaxPermissionLevel: s.oauth_max_permission_level,
+      visibleFaqCap: s.visible_faq_cap,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -405,6 +406,37 @@ router.post('/internal/clients/:id/oauth-policy', async (req, res, next) => {
     });
 
     res.json({ id: site.id, oauthMaxPermissionLevel: site.oauth_max_permission_level });
+  } catch (e) { next(e); }
+});
+
+// Sitewide ceiling on how many pages may get a visible on-page FAQ block
+// (migration 071) — read by render-inspector.js's inspectRenderMode via
+// countVisibleFaqDrafts to keep visible FAQs selective across a site rather
+// than appearing on every eligible page.
+router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { visibleFaqCap } = req.body || {};
+    if (!Number.isInteger(visibleFaqCap) || visibleFaqCap < 0) {
+      return res.status(400).json({ error: 'visibleFaqCap must be a non-negative integer.' });
+    }
+
+    const site = await updateSiteVisibleFaqCap({ siteId, visibleFaqCap });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.visible_faq_cap_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { visibleFaqCap },
+      success: true,
+    });
+
+    res.json({ id: site.id, visibleFaqCap: site.visible_faq_cap });
   } catch (e) { next(e); }
 });
 

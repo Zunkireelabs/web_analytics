@@ -64,13 +64,27 @@ const STATUS_INFO = {
   implemented: { label: 'Implemented · live on main', color: '#16a34a', bg: '#16a34a0c', border: '#16a34a20' },
 };
 
-function FileDiffPreview({ result }) {
+// matchedVia/matchedFrom only ever appear on broken-link-fix results
+// (server/implementers/backend.js's computeBrokenLinkFixMerge) — undefined,
+// and so invisible, for every other action type.
+function MatchedViaCaption({ matchedVia, matchedFrom }) {
+  if (!matchedVia) return null;
+  return (
+    <p className="text-[10px] text-slate-400 italic mt-1">
+      {matchedVia === 'code-search'
+        ? 'Found via GitHub code search — not in url_file_map, review carefully before merging.'
+        : `Found on source page: ${matchedFrom}`}
+    </p>
+  );
+}
+
+function FileDiffBlock({ filePath, renderMode, live, changedRegions, oldContent, newContent, matchedVia, matchedFrom }) {
   const header = (
     <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-extrabold uppercase tracking-wide flex-wrap">
       <GitBranch size={12} />
       <span>Target:</span>
-      <code className="font-mono text-slate-600 bg-slate-100 rounded px-1.5 py-0.5">{result.filePath}</code>
-      {result.renderMode === 'schema-only' && (
+      <code className="font-mono text-slate-600 bg-slate-100 rounded px-1.5 py-0.5">{filePath}</code>
+      {renderMode === 'schema-only' && (
         <span className="ml-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100 normal-case tracking-normal font-bold">
           Schema only — visible page content unchanged
         </span>
@@ -82,11 +96,12 @@ function FileDiffPreview({ result }) {
   // what's actually sitting in the live marker(s) right now, read fresh
   // every time this loads (backend.js's previewLiveMarkerContent), not a
   // before/after.
-  if (result.live) {
+  if (live) {
     return (
       <div className="mt-4 space-y-4 animate-slide-down">
         {header}
-        {result.changedRegions.map((r, i) => (
+        <MatchedViaCaption matchedVia={matchedVia} matchedFrom={matchedFrom} />
+        {changedRegions.map((r, i) => (
           <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
             {r.field && (
               <div className="bg-slate-50 px-4 py-2 border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-450">
@@ -105,15 +120,16 @@ function FileDiffPreview({ result }) {
     );
   }
 
-  const regions = result.changedRegions?.length
-    ? result.changedRegions
-    : [{ field: result.filePath, before: result.oldContent, after: result.newContent }];
+  const regions = changedRegions?.length
+    ? changedRegions
+    : [{ field: filePath, before: oldContent, after: newContent }];
   return (
     <div className="mt-4 space-y-4 animate-slide-down">
       {header}
+      <MatchedViaCaption matchedVia={matchedVia} matchedFrom={matchedFrom} />
       {regions.map((r, i) => (
         <div key={i} className="space-y-2 border border-slate-100 rounded-2xl overflow-hidden">
-          {r.field && r.field !== result.filePath && (
+          {r.field && r.field !== filePath && (
             <div className="bg-slate-50 px-4 py-2 border-b border-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-450">
               Field: {r.field}
             </div>
@@ -136,6 +152,23 @@ function FileDiffPreview({ result }) {
       ))}
     </div>
   );
+}
+
+// `result.files` (an array) only ever appears on broken-link-fix results —
+// every other action type keeps returning the legacy single-file shape
+// ({filePath, oldContent, newContent, ...}) and renders identically to
+// before this existed.
+function FileDiffPreview({ result }) {
+  if (Array.isArray(result.files)) {
+    return (
+      <div className="space-y-6">
+        {result.files.map((f, i) => (
+          <FileDiffBlock key={f.filePath + i} {...f} live={result.live} />
+        ))}
+      </div>
+    );
+  }
+  return <FileDiffBlock {...result} />;
 }
 
 export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
@@ -190,6 +223,18 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
   // null | { call: 'approve'|'push-branch', reason, confidence, suggestedMode }
   const [renderModeConfirm, setRenderModeConfirm] = useState(null);
   const [rollbackPr, setRollbackPr] = useState(null); // null | {prNumber, prUrl}
+
+  // Fallback for when local state is empty (fresh modal open / page reload)
+  // but the backend already persisted a render-mode-uncertain result
+  // (draft.render_mode_confirm — see recordApplyFailure) — without this, a
+  // failure from an earlier session/render would only ever show the plain
+  // red apply_error banner, with no way to act on it short of retrying the
+  // exact same action to reproduce the failure. `call` is always
+  // 'push-branch' here since both persist sites only ever fire post-approval.
+  const persistedRenderModeConfirm = !renderModeConfirm && draft.render_mode_confirm
+    ? { call: 'push-branch', ...draft.render_mode_confirm }
+    : null;
+  const activeRenderModeConfirm = renderModeConfirm || persistedRenderModeConfirm;
 
   const runPublishAction = async (call, renderMode) => {
     setTransitioning(true);
@@ -480,26 +525,26 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
               <span>{error}</span>
             </div>
           )}
-          {renderModeConfirm && (
+          {activeRenderModeConfirm && (
             <div className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-100 rounded-2xl p-4 mt-3 space-y-3">
               <div className="flex items-start gap-2">
                 <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
                 <span>
                   <span className="font-extrabold">Render mode unclear</span>
-                  {typeof renderModeConfirm.confidence === 'number' && ` (${renderModeConfirm.confidence}% confidence)`}
-                  {': '}{renderModeConfirm.reason}
+                  {typeof activeRenderModeConfirm.confidence === 'number' && ` (${activeRenderModeConfirm.confidence}% confidence)`}
+                  {': '}{activeRenderModeConfirm.reason}
                 </span>
               </div>
               <div className="flex items-center gap-2 pl-6">
                 <button
-                  onClick={() => runPublishAction(renderModeConfirm.call, 'visible')}
+                  onClick={() => runPublishAction(activeRenderModeConfirm.call, 'visible')}
                   disabled={transitioning}
                   className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 transition disabled:opacity-60"
                 >
                   Use Visible
                 </button>
                 <button
-                  onClick={() => runPublishAction(renderModeConfirm.call, 'schema-only')}
+                  onClick={() => runPublishAction(activeRenderModeConfirm.call, 'schema-only')}
                   disabled={transitioning}
                   className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 transition disabled:opacity-60"
                 >

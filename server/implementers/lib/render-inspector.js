@@ -1,13 +1,17 @@
 import { callLLM } from '../../llm.js';
 
-// Deterministic-first render-mode inspection: replaces the old static
-// url_file_map.pages[url].render config as the source of truth for
-// visible-vs-schema-only. Cheap regex/structural evidence is tried first and
-// short-circuits whenever it's decisive; the LLM is only ever consulted when
-// that evidence is genuinely ambiguous, and even then it reports FACTS
-// (hasVisibleFaqSection/evidenceQuotes/hasSafeInsertionPoint), never a mode
-// directly — this module is the one place that turns evidence into a
-// decision, whichever pass produced the evidence.
+// Deterministic-first, fully autonomous render-mode inspection: replaces the
+// old static url_file_map.pages[url].render config as the source of truth
+// for visible-vs-schema-only. Cheap regex/structural evidence is tried first
+// and short-circuits whenever it's decisive; a sitewide visible-FAQ cap
+// (visibleFaqCount/visibleFaqCap, see countVisibleFaqDrafts in
+// server/store/drafts.js) is checked next, since visible FAQ blocks are
+// meant to stay selective across a site rather than appear on every eligible
+// page; only genuinely ambiguous evidence under an unfilled cap reaches the
+// LLM, which decides the mode directly. This module never stops to ask a
+// human for a policy judgment call — the one remaining escalation
+// (render-mode-uncertain, confidence 0) is reserved for a real LLM/infra
+// failure, not ambiguity.
 
 // Only content types with more than one real representation have a mode
 // decision to make at all — see lib/marker-merge.js's buildMergeValues:
@@ -103,33 +107,30 @@ export function hasSafeInsertionPoint(fileContent) {
 
 const TRUNCATE_CHARS = 8000;
 
-// Reached only when deterministic signals are ambiguous. Asks the LLM to
-// report observations, not a decision — this function (not the model) turns
-// those observations into a mode, exactly like the deterministic path above
-// does with regex evidence. A resolved-but-escalated result is capped below
-// a pure deterministic one; reaching this path is itself evidence of real
-// ambiguity. Any parse/call failure is treated as confidence 0, never a crash.
-async function llmAssistedInspection(fileContent, deterministicSignals) {
+// Reached only when deterministic signals are ambiguous and the sitewide cap
+// isn't already exhausted. The LLM decides the mode directly (not just facts
+// for a human to act on) — visible FAQ blocks are meant to stay selective
+// across a site, so the model is told to err toward schema-only whenever
+// it's genuinely unsure, rather than escalating. Any parse/call failure is a
+// real infra problem, not a policy judgment call — that's the one case still
+// allowed to stop and ask a human (confidence 0, below CONFIDENCE_THRESHOLD).
+async function llmAssistedInspection(fileContent, deterministicSignals, { visibleFaqCount, visibleFaqCap }) {
   const excerpt = fileContent.slice(0, TRUNCATE_CHARS);
-  const truncated = fileContent.length > TRUNCATE_CHARS;
 
-  const system = 'You are examining a website template file to gather FACTS, not to make a decision. ' +
-    'A deterministic scan already found weak/ambiguous signals (e.g. the word "FAQ"/"FAQs" appearing somewhere, ' +
-    'or generic accordion-related keywords) and could not confidently classify the page — those signals alone ' +
-    'are NOT proof of a real FAQ section. Distinguish carefully: (a) a REAL, VISIBLE FAQ section — multiple ' +
-    'question/answer pairs actually presented to site visitors as an FAQ or Q&A block — versus (b) any ' +
-    'INCIDENTAL use of the word "FAQ"/"FAQs" in unrelated prose, a statistic, a nav link label, or a single ' +
-    'passing sentence that is not itself a Q&A section. Only report hasVisibleFaqSection: true for case (a). If ' +
-    'you report true, evidenceQuotes MUST be the actual visible question text(s) from a real Q&A section — if ' +
-    'you cannot quote at least one genuine question a visitor would see and read as part of an FAQ, report ' +
-    'hasVisibleFaqSection: false instead, even if the word "FAQ" appears elsewhere in the file.' +
-    (truncated ? ' This excerpt may be truncated — if you cannot rule out something existing beyond it, say "unsure".' : '') +
-    ' Respond with ONLY JSON: {"hasVisibleFaqSection": true|false|"unsure", "evidenceQuotes": ["short exact quotes"], "hasSafeInsertionPoint": true|false}.';
-  const user = `Deterministic signals already found: ${deterministicSignals.evidence.join('; ') || 'none'}.\n\nFile excerpt:\n${excerpt}`;
+  const system = 'You are deciding, for one page, whether to publish a NEW VISIBLE on-page FAQ block or ' +
+    'structured (schema-only, invisible) FAQ data instead. Choose "visible" only if: (a) no real visible FAQ/Q&A ' +
+    'section already exists on this page — if one does, always choose "schema-only" to avoid duplicating it; and ' +
+    '(b) this specific page substantively benefits from an on-page FAQ (e.g. a product/service/pricing page where ' +
+    'visitors commonly have concrete questions), not a generic page where an FAQ would feel bolted on. Visible FAQ ' +
+    'blocks should stay selective across a site, not appear on every page that could technically have one — err ' +
+    'toward "schema-only" when genuinely unsure. Respond with ONLY JSON: ' +
+    '{"mode": "visible"|"schema-only", "reasoning": "one sentence", "evidenceQuotes": ["short exact quotes, if any"]}.';
+  const user = `Sitewide context: ${visibleFaqCount} of ${visibleFaqCap} allowed visible-FAQ pages already used.\n` +
+    `Deterministic signals already found: ${deterministicSignals.evidence.join('; ') || 'none'}.\n\nFile excerpt:\n${excerpt}`;
 
   let parsed;
   try {
-    const raw = await callLLM(system, user, { maxTokens: 400 });
+    const raw = await callLLM(system, user, { maxTokens: 300 });
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch (err) {
     return {
@@ -139,23 +140,12 @@ async function llmAssistedInspection(fileContent, deterministicSignals) {
     };
   }
 
-  if (parsed.hasVisibleFaqSection === true) {
-    return {
-      mode: 'schema-only', confidence: 80,
-      reason: `Existing visible FAQ content found on closer review: ${(parsed.evidenceQuotes || []).join('; ') || 'see file'}.`,
-      source: 'llm-assisted',
-    };
-  }
-  if (parsed.hasVisibleFaqSection === false && parsed.hasSafeInsertionPoint) {
-    return {
-      mode: 'visible', confidence: 78,
-      reason: 'No visible FAQ content found on closer review, and a safe insertion point exists.',
-      source: 'llm-assisted',
-    };
-  }
+  const mode = parsed.mode === 'visible' ? 'visible' : 'schema-only'; // any unexpected value defaults safe
   return {
-    mode: null, confidence: 45,
-    reason: `Could not confidently determine whether this page already has a visible FAQ section (deterministic signals: ${deterministicSignals.evidence.join('; ') || 'none'}). Manual confirmation required.`,
+    mode, confidence: 75,
+    reason: parsed.reasoning || (mode === 'visible'
+      ? 'No existing visible FAQ found; page benefits from one.'
+      : 'Defaulting to schema-only — kept visible FAQs selective.'),
     source: 'llm-assisted',
   };
 }
@@ -165,7 +155,7 @@ async function llmAssistedInspection(fileContent, deterministicSignals) {
 // escalates. `fileContent` should be the SAME content the caller already
 // fetched for the marker-splice step — this function never fetches on its
 // own, keeping it a pure, easily-testable function of (content, actionType).
-export async function inspectRenderMode(fileContent, actionType) {
+export async function inspectRenderMode(fileContent, actionType, { visibleFaqCount = 0, visibleFaqCap = Infinity } = {}) {
   if (!INSPECTABLE_ACTION_TYPES.includes(actionType)) {
     return {
       mode: 'visible', confidence: 100,
@@ -194,6 +184,17 @@ export async function inspectRenderMode(fileContent, actionType) {
     };
   }
 
+  // Cap check comes before the 'none' short-circuit and before the LLM — a
+  // page with no existing FAQ still doesn't get a visible one once the site
+  // is already at its selective-visibility limit.
+  if (visibleFaqCount >= visibleFaqCap) {
+    return {
+      mode: 'schema-only', confidence: 90,
+      reason: `Sitewide visible-FAQ limit reached (${visibleFaqCount}/${visibleFaqCap} pages already have a visible FAQ) — publishing structured data only to keep visible FAQs selective.`,
+      source: 'cap',
+    };
+  }
+
   if (signals.strength === 'none') {
     return {
       mode: 'visible', confidence: 90,
@@ -202,5 +203,5 @@ export async function inspectRenderMode(fileContent, actionType) {
     };
   }
 
-  return llmAssistedInspection(organicContent, signals);
+  return llmAssistedInspection(organicContent, signals, { visibleFaqCount, visibleFaqCap });
 }

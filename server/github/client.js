@@ -128,6 +128,32 @@ export async function getPullRequest(site, prNumber) {
   return { state: data.state, merged: data.merged };
 }
 
+// Last-resort candidate finder for broken-link-fix's Layer 2 (see
+// implementers/backend.js's computeBrokenLinkFixMerge) — locates files by
+// literal content match via GitHub's Code Search API, when url_file_map has
+// no entry (or no anchor match) for any of a finding's known source pages.
+// This is fundamentally different from url-file-map.js's resolveFile: it
+// finds a file by REAL, literal content, not by guessing a path from
+// framework convention — but it's still only a candidate list. Callers MUST
+// re-verify each result with a real regex match (href-rewrite-inject.js's
+// stripLink) before touching anything; search relevance is never trusted
+// alone.
+//
+// Caveat: GitHub's code search only indexes the repo's DEFAULT branch and
+// files under ~384KB, and has its own, stricter rate limit than the
+// Contents API used elsewhere in this file — call this only as a genuine
+// last resort, never speculatively. If the working ref isn't actually this
+// repo's default branch, results may miss files that exist there but
+// haven't been indexed yet.
+export async function searchCodeForString(site, literal, { maxResults = 5 } = {}) {
+  const q = `"${literal}" repo:${repoPath(site)}`;
+  const res = await githubRequest(site, 'GET', `/search/code?q=${encodeURIComponent(q)}&per_page=${maxResults}`);
+  if (!res.ok) throw new Error(`searchCodeForString failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  const paths = (data.items || []).map((item) => item.path);
+  return [...new Set(paths)].slice(0, maxResults);
+}
+
 // Lists open PRs whose head is exactly `branch` — used to detect "does
 // today's batch branch already have a PR open" before trying to open a new
 // one, since GitHub 422s on a second PR for the same head->base pair.

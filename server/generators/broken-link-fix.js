@@ -13,14 +13,20 @@ export const meta = {
   recommendationTags: [],
 };
 
-// params: { page: string, href: string }
+// params: { page: string, href: string, sourcePages?: string[] }
 export async function generate({ params }) {
-  const { page, href } = params || {};
+  const { page, href, sourcePages } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
   if (!href) throw Object.assign(new Error('href is required'), { status: 400 });
 
+  // Every page the crawler actually found this href on — not just `page`
+  // (kept for back-compat with generic page-lookup code elsewhere). The
+  // implementer tries all of them before giving up, since the same dead
+  // link is often hardcoded on more than one page's own file.
+  const pages = Array.isArray(sourcePages) && sourcePages.length ? sourcePages : [page];
+
   return {
-    content: { page, href },
+    content: { page, href, sourcePages: pages },
     summary: `Remove dead link to ${href}`,
   };
 }

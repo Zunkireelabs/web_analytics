@@ -188,3 +188,16 @@ export async function updateSiteOauthPolicy({ siteId, oauthMaxPermissionLevel })
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
 }
+
+// Sitewide ceiling on how many pages may get a visible on-page FAQ block
+// (migration 071) — read by render-inspector.js's inspectRenderMode via
+// countVisibleFaqDrafts (server/store/drafts.js) to keep visible FAQs
+// selective rather than appearing on every eligible page.
+export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
+  const { rows } = await query(
+    `UPDATE sites SET visible_faq_cap = $1 WHERE id = $2 RETURNING *`,
+    [visibleFaqCap, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
