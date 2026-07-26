@@ -36,6 +36,7 @@ export const api = {
   logout: () => req('/logout', { method: 'POST' }),
   changePassword: (currentPassword, newPassword) =>
     req('/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+  verifyPassword: (password) => req('/verify-password', { method: 'POST', body: JSON.stringify({ password }) }),
   sites: () => req('/sites'),
   agents: () => req('/agents'),
   agentsStatus: () => req('/agents/status'),
@@ -100,12 +101,53 @@ export const api = {
     connect: (id, body) => req(`/internal/clients/${id}/connect`, { method: 'POST', body: JSON.stringify(body) }),
     connectRepo: (id, body) => req(`/internal/clients/${id}/connect-repo`, { method: 'POST', body: JSON.stringify(body) }),
     retryBaseline: (id) => req(`/internal/clients/${id}/retry-baseline`, { method: 'POST' }),
+    setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     growthSummary: () => req('/internal/clients/growth-summary'),
     signupRequests: {
       list: () => req('/internal/signup-requests'),
       approve: (id) => req(`/internal/signup-requests/${id}/approve`, { method: 'POST' }),
       reject: (id) => req(`/internal/signup-requests/${id}/reject`, { method: 'POST' }),
     },
+    // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5) — status
+    // transitions only; hardDelete additionally requires typed-name confirmation.
+    suspend: (id) => req(`/internal/tenants/${id}/suspend`, { method: 'POST' }),
+    reactivate: (id) => req(`/internal/tenants/${id}/reactivate`, { method: 'POST' }),
+    softDelete: (id) => req(`/internal/tenants/${id}/soft-delete`, { method: 'POST' }),
+    hardDelete: (id, confirmName) => req(`/internal/tenants/${id}/hard-delete`, { method: 'POST', body: JSON.stringify({ confirmName }) }),
+  },
+
+  // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —
+  // any tenant, any role including platform tiers. Distinct from `team`
+  // below, which is scoped to the caller's own tenant.
+  adminUsers: {
+    list: () => req('/internal/users'),
+    invite: (body) => req('/internal/users', { method: 'POST', body: JSON.stringify(body) }),
+    updateRole: (id, role) => req(`/internal/users/${id}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    disable: (id) => req(`/internal/users/${id}`, { method: 'DELETE' }),
+  },
+
+  // Own-tenant user management, backs Settings.jsx's Team tab — site_id is
+  // always the caller's own session, server-derived, never sent from here.
+  team: {
+    list: () => req('/users'),
+    invite: (body) => req('/users', { method: 'POST', body: JSON.stringify(body) }),
+    updateRole: (id, role) => req(`/users/${id}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    disable: (id) => req(`/users/${id}`, { method: 'DELETE' }),
+  },
+
+  // Cross-tenant MCP token oversight (PLATFORM-ADMIN-DESIGN.md §F.6, §K
+  // Phase 5) — metadata only, never a raw token value.
+  mcpAdmin: {
+    list: () => req('/internal/mcp-tokens'),
+    revoke: (id) => req(`/internal/mcp-tokens/${id}/revoke`, { method: 'POST' }),
+  },
+
+  systemHealth: {
+    get: () => req('/internal/system-health'),
+  },
+
+  auditLog: {
+    list: (filters = {}) => req(`/internal/audit-log?${new URLSearchParams(filters)}`),
   },
 
   actionCenter: {
@@ -131,6 +173,21 @@ export const api = {
     trigger: (maxPages) => req('/site-audit/run', { method: 'POST', body: JSON.stringify(maxPages ? { maxPages } : {}) }),
     list: () => req('/site-audit/runs'),
     get: (id) => req(`/site-audit/runs/${id}`),
+  },
+
+  mcpTokens: {
+    list: () => req('/mcp-tokens'),
+    create: (label, permissionLevel) => req('/mcp-tokens', { method: 'POST', body: JSON.stringify({ label, permissionLevel }) }),
+    revoke: (id) => req(`/mcp-tokens/${id}`, { method: 'DELETE' }),
+  },
+
+  // Backs the OAuth "Connect" consent screen (pages/OAuthAuthorize.jsx).
+  // Deliberately no `permissionLevel`/tier field anywhere here — the server
+  // derives it from this session's own site, never from what the browser
+  // sends. See server/routes/oauth-consent.js.
+  oauth: {
+    authorizeInfo: (params) => req(`/oauth/authorize-info?${new URLSearchParams(params)}`),
+    decide: (body) => req('/oauth/authorize/decision', { method: 'POST', body: JSON.stringify(body) }),
   },
 };
 

@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { createConversation, listConversations, getConversation, getMessages, getRecentMessages, saveMessage } from '../store/copilot.js';
 import { answerQuestion } from '../agents/lib/copilot.js';
 
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 router.get('/copilot/conversations', async (req, res, next) => {
   try { res.json(await listConversations(req.siteId)); } catch (e) { next(e); }

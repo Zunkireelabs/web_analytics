@@ -23,6 +23,22 @@ async function main() {
   const site = await getOrCreateSite();
   console.log(`Site ready: #${site.id} "${site.name}" (${site.gsc_property})`);
 
+  // Platform Administration, Phase 0 (PLATFORM-ADMIN-DESIGN.md §K): promote
+  // COMPANY_SITE_ID's existing users from 062's default 'tenant_admin' to
+  // 'platform_admin'. This needs process.env, which a static .sql file has
+  // no access to, so it lives here alongside the other env-driven step
+  // above. Guarded to only touch rows still at the default role, so it
+  // never clobbers a role a Platform Admin deliberately set later — safe
+  // to run on every deploy.
+  const companySiteId = Number(process.env.COMPANY_SITE_ID);
+  if (companySiteId) {
+    const { rowCount } = await pool.query(
+      `UPDATE users SET role = 'platform_admin' WHERE site_id = $1 AND role = 'tenant_admin'`,
+      [companySiteId]
+    );
+    if (rowCount) console.log(`Promoted ${rowCount} COMPANY_SITE_ID user(s) to platform_admin.`);
+  }
+
   await pool.end();
   console.log('Migrations complete.');
 }

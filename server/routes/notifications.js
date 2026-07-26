@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { listNotifications, unreadCount, markRead, markAllRead } from '../store/notifications.js';
 
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 router.get('/notifications', async (req, res, next) => {
   try {

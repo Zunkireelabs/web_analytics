@@ -20,6 +20,15 @@ import clientsRouter from './routes/clients.js';
 import growthReportRouter from './routes/growth-report.js';
 import siteAuditRouter from './routes/site-audit.js';
 import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
+import mcpTokensRouter from './routes/mcp-tokens.js';
+import mcpRouter from './routes/mcp.js';
+import oauthRouter from './routes/oauth.js';
+import oauthConsentRouter from './routes/oauth-consent.js';
+import usersRouter from './routes/users.js';
+import userInvitationsRouter from './routes/user-invitations.js';
+import mcpAdminRouter from './routes/mcp-admin.js';
+import systemHealthRouter from './routes/system-health.js';
+import auditLogRouter from './routes/audit-log.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
@@ -59,13 +68,38 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // middleware runs before Express ever checks whether a route inside it
 // actually matches the URL — a non-matching path still gets rejected there
 // instead of falling through to the router that actually owns it. Any
-// router gated by requireInternalSite must therefore be mounted AFTER every
+// router gated by requirePlatformRole must therefore be mounted AFTER every
 // client-facing router, or it silently 404s legitimate client requests for
 // routes it has nothing to do with (confirmed live: an authenticated client
 // hitting /api/growth-report was rejected by copilot.js's blanket internal
 // gate before ever reaching growth-report.js, despite growth-report.js
 // itself being correctly client-scoped).
 app.use('/api', loginRouter);
+// Fully public (no requireAuth at all, not even per-route) — parallel to
+// loginRouter's own public /signup-requests. Must be mounted before any
+// router with a blanket `router.use(requireAuth)` below (mcpTokensRouter,
+// the internal-only block), for the same reason mcpRouter must be — an
+// invitation-accept request carries no session cookie, so a blanket
+// requireAuth encountered first would 401 it before this router's own
+// route is ever checked.
+app.use('/api', userInvitationsRouter);
+// mcpRouter gates itself with requireMcpToken (bearer-token auth), which
+// checks the Authorization header, not req.session — an MCP client sends
+// no session cookie at all. It must be mounted before every
+// requireAuth-scoped router below (they all run their blanket
+// `router.use(requireAuth)` against ANY path that reaches them, per the
+// hazard described above), or requireAuth intercepts a cookie-less MCP
+// request and rejects it with "Not authenticated." before requireMcpToken
+// ever runs (confirmed live during verification: POST /api/mcp with a
+// valid bearer token still hit metricsRouter's requireAuth first and 401'd).
+app.use('/api', mcpRouter);
+// OAuth 2.1 surface for the client-facing "Connect" flow (see MCP-PLAN.md's
+// successor, the OAuth plan) — /oauth/* and /.well-known/* are OAuth-spec
+// paths at the app root, not under /api, and don't collide with any
+// requireAuth-gated router's blanket middleware, so mount order relative to
+// them doesn't matter beyond "before the SPA catch-all" (already true; this
+// is far above it in the file).
+app.use(oauthRouter);
 app.use('/api', metricsRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
@@ -73,13 +107,27 @@ app.use('/api', reportsRouter);
 app.use('/api', commandCenterRouter);
 app.use('/api', growthReportRouter);
 app.use('/api', siteAuditRouter);
-// Internal-only (requireInternalSite-gated) — must stay last, see above.
+app.use('/api', mcpTokensRouter);
+// Every route in usersRouter applies requireAuth per-route, not as a
+// router-wide blanket (deliberately — it mixes /internal/users, staff-only,
+// with /users, tenant-scoped, and a blanket at the top would gate both
+// identically) — so unlike mcpTokensRouter above, its mount position here
+// is for logical grouping only, not a mount-order hazard to avoid.
+app.use('/api', usersRouter);
+// requireAuth-gated (session cookie) — backs the OAuth consent screen
+// (web/src/pages/OAuthAuthorize.jsx). Same tier as mcpTokensRouter above;
+// must still precede the internal-only block below.
+app.use('/api', oauthConsentRouter);
+// Internal-only (requirePlatformRole-gated) — must stay last, see above.
 app.use('/api', copilotRouter);
 app.use('/api', integrationsRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', watchlistRouter);
 app.use('/api', clientsRouter);
 app.use('/api', commoncrawlBacklinksRouter);
+app.use('/api', mcpAdminRouter);
+app.use('/api', systemHealthRouter);
+app.use('/api', auditLogRouter);
 
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);

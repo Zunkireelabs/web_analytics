@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth, requireInternalSite } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { fetchDomainSummary } from '../providers/backlinks/commoncrawl.js';
 import { hasCompletedGraphRelease } from '../store/commoncrawl-backlinks.js';
 
@@ -12,7 +12,7 @@ import { hasCompletedGraphRelease } from '../store/commoncrawl-backlinks.js';
 // so this stays independent of DataForSEO and the Authority Score both in
 // behavior and in what happens if either is unconfigured or down.
 const router = Router();
-router.use(requireAuth, requireInternalSite);
+router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 // GET /commoncrawl-backlinks/summary?domain=example.com
 // Always 200 with a structured `status` — 'ok' when this domain has real

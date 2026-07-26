@@ -18,11 +18,27 @@ import {
   ShieldCheck,
   Settings,
   ChevronRight,
-  Sliders
+  Sliders,
+  PauseCircle,
+  PlayCircle,
+  Trash2,
+  AlertOctagon
 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
+
+// The ceiling on what this client's OAuth "Connect" flow (server/routes/
+// oauth-consent.js) can ever grant — 'admin' is deliberately not an option
+// here, same reasoning as its absence from server/mcp/oauth-provider.js's
+// computeEffectivePermissionLevel: OAuth tokens must never reach the tier
+// that can mint/revoke other tokens unattended. Kept in sync by hand with
+// server/mcp/permissions.js, same as McpTokensCard.jsx's TIERS already is.
+const OAUTH_POLICY_OPTIONS = [
+  { value: 'read_only', label: 'Read Only' },
+  { value: 'ai_actions', label: 'AI Actions' },
+  { value: 'automation', label: 'Automation' },
+];
 
 function Field({ label, hint, icon: Icon, ...props }) {
   return (
@@ -290,6 +306,15 @@ const STATUS_PILLS = {
   pending: { label: 'Awaiting integrations', color: '#d97706', bg: '#fffbeb', border: '#fef3c7' },
 };
 
+// Tenant lifecycle status (PLATFORM-ADMIN-DESIGN.md §D) — distinct from the
+// onboarding-progress pills above. Only shown when status !== 'active', so
+// the common case (every tenant, today) doesn't clutter the row with a
+// redundant "Active" pill next to the onboarding pill.
+const LIFECYCLE_PILLS = {
+  suspended: { label: 'Suspended', color: '#d97706', bg: '#fffbeb', border: '#fde68a' },
+  soft_deleted: { label: 'Soft-deleted', color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
+};
+
 export default function ClientOnboarding() {
   const [clients, setClients] = useState(null); // null = loading
   const [showNewForm, setShowNewForm] = useState(false);
@@ -297,6 +322,14 @@ export default function ClientOnboarding() {
   const [connectingRepoClient, setConnectingRepoClient] = useState(null);
   const [retryState, setRetryState] = useState({}); // {[clientId]: 'running'|'done'|'error'}
   const [retryResult, setRetryResult] = useState({}); // {[clientId]: result | {error}}
+  const [oauthPolicySaving, setOauthPolicySaving] = useState({}); // {[clientId]: true}
+  const [oauthPolicyError, setOauthPolicyError] = useState({}); // {[clientId]: message}
+
+  // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5).
+  const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
+  const [lifecycleError, setLifecycleError] = useState({}); // {[clientId]: message}
+  const [hardDeleteOpen, setHardDeleteOpen] = useState({}); // {[clientId]: true}
+  const [hardDeleteName, setHardDeleteName] = useState({}); // {[clientId]: string}
 
   const [requests, setRequests] = useState(null); // null = loading
   const [reviewState, setReviewState] = useState({}); // {[requestId]: 'approving'|'rejecting'|'error'}
@@ -343,6 +376,59 @@ export default function ClientOnboarding() {
       setRetryResult((r) => ({ ...r, [client.id]: { error: err.message || 'Retry failed.' } }));
       setRetryState((s) => ({ ...s, [client.id]: 'error' }));
     }
+  };
+
+  // The trusted ceiling for this client's OAuth "Connect" flow
+  // (sites.oauth_max_permission_level, migration 061) — staff-only, same
+  // gating as every other control on this page. Optimistic local update so
+  // the dropdown doesn't visually snap back while the request is in flight;
+  // reverts via a full reload if the save actually fails.
+  const updateOauthPolicy = async (client, oauthMaxPermissionLevel) => {
+    const previous = client.oauthMaxPermissionLevel;
+    setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, oauthMaxPermissionLevel } : c)));
+    setOauthPolicySaving((s) => ({ ...s, [client.id]: true }));
+    setOauthPolicyError((e) => ({ ...e, [client.id]: null }));
+    try {
+      await api.clients.setOauthPolicy(client.id, oauthMaxPermissionLevel);
+    } catch (err) {
+      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, oauthMaxPermissionLevel: previous } : c)));
+      setOauthPolicyError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
+    } finally {
+      setOauthPolicySaving((s) => ({ ...s, [client.id]: false }));
+    }
+  };
+
+  const runLifecycleAction = async (client, action, onSuccess) => {
+    setLifecycleBusy((s) => ({ ...s, [client.id]: true }));
+    setLifecycleError((e) => ({ ...e, [client.id]: null }));
+    try {
+      await action();
+      await load();
+      onSuccess?.();
+    } catch (err) {
+      setLifecycleError((e) => ({ ...e, [client.id]: err.message || 'Action failed.' }));
+    } finally {
+      setLifecycleBusy((s) => ({ ...s, [client.id]: false }));
+    }
+  };
+
+  const suspend = (client) => {
+    if (!confirm(`Suspend ${client.name}? This immediately blocks all access to their dashboard, MCP tokens, and OAuth grants.`)) return;
+    runLifecycleAction(client, () => api.clients.suspend(client.id));
+  };
+
+  const reactivate = (client) => runLifecycleAction(client, () => api.clients.reactivate(client.id));
+
+  const softDelete = (client) => {
+    if (!confirm(`Soft-delete ${client.name}? Data is retained and this is reversible via Reactivate.`)) return;
+    runLifecycleAction(client, () => api.clients.softDelete(client.id));
+  };
+
+  const hardDelete = (client) => {
+    runLifecycleAction(client, () => api.clients.hardDelete(client.id, hardDeleteName[client.id] || ''), () => {
+      setHardDeleteOpen((o) => ({ ...o, [client.id]: false }));
+      setHardDeleteName((n) => ({ ...n, [client.id]: '' }));
+    });
   };
 
   const onCreated = (site) => {
@@ -529,6 +615,12 @@ export default function ClientOnboarding() {
                         </div>
 
                         <div className="shrink-0 flex flex-col items-end gap-1.5">
+                          {LIFECYCLE_PILLS[c.status] && (
+                            <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border leading-none"
+                              style={{ color: LIFECYCLE_PILLS[c.status].color, backgroundColor: LIFECYCLE_PILLS[c.status].bg, borderColor: LIFECYCLE_PILLS[c.status].border }}>
+                              {LIFECYCLE_PILLS[c.status].label}
+                            </span>
+                          )}
                           <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border leading-none"
                             style={{ color: s.color, backgroundColor: s.bg, borderColor: s.border }}>
                             {s.label}
@@ -562,6 +654,100 @@ export default function ClientOnboarding() {
                           <span>{c.repoConnected ? 'Edit Repo' : 'Link Repo'}</span>
                         </button>
                       </div>
+
+                      {/* Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K
+                          Phase 3/3.5). The company's own site never reaches
+                          this row with an active suspend/delete path — the
+                          server rejects COMPANY_SITE_ID unconditionally
+                          regardless of what this UI shows, this is just
+                          normal staff console UX on top of that guard. */}
+                      <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-slate-100/50">
+                        {c.status === 'active' && (
+                          <button type="button" onClick={() => suspend(c)} disabled={!!lifecycleBusy[c.id]}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
+                            <PauseCircle size={9} />
+                            <span>Suspend</span>
+                          </button>
+                        )}
+                        {(c.status === 'suspended' || c.status === 'soft_deleted') && (
+                          <button type="button" onClick={() => reactivate(c)} disabled={!!lifecycleBusy[c.id]}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
+                            <PlayCircle size={9} />
+                            <span>Reactivate</span>
+                          </button>
+                        )}
+                        {c.status === 'suspended' && (
+                          <button type="button" onClick={() => softDelete(c)} disabled={!!lifecycleBusy[c.id]}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
+                            <Trash2 size={9} />
+                            <span>Soft Delete</span>
+                          </button>
+                        )}
+                        {c.status === 'soft_deleted' && !hardDeleteOpen[c.id] && (
+                          <button type="button" onClick={() => setHardDeleteOpen((o) => ({ ...o, [c.id]: true }))}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white transition active:scale-95 flex items-center gap-1">
+                            <AlertOctagon size={9} />
+                            <span>Hard Delete…</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {lifecycleError[c.id] && (
+                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
+                          {lifecycleError[c.id]}
+                        </div>
+                      )}
+
+                      {c.status === 'soft_deleted' && hardDeleteOpen[c.id] && (
+                        <div className="rounded-2xl bg-rose-500/[0.04] border border-rose-500/20 p-4 space-y-3">
+                          <p className="text-[11px] font-bold text-rose-800 leading-relaxed">
+                            This permanently and irreversibly deletes <strong>{c.name}</strong> and all its data.
+                            Type the tenant's exact name to confirm.
+                          </p>
+                          <input
+                            className={inputCls}
+                            value={hardDeleteName[c.id] || ''}
+                            onChange={(e) => setHardDeleteName((n) => ({ ...n, [c.id]: e.target.value }))}
+                            placeholder={c.name}
+                          />
+                          <div className="flex gap-2">
+                            <button type="button" onClick={() => hardDelete(c)}
+                              disabled={!!lifecycleBusy[c.id] || (hardDeleteName[c.id] || '').trim() !== c.name}
+                              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white transition disabled:opacity-40">
+                              {lifecycleBusy[c.id] ? 'Deleting…' : 'Permanently Delete'}
+                            </button>
+                            <button type="button"
+                              onClick={() => { setHardDeleteOpen((o) => ({ ...o, [c.id]: false })); setHardDeleteName((n) => ({ ...n, [c.id]: '' })); }}
+                              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* OAuth "Connect" ceiling — the max permission_level this
+                          client's OAuth grants (server/routes/oauth-consent.js)
+                          can ever reach. 'admin' deliberately isn't an option;
+                          see OAUTH_POLICY_OPTIONS above. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <ShieldCheck size={11} className="text-slate-400 shrink-0" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">OAuth ceiling</span>
+                        <select
+                          value={c.oauthMaxPermissionLevel || 'read_only'}
+                          disabled={!!oauthPolicySaving[c.id]}
+                          onChange={(e) => updateOauthPolicy(c, e.target.value)}
+                          className="text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1 bg-white disabled:opacity-60"
+                        >
+                          {OAUTH_POLICY_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {oauthPolicyError[c.id] && (
+                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
+                          {oauthPolicyError[c.id]}
+                        </div>
+                      )}
 
                       {/* Diagnostic baselining results */}
                       {rState === 'done' && rResult && !rResult.error && <BaselineResult result={rResult} />}

@@ -20,11 +20,17 @@ const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
+const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
+const AdminUsers = lazy(() => import('./pages/admin/Users.jsx'));
+const McpAdmin = lazy(() => import('./pages/admin/McpAdmin.jsx'));
+const SystemHealth = lazy(() => import('./pages/admin/SystemHealth.jsx'));
+const AuditLog = lazy(() => import('./pages/admin/AuditLog.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
   const [authed, setAuthed] = useState(null); // null = still checking
   const [isInternal, setIsInternal] = useState(false);
+  const [role, setRole] = useState(null);
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
   const [sitesLoaded, setSitesLoaded] = useState(false);
@@ -32,7 +38,7 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const checkSession = () => api.me()
-    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); })
+    .then((r) => { setAuthed(r.authed); setIsInternal(!!r.isInternal); setRole(r.role || null); })
     .catch(() => setAuthed(false));
 
   // Check session on load.
@@ -55,8 +61,19 @@ export default function App() {
   // authed, force the URL back to '/' so it always matches what's on screen —
   // covers explicit logout, a mid-session expiry caught above, and a stale
   // session landing on a protected URL from a fresh load/hard refresh alike.
+  //
+  // Exception: an OAuth "Connect" flow (server/mcp/oauth-provider.js redirects
+  // an unauthenticated browser here, to /oauth/authorize-consent, carrying
+  // client_id/redirect_uri/code_challenge/state/scope in the query string).
+  // Rewriting that away to '/' would lose those params before the user even
+  // reaches the login form below, so after logging in they'd land on '/'
+  // instead of back on the consent screen. Preserving the URL here is what
+  // lets <Login> (rendered unconditionally, regardless of path) hand off to
+  // <Routes> at the same /oauth/authorize-consent URL once authed flips true.
   useEffect(() => {
-    if (authed === false) navigate('/', { replace: true });
+    if (authed === false && !window.location.pathname.startsWith('/oauth/')) {
+      navigate('/', { replace: true });
+    }
   }, [authed, navigate]);
 
   // Load sites once authenticated.
@@ -76,6 +93,12 @@ export default function App() {
   if (authed === null) return <div className="p-8 text-gray-400">Loading…</div>;
   if (!authed) return <Login onAuthed={checkSession} />;
 
+  // Platform Administration nav/routes (PLATFORM-ADMIN-DESIGN.md §H, §K
+  // Phase 7) — gated on the role dimension directly, not isInternal, since
+  // requirePlatformRole('platform_admin') on the server is what actually
+  // guards every route these pages call.
+  const isPlatformAdmin = role === 'platform_admin';
+
   return (
     <div className="min-h-screen relative flex">
       {/* soft purple ambiance behind all pages */}
@@ -87,7 +110,7 @@ export default function App() {
         <div className="absolute bottom-10 right-1/4 w-[460px] h-[460px] rounded-full blur-3xl"
           style={{ background: 'radial-gradient(circle, rgba(108,99,255,0.08), transparent 60%)' }} />
       </div>
-      <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} onSite={setSiteId} onLogout={logout}
+      <Sidebar sites={sites} siteId={siteId} isInternal={isInternal} isPlatformAdmin={isPlatformAdmin} onSite={setSiteId} onLogout={logout}
         mobileOpen={mobileNavOpen} onCloseMobile={() => setMobileNavOpen(false)} />
       <main className="flex-1 min-w-0 pt-14 md:pt-0">
         {/* Sidebar becomes an overlay drawer below md — this is its trigger,
@@ -127,6 +150,18 @@ export default function App() {
               <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this session's own. */}
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
+              {/* OAuth "Connect" consent screen — reached via a 302 from
+                  server/mcp/oauth-provider.js's authorize(), scoped to this
+                  session's own siteId server-side, same as every route above. */}
+              <Route path="/oauth/authorize-consent" element={<OAuthAuthorize />} />
+              {/* Platform Administration — cross-tenant, platform_admin only.
+                  Each page's own API calls are independently guarded by
+                  requirePlatformRole('platform_admin') server-side; this
+                  gate is routing/UX, not the real access-control boundary. */}
+              {isPlatformAdmin && <Route path="/admin/users" element={<AdminUsers />} />}
+              {isPlatformAdmin && <Route path="/admin/mcp" element={<McpAdmin />} />}
+              {isPlatformAdmin && <Route path="/admin/system-health" element={<SystemHealth />} />}
+              {isPlatformAdmin && <Route path="/admin/audit-log" element={<AuditLog />} />}
             </Routes>
           </Suspense>
         ) : !sitesLoaded ? (

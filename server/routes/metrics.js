@@ -1,21 +1,16 @@
 import { Router } from 'express';
 import {
-  getSiteById, getDailySeries, getDay,
-  getMonthlyTotals, getRangeTotals, getWeeklyDocUrl, getDailyDocUrl, getMonthlyDocUrl,
+  getSiteById, getDailySeries,
+  getMonthlyTotals, getRangeTotals,
   getGscBreakdownRange, getGa4BreakdownRange, getTopMovers, getTopPagePerQuery, getTopDeviceCountryPerQuery,
   getDataRange, getChannelsRange,
 } from '../store/read.js';
 import { requireAuth } from './login.js';
 import { countryName } from '../util/countries.js';
-import { previousWeek, previousMonth, monthBounds, shiftMonth } from '../util/dates.js';
+import { previousWeek } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 import { translateQuery } from '../report/translate.js';
-
-const iso = (d) => String(d).slice(0, 10);
-const shiftYmd = (ymd, days) => {
-  const d = new Date(`${ymd}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-};
+import { buildReportSummary, buildCountryBreakdown } from '../report/summary.js';
 
 // Precomputed A→B percent change per metric — handed to the LLM as grounded facts
 // so it never has to do (and risk botching) the comparison arithmetic itself.
@@ -40,15 +35,6 @@ router.get('/sites', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// vs-previous-entry percent change, newest-first arrays (entry i vs entry i+1).
-function withDeltaPct(entries) {
-  return entries.map((h, i) => {
-    const older = entries[i + 1];
-    const deltaPct = older && older.clicks ? Math.round(((h.clicks - older.clicks) / older.clicks) * 1000) / 10 : null;
-    return { ...h, deltaPct };
-  });
-}
-
 // Inline report content for the dashboard's Reports page: live metrics, a
 // trend chart series, query-level movers, a short recent-report-history rail,
 // and the AI narrative for THIS specific period — the same narrative already
@@ -70,91 +56,7 @@ router.get('/report-summary', async (req, res, next) => {
     const site = await getSiteById(req.siteId);
     if (!site) return res.status(404).json({ error: 'Site not found.' });
 
-    const resolveNarrative = (periodNarrative, periodMatches) => {
-      if (periodMatches && periodNarrative) {
-        return { narrative: periodNarrative, narrativeSource: 'period', narrativeGeneratedAt: null };
-      }
-      return { narrative: null, narrativeSource: null, narrativeGeneratedAt: null };
-    };
-
-    if (period === 'daily') {
-      const { freshest: date } = await getDataRange(site.id);
-      if (!date) {
-        return res.json({ period, date: null, metrics: null, series: [], movers: { gainers: [], droppers: [] }, history: [], ...resolveNarrative(null, false), docUrl: await getDailyDocUrl(site.id) });
-      }
-      const row = await getDay(site.id, date);
-      const matches = site.daily_report_narrative_date === date;
-      const series = await getDailySeries(site.id, shiftYmd(date, -10), date); // 11 days, oldest→newest (first day is the delta baseline for the Recent Report History rail, leaving 10 rows shown)
-      const { gainers, droppers } = await getTopMovers(site.id, { start: date, end: date }, { start: shiftYmd(date, -1), end: shiftYmd(date, -1) }, 8);
-      // Compute deltas over the full 11-entry (newest-first) series BEFORE
-      // slicing to 10 — withDeltaPct compares entries[i] to entries[i+1], so
-      // the oldest displayed day (index 9) needs the baseline day (index 10)
-      // still present to get a real delta. Slicing first (as this used to)
-      // threw the baseline away before that comparison could happen.
-      const history = withDeltaPct(series.map((r) => ({ label: iso(r.date), clicks: Number(r.clicks || 0) })).reverse()).slice(0, 10);
-      return res.json({
-        period, date,
-        metrics: row && {
-          clicks: row.clicks, impressions: row.impressions, position: row.position,
-          users: row.users, sessions: row.sessions,
-        },
-        series, movers: { gainers, droppers }, history,
-        ...resolveNarrative(site.daily_report_narrative, matches),
-        docUrl: await getDailyDocUrl(site.id),
-      });
-    }
-
-    if (period === 'weekly') {
-      const { start, end } = previousWeek(site.timezone);
-      const totals = await getRangeTotals(site.id, start, end);
-      const matches = site.weekly_report_narrative_start === start && site.weekly_report_narrative_end === end;
-      const series = await getDailySeries(site.id, start, end);
-      const { gainers, droppers } = await getTopMovers(site.id, { start, end }, { start: shiftYmd(start, -7), end: shiftYmd(end, -7) }, 8);
-      const weeklyTotals = [];
-      for (let i = 0; i < 4; i++) {
-        const wStart = shiftYmd(start, -7 * i);
-        const wEnd = shiftYmd(end, -7 * i);
-        const t = await getRangeTotals(site.id, wStart, wEnd);
-        weeklyTotals.push({ label: `${wStart} – ${wEnd}`, clicks: Number(t.clicks || 0) });
-      }
-      return res.json({
-        period, start, end,
-        metrics: {
-          clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
-          users: totals.users, sessions: totals.sessions,
-        },
-        series, movers: { gainers, droppers }, history: withDeltaPct(weeklyTotals),
-        ...resolveNarrative(site.weekly_report_narrative, matches),
-        docUrl: await getWeeklyDocUrl(site.id),
-      });
-    }
-
-    // monthly
-    const { year, month } = previousMonth(site.timezone);
-    const ym = `${year}-${String(month).padStart(2, '0')}`;
-    const { start, end } = monthBounds(year, month);
-    const totals = await getMonthlyTotals(site.id, year, month);
-    const matches = site.monthly_report_narrative_ym === ym;
-    const series = await getDailySeries(site.id, start, end);
-    const priorYm = shiftMonth(year, month, -1);
-    const priorBounds = monthBounds(priorYm.year, priorYm.month);
-    const { gainers, droppers } = await getTopMovers(site.id, { start, end }, priorBounds, 8);
-    const monthlyTotals = [];
-    for (let i = 0; i < 6; i++) {
-      const sm = shiftMonth(year, month, -i);
-      const t = await getMonthlyTotals(site.id, sm.year, sm.month);
-      monthlyTotals.push({ label: `${sm.year}-${String(sm.month).padStart(2, '0')}`, clicks: Number(t.clicks || 0) });
-    }
-    res.json({
-      period, ym,
-      metrics: {
-        clicks: totals.clicks, impressions: totals.impressions, position: totals.avg_position,
-        users: totals.users, sessions: totals.sessions,
-      },
-      series, movers: { gainers, droppers }, history: withDeltaPct(monthlyTotals),
-      ...resolveNarrative(site.monthly_report_narrative, matches),
-      docUrl: await getMonthlyDocUrl(site.id),
-    });
+    res.json(await buildReportSummary(site, period));
   } catch (e) { next(e); }
 });
 
@@ -200,16 +102,8 @@ router.get('/device', async (req, res, next) => {
 // Country breakdown — GA4 visitors (by name) + GSC search clicks (code→name). ?start&end
 router.get('/country', async (req, res, next) => {
   try {
-    const site = req.siteId;
     const { start, end } = req.query;
-    const [ga4, gsc] = await Promise.all([
-      getGa4BreakdownRange(site, start, end, 'country', 10),
-      getGscBreakdownRange(site, start, end, 'country', 10),
-    ]);
-    res.json({
-      visitors: ga4.map((r) => ({ country: r.dim_value, sessions: r.sessions, users: r.users })),
-      search: gsc.map((r) => ({ code: r.dim_value, country: countryName(r.dim_value), clicks: r.clicks, impressions: r.impressions })),
-    });
+    res.json(await buildCountryBreakdown(req.siteId, start, end));
   } catch (e) { next(e); }
 });
 

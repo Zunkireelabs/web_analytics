@@ -298,9 +298,16 @@ export async function runExecutiveIfDue(site) {
 // GSC/GA4 hasn't been wired up) rather than attempting and failing every
 // cycle — it will start receiving automation automatically the moment both
 // are set on its `sites` row.
+//
+// status === 'active' (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3): a
+// suspended or soft-deleted tenant stops consuming GSC/GA4 quota and
+// stops receiving reports the moment it's suspended, without deleting or
+// touching its saved properties — it picks back up automatically on
+// reactivation, same "automatic the moment the row says so" behavior as
+// the gsc_property/ga4_property_id filter above.
 export async function listConnectedSites() {
   const sites = await listSites();
-  return sites.filter((s) => s.gsc_property && s.ga4_property_id);
+  return sites.filter((s) => s.gsc_property && s.ga4_property_id && s.status === 'active');
 }
 
 // Run the full daily pipeline independently for every connected site. A

@@ -28,46 +28,53 @@ router.get('/command-center', async (req, res, next) => {
 // reusing runOrchestration's output directly instead of a second call to
 // executive-report.js, which would silently re-run every agent a second
 // time (double the page fetches/LLM calls for one "Refresh" click).
+//
+// Exported so the MCP `refresh_command_center` tool (server/mcp/tools/
+// ai-actions.js) reuses this exact logic instead of duplicating it — same
+// precedent as buildStalenessContext being shared across route files.
+export async function refreshCommandCenter(siteId, { start, end }) {
+  // Same enabled-flag branch-with-fallback Action Center's own refresh
+  // already uses (server/routes/action-center.js) — previously this route
+  // always ran the fixed fan-out regardless of AGENTIC_ORCHESTRATION_ENABLED,
+  // meaning the agentic tool-calling loop could never actually be
+  // exercised from Command Center's "Run Agent Core"/Orchestration's "Run
+  // Audit" buttons. Same {findings, perAgent, narrative} shape either way
+  // (both share summarizeAgentRuns), so nothing below needs to branch.
+  let result;
+  if (agenticOrchestrationEnabled()) {
+    try {
+      const staleness = await buildStalenessContext(siteId);
+      result = await runAgenticLoop({ siteId, start, end, staleness, persistSubAgentRuns: true });
+    } catch (e) {
+      console.warn('[command-center] agentic refresh failed, falling back to full refresh:', e.message);
+      result = await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+    }
+  } else {
+    result = await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+  }
+  await saveAgentRun({
+    siteId, agentId: 'executive-report', agentVersion: execReportMeta.version,
+    input: { siteId, start, end }, status: 'ok',
+    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
+    narrative: result.narrative, error: null, tookMs: null,
+  });
+
+  // Opportunity Watchlist syncs on every fresh analysis, same as the daily
+  // cron path (server/job.js) — auto-adds newly-qualifying opportunities,
+  // auto-closes ones that fell out of this run.
+  const recommendations = await buildRecommendations(siteId);
+  const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
+  await syncWatchlist(siteId, result.findings, groundedById)
+    .catch((err) => console.error(`[command-center] watchlist sync failed for site ${siteId}:`, err.message));
+
+  return getCommandCenterData(siteId);
+}
+
 router.post('/command-center/refresh', async (req, res, next) => {
   try {
     const { start, end } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end are required' });
-
-    // Same enabled-flag branch-with-fallback Action Center's own refresh
-    // already uses (server/routes/action-center.js) — previously this route
-    // always ran the fixed fan-out regardless of AGENTIC_ORCHESTRATION_ENABLED,
-    // meaning the agentic tool-calling loop could never actually be
-    // exercised from Command Center's "Run Agent Core"/Orchestration's "Run
-    // Audit" buttons. Same {findings, perAgent, narrative} shape either way
-    // (both share summarizeAgentRuns), so nothing below needs to branch.
-    let result;
-    if (agenticOrchestrationEnabled()) {
-      try {
-        const staleness = await buildStalenessContext(req.siteId);
-        result = await runAgenticLoop({ siteId: req.siteId, start, end, staleness, persistSubAgentRuns: true });
-      } catch (e) {
-        console.warn('[command-center] agentic refresh failed, falling back to full refresh:', e.message);
-        result = await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
-      }
-    } else {
-      result = await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
-    }
-    await saveAgentRun({
-      siteId: req.siteId, agentId: 'executive-report', agentVersion: execReportMeta.version,
-      input: { siteId: req.siteId, start, end }, status: 'ok',
-      facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
-      narrative: result.narrative, error: null, tookMs: null,
-    });
-
-    // Opportunity Watchlist syncs on every fresh analysis, same as the daily
-    // cron path (server/job.js) — auto-adds newly-qualifying opportunities,
-    // auto-closes ones that fell out of this run.
-    const recommendations = await buildRecommendations(req.siteId);
-    const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
-    await syncWatchlist(req.siteId, result.findings, groundedById)
-      .catch((err) => console.error(`[command-center] watchlist sync failed for site ${req.siteId}:`, err.message));
-
-    res.json(await getCommandCenterData(req.siteId));
+    res.json(await refreshCommandCenter(req.siteId, { start, end }));
   } catch (e) { next(e); }
 });
 

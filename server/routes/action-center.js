@@ -37,6 +37,28 @@ async function notifyGscBestEffort(site, draft) {
   }
 }
 
+// Shared convention for the 4 automation-tier route handlers below (approve,
+// push-branch, open-pr, check-pr-status) and their MCP tool counterparts
+// (server/mcp/tools/automation.js): throw an Error carrying `.status` plus
+// whichever extra fields (reason/confidence/suggestedMode/draftStatus) the
+// original inline res.status(...).json({...}) calls used to send, so both
+// callers can reconstruct the exact same response shape from one thrown value.
+function httpError(status, message, extra) {
+  const err = new Error(message);
+  err.status = status;
+  if (extra) Object.assign(err, extra);
+  return err;
+}
+
+function sendHttpError(res, e) {
+  const body = { error: e.message };
+  if (e.reason !== undefined) body.reason = e.reason;
+  if (e.confidence !== undefined) body.confidence = e.confidence;
+  if (e.suggestedMode !== undefined) body.suggestedMode = e.suggestedMode;
+  if (e.draftStatus !== undefined) body.status = e.draftStatus;
+  res.status(e.status).json(body);
+}
+
 // Best-effort, informational only — shown right after generation so staff
 // see the likely render mode before even submitting for approval. Never
 // blocks draft creation: a missing repo/file-mapping/fetch failure just
@@ -93,25 +115,29 @@ export async function buildStalenessContext(siteId) {
   }).join('\n');
 }
 
+// Exported so the MCP `refresh_recommendations` tool (server/mcp/tools/
+// ai-actions.js) reuses this exact logic instead of duplicating it.
+export async function refreshRecommendations(siteId, { start, end }) {
+  if (agenticOrchestrationEnabled()) {
+    try {
+      const staleness = await buildStalenessContext(siteId);
+      const { ranAgentIds } = await runAgenticLoop({ siteId, start, end, staleness, persistSubAgentRuns: true });
+      console.log('[action-center] agentic loop selected:', ranAgentIds.length ? ranAgentIds.join(', ') : '(nothing needed refreshing)');
+    } catch (e) {
+      console.warn('[action-center] agentic selection failed, falling back to full refresh:', e.message);
+      await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+    }
+  } else {
+    await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
+  }
+  return buildRecommendations(siteId);
+}
+
 router.post('/action-center/recommendations/refresh', async (req, res, next) => {
   try {
     const { start, end } = req.body || {};
     if (!start || !end) return res.status(400).json({ error: 'start and end are required' });
-
-    if (agenticOrchestrationEnabled()) {
-      try {
-        const staleness = await buildStalenessContext(req.siteId);
-        const { ranAgentIds } = await runAgenticLoop({ siteId: req.siteId, start, end, staleness, persistSubAgentRuns: true });
-        console.log('[action-center] agentic loop selected:', ranAgentIds.length ? ranAgentIds.join(', ') : '(nothing needed refreshing)');
-      } catch (e) {
-        console.warn('[action-center] agentic selection failed, falling back to full refresh:', e.message);
-        await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
-      }
-    } else {
-      await runOrchestration({ siteId: req.siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
-    }
-
-    res.json(await buildRecommendations(req.siteId));
+    res.json(await refreshRecommendations(req.siteId, { start, end }));
   } catch (e) { next(e); }
 });
 
@@ -123,34 +149,43 @@ router.get('/action-center/generators', async (req, res, next) => {
 
 // Runs one generator and persists the result as a new draft. Never writes
 // anywhere else — no publish path exists.
+//
+// Exported so the MCP `generate_draft` tool (server/mcp/tools/ai-actions.js)
+// reuses this exact logic instead of duplicating it. Throws with a `.status`
+// (400/404) for the route below to map to a response — same convention
+// runAgent() (server/agents/runner.js) already uses.
+export async function generateDraft(siteId, { generatorId, params, source, findingId } = {}) {
+  if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
+  const generator = await getGenerator(generatorId);
+  if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
+
+  // Idempotent per finding: a retry, double-click, or a second tab must
+  // never create a second draft row for the same finding — return the
+  // one that already exists instead of generating (and billing an LLM
+  // call for) a duplicate.
+  if (findingId) {
+    const existing = await getDraftByFindingId(siteId, findingId);
+    if (existing) {
+      const hintPage = existing.input?.page || existing.content?.page;
+      const renderModeHint = await buildRenderModeHint(siteId, existing.action_type, hintPage);
+      return { ...existing, renderModeHint };
+    }
+  }
+
+  const { content, summary } = await generator.generate({ siteId, params: params || {} });
+  const draft = await createDraft(siteId, {
+    actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
+  });
+  const renderModeHint = await buildRenderModeHint(siteId, generatorId, params?.page || content?.page);
+  return { ...draft, summary, renderModeHint };
+}
+
 router.post('/action-center/generate', async (req, res, next) => {
   try {
     const { generatorId, params, source, findingId } = req.body || {};
-    if (!generatorId) return res.status(400).json({ error: 'generatorId is required' });
-    const generator = await getGenerator(generatorId);
-    if (!generator) return res.status(404).json({ error: `Unknown generator "${generatorId}"` });
-
-    // Idempotent per finding: a retry, double-click, or a second tab must
-    // never create a second draft row for the same finding — return the
-    // one that already exists instead of generating (and billing an LLM
-    // call for) a duplicate.
-    if (findingId) {
-      const existing = await getDraftByFindingId(req.siteId, findingId);
-      if (existing) {
-        const hintPage = existing.input?.page || existing.content?.page;
-        const renderModeHint = await buildRenderModeHint(req.siteId, existing.action_type, hintPage);
-        return res.json({ ...existing, renderModeHint });
-      }
-    }
-
-    const { content, summary } = await generator.generate({ siteId: req.siteId, params: params || {} });
-    const draft = await createDraft(req.siteId, {
-      actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
-    });
-    const renderModeHint = await buildRenderModeHint(req.siteId, generatorId, params?.page || content?.page);
-    res.json({ ...draft, summary, renderModeHint });
+    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId }));
   } catch (e) {
-    if (e.status === 400) return res.status(400).json({ error: e.message });
+    if (e.status === 400 || e.status === 404) return res.status(e.status).json({ error: e.message });
     next(e);
   }
 });
@@ -217,68 +252,80 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
 // Once past that, any failure below (GitHub API hiccup, a genuinely
 // transient error) is a legitimate post-approval concern — same retryable
 // apply_error path as before, via /push-branch and /open-pr.
-router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
-  try {
-    const draft = await getDraft(req.siteId, req.params.id);
-    if (!draft || draft.status !== 'submitted_for_approval') {
-      return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
-    }
+// Exported so the MCP `approve_draft` tool (server/mcp/tools/automation.js)
+// reuses this exact logic instead of duplicating it. Note this can return a
+// draft reflecting a *recorded* apply/merge failure (recordApplyFailure/
+// recordMergeFailure) rather than throwing — those are legitimate,
+// retryable post-approval states (see /push-branch, /open-pr), not errors
+// this call itself failed with. Only a pre-approval rejection (bad
+// implementer resolution, a failed preview, or an uncertain render mode)
+// throws.
+export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode } = {}) {
+  const draft = await getDraft(siteId, draftId);
+  if (!draft || draft.status !== 'submitted_for_approval') {
+    throw httpError(404, 'Draft not found, or not submitted for approval');
+  }
 
-    const site = await getSiteById(req.siteId);
-    let resolved = null;
-    if (site.repo_owner && site.repo_name) {
-      resolved = await resolveImplementerForApply(site, draft);
-      if (resolved.error) return res.status(400).json({ error: resolved.error });
-      if (typeof resolved.implementer.preview === 'function') {
-        const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: req.body?.renderMode });
-        if (!previewResult.ok) {
-          return res.status(422).json({
-            error: previewResult.error, reason: previewResult.reason,
-            confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
-          });
-        }
-      }
-    }
-
-    const approvedDraft = await approveDraft(req.siteId, draft.id, req.userId);
-    if (!approvedDraft) return res.status(404).json({ error: 'Draft not found, or not submitted for approval' });
-    if (!resolved) return res.json(approvedDraft);
-
-    const { implementer, implementerId } = resolved;
-    const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: req.body?.renderMode });
-    if (!applyResult.ok) {
-      await recordApplyFailure(req.siteId, approvedDraft.id, applyResult.error);
-      if (applyResult.reason === 'render-mode-uncertain') {
-        // approveDraft() above already flipped this draft's real status to
-        // 'approved' before implementer.apply() hit this — unlike the
-        // earlier preview() check (which fires while still
-        // submitted_for_approval), a retry against this exact draft can no
-        // longer re-run approveDraft(). Including the real current status
-        // lets the frontend refresh instead of showing a stale retry prompt
-        // for a state that's no longer true.
-        return res.status(422).json({
-          error: applyResult.error, reason: applyResult.reason,
-          confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode,
-          status: approvedDraft.status,
+  const site = await getSiteById(siteId);
+  let resolved = null;
+  if (site.repo_owner && site.repo_name) {
+    resolved = await resolveImplementerForApply(site, draft);
+    if (resolved.error) throw httpError(400, resolved.error);
+    if (typeof resolved.implementer.preview === 'function') {
+      const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: renderMode });
+      if (!previewResult.ok) {
+        throw httpError(422, previewResult.error, {
+          reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
         });
       }
-      return res.json(await getDraft(req.siteId, approvedDraft.id));
     }
-    const branchPushedDraft = await markDraftBranchPushed(req.siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId });
+  }
 
-    if (typeof implementer.mergeToStage !== 'function') return res.json(branchPushedDraft);
+  const approvedDraft = await approveDraft(siteId, draft.id, userId);
+  if (!approvedDraft) throw httpError(404, 'Draft not found, or not submitted for approval');
+  if (!resolved) return approvedDraft;
 
-    const prResult = await implementer.mergeToStage(site, branchPushedDraft);
-    if (!prResult.ok) {
-      await recordMergeFailure(req.siteId, branchPushedDraft.id, prResult.error);
-      return res.json(await getDraft(req.siteId, branchPushedDraft.id));
+  const { implementer, implementerId } = resolved;
+  const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: renderMode });
+  if (!applyResult.ok) {
+    await recordApplyFailure(siteId, approvedDraft.id, applyResult.error);
+    if (applyResult.reason === 'render-mode-uncertain') {
+      // approveDraft() above already flipped this draft's real status to
+      // 'approved' before implementer.apply() hit this — unlike the
+      // earlier preview() check (which fires while still
+      // submitted_for_approval), a retry against this exact draft can no
+      // longer re-run approveDraft(). Including the real current status
+      // lets the caller refresh instead of retrying against a state that's
+      // no longer true.
+      throw httpError(422, applyResult.error, {
+        reason: applyResult.reason, confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode,
+        draftStatus: approvedDraft.status,
+      });
     }
-    const prOpenedDraft = await markDraftPrOpened(req.siteId, branchPushedDraft.id, {
-      prNumber: prResult.prNumber, prUrl: prResult.prUrl,
-      rollbackSnapshot: prResult.previousContent != null ? { filePath: prResult.filePath, content: prResult.previousContent } : null,
-    });
-    res.json(prOpenedDraft);
-  } catch (e) { next(e); }
+    return getDraft(siteId, approvedDraft.id);
+  }
+  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId });
+
+  if (typeof implementer.mergeToStage !== 'function') return branchPushedDraft;
+
+  const prResult = await implementer.mergeToStage(site, branchPushedDraft);
+  if (!prResult.ok) {
+    await recordMergeFailure(siteId, branchPushedDraft.id, prResult.error);
+    return getDraft(siteId, branchPushedDraft.id);
+  }
+  return markDraftPrOpened(siteId, branchPushedDraft.id, {
+    prNumber: prResult.prNumber, prUrl: prResult.prUrl,
+    rollbackSnapshot: prResult.previousContent != null ? { filePath: prResult.filePath, content: prResult.previousContent } : null,
+  });
+}
+
+router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
+  try {
+    res.json(await approveAndPublishDraft(req.siteId, req.params.id, { userId: req.userId, renderMode: req.body?.renderMode }));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
 });
 
 // Shared by /implemented and /merge-to-stage below: marks a draft
@@ -300,24 +347,36 @@ async function finalizeImplemented(siteId, draftId, site) {
 
 // Defensive/manual escape hatch only — every real generator type now
 // auto-completes to 'implemented' the moment merge-to-stage succeeds (see
-// below), so this route is only ever reached for a draft type with no real
+// above), so this route is only ever reached for a draft type with no real
 // merge strategy at all (MERGE_MANDATORY_TYPES, store/drafts.js) — none
 // exist today, kept for a future generator that might not have one yet.
+//
+// Exported so the MCP `mark_draft_implemented` tool reuses this logic. Sits
+// in the `ai_actions` tier, not `automation` — it makes no external
+// (GitHub/etc) call, only an internal status flip plus a best-effort local
+// site-discovery refresh, so it doesn't cross the "touches an external
+// system" line that defines the automation tier (see server/mcp/tools/
+// automation.js's own comment).
+export async function markDraftImplementedIfEligible(siteId, draftId) {
+  const existing = await getDraft(siteId, draftId);
+  if (!existing) throw httpError(404, 'Draft not found');
+  if (existing.status === 'approved' && !existing.branch_name && MERGE_MANDATORY_TYPES.includes(existing.action_type)) {
+    throw httpError(400, 'This change type requires a real merge into stage before it can be marked implemented — click "Push Branch" first.');
+  }
+
+  const site = await getSiteById(siteId);
+  const draft = await finalizeImplemented(siteId, draftId, site);
+  if (!draft) throw httpError(404, 'Draft not found, or not yet approved');
+  return draft;
+}
+
 router.post('/action-center/drafts/:id/implemented', async (req, res, next) => {
   try {
-    const existing = await getDraft(req.siteId, req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Draft not found' });
-    if (existing.status === 'approved' && !existing.branch_name && MERGE_MANDATORY_TYPES.includes(existing.action_type)) {
-      return res.status(400).json({
-        error: 'This change type requires a real merge into stage before it can be marked implemented — click "Push Branch" first.',
-      });
-    }
-
-    const site = await getSiteById(req.siteId);
-    const draft = await finalizeImplemented(req.siteId, req.params.id, site);
-    if (!draft) return res.status(404).json({ error: 'Draft not found, or not yet approved' });
-    res.json(draft);
-  } catch (e) { next(e); }
+    res.json(await markDraftImplementedIfEligible(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
 });
 
 // Two different things depending on status: for a draft that isn't
@@ -359,29 +418,33 @@ router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
 // evidence or an honest failure — not merged yet. Staff reviews the real
 // diff (Draft Preview panel — same computation apply() used) before the
 // separate merge-to-stage step below.
+// Exported so the MCP `push_draft_branch` tool reuses this exact logic.
+export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
+  const draft = await getDraft(siteId, draftId);
+  if (!draft || draft.status !== 'approved') throw httpError(404, 'Draft not found, or not yet approved');
+
+  const site = await getSiteById(siteId);
+  if (!site.repo_owner || !site.repo_name) throw httpError(400, 'This site has no repository configured yet — run `npm run connect-repo` first.');
+
+  const resolved = await resolveImplementerForApply(site, draft);
+  if (resolved.error) throw httpError(400, resolved.error);
+  const { implementer, implementerId } = resolved;
+
+  const result = await implementer.apply(site, draft, { renderModeOverride: renderMode });
+  if (!result.ok) {
+    await recordApplyFailure(siteId, draft.id, result.error);
+    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode });
+  }
+  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId });
+}
+
 router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
   try {
-    const draft = await getDraft(req.siteId, req.params.id);
-    if (!draft || draft.status !== 'approved') return res.status(404).json({ error: 'Draft not found, or not yet approved' });
-
-    const site = await getSiteById(req.siteId);
-    if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'This site has no repository configured yet — run `npm run connect-repo` first.' });
-
-    const resolved = await resolveImplementerForApply(site, draft);
-    if (resolved.error) return res.status(400).json({ error: resolved.error });
-    const { implementer, implementerId } = resolved;
-
-    const result = await implementer.apply(site, draft, { renderModeOverride: req.body?.renderMode });
-    if (!result.ok) {
-      await recordApplyFailure(req.siteId, draft.id, result.error);
-      return res.status(422).json({
-        error: result.error, reason: result.reason,
-        confidence: result.confidence, suggestedMode: result.suggestedMode,
-      });
-    }
-    const updated = await markDraftBranchPushed(req.siteId, draft.id, { branchName: result.branchName, implementerId });
-    res.json(updated);
-  } catch (e) { next(e); }
+    res.json(await pushDraftBranch(req.siteId, req.params.id, { renderMode: req.body?.renderMode }));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
 });
 
 // branch_pushed -> pr_opened. Opens a real PR from the branch already
@@ -391,28 +454,35 @@ router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
 // anything and does NOT mark the draft implemented — merging is now a
 // manual human action on GitHub; see /check-pr-status below for how the app
 // learns the PR merged.
+// Exported so the MCP `open_draft_pr` tool reuses this exact logic.
+export async function openDraftPr(siteId, draftId) {
+  const draft = await getDraft(siteId, draftId);
+  if (!draft || draft.status !== 'branch_pushed') throw httpError(404, 'Draft not found, or has no pushed branch yet');
+
+  const site = await getSiteById(siteId);
+  const resolved = await resolveImplementerForMerge(draft);
+  if (resolved.error) throw httpError(400, resolved.error);
+  const { implementer } = resolved;
+  if (typeof implementer.mergeToStage !== 'function') throw httpError(400, `No PR step wired for "${draft.action_type}" yet`);
+
+  const result = await implementer.mergeToStage(site, draft);
+  if (!result.ok) {
+    await recordMergeFailure(siteId, draft.id, result.error);
+    throw httpError(422, result.error, { reason: result.reason });
+  }
+  return markDraftPrOpened(siteId, draft.id, {
+    prNumber: result.prNumber, prUrl: result.prUrl,
+    rollbackSnapshot: result.previousContent != null ? { filePath: result.filePath, content: result.previousContent } : null,
+  });
+}
+
 router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
   try {
-    const draft = await getDraft(req.siteId, req.params.id);
-    if (!draft || draft.status !== 'branch_pushed') return res.status(404).json({ error: 'Draft not found, or has no pushed branch yet' });
-
-    const site = await getSiteById(req.siteId);
-    const resolved = await resolveImplementerForMerge(draft);
-    if (resolved.error) return res.status(400).json({ error: resolved.error });
-    const { implementer } = resolved;
-    if (typeof implementer.mergeToStage !== 'function') return res.status(400).json({ error: `No PR step wired for "${draft.action_type}" yet` });
-
-    const result = await implementer.mergeToStage(site, draft);
-    if (!result.ok) {
-      await recordMergeFailure(req.siteId, draft.id, result.error);
-      return res.status(422).json({ error: result.error, reason: result.reason });
-    }
-    const updated = await markDraftPrOpened(req.siteId, draft.id, {
-      prNumber: result.prNumber, prUrl: result.prUrl,
-      rollbackSnapshot: result.previousContent != null ? { filePath: result.filePath, content: result.previousContent } : null,
-    });
-    res.json(updated);
-  } catch (e) { next(e); }
+    res.json(await openDraftPr(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
 });
 
 // pr_opened -> implemented, once GitHub confirms the PR was actually merged.
@@ -423,29 +493,36 @@ router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
 // post-publish steps /merge-to-stage used to (GSC notification, finalize to
 // 'implemented'), now gated on real human-confirmed evidence instead of an
 // automatic merge.
+// Exported so the MCP `check_pr_status` tool reuses this exact logic.
+export async function checkDraftPrStatus(siteId, draftId) {
+  const draft = await getDraft(siteId, draftId);
+  if (!draft || draft.status !== 'pr_opened' || !draft.pr_number) {
+    throw httpError(404, 'Draft not found, or has no open PR to check');
+  }
+
+  const site = await getSiteById(siteId);
+  let pr;
+  try {
+    pr = await getPullRequest(site, draft.pr_number);
+  } catch (e) {
+    throw httpError(502, `Could not read PR status from GitHub: ${e.message}`);
+  }
+
+  if (pr.merged) {
+    await recordPrState(siteId, draft.id, 'merged');
+    notifyGscBestEffort(site, draft);
+    return finalizeImplemented(siteId, draft.id, site);
+  }
+  return recordPrState(siteId, draft.id, pr.state);
+}
+
 router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) => {
   try {
-    const draft = await getDraft(req.siteId, req.params.id);
-    if (!draft || draft.status !== 'pr_opened' || !draft.pr_number) {
-      return res.status(404).json({ error: 'Draft not found, or has no open PR to check' });
-    }
-
-    const site = await getSiteById(req.siteId);
-    let pr;
-    try {
-      pr = await getPullRequest(site, draft.pr_number);
-    } catch (e) {
-      return res.status(502).json({ error: `Could not read PR status from GitHub: ${e.message}` });
-    }
-
-    if (pr.merged) {
-      await recordPrState(req.siteId, draft.id, 'merged');
-      notifyGscBestEffort(site, draft);
-      return res.json(await finalizeImplemented(req.siteId, draft.id, site));
-    }
-    const updated = await recordPrState(req.siteId, draft.id, pr.state);
-    res.json(updated);
-  } catch (e) { next(e); }
+    res.json(await checkDraftPrStatus(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
 });
 
 // Restores a merged draft's target file to exactly what it was right

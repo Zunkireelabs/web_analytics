@@ -112,3 +112,79 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
 }
+
+// Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3). Each function
+// bakes its required source status into the UPDATE's WHERE clause and
+// returns null when the row didn't match — the same atomic-claim shape
+// signup_requests approval already uses for its race guard — so a route
+// handler never needs a separate read-then-write check for "is this
+// transition even legal from the current state." Hard delete is Phase 3.5,
+// not here.
+//
+// deactivated_at/deleted_at are treated as *current-state* markers, not raw
+// history (the richer, actor-attributed history lives in audit_log):
+// non-null deactivated_at means "currently suspended since this time,"
+// non-null deleted_at means "currently soft-deleted since this time." Both
+// clear back to NULL on reactivate, whichever state it reactivated from.
+
+export async function suspendSite(siteId) {
+  const { rows } = await query(
+    `UPDATE sites SET status = 'suspended', deactivated_at = now()
+     WHERE id = $1 AND status = 'active' RETURNING *`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+export async function reactivateSite(siteId) {
+  const { rows } = await query(
+    `UPDATE sites SET status = 'active', deactivated_at = NULL, deleted_at = NULL
+     WHERE id = $1 AND status IN ('suspended', 'soft_deleted') RETURNING *`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+// Only reachable from 'suspended', not directly from 'active' — matches the
+// state machine in §D's diagram (ACTIVE -> SUSPENDED -> SOFT-DELETED), a
+// deliberate two-step path rather than a shortcut straight to soft-deleted.
+export async function softDeleteSite(siteId) {
+  const { rows } = await query(
+    `UPDATE sites SET status = 'soft_deleted', deleted_at = now()
+     WHERE id = $1 AND status = 'suspended' RETURNING *`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+// Phase 3.5 — irreversible. Only reachable from 'soft_deleted' (§D's
+// diagram: SUSPENDED -> SOFT-DELETED -> hard-delete -> GONE), same atomic
+// guard-in-the-WHERE-clause shape as the three functions above: if the
+// status changed out from under the caller between its own read and this
+// statement (e.g. a Platform Admin reactivated it in the meantime), this
+// returns null instead of deleting a row nobody meant to delete anymore.
+// Relies entirely on migration 064's FK corrections (growth_targets/
+// integration_health -> CASCADE, signup_requests -> SET NULL) — without
+// those, this DELETE fails on any tenant with rows in those three tables.
+export async function hardDeleteSite(siteId) {
+  const { rows } = await query(
+    `DELETE FROM sites WHERE id = $1 AND status = 'soft_deleted' RETURNING id, name`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+// Sets the trusted ceiling on what an OAuth-issued MCP token can ever reach
+// for this site (migration 061) — staff-only, never reachable from a
+// client-facing route. See server/routes/oauth-consent.js and
+// server/mcp/oauth-provider.js, which read this value to compute an OAuth
+// grant's effective permission_level; a client's requested scope can only
+// narrow it, never raise it.
+export async function updateSiteOauthPolicy({ siteId, oauthMaxPermissionLevel }) {
+  const { rows } = await query(
+    `UPDATE sites SET oauth_max_permission_level = $1 WHERE id = $2 RETURNING *`,
+    [oauthMaxPermissionLevel, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
