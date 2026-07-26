@@ -1,5 +1,5 @@
 import { getFileContent } from '../../github/client.js';
-import { pushDraftBranch, getOrInitBatchBranch, STAGE_BRANCH } from '../lib/github-ops.js';
+import { pushDraftBranch, getOrInitBatchBranch, baseBranch } from '../lib/github-ops.js';
 import { resolveAdapter } from '../lib/url-file-map.js';
 import {
   findObjectRange, findArrayFieldRange, spliceMarkedArray, insertNewArrayField,
@@ -41,7 +41,7 @@ function idFromPageUrl(pageUrl) {
 
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
-export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = STAGE_BRANCH) {
+export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
   const config = resolveAdapter(site, page, draft.action_type);
   if (!config?.dataFile || !config?.itemsField) {
@@ -84,13 +84,13 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
 export async function preview(site, draft) {
   const batchInfo = await getOrInitBatchBranch(site);
-  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   return computeChange(site, draft, getFileContent, beforeRef);
 }
 
 export async function apply(site, draft) {
   const batchInfo = await getOrInitBatchBranch(site);
-  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const computed = await computeChange(site, draft, getFileContent, beforeRef);
   if (!computed.ok) return computed;
   return pushDraftBranch(site, draft, [{ path: computed.filePath, content: computed.newContent }], batchInfo);

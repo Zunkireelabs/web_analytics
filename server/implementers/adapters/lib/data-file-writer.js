@@ -1,5 +1,5 @@
 import { getFileContent } from '../../../github/client.js';
-import { pushDraftBranch, openPrForBranch, STAGE_BRANCH } from '../../lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, baseBranch } from '../../lib/github-ops.js';
 import { assertValidContent } from './js-data-splice.js';
 
 // Shared push/open-PR/rollback lifecycle for every data-file adapter (today:
@@ -14,12 +14,13 @@ export async function openPrWithSnapshot(site, draft, filePath) {
   if (!draft.branch_name) return { ok: false, reason: 'no-branch', error: 'No branch has been pushed for this draft yet.' };
   // Snapshot the file's content BEFORE the PR is opened — this is what a
   // later rollback restores. Captured here (not at push time) so it
-  // reflects whatever is actually live on stage right before this draft
-  // would overwrite it, even if other changes landed on stage between this
-  // draft's branch push and now. Rollback itself still targets stage (see
-  // action-center.js's /rollback), so the snapshot stays stage-relative
-  // regardless of where this draft's own PR ends up merging.
-  const before = await getFileContent(site, filePath, STAGE_BRANCH);
+  // reflects whatever is actually live on the site's default branch right
+  // before this draft would overwrite it, even if other changes landed
+  // there between this draft's branch push and now. Rollback itself also
+  // targets the same default branch (see action-center.js's /rollback, and
+  // github-ops.js's openRollbackPr), so the snapshot stays relevant
+  // regardless of when it's restored.
+  const before = await getFileContent(site, filePath, baseBranch(site));
   const opened = await openPrForBranch(site, draft, draft.branch_name);
   if (!opened.ok) return opened;
   return { ...opened, previousContent: before?.content ?? null, filePath };

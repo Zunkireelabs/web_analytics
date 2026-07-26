@@ -189,6 +189,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
   // question that needs a human answer before either action can proceed.
   // null | { call: 'approve'|'push-branch', reason, confidence, suggestedMode }
   const [renderModeConfirm, setRenderModeConfirm] = useState(null);
+  const [rollbackPr, setRollbackPr] = useState(null); // null | {prNumber, prUrl}
 
   const runPublishAction = async (call, renderMode) => {
     setTransitioning(true);
@@ -220,15 +221,17 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     }
   };
 
-  // Not a plain transition() — POST .../rollback returns {ok, mergeSha,
-  // mergeUrl, branchName}, not a draft row, so onSaved needs a real re-fetch
-  // of the draft afterward rather than that response shape directly.
+  // Not a plain transition() — POST .../rollback opens a real PR (never
+  // merges straight to production) and returns {ok, prNumber, prUrl,
+  // branchName}, not a draft row. The draft itself is unchanged until a
+  // human merges that PR on GitHub, so there's nothing to re-fetch — just
+  // surface the PR link so staff can go review/merge it.
   const rollback = async () => {
     setTransitioning(true);
     setError(null);
     try {
-      await api.actionCenter.rollback(draft.id);
-      onSaved(await api.actionCenter.draft(draft.id));
+      const result = await api.actionCenter.rollback(draft.id);
+      setRollbackPr({ prNumber: result.prNumber, prUrl: result.prUrl });
     } catch (e) {
       setError(e.message || 'Rollback failed');
     } finally {
@@ -360,6 +363,15 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                 </span>
               )}
             </div>
+          </div>
+        )}
+
+        {rollbackPr && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-indigo-50/30 flex items-center justify-between gap-3 text-xs">
+            <a href={rollbackPr.prUrl} target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 hover:underline flex items-center gap-1">
+              View rollback PR on GitHub <ExternalLink size={12} />
+            </a>
+            <span className="font-extrabold text-amber-600">Awaiting merge</span>
           </div>
         )}
 
@@ -643,7 +655,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                         title="Restore this file to exactly what it was right before this draft's merge"
                         className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
                       >
-                        <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
+                        <Undo size={12} /> {transitioning ? 'Opening PR…' : 'Rollback'}
                       </button>
                     )}
                     {draft.rollback_snapshot && draft.sibling_count > 0 && (
@@ -676,7 +688,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     title="Restore this file to exactly what it was right before this draft's merge"
                     className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition flex items-center gap-1"
                   >
-                    <Undo size={12} /> {transitioning ? 'Rolling back…' : 'Rollback'}
+                    <Undo size={12} /> {transitioning ? 'Opening PR…' : 'Rollback'}
                   </button>
                 )}
                 {draft.status === 'implemented' && draft.rollback_snapshot && draft.sibling_count > 0 && (

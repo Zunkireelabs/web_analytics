@@ -1,6 +1,6 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, STAGE_BRANCH } from './lib/github-ops.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody } from './lib/newpage-render.js';
 
 export const meta = {
@@ -49,10 +49,10 @@ async function resolveTargetAndBody(site, draft) {
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };
 }
 
-// Pushes a real branch (forked from stage) with the real new-file content —
-// not merged yet (see mergeToStage below). Staff reviews the real diff
-// (Draft Preview panel, unchanged — same resolveTargetAndBody output)
-// before deciding to merge it into stage.
+// Pushes a real branch (forked from the site's default branch) with the
+// real new-file content — not merged yet (see mergeToStage below). Staff
+// reviews the real diff (Draft Preview panel, unchanged — same
+// resolveTargetAndBody output) before deciding to merge the PR.
 export async function apply(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
@@ -60,12 +60,13 @@ export async function apply(site, draft) {
   return pushDraftBranch(site, draft, [{ path: resolved.filePath, content: resolved.body }], batchInfo);
 }
 
-// branch_pushed -> PR opened into main (human merges on GitHub). Despite the
-// name — kept as-is because implementers/registry.js checks for this exact
-// export name at load time (see server/implementers/registry.js) — this no
-// longer merges into stage, it opens a PR into main. draft.branch_name is
-// already real (persisted by markDraftBranchPushed after apply() above
-// succeeded) — this step only opens the PR, no new file writes.
+// branch_pushed -> PR opened into the site's default branch (human merges
+// on GitHub). Despite the name — kept as-is because implementers/registry.js
+// checks for this exact export name at load time (see
+// server/implementers/registry.js) — this doesn't merge into stage at all,
+// it opens a PR. draft.branch_name is already real (persisted by
+// markDraftBranchPushed after apply() above succeeded) — this step only
+// opens the PR, no new file writes.
 export async function mergeToStage(site, draft) {
   if (!draft.branch_name) return { ok: false, reason: 'no-branch', error: 'No branch has been pushed for this draft yet.' };
   return openPrForBranch(site, draft, draft.branch_name);
@@ -79,7 +80,7 @@ export async function preview(site, draft) {
   const resolved = await resolveTargetAndBody(site, draft);
   if (!resolved.ok) return resolved;
   const batchInfo = await getOrInitBatchBranch(site);
-  const branch = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  const branch = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   const existing = await getFileContent(site, resolved.filePath, branch);
   return {
     ok: true,
