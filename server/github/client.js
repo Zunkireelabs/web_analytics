@@ -39,13 +39,17 @@ export async function getBranchSha(site, branch) {
   return data.object.sha;
 }
 
-// SHA of the tip of the site's default (production) branch — kept for
-// contexts that specifically mean "production," distinct from the Action
-// Center's real fork/merge base, which is always 'stage' per the company
-// CI/CD guide (~/Travel/ci-cd-deployment-master-guide) regardless of what
-// repo_default_branch happens to be.
+// This site's default (production) branch name — the single source of
+// truth every other function here and in implementers/lib/github-ops.js
+// uses instead of each inlining its own `site.repo_default_branch || 'main'`
+// fallback.
+export function defaultBranchName(site) {
+  return site.repo_default_branch || 'main';
+}
+
+// SHA of the tip of the site's default (production) branch.
 export async function getDefaultBranchSha(site) {
-  return getBranchSha(site, site.repo_default_branch || 'main');
+  return getBranchSha(site, defaultBranchName(site));
 }
 
 // Creates `refs/heads/<branchName>` pointing at fromSha. A 422 "Reference
@@ -106,30 +110,13 @@ export async function putFile(site, { path, content, message, branch, sha }) {
 export async function openPullRequest(site, { branch, title, body }) {
   const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/pulls`, {
     head: branch,
-    base: site.repo_default_branch || 'main',
+    base: defaultBranchName(site),
     title,
     body,
   });
   if (!res.ok) throw new Error(`openPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return { number: data.number, url: data.html_url };
-}
-
-// Merges `head` directly into `base` — no PR object involved. Used only for
-// merging into 'stage' (the company's real no-protection-rules staging
-// branch, per ~/Travel/ci-cd-deployment-master-guide — a real PR isn't
-// required there). Production (`main`) is never touched by this function;
-// promoting stage -> main stays a fully manual, human action outside this
-// platform. A 204 response means head is already merged into base (nothing
-// to do) — treated as success, not an error.
-export async function mergeBranch(site, { base, head, commitMessage }) {
-  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/merges`, {
-    base, head, commit_message: commitMessage,
-  });
-  if (res.status === 204) return { alreadyMerged: true, sha: null, htmlUrl: null };
-  if (!res.ok) throw new Error(`mergeBranch failed (${res.status}): ${await res.text()}`);
-  const data = await res.json();
-  return { alreadyMerged: false, sha: data.sha, htmlUrl: data.html_url };
 }
 
 // Real-evidence read for the "Check PR Status" action — reports GitHub's own

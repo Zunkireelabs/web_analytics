@@ -1,20 +1,17 @@
-import { getBranchSha, createBranch, getFileSha, putFile, mergeBranch, openPullRequest, listOpenPullRequestsForBranch } from '../../github/client.js';
+import { getBranchSha, createBranch, getFileSha, putFile, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName } from '../../github/client.js';
 
-// Company convention (~/Travel/ci-cd-deployment-master-guide): `stage` has
-// no protection rules and auto-deploys on push/merge, so it's still the
-// safe, cheap base every draft branch forks from and diffs against.
-// Publishing a draft, though, now opens a real PR into `main` (see
-// openPrForBranch below) instead of merging straight into `stage` — a human
-// reviews and merges it on GitHub. Because the branch is forked from
-// `stage` but the PR targets `main`, if a given client's `stage` has
-// diverged from `main` (not promoted in a while), the PR diff will include
-// that unrelated divergence too, not just this draft's change — that's
-// intentional: it's surfaced to the human reviewer via the PR itself, which
-// is the whole point of requiring manual review, not something this layer
-// tries to rebase away. Exported so backend.js/frontend.js read the SAME
-// real branch when fetching "current" content for a diff (preview) as
+// Every draft branch forks from — and every "current content" read (diff
+// preview, live-view, existence check) diffs against — the site's own
+// default branch (site.repo_default_branch, 'main' if unset). This is
+// deliberately the SAME branch openPrForBranch below opens the PR into, so
+// a batch PR's diff only ever contains this batch's actual changes — no
+// separate staging branch to drift out of sync with production and leak
+// unrelated changes into every PR. Exported so backend.js/frontend.js read
+// the SAME branch when fetching "current" content for a diff (preview) as
 // pushDraftBranch actually forks from.
-export const STAGE_BRANCH = 'stage';
+export function baseBranch(site) {
+  return defaultBranchName(site);
+}
 
 // Deterministic per-site, per-calendar-day branch name. Strict day-boundary-
 // keyed by design — NOT "reuse until merged": a new branch starts every day
@@ -29,8 +26,8 @@ export function batchBranchName(site, date = new Date()) {
 }
 
 // Detects whether today's batch branch already has commits (i.e. this is
-// NOT the first draft pushed today) vs. needs to be created fresh from
-// stage. GitHub's 404 body for a missing ref is the standard
+// NOT the first draft pushed today) vs. needs to be created fresh from the
+// site's default branch. GitHub's 404 body for a missing ref is the standard
 // `{"message":"Not Found",...}` shape — same body-sniffing convention
 // createBranch below already uses for its 422 case.
 export async function getOrInitBatchBranch(site, date = new Date()) {
@@ -46,7 +43,7 @@ export async function getOrInitBatchBranch(site, date = new Date()) {
 
 // Two real, independently-triggered steps — deliberately NOT bundled. Staff
 // needs a real manual checkpoint between "a branch with the real change
-// exists" and "it's merged into stage (and therefore deployed)," so they
+// exists" and "a PR is open for someone to review and merge," so they
 // can review the real pushed diff (dashboard's Draft Preview panel) first.
 //
 // `target` ({ branchName, exists }) is required and always passed explicitly
@@ -60,7 +57,7 @@ export async function pushDraftBranch(site, draft, files, target) {
   const { branchName, exists } = target;
   try {
     if (!exists) {
-      const baseSha = await getBranchSha(site, STAGE_BRANCH);
+      const baseSha = await getBranchSha(site, baseBranch(site));
       await createBranch(site, branchName, baseSha);
     }
 
@@ -81,22 +78,35 @@ export async function pushDraftBranch(site, draft, files, target) {
   }
 }
 
-export async function mergeBranchToStage(site, draft, branchName) {
+// Opens a real PR restoring a draft's pre-merge snapshot — same "no direct/
+// auto-merge onto production" rule as every other change: `main` auto-
+// deploys on push (company CI/CD convention), so even an automated revert
+// needs a human to review and merge it on GitHub, not this app merging
+// straight to production unattended. Reuses the same existing-PR-reuse
+// check as openPrForBranch since a retried rollback shouldn't 422.
+export async function openRollbackPr(site, draft, branchName) {
   try {
-    const result = await mergeBranch(site, {
-      base: STAGE_BRANCH,
-      head: branchName,
-      commitMessage: `Action Center: merge ${draft.action_type} draft #${draft.id} into stage`,
+    const existing = await listOpenPullRequestsForBranch(site, branchName);
+    if (existing.length > 0) {
+      const pr = existing[0];
+      return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
+    }
+
+    const base = baseBranch(site);
+    const { number, url } = await openPullRequest(site, {
+      branch: branchName,
+      title: `Action Center: rollback ${draft.action_type} draft #${draft.id}`,
+      body: `Restores \`${draft.action_type}\` draft #${draft.id}'s file to exactly what it was right before `
+          + `that draft's own PR was merged.\n\nReview the diff and merge into \`${base}\` to complete the rollback.`,
     });
-    return { ok: true, mergeSha: result.sha, mergeUrl: result.htmlUrl, alreadyMerged: result.alreadyMerged };
+    return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
     return { ok: false, reason: 'github-error', error: err.message };
   }
 }
 
-// Opens a real PR from the batch branch into `main` — never merges it; a
-// human reviews and merges on GitHub (see STAGE_BRANCH comment above for why
-// the diff can include unrelated stage/main divergence). Since many drafts
+// Opens a real PR from the batch branch into the site's default branch —
+// never merges it; a human reviews and merges on GitHub. Since many drafts
 // can now share one branch, this checks for an already-open PR on that
 // branch first and reuses it instead of erroring on GitHub's "a PR already
 // exists for this head" 422 — every draft approved the same day after the
@@ -109,15 +119,14 @@ export async function openPrForBranch(site, draft, branchName) {
       return { ok: true, prNumber: pr.number, prUrl: pr.html_url, reused: true };
     }
 
+    const base = baseBranch(site);
     const { number, url } = await openPullRequest(site, {
       branch: branchName,
       title: `Action Center: batch for ${branchName}`,
       body: `Automated content batch for \`${branchName}\`, generated by the Action Center.\n\n`
-          + `Review the diff and merge into \`main\` to publish. Additional drafts approved later today `
+          + `Review the diff and merge into \`${base}\` to publish. Additional drafts approved later today `
           + `will be added as new commits to this same branch/PR — check back before merging if you know `
-          + `more drafts are still pending today.\n\n`
-          + `**Note:** this branch was forked from \`stage\`, not \`main\` — if \`stage\` has diverged from `
-          + `\`main\`, the diff below may include unrelated changes on top of this batch's actual edits. Review accordingly.`,
+          + `more drafts are still pending today.`,
     });
     return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {

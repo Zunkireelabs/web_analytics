@@ -15,7 +15,7 @@ import {
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
-import { STAGE_BRANCH, mergeBranchToStage } from '../implementers/lib/github-ops.js';
+import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
@@ -72,7 +72,7 @@ async function buildRenderModeHint(siteId, actionType, page) {
     if (!site?.repo_owner || !site?.repo_name) return null;
     const filePath = resolveFile(site, page);
     if (!filePath) return null;
-    const file = await getFileContent(site, filePath, STAGE_BRANCH);
+    const file = await getFileContent(site, filePath, baseBranch(site));
     if (!file) return null;
     return await inspectRenderMode(file.content, actionType);
   } catch {
@@ -414,10 +414,10 @@ router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
 
 // approved -> branch_pushed. Routes to whichever implementer (frontend/
 // backend) handles this draft's generator type, pushes a real branch
-// (forked from stage) with the real change, and persists either that real
-// evidence or an honest failure — not merged yet. Staff reviews the real
-// diff (Draft Preview panel — same computation apply() used) before the
-// separate merge-to-stage step below.
+// (forked from the site's default branch) with the real change, and
+// persists either that real evidence or an honest failure — not merged yet.
+// Staff reviews the real diff (Draft Preview panel — same computation
+// apply() used) before the separate open-PR step below.
 // Exported so the MCP `push_draft_branch` tool reuses this exact logic.
 export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
   const draft = await getDraft(siteId, draftId);
@@ -528,10 +528,11 @@ router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) 
 // Restores a merged draft's target file to exactly what it was right
 // before this draft's merge — only available for draft types whose writer
 // captured a rollback_snapshot at merge time (currently data-array-content.js,
-// the generic data-file adapter). Never a silent/direct revert: pushes a
-// real new branch with the restored content, then merges it through the
-// same real, auditable flow as every other change — the merge commit
-// itself is the record of what happened and when.
+// the generic data-file adapter). Never a silent/direct revert, and never a
+// direct/auto-merge onto production either: pushes a real new branch with
+// the restored content, then opens a real PR into the site's default branch
+// (main) — a human reviews and merges it on GitHub, same as every other
+// change. This route only gets the PR open; it doesn't wait for it to merge.
 router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
@@ -552,10 +553,10 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
     const pushed = await implementer.rollback(site, draft);
     if (!pushed.ok) return res.status(422).json({ error: pushed.error, reason: pushed.reason });
 
-    const merged = await mergeBranchToStage(site, draft, pushed.branchName);
-    if (!merged.ok) return res.status(422).json({ error: merged.error, reason: merged.reason });
+    const opened = await openRollbackPr(site, draft, pushed.branchName);
+    if (!opened.ok) return res.status(422).json({ error: opened.error, reason: opened.reason });
 
-    res.json({ ok: true, mergeSha: merged.mergeSha, mergeUrl: merged.mergeUrl, branchName: pushed.branchName });
+    res.json({ ok: true, prNumber: opened.prNumber, prUrl: opened.prUrl, branchName: pushed.branchName });
   } catch (e) { next(e); }
 });
 
