@@ -109,12 +109,21 @@ export async function approveDraft(siteId, id, approvedBy) {
 // yet) — this persists real evidence, it doesn't create it. Staff reviews
 // the real diff (Draft Preview panel — same computation, now confirmed
 // pushed) before the separate mergeToStage step below.
-export async function markDraftBranchPushed(siteId, id, { branchName, implementerId }) {
+// `appliedFiles` ([{filePath, matchedVia, matchedFrom}]) is optional — only
+// broken-link-fix's pushBrokenLinkFixBranch (server/implementers/backend.js)
+// supplies it today, so previewLiveBrokenLinkFix can re-check exactly the
+// files that were actually touched (including a code-search match that
+// isn't re-derivable from url_file_map alone) rather than re-resolving live
+// on every preview click. null/undefined for every other action type, same
+// as before this param existed.
+export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null }) {
   const { rows } = await query(
-    `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, apply_error = NULL, updated_at = now()
+    `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, render_mode = $5,
+       apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
+       content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, branchName, implementerId]
+    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null]
   );
   return rows[0] || null;
 }
@@ -131,7 +140,7 @@ export async function markDraftBranchPushed(siteId, id, { branchName, implemente
 export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl, rollbackSnapshot = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'merged_to_stage', stage_merge_sha = $3, stage_merge_url = $4,
-       stage_merged_at = now(), apply_error = NULL, updated_at = now(),
+       stage_merged_at = now(), apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
        rollback_snapshot = COALESCE($5, rollback_snapshot)
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
@@ -151,13 +160,27 @@ export async function markDraftMergedToStage(siteId, id, { mergeSha, mergeUrl, r
 export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackSnapshot = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'pr_opened', pr_number = $3, pr_url = $4, pr_state = 'open',
-       apply_error = NULL, updated_at = now(),
+       apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
        rollback_snapshot = COALESCE($5, rollback_snapshot)
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
     [siteId, id, prNumber, prUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]
   );
   return rows[0] || null;
+}
+
+// Every draft still awaiting a merge confirmation for a given PR — a batch
+// branch can carry several drafts sharing one PR number (see
+// implementers/lib/github-ops.js's openPrForBranch), so a single "this PR
+// merged" event (the GitHub webhook, server/routes/webhooks.js) must fan out
+// to all of them, not just one. Scoped to status = 'pr_opened' so a draft
+// that's already implemented (or never got this far) is never touched twice.
+export async function listDraftsAwaitingPrCheck(siteId, prNumber) {
+  const { rows } = await query(
+    `SELECT * FROM drafts WHERE site_id = $1 AND pr_number = $2 AND status = 'pr_opened'`,
+    [siteId, prNumber]
+  );
+  return rows;
 }
 
 // Pure annotation write, no status guard — same pattern as
@@ -190,14 +213,27 @@ export async function recordGscNotification(siteId, id, result) {
 // "Push Branch" is simply retryable once the underlying issue (missing
 // mapping, GitHub error) is fixed — never leaves a draft stuck in a broken
 // state.
-export async function recordApplyFailure(siteId, id, errorMessage) {
+export async function recordApplyFailure(siteId, id, errorMessage, renderModeInfo = null) {
   const { rows } = await query(
-    `UPDATE drafts SET apply_error = $3, updated_at = now()
+    `UPDATE drafts SET apply_error = $3, render_mode_confirm = $4, updated_at = now()
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, errorMessage]
+    [siteId, id, errorMessage, renderModeInfo ? JSON.stringify(renderModeInfo) : null]
   );
   return rows[0] || null;
+}
+
+// Every page on this site with a live, actually-applied visible FAQ block —
+// render_mode is only ever set from markDraftBranchPushed onward, so this
+// naturally only counts drafts with a real GitHub branch already pushed.
+// Feeds the sitewide visible-FAQ cap in render-inspector.js's
+// inspectRenderMode, so visible FAQ blocks stay selective across a site.
+export async function countVisibleFaqDrafts(siteId) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible'`,
+    [siteId]
+  );
+  return rows[0].n;
 }
 
 // Same retryable-in-place pattern as recordApplyFailure, for a

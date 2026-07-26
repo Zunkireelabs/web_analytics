@@ -102,6 +102,7 @@ export const api = {
     connectRepo: (id, body) => req(`/internal/clients/${id}/connect-repo`, { method: 'POST', body: JSON.stringify(body) }),
     retryBaseline: (id) => req(`/internal/clients/${id}/retry-baseline`, { method: 'POST' }),
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
+    setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     growthSummary: () => req('/internal/clients/growth-summary'),
     signupRequests: {
       list: () => req('/internal/signup-requests'),

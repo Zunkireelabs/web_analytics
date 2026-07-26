@@ -26,7 +26,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 //   export const meta = { id, description };
 //   export async function apply(site, draft) { ... }   // -> ApplyResult (implementers/types.js)
 //   export async function mergeToStage(site, draft) { ... }  // -> same shape as ApplyResult's merge step
-// Adapters typically implement these by reusing pushDraftBranch/mergeBranchToStage
+// Adapters typically implement these by reusing pushDraftBranch/openPrForBranch
 // from ../lib/github-ops.js internally (same as backend.js/frontend.js do),
 // but nothing requires that — an adapter that writes to a non-GitHub target
 // (e.g. a CMS API) just needs to return the same result shape.

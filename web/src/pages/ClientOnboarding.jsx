@@ -22,7 +22,8 @@ import {
   PauseCircle,
   PlayCircle,
   Trash2,
-  AlertOctagon
+  AlertOctagon,
+  HelpCircle
 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
@@ -324,6 +325,8 @@ export default function ClientOnboarding() {
   const [retryResult, setRetryResult] = useState({}); // {[clientId]: result | {error}}
   const [oauthPolicySaving, setOauthPolicySaving] = useState({}); // {[clientId]: true}
   const [oauthPolicyError, setOauthPolicyError] = useState({}); // {[clientId]: message}
+  const [faqCapSaving, setFaqCapSaving] = useState({}); // {[clientId]: true}
+  const [faqCapError, setFaqCapError] = useState({}); // {[clientId]: message}
 
   // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5).
   const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
@@ -395,6 +398,25 @@ export default function ClientOnboarding() {
       setOauthPolicyError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
     } finally {
       setOauthPolicySaving((s) => ({ ...s, [client.id]: false }));
+    }
+  };
+
+  // Sitewide ceiling on how many pages may get a visible on-page FAQ block
+  // (sites.visible_faq_cap, migration 071) — keeps visible FAQs selective
+  // rather than appearing on every eligible page. Same optimistic-update
+  // pattern as updateOauthPolicy above.
+  const updateVisibleFaqCap = async (client, visibleFaqCap) => {
+    const previous = client.visibleFaqCap;
+    setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqCap } : c)));
+    setFaqCapSaving((s) => ({ ...s, [client.id]: true }));
+    setFaqCapError((e) => ({ ...e, [client.id]: null }));
+    try {
+      await api.clients.setVisibleFaqCap(client.id, visibleFaqCap);
+    } catch (err) {
+      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqCap: previous } : c)));
+      setFaqCapError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
+    } finally {
+      setFaqCapSaving((s) => ({ ...s, [client.id]: false }));
     }
   };
 
@@ -746,6 +768,31 @@ export default function ClientOnboarding() {
                       {oauthPolicyError[c.id] && (
                         <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
                           {oauthPolicyError[c.id]}
+                        </div>
+                      )}
+
+                      {/* Sitewide visible-FAQ cap — how many pages may get a
+                          visible on-page FAQ before render-inspector.js
+                          starts auto-publishing schema-only. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <HelpCircle size={11} className="text-slate-400 shrink-0" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Visible FAQ cap</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={c.visibleFaqCap ?? 5}
+                          disabled={!!faqCapSaving[c.id]}
+                          onChange={(e) => {
+                            const n = Number(e.target.value);
+                            if (Number.isInteger(n) && n >= 0) updateVisibleFaqCap(c, n);
+                          }}
+                          className="w-16 text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1 bg-white disabled:opacity-60"
+                        />
+                      </div>
+                      {faqCapError[c.id] && (
+                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
+                          {faqCapError[c.id]}
                         </div>
                       )}
 

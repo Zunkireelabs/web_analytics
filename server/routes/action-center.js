@@ -10,12 +10,12 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
+  recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqDrafts, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
-import { STAGE_BRANCH, mergeBranchToStage } from '../implementers/lib/github-ops.js';
+import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
@@ -56,6 +56,7 @@ function sendHttpError(res, e) {
   if (e.confidence !== undefined) body.confidence = e.confidence;
   if (e.suggestedMode !== undefined) body.suggestedMode = e.suggestedMode;
   if (e.draftStatus !== undefined) body.status = e.draftStatus;
+  if (e.attempted !== undefined) body.attempted = e.attempted;
   res.status(e.status).json(body);
 }
 
@@ -72,9 +73,10 @@ async function buildRenderModeHint(siteId, actionType, page) {
     if (!site?.repo_owner || !site?.repo_name) return null;
     const filePath = resolveFile(site, page);
     if (!filePath) return null;
-    const file = await getFileContent(site, filePath, STAGE_BRANCH);
+    const file = await getFileContent(site, filePath, baseBranch(site));
     if (!file) return null;
-    return await inspectRenderMode(file.content, actionType);
+    const visibleFaqCount = await countVisibleFaqDrafts(siteId);
+    return await inspectRenderMode(file.content, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
   } catch {
     return null;
   }
@@ -288,7 +290,10 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   const { implementer, implementerId } = resolved;
   const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: renderMode });
   if (!applyResult.ok) {
-    await recordApplyFailure(siteId, approvedDraft.id, applyResult.error);
+    const renderModeInfo = applyResult.reason === 'render-mode-uncertain'
+      ? { reason: applyResult.error, confidence: applyResult.confidence, suggestedMode: applyResult.suggestedMode }
+      : null;
+    await recordApplyFailure(siteId, approvedDraft.id, applyResult.error, renderModeInfo);
     if (applyResult.reason === 'render-mode-uncertain') {
       // approveDraft() above already flipped this draft's real status to
       // 'approved' before implementer.apply() hit this — unlike the
@@ -304,7 +309,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     return getDraft(siteId, approvedDraft.id);
   }
-  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId });
+  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles });
 
   if (typeof implementer.mergeToStage !== 'function') return branchPushedDraft;
 
@@ -407,17 +412,17 @@ router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
     }
 
     const result = await implementer.preview(site, draft);
-    if (!result.ok) return res.status(422).json({ error: result.error, reason: result.reason });
+    if (!result.ok) return res.status(422).json({ error: result.error, reason: result.reason, attempted: result.attempted });
     res.json(result);
   } catch (e) { next(e); }
 });
 
 // approved -> branch_pushed. Routes to whichever implementer (frontend/
 // backend) handles this draft's generator type, pushes a real branch
-// (forked from stage) with the real change, and persists either that real
-// evidence or an honest failure — not merged yet. Staff reviews the real
-// diff (Draft Preview panel — same computation apply() used) before the
-// separate merge-to-stage step below.
+// (forked from the site's default branch) with the real change, and
+// persists either that real evidence or an honest failure — not merged yet.
+// Staff reviews the real diff (Draft Preview panel — same computation
+// apply() used) before the separate open-PR step below.
 // Exported so the MCP `push_draft_branch` tool reuses this exact logic.
 export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
   const draft = await getDraft(siteId, draftId);
@@ -432,10 +437,13 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
 
   const result = await implementer.apply(site, draft, { renderModeOverride: renderMode });
   if (!result.ok) {
-    await recordApplyFailure(siteId, draft.id, result.error);
-    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode });
+    const renderModeInfo = result.reason === 'render-mode-uncertain'
+      ? { reason: result.error, confidence: result.confidence, suggestedMode: result.suggestedMode }
+      : null;
+    await recordApplyFailure(siteId, draft.id, result.error, renderModeInfo);
+    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted });
   }
-  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId });
+  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });
 }
 
 router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {
@@ -528,10 +536,11 @@ router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) 
 // Restores a merged draft's target file to exactly what it was right
 // before this draft's merge — only available for draft types whose writer
 // captured a rollback_snapshot at merge time (currently data-array-content.js,
-// the generic data-file adapter). Never a silent/direct revert: pushes a
-// real new branch with the restored content, then merges it through the
-// same real, auditable flow as every other change — the merge commit
-// itself is the record of what happened and when.
+// the generic data-file adapter). Never a silent/direct revert, and never a
+// direct/auto-merge onto production either: pushes a real new branch with
+// the restored content, then opens a real PR into the site's default branch
+// (main) — a human reviews and merges it on GitHub, same as every other
+// change. This route only gets the PR open; it doesn't wait for it to merge.
 router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
   try {
     const draft = await getDraft(req.siteId, req.params.id);
@@ -552,10 +561,10 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
     const pushed = await implementer.rollback(site, draft);
     if (!pushed.ok) return res.status(422).json({ error: pushed.error, reason: pushed.reason });
 
-    const merged = await mergeBranchToStage(site, draft, pushed.branchName);
-    if (!merged.ok) return res.status(422).json({ error: merged.error, reason: merged.reason });
+    const opened = await openRollbackPr(site, draft, pushed.branchName);
+    if (!opened.ok) return res.status(422).json({ error: opened.error, reason: opened.reason });
 
-    res.json({ ok: true, mergeSha: merged.mergeSha, mergeUrl: merged.mergeUrl, branchName: pushed.branchName });
+    res.json({ ok: true, prNumber: opened.prNumber, prUrl: opened.prUrl, branchName: pushed.branchName });
   } catch (e) { next(e); }
 });
 

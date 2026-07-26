@@ -39,13 +39,17 @@ export async function getBranchSha(site, branch) {
   return data.object.sha;
 }
 
-// SHA of the tip of the site's default (production) branch — kept for
-// contexts that specifically mean "production," distinct from the Action
-// Center's real fork/merge base, which is always 'stage' per the company
-// CI/CD guide (~/Travel/ci-cd-deployment-master-guide) regardless of what
-// repo_default_branch happens to be.
+// This site's default (production) branch name — the single source of
+// truth every other function here and in implementers/lib/github-ops.js
+// uses instead of each inlining its own `site.repo_default_branch || 'main'`
+// fallback.
+export function defaultBranchName(site) {
+  return site.repo_default_branch || 'main';
+}
+
+// SHA of the tip of the site's default (production) branch.
 export async function getDefaultBranchSha(site) {
-  return getBranchSha(site, site.repo_default_branch || 'main');
+  return getBranchSha(site, defaultBranchName(site));
 }
 
 // Creates `refs/heads/<branchName>` pointing at fromSha. A 422 "Reference
@@ -106,30 +110,13 @@ export async function putFile(site, { path, content, message, branch, sha }) {
 export async function openPullRequest(site, { branch, title, body }) {
   const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/pulls`, {
     head: branch,
-    base: site.repo_default_branch || 'main',
+    base: defaultBranchName(site),
     title,
     body,
   });
   if (!res.ok) throw new Error(`openPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return { number: data.number, url: data.html_url };
-}
-
-// Merges `head` directly into `base` — no PR object involved. Used only for
-// merging into 'stage' (the company's real no-protection-rules staging
-// branch, per ~/Travel/ci-cd-deployment-master-guide — a real PR isn't
-// required there). Production (`main`) is never touched by this function;
-// promoting stage -> main stays a fully manual, human action outside this
-// platform. A 204 response means head is already merged into base (nothing
-// to do) — treated as success, not an error.
-export async function mergeBranch(site, { base, head, commitMessage }) {
-  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/merges`, {
-    base, head, commit_message: commitMessage,
-  });
-  if (res.status === 204) return { alreadyMerged: true, sha: null, htmlUrl: null };
-  if (!res.ok) throw new Error(`mergeBranch failed (${res.status}): ${await res.text()}`);
-  const data = await res.json();
-  return { alreadyMerged: false, sha: data.sha, htmlUrl: data.html_url };
 }
 
 // Real-evidence read for the "Check PR Status" action — reports GitHub's own
@@ -139,6 +126,32 @@ export async function getPullRequest(site, prNumber) {
   if (!res.ok) throw new Error(`getPullRequest failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return { state: data.state, merged: data.merged };
+}
+
+// Last-resort candidate finder for broken-link-fix's Layer 2 (see
+// implementers/backend.js's computeBrokenLinkFixMerge) — locates files by
+// literal content match via GitHub's Code Search API, when url_file_map has
+// no entry (or no anchor match) for any of a finding's known source pages.
+// This is fundamentally different from url-file-map.js's resolveFile: it
+// finds a file by REAL, literal content, not by guessing a path from
+// framework convention — but it's still only a candidate list. Callers MUST
+// re-verify each result with a real regex match (href-rewrite-inject.js's
+// stripLink) before touching anything; search relevance is never trusted
+// alone.
+//
+// Caveat: GitHub's code search only indexes the repo's DEFAULT branch and
+// files under ~384KB, and has its own, stricter rate limit than the
+// Contents API used elsewhere in this file — call this only as a genuine
+// last resort, never speculatively. If the working ref isn't actually this
+// repo's default branch, results may miss files that exist there but
+// haven't been indexed yet.
+export async function searchCodeForString(site, literal, { maxResults = 5 } = {}) {
+  const q = `"${literal}" repo:${repoPath(site)}`;
+  const res = await githubRequest(site, 'GET', `/search/code?q=${encodeURIComponent(q)}&per_page=${maxResults}`);
+  if (!res.ok) throw new Error(`searchCodeForString failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  const paths = (data.items || []).map((item) => item.path);
+  return [...new Set(paths)].slice(0, maxResults);
 }
 
 // Lists open PRs whose head is exactly `branch` — used to detect "does

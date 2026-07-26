@@ -5,7 +5,7 @@ import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter } from '../implementers/lib/url-file-map.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
-import { STAGE_BRANCH } from '../implementers/lib/github-ops.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
 
 // Read-only config-completeness audit for a site's url_file_map — surfaces
 // exactly the class of gap that let the homepage-FAQ and /compare/-FAQ
@@ -97,7 +97,7 @@ async function auditSite(siteId) {
     // without hammering the API once per (page, actionType) combination.
     if (filePath && !fileExistsCache.has(filePath)) {
       try {
-        const file = await getFileContent(site, filePath, STAGE_BRANCH);
+        const file = await getFileContent(site, filePath, baseBranch(site));
         fileExistsCache.set(filePath, !!file);
       } catch (err) {
         fileExistsCache.set(filePath, 'error');

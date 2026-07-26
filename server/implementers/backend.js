@@ -1,12 +1,13 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
-import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, STAGE_BRANCH } from './lib/github-ops.js';
-import { getFileContent } from '../github/client.js';
+import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch } from './lib/github-ops.js';
+import { getFileContent, searchCodeForString } from '../github/client.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField } from './lib/marker-merge.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
-import { inspectRenderMode, CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
+import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
+import { countVisibleFaqDrafts } from '../store/drafts.js';
 
 export const meta = {
   id: 'backend',
@@ -98,8 +99,8 @@ async function pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef) {
 async function previewLiveSecurityHeaders(site, draft) {
   const path = resolveSiteRootFile(site, 'nginxConfig');
   if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
-  const file = await getFileContent(site, path, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   const content = getHashMarkerContent(file.content, 'SECURITY-HEADERS');
   if (content === null) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
@@ -143,8 +144,8 @@ async function pushRobotsFixBranch(site, draft, batchInfo, beforeRef) {
 async function previewLiveRobotsFix(site, draft) {
   const path = resolveSiteRootFile(site, 'robotsTxt');
   if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
-  const file = await getFileContent(site, path, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   const content = getHashMarkerContent(file.content, 'ROBOTS-FIX');
   if (content === null) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:ROBOTS-FIX marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
@@ -187,8 +188,8 @@ async function pushHtmlLangBranch(site, draft, batchInfo, beforeRef) {
 async function previewLiveHtmlLang(site, draft) {
   const path = resolveSiteRootFile(site, 'layoutTemplate');
   if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured.' };
-  const file = await getFileContent(site, path, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   const tag = getHtmlTag(file.content);
   if (tag === null) {
     return { ok: false, reason: 'no-insertion-marker', error: `No <html> tag found in ${path} — it may have moved since this draft was implemented.` };
@@ -232,8 +233,8 @@ async function pushViewportBranch(site, draft, batchInfo, beforeRef) {
 async function previewLiveViewport(site, draft) {
   const path = resolveSiteRootFile(site, 'layoutTemplate');
   if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured.' };
-  const file = await getFileContent(site, path, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${STAGE_BRANCH}".` };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
   const tag = getViewportMeta(file.content);
   if (tag === null) {
     return { ok: false, reason: 'no-insertion-marker', error: `No <meta name="viewport"> tag found in ${path} — it may have moved since this draft was implemented.` };
@@ -274,8 +275,8 @@ async function pushRedirectFixBranch(site, draft, batchInfo, beforeRef) {
 async function previewLiveRedirectFix(site, draft) {
   const filePath = resolveFile(site, draft.content.page);
   if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}".` };
-  const file = await getFileContent(site, filePath, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${STAGE_BRANCH}".` };
+  const file = await getFileContent(site, filePath, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${baseBranch(site)}".` };
   const anchors = getAnchorsForHref(file.content, draft.content.newHref);
   if (!anchors.length) {
     return { ok: false, reason: 'no-insertion-marker', error: `No <a href="${draft.content.newHref}"> found in ${filePath} — it may have changed since this draft was implemented.` };
@@ -283,38 +284,140 @@ async function previewLiveRedirectFix(site, draft) {
   return { ok: true, filePath, live: true, changedRegions: anchors.map((content) => ({ field: 'href', content })) };
 }
 
+const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case calls on the rate-limited search fallback
+
+// One readable sentence summarizing every attempt across both layers, for
+// the single `error` string surfaced to a human — full per-attempt detail
+// still lives in `attempted` for anyone (UI, logs, MCP) that wants it.
+function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
+  const sourceAttempts = attempted.filter((a) => a.matchedVia === 'source-page');
+  const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
+  const noAnchor = sourceAttempts.length - noMapping;
+  const searchAttempts = attempted.filter((a) => a.matchedVia === 'code-search');
+  const searchError = searchAttempts.find((a) => a.reason === 'code-search-error');
+
+  const sourceSummary = `${sourcePages.length} known source page(s) (${noMapping} have no url_file_map entry; ${noAnchor} mapped file(s) don't contain this link)`;
+  const searchSummary = searchError
+    ? `code search fallback failed: ${searchError.error}`
+    : searchAttempts.length
+      ? `also checked ${searchAttempts.length} GitHub code-search candidate(s), none matched`
+      : 'code search fallback found no candidates';
+
+  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary} — ${searchSummary}.`;
+}
+
 async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
-  const filePath = resolveFile(site, draft.content.page);
-  if (!filePath) {
-    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}" — add one via \`npm run connect-repo\` before this can be applied.` };
+  const href = draft.content.href;
+  // Back-compat: a draft persisted before this change has no sourcePages
+  // key at all — fall back to the single `page` field, same effective
+  // behavior as today for those drafts.
+  const sourcePages = [...new Set(
+    Array.isArray(draft.content.sourcePages) && draft.content.sourcePages.length
+      ? draft.content.sourcePages
+      : [draft.content.page].filter(Boolean)
+  )];
+
+  const files = [];
+  const attempted = [];
+  const seenPaths = new Set();
+
+  // Layer 1: every known source page's mapped file, not just the first —
+  // and every one that genuinely matches, not just the first success. The
+  // same dead href is often hardcoded on more than one page's own file.
+  for (const page of sourcePages) {
+    const filePath = resolveFile(site, page);
+    if (!filePath) { attempted.push({ page, matchedVia: 'source-page', reason: 'no-file-mapping' }); continue; }
+    if (seenPaths.has(filePath)) continue;
+    seenPaths.add(filePath);
+
+    const file = await getFileContent(site, filePath, beforeRef);
+    if (!file) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: 'file-not-found' }); continue; }
+
+    const stripped = stripLink(file.content, href);
+    if (!stripped.ok) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: stripped.reason, error: stripped.error }); continue; }
+
+    files.push({
+      filePath, oldContent: file.content, newContent: stripped.newContent,
+      changedRegions: [{ field: 'href', before: href, after: null }],
+      matchedVia: 'source-page', matchedFrom: page,
+    });
   }
-  const file = await getFileContent(site, filePath, beforeRef);
-  if (!file) {
-    return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+
+  if (files.length) return { ok: true, files, attempted };
+
+  // Layer 2: only when Layer 1 found ZERO matches anywhere — last resort,
+  // never speculative. GitHub's code search has its own, stricter rate
+  // limit than the Contents API, so a failure here degrades to "no
+  // candidates" rather than failing the whole preview/apply.
+  let candidates = [];
+  try {
+    candidates = await searchCodeForString(site, href, { maxResults: CODE_SEARCH_MAX_CANDIDATES });
+  } catch (err) {
+    attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: err.message });
   }
-  const stripped = stripLink(file.content, draft.content.href);
-  if (!stripped.ok) return stripped;
+
+  for (const filePath of candidates) {
+    if (seenPaths.has(filePath)) continue;
+    seenPaths.add(filePath);
+    const file = await getFileContent(site, filePath, beforeRef);
+    if (!file) { attempted.push({ filePath, matchedVia: 'code-search', reason: 'file-not-found' }); continue; }
+    const stripped = stripLink(file.content, href);
+    if (!stripped.ok) { attempted.push({ filePath, matchedVia: 'code-search', reason: stripped.reason, error: stripped.error }); continue; }
+    files.push({
+      filePath, oldContent: file.content, newContent: stripped.newContent,
+      changedRegions: [{ field: 'href', before: href, after: null }],
+      matchedVia: 'code-search',
+    });
+  }
+
+  if (files.length) return { ok: true, files, attempted };
+
   return {
-    ok: true, filePath, oldContent: file.content, newContent: stripped.newContent,
-    changedRegions: [{ field: 'href', before: draft.content.href, after: null }],
+    ok: false,
+    reason: attempted.length && attempted.every((a) => a.reason === 'no-file-mapping') ? 'no-file-mapping' : 'no-match',
+    error: summarizeBrokenLinkAttempts(sourcePages, href, attempted),
+    attempted,
   };
 }
 
 async function pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef) {
   const merged = await computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (!merged.ok) return merged;
-  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+  const pushed = await pushDraftBranch(
+    site, draft,
+    merged.files.map((f) => ({ path: f.filePath, content: f.newContent })),
+    batchInfo,
+  );
+  if (!pushed.ok) return pushed;
+  return {
+    ...pushed,
+    appliedFiles: merged.files.map((f) => ({ filePath: f.filePath, matchedVia: f.matchedVia, matchedFrom: f.matchedFrom || null })),
+  };
 }
 
 async function previewLiveBrokenLinkFix(site, draft) {
-  const filePath = resolveFile(site, draft.content.page);
-  if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}".` };
-  const file = await getFileContent(site, filePath, STAGE_BRANCH);
-  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${STAGE_BRANCH}".` };
-  // Implemented means the anchor was already stripped — its live absence
-  // (getAnchorsForHref finds none left) IS the confirmation, not a failure.
-  const anchors = getAnchorsForHref(file.content, draft.content.href);
-  return { ok: true, filePath, live: true, changedRegions: [{ field: 'href', content: anchors.length ? anchors.join('\n') : '(link removed)' }] };
+  const href = draft.content.href;
+  // A draft implemented before this change has no appliedFiles recorded —
+  // fall back to today's single-file re-resolution for those.
+  const appliedFiles = draft.content.appliedFiles;
+  const filePaths = appliedFiles?.length
+    ? appliedFiles.map((f) => f.filePath)
+    : [resolveFile(site, draft.content.page)].filter(Boolean);
+
+  if (!filePaths.length) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}".` };
+
+  const files = [];
+  for (const filePath of filePaths) {
+    const file = await getFileContent(site, filePath, baseBranch(site));
+    // Implemented means the anchor was already stripped — its live absence
+    // (getAnchorsForHref finds none left) IS the confirmation, not a failure.
+    const anchors = file ? getAnchorsForHref(file.content, href) : [];
+    files.push({
+      filePath,
+      changedRegions: [{ field: 'href', content: file ? (anchors.length ? anchors.join('\n') : '(link removed)') : '(file not found)' }],
+    });
+  }
+  return { ok: true, live: true, files };
 }
 
 // Real, marker-based merge for meta-title/faq (see lib/marker-merge.js) —
@@ -328,7 +431,7 @@ async function previewLiveBrokenLinkFix(site, draft) {
 // is the one way a human's already-confirmed choice re-enters this — passed
 // through from routes/action-center.js after a prior 'render-mode-uncertain'
 // stop, never persisted as site config.
-async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = STAGE_BRANCH) {
+async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
   const filePath = resolveFile(site, page);
   if (!filePath) {
@@ -354,7 +457,11 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = S
   if (renderModeOverride) {
     mode = renderModeOverride;
   } else {
-    inspection = await inspectRenderMode(file.content, draft.action_type);
+    let inspectionOpts = {};
+    if (INSPECTABLE_ACTION_TYPES.includes(draft.action_type)) {
+      inspectionOpts = { visibleFaqCount: await countVisibleFaqDrafts(site.id), visibleFaqCap: site.visible_faq_cap };
+    }
+    inspection = await inspectRenderMode(file.content, draft.action_type, inspectionOpts);
     if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
       return {
         ok: false, reason: 'render-mode-uncertain', error: inspection.reason,
@@ -421,7 +528,7 @@ async function previewLiveMarkerContent(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No markers configured for "${page}" — add e.g. {"${field}":"${marker}"} to url_file_map.pages[...].placements or .markers.` };
   }
 
-  const branch = STAGE_BRANCH;
+  const branch = baseBranch(site);
   const file = await getFileContent(site, filePath, branch);
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${branch}".` };
@@ -438,15 +545,15 @@ async function previewLiveMarkerContent(site, draft) {
   return { ok: true, filePath, live: true, changedRegions };
 }
 
-// Pushes a real branch (forked from stage) with the real change — not
-// merged yet (see mergeToStage below). Staff reviews the real diff (Draft
-// Preview panel, unchanged — same computeMarkerMerge output) before
-// deciding to merge it into stage. `opts.renderModeOverride` is ignored by
-// llms-txt (no mode concept) and simply unused for anything but marker-merge
-// types.
+// Pushes a real branch (forked from the site's default branch) with the
+// real change — not merged yet (see mergeToStage below). Staff reviews the
+// real diff (Draft Preview panel, unchanged — same computeMarkerMerge
+// output) before deciding to merge the PR. `opts.renderModeOverride` is
+// ignored by llms-txt (no mode concept) and simply unused for anything but
+// marker-merge types.
 export async function apply(site, draft, opts = {}) {
   const batchInfo = await getOrInitBatchBranch(site);
-  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
@@ -457,17 +564,19 @@ export async function apply(site, draft, opts = {}) {
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
     const merged = await computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);
     if (!merged.ok) return merged;
-    return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+    const pushed = await pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+    return pushed.ok ? { ...pushed, renderMode: merged.renderMode } : pushed;
   }
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${draft.action_type}".` };
 }
 
-// branch_pushed -> PR opened into main (human merges on GitHub). Despite the
-// name — kept as-is because implementers/registry.js checks for this exact
-// export name at load time (see server/implementers/registry.js) — this no
-// longer merges into stage, it opens a PR into main. draft.branch_name is
-// already real (persisted by markDraftBranchPushed after apply() above
-// succeeded) — this step only opens the PR, no new file writes.
+// branch_pushed -> PR opened into the site's default branch (human merges
+// on GitHub). Despite the name — kept as-is because implementers/registry.js
+// checks for this exact export name at load time (see
+// server/implementers/registry.js) — this doesn't merge into stage at all,
+// it opens a PR. draft.branch_name is already real (persisted by
+// markDraftBranchPushed after apply() above succeeded) — this step only
+// opens the PR, no new file writes.
 export async function mergeToStage(site, draft) {
   if (!draft.branch_name) return { ok: false, reason: 'no-branch', error: 'No branch has been pushed for this draft yet.' };
   return openPrForBranch(site, draft, draft.branch_name);
@@ -483,7 +592,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'llms-txt') {
       const llmsPath = resolveSiteRootFile(site, 'llmsTxt');
       if (!llmsPath) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured.' };
-      const file = await getFileContent(site, llmsPath, STAGE_BRANCH);
+      const file = await getFileContent(site, llmsPath, baseBranch(site));
       return { ok: true, filePath: llmsPath, live: true, changedRegions: [{ field: 'llmsTxt', content: file?.content || '' }] };
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
@@ -497,7 +606,7 @@ export async function preview(site, draft, opts = {}) {
   }
 
   const batchInfo = await getOrInitBatchBranch(site);
-  const beforeRef = batchInfo.exists ? batchInfo.branchName : STAGE_BRANCH;
+  const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
 
   if (draft.action_type === 'llms-txt') {
     const llmsPath = resolveSiteRootFile(site, 'llmsTxt');

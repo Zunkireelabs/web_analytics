@@ -262,7 +262,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     priority: brokenPriorities[i],
     // Strips the dead link rather than guessing a replacement target — always
     // safe (never worse than the current broken state), no fabricated URL.
-    recommendedAction: { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href }, effort: effortForGenerator('broken-link-fix') },
+    recommendedAction: { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
     expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
   }));
 
