@@ -9,7 +9,7 @@ import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqDrafts, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
@@ -493,20 +493,23 @@ router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
   }
 });
 
-// pr_opened -> implemented, once GitHub confirms the PR was actually merged.
-// Triggered three ways: the manual "Check PR Status" button, the GitHub
-// webhook (routes/webhooks.js, fires on PR close/merge), and an hourly
-// polling fallback (job.js's runPrStatusPollForAllSites) for sites where the
-// webhook was never configured or a delivery was missed — all three call
-// this exact function, so behavior can never diverge between them. Reads the
-// PR's real current state straight from GitHub every call (getPullRequest),
-// never inferred locally. Not merged yet also records GitHub's own
-// mergeable_state, so a batch branch that's gone stale/conflicted (the root
-// cause of a real incident) is visible in the UI instead of silently
-// invisible until a human opens the PR on GitHub themselves. Merged fires
-// the same post-publish steps /merge-to-stage used to (GSC notification,
-// finalize to 'implemented'), now gated on real human-confirmed evidence
-// instead of an automatic merge.
+// pr_opened -> implemented, once GitHub confirms the PR was actually merged;
+// pr_opened -> abandoned if it closed without merging. Triggered three ways:
+// the manual "Check PR Status" button, the GitHub webhook (routes/webhooks.js,
+// fires on PR close/merge), and an hourly polling fallback (job.js's
+// runPrStatusPollForAllSites) for sites where the webhook was never
+// configured or a delivery was missed — all three call this exact function,
+// so behavior can never diverge between them. Reads the PR's real current
+// state straight from GitHub every call (getPullRequest), never inferred
+// locally. Not merged yet also records GitHub's own mergeable_state, so a
+// batch branch that's gone stale/conflicted (the root cause of a real
+// incident) is visible in the UI instead of silently invisible until a human
+// opens the PR on GitHub themselves. Merged fires the same post-publish
+// steps /merge-to-stage used to (GSC notification, finalize to
+// 'implemented'), now gated on real human-confirmed evidence instead of an
+// automatic merge. Closed-without-merge instead abandons the draft, so its
+// finding_id isn't locked out of Recommendations forever (see
+// markDraftAbandoned/getDraftedFindingIds in store/drafts.js).
 // Exported so the MCP `check_pr_status` tool reuses this exact logic.
 export async function checkDraftPrStatus(siteId, draftId) {
   const draft = await getDraft(siteId, draftId);
@@ -526,6 +529,15 @@ export async function checkDraftPrStatus(siteId, draftId) {
     await recordPrState(siteId, draft.id, 'merged');
     notifyGscBestEffort(site, draft);
     return finalizeImplemented(siteId, draft.id, site);
+  }
+  if (pr.state === 'closed') {
+    // Closed without merging — the fix was abandoned, not shipped. Record
+    // the real state first (audit trail), then release this draft's
+    // finding_id lock (getDraftedFindingIds) so the underlying issue can
+    // resurface as a fresh Recommendation instead of staying stuck at
+    // 'pr_opened' forever with no way back into the pipeline.
+    await recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+    return markDraftAbandoned(siteId, draft.id, 'pr_closed_without_merge');
   }
   return recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
 }

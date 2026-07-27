@@ -48,14 +48,14 @@ const GENERATOR_META = {
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
   approved: 'approved', branch_pushed: 'branch pushed', merged_to_stage: 'merged to stage',
-  pr_opened: 'PR opened', implemented: 'implemented',
+  pr_opened: 'PR opened', implemented: 'implemented', abandoned: 'abandoned',
 };
 
 const STATUS_ORDER = ['draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented'];
 const STAGE_COLOR = {
   draft: '#94a3b8', edited: '#f59e0b', submitted_for_approval: '#f59e0b',
   approved: '#10b981', branch_pushed: '#7c3aed', merged_to_stage: '#2563eb',
-  pr_opened: '#2563eb', implemented: '#10b981',
+  pr_opened: '#2563eb', implemented: '#10b981', abandoned: '#94a3b8',
 };
 
 // No 'implemented' entry — implemented drafts live only on the dedicated
@@ -155,9 +155,12 @@ export default function ActionCenter() {
     setSearchParams((p) => { p.delete('openDraft'); return p; }, { replace: true });
   }, [drafts, searchParams]);
 
-  // Implemented drafts belong on the Implemented tab only — never mixed
+  // Implemented drafts belong on the Implemented tab only, and abandoned
+  // ones (a PR closed without merging, or a leftover superseded by another
+  // draft — see markDraftAbandoned/supersedeLegacyLlmsTxtDrafts in
+  // store/drafts.js) never shipped and never will — neither belongs mixed
   // into the Drafts tab's own list, "All Drafts" included.
-  const nonImplementedDrafts = drafts === null ? null : drafts.filter((d) => d.status !== 'implemented');
+  const nonImplementedDrafts = drafts === null ? null : drafts.filter((d) => d.status !== 'implemented' && d.status !== 'abandoned');
   const visibleDrafts = statusFilter ? (nonImplementedDrafts || []).filter((d) => d.status === statusFilter) : nonImplementedDrafts;
 
   const refresh = async () => {
