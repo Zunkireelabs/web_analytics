@@ -518,23 +518,33 @@ export async function runExecutiveIfDueForAllSites() {
 }
 
 // Run the monthly Google Doc report for the previous full calendar month, but
-// only if it hasn't been written yet this month — same idempotency pattern as
-// runWeeklyIfDue, except reusing the existing monthly_report_narrative_ym
-// marker (already written by runMonthlyDocReport's saveMonthlyReportNarrative
-// call) instead of a new dedicated column. Previously this report only ever
-// ran via the manual `npm run monthly` script — the Reports page's Monthly
-// tab had no automatic doc to link to. Manual `npm run monthly -- <ym>`
-// bypasses this guard for backfills, same as weekly's manual override.
+// only if it hasn't been written yet this month — identical idempotency
+// pattern to runWeeklyIfDue/runExecutiveIfDue above (own dedicated marker
+// column, DATE compared against this period's start), not a special case.
+// monthly_last_done already existed (migration 006_monthly_doc.sql, added
+// alongside monthly_doc_id) but had never been read or written anywhere —
+// this is that column's actual intended use, not a new field.
+// Previously this report only ever ran via the manual `npm run monthly`
+// script — the Reports page's Monthly tab had no automatic doc to link to.
+// Manual `npm run monthly -- <ym>` bypasses this guard for backfills, same
+// as weekly's manual override.
 export async function runMonthlyIfDue(site) {
   const { year, month } = previousMonth(site.timezone);
-  const ym = `${year}-${String(month).padStart(2, '0')}`;
-  const { rows } = await query('SELECT monthly_report_narrative_ym FROM sites WHERE id = $1', [site.id]);
-  if (rows[0]?.monthly_report_narrative_ym === ym) {
-    console.log(`[monthly] site ${site.id} month ${ym} already written — skipping.`);
+  const { start } = monthBounds(year, month); // first day of that month, YYYY-MM-DD
+  // Read as a plain YYYY-MM-DD string (PG DATE → JS Date would shift across timezones).
+  const { rows } = await query(
+    "SELECT to_char(monthly_last_done, 'YYYY-MM-DD') AS monthly_last_done FROM sites WHERE id = $1",
+    [site.id]
+  );
+  const lastStr = rows[0]?.monthly_last_done || null;
+
+  if (lastStr && lastStr >= start) {
+    console.log(`[monthly] site ${site.id} month of ${start} already written — skipping.`);
     return null;
   }
   const r = await runMonthlyDocReport(site); // no anchor → previous full month
-  console.log(`[monthly] site ${site.id} month ${ym} written.`);
+  await query('UPDATE sites SET monthly_last_done = $1 WHERE id = $2', [start, site.id]);
+  console.log(`[monthly] site ${site.id} month of ${start} written; marker updated.`);
   return r;
 }
 
