@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites } from './job.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -123,6 +123,22 @@ export function startCron() {
           console.log(`[cron] weekly AI executive report finished — ${written.length} site(s) written`);
         } catch (err) {
           console.error('[cron] weekly AI executive report error:', err.message);
+        }
+
+        // Monthly Google Doc report — also checked on this weekly trigger but
+        // only actually writes once a month (see job.js's runMonthlyIfDue),
+        // same "checked weekly, real work only when due" cadence as the
+        // competitor/authority/AI-recommendation checks above. Previously
+        // this only ran via the manual `npm run monthly` script, so the
+        // Reports page's Monthly tab had no doc to link to until someone ran
+        // it by hand.
+        console.log(`[cron] monthly doc report started ${new Date().toISOString()}`);
+        try {
+          const results = await runMonthlyIfDueForAllSites();
+          const written = results.filter(Boolean);
+          console.log(`[cron] monthly doc report finished — ${written.length} site(s) written`);
+        } catch (err) {
+          console.error('[cron] monthly doc report error:', err.message);
         }
       },
       { timezone: tz }
