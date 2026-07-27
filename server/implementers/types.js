@@ -160,18 +160,32 @@
  */
 
 /**
- * Sitemap regeneration: intentionally NOT this platform's job, for any
- * tenant. No implementer/adapter here ever reads or writes a sitemap file.
+ * Sitemap regeneration: NOT this platform's job by default, for any tenant.
  * A real static-site build (Eleventy, Next.js, Hugo, Gatsby, ...) already
  * regenerates its own sitemap from its own page collection on every build,
  * and `stage` already auto-deploys (rebuilds) on every merge (company-wide
  * CI/CD convention, not app-specific — see
  * ~/Travel/ci-cd-deployment-master-guide). So once a draft's merge lands,
  * the target repo's own build produces an up-to-date sitemap without this
- * app doing anything extra. If a future tenant's build pipeline does NOT
- * auto-regenerate its sitemap, that's a gap in THEIR CI/CD to fix, not
- * something to work around by having this app hand-edit a sitemap file
- * directly — doing so would fight the site's own build the next time it
- * runs.
+ * app doing anything extra. If a tenant's build pipeline auto-regenerates
+ * its sitemap, that principle still holds fully — nothing here should ever
+ * touch that tenant's sitemap file.
+ *
+ * The one explicit, opt-in exception: a tenant whose build does NOT
+ * regenerate its own sitemap (e.g. a hand-maintained static sitemap.xml with
+ * no build-time page-collection step) can opt in by setting
+ * `url_file_map.siteRoot.sitemap` to that file's real repo path (same
+ * onboarding step as `nginxConfig`/`llmsTxt`/`htmlLang` above — never
+ * guessed; absence is an honest "not enabled for this site" outcome, see
+ * server/agents/sitemap.js and server/generators/sitemap.js). Even then the
+ * scope is narrow and additive-only: the sitemap agent/generator only ADDS
+ * URLs already discovered via the existing crawl/GSC/page_inventory pipeline
+ * that are missing from the live sitemap; it never removes an entry, even
+ * an orphaned one (surfaced as a note for manual review instead — v1 has no
+ * reliable enough signal to conclude an orphaned URL should be deleted). Like
+ * every other generator, this goes through the normal
+ * draft -> branch -> PR -> human-merge flow (this file's own apply()
+ * contract above) — nothing here ever writes directly to a tenant's repo or
+ * auto-merges anything.
  */
 export {};

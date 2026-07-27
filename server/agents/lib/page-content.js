@@ -377,7 +377,7 @@ export const GAP_TYPE_TO_GENERATOR = {
 // honest, documented lookup instead of a per-agent guessed constant.
 const GENERATOR_EFFORT = {
   'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
-  'security-headers': 'Low', 'html-lang': 'Low',
+  'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High',

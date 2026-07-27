@@ -25,7 +25,7 @@ const ACTION_LABELS = {
   'security-headers': 'Security Headers', 'html-lang': 'Page Language',
   viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
-  'expand-content': 'Content Expansion',
+  'expand-content': 'Content Expansion', sitemap: 'Sitemap Update',
 };
 
 const GENERATOR_COLORS = {
@@ -46,12 +46,13 @@ const GENERATOR_COLORS = {
   'broken-link-fix': '#dc2626',
   'redirect-fix': '#d97706',
   'expand-content': '#4f46e5',
+  sitemap: '#65a30d',
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
 // type here has a real merge-to-stage strategy, so "mark implemented
 // manually" (the legacy bypass button) must never show for it.
-const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content'];
+const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap'];
 
 const STATUS_INFO = {
   draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },

@@ -292,6 +292,41 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
         </div>
       );
 
+    case 'sitemap':
+      return (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label={`Added URLs (${content.addedUrls?.length || 0})`} icon={Link2}>
+              {content.addedUrls?.length ? (
+                <ul className="space-y-1">
+                  {content.addedUrls.map((url, i) => <li key={i} className="truncate" title={url}>{url}</li>)}
+                </ul>
+              ) : '—'}
+            </Field>
+            <Field label={`Existing Entries Kept Unchanged (${content.existingCount ?? 0})`} icon={Check}>
+              Every existing sitemap entry — and its lastmod/priority/changefreq — is preserved as-is.
+            </Field>
+          </div>
+
+          {content.orphanedUrls?.length > 0 && (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100/50 rounded-2xl p-4 leading-relaxed flex items-start gap-2">
+              <Info size={14} className="text-amber-500 shrink-0 mt-0.5" />
+              <span>{content.orphanedUrls.length} existing sitemap URL(s) weren't reached by the crawl — review manually, not removed automatically: {content.orphanedUrls.join(', ')}</span>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+              <FileCode size={12} />
+              <span>{content.sitemapPath}</span>
+            </div>
+            <div className="rounded-2xl bg-slate-950 border border-slate-800 p-4 relative">
+              <pre className="text-[11px] font-mono text-emerald-400/90 leading-relaxed overflow-x-auto max-h-64 overflow-y-auto custom-scrollbar whitespace-pre-wrap">{content.sitemapXml}</pre>
+            </div>
+          </div>
+        </div>
+      );
+
     case 'translation':
       return (
         <div className="space-y-4">

@@ -257,7 +257,7 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 // ONLY path to 'implemented' for all 10. The legacy manual bypass below is
 // kept only as an escape hatch for a draft whose type somehow isn't in this
 // list (defensive, not expected to ever apply today).
-export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content'];
+export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap'];
 
 // approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real
