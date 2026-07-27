@@ -10,6 +10,7 @@ import { sendDailyEmail } from './report/email.js';
 import { runWeeklyDocReport } from './report/weekly-doc.js';
 import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
+import { runMonthlyDocReport } from './report/monthly-doc.js';
 import { isGoogleAuthError } from './integrations/google-oauth.js';
 import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
@@ -511,6 +512,45 @@ export async function runExecutiveIfDueForAllSites() {
     } catch (err) {
       console.error(`[job] executive report failed for site ${site.id} "${site.name}":`, err.message);
       await noteGoogleAuthOutcome(false, err);
+    }
+  }
+  return results;
+}
+
+// Run the monthly Google Doc report for the previous full calendar month, but
+// only if it hasn't been written yet this month — same idempotency pattern as
+// runWeeklyIfDue, except reusing the existing monthly_report_narrative_ym
+// marker (already written by runMonthlyDocReport's saveMonthlyReportNarrative
+// call) instead of a new dedicated column. Previously this report only ever
+// ran via the manual `npm run monthly` script — the Reports page's Monthly
+// tab had no automatic doc to link to. Manual `npm run monthly -- <ym>`
+// bypasses this guard for backfills, same as weekly's manual override.
+export async function runMonthlyIfDue(site) {
+  const { year, month } = previousMonth(site.timezone);
+  const ym = `${year}-${String(month).padStart(2, '0')}`;
+  const { rows } = await query('SELECT monthly_report_narrative_ym FROM sites WHERE id = $1', [site.id]);
+  if (rows[0]?.monthly_report_narrative_ym === ym) {
+    console.log(`[monthly] site ${site.id} month ${ym} already written — skipping.`);
+    return null;
+  }
+  const r = await runMonthlyDocReport(site); // no anchor → previous full month
+  console.log(`[monthly] site ${site.id} month ${ym} written.`);
+  return r;
+}
+
+// Run the monthly-if-due check independently for every connected site. Meant
+// to be checked on the same weekly cron trigger as competitor/authority/
+// ai-recommendation below (cron.js) — cheap to check weekly, only actually
+// writes once a month, same "checked weekly, real work only when due"
+// convention those three already use.
+export async function runMonthlyIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runMonthlyIfDue(site));
+    } catch (err) {
+      console.error(`[job] monthly report failed for site ${site.id} "${site.name}":`, err.message);
     }
   }
   return results;

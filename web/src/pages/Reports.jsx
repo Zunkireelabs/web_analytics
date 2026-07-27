@@ -52,12 +52,20 @@ export default function Reports({ siteId }) {
 
   useEffect(() => {
     if (!siteId) return;
+    // Guards against an out-of-order response overwriting the currently
+    // selected tab's data — without this, switching Daily -> Weekly ->
+    // Monthly quickly could let an earlier tab's slower request resolve
+    // LAST and silently win, showing e.g. the Weekly doc/metrics while the
+    // Monthly tab is the one actually selected. Same convention already
+    // used by Overview.jsx/Insights.jsx/CommandCenter.jsx.
+    let cancelled = false;
     setLoading(true);
     setError(false);
     api.reportSummary(siteId, period)
-      .then(setData)
-      .catch(() => setError(true))
-      .finally(() => setLoading(false));
+      .then((res) => { if (!cancelled) setData(res); })
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [siteId, period]);
 
   useEffect(() => {
@@ -81,7 +89,7 @@ export default function Reports({ siteId }) {
       <PageHeader title="Reports" subtitle="Your AI Executive Briefing" icon="🗒️"
         right={
           <div className="flex flex-wrap items-center gap-2">
-            {data?.docUrl && (
+            {!loading && data?.docUrl && (
               <a href={data.docUrl} target="_blank" rel="noreferrer"
                 className="text-xs font-extrabold px-3.5 py-2 rounded-xl text-slate-700 hover:text-slate-900 border border-slate-200/80 bg-white/70 hover:bg-white shadow-sm transition hover:scale-[1.01] active:scale-[0.99] duration-150">
                 View Google Doc ↗
