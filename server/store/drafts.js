@@ -307,7 +307,45 @@ export async function markDraftImplemented(siteId, id) {
       source: draft.source,
     });
   }
+  if (draft) await supersedeLegacyLlmsTxtDrafts(siteId, draft);
   return draft;
+}
+
+// A single site-wide llms.txt draft (finding_id 'ai-visibility:site:llms-txt',
+// see ai-visibility.js's llmsTxtFinding()) fully covers every page — once it
+// ships, any older per-page llms-txt draft still sitting open (a leftover
+// from before the dedup fix that introduced the site-wide finding) is
+// permanently redundant and would otherwise sit in Action Center forever
+// looking unresolved even though the real fix is already live. Narrowly
+// scoped to llms-txt on purpose — not a general cross-action-type dedup
+// engine.
+async function supersedeLegacyLlmsTxtDrafts(siteId, draft) {
+  if (draft.action_type !== 'llms-txt' || draft.finding_id !== 'ai-visibility:site:llms-txt') return;
+  await query(
+    `UPDATE drafts SET status = 'abandoned', abandoned_at = now(),
+       abandoned_reason = 'superseded_by_site_wide_llms_txt', updated_at = now()
+     WHERE site_id = $1 AND action_type = 'llms-txt'
+       AND finding_id LIKE 'ai-visibility:%:Publish an llms.txt file%'
+       AND status NOT IN ('implemented', 'abandoned')`,
+    [siteId]
+  );
+}
+
+// Terminal state for a draft whose fix never shipped — a PR closed without
+// merging, or (see supersedeLegacyLlmsTxtDrafts above) another draft already
+// fixed the same underlying issue. Excluded from getDraftedFindingIds below,
+// so the underlying finding_id naturally reopens for buildRecommendations
+// instead of staying silently locked out by a draft that never went live.
+// Guarded like markDraftImplemented: never overwrites a real implemented
+// draft, and idempotent against an already-abandoned one.
+export async function markDraftAbandoned(siteId, id, reason) {
+  const { rows } = await query(
+    `UPDATE drafts SET status = 'abandoned', abandoned_at = now(), abandoned_reason = $3, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status NOT IN ('implemented', 'abandoned')
+     RETURNING *`,
+    [siteId, id, reason]
+  );
+  return rows[0] || null;
 }
 
 // Real evidence a recommendation was actually acted on, not just that it
@@ -339,17 +377,18 @@ export async function getImplementedFindingIds(siteId) {
   return new Set(rows.map((r) => r.finding_id));
 }
 
-// Every finding_id with a draft in ANY status — a superset of
+// Every finding_id with a draft in any non-abandoned status — a superset of
 // getImplementedFindingIds above, since implemented is itself just one
 // status among draft/edited/submitted_for_approval/approved/branch_pushed/
 // merged_to_stage/pr_opened/implemented. Used by buildRecommendations to
 // stop showing a recommendation the moment a draft exists for it, so it
 // only ever shows in the Drafts tab from then on — not still in
-// Recommendations too. Deleting a draft naturally un-hides its finding
-// again, since the row is gone.
+// Recommendations too. Deleting a draft, or it becoming 'abandoned' (the fix
+// never shipped — see markDraftAbandoned), naturally un-hides its finding
+// again so a fresh draft can be generated.
 export async function getDraftedFindingIds(siteId) {
   const { rows } = await query(
-    'SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL',
+    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned'",
     [siteId]
   );
   return new Set(rows.map((r) => r.finding_id));
