@@ -163,12 +163,14 @@ export async function run({ siteId, start, end, pageCache }) {
       recommendedAction: {
         label: rec.label,
         generatorId: rec.generatorId,
-        // faq.js needs a real query/topic, never schemaType (which it never
-        // reads); expand-content needs the qa-subheadings focus for this
-        // specific rule (citationReadiness) — everything else keeps the
-        // page+schemaType shape schema.js actually consumes.
+        // faq.js needs a real query/topic (schemaType is secondary there —
+        // only used to steer utility-page FAQs like Contact/About away from
+        // generic brand content, see generators/faq.js); expand-content
+        // needs the qa-subheadings focus for this specific rule
+        // (citationReadiness) — everything else keeps the page+schemaType
+        // shape schema.js actually consumes.
         params: rec.generatorId === 'faq'
-          ? { page: p.page, query: p.topQuery }
+          ? { page: p.page, query: p.topQuery, schemaType: inferSchemaType(p.page, p.schemaTypes) }
           : rec.generatorId === 'expand-content'
             ? { page: p.page, query: p.topQuery, focus: 'qa-subheadings' }
             : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },

@@ -88,3 +88,44 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, false);
   });
 });
+
+describe('buildMergeValues — faq (matches the real site accordion, not a bare <dl>)', () => {
+  const items = [
+    { question: 'How do I get in touch?', answer: 'Email or call us.' },
+    { question: 'What are your hours?', answer: '9-5 Nepal time.' },
+  ];
+
+  test('renders the Tailwind/Alpine accordion structure, not a plain <dl>', () => {
+    const result = buildMergeValues('faq', { items });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /<dl class="faq">/);
+    assert.match(result.values.faq, /x-data="\{ activeIndex: null, expandAll: false \}"/);
+    assert.match(result.values.faq, /Frequently asked questions/);
+    assert.match(result.values.faq, /divide-y divide-gray-200/);
+  });
+
+  test('one toggle button + answer panel per item, indexed in order', () => {
+    const result = buildMergeValues('faq', { items });
+    assert.match(result.values.faq, /activeIndex = \(activeIndex === 1 && !expandAll\) \? null : 1/);
+    assert.match(result.values.faq, /activeIndex = \(activeIndex === 2 && !expandAll\) \? null : 2/);
+    assert.match(result.values.faq, /How do I get in touch\?/);
+    assert.match(result.values.faq, /Email or call us\./);
+  });
+
+  test('escapes untrusted question/answer content', () => {
+    const result = buildMergeValues('faq', { items: [{ question: '<script>x</script>', answer: 'ok' }] });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /<script>/);
+  });
+
+  test('still appends the JSON-LD schema after the visible accordion', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('faq', { items, schemaJsonLd });
+    assert.match(result.values.faq, /<script type="application\/ld\+json">.*"@type":"FAQPage"/);
+  });
+
+  test('fails honestly with no items', () => {
+    const result = buildMergeValues('faq', { items: [] });
+    assert.equal(result.ok, false);
+  });
+});
