@@ -76,11 +76,12 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.doesNotMatch(result.values.openGraph, /<script>/);
   });
 
-  test('expand-content renders sections to HTML', () => {
+  test('expand-content renders sections matching the real site typography, not bare tags', () => {
     const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] });
     assert.equal(result.ok, true);
-    assert.match(result.values.expandedContent, /<h2>H1<\/h2>/);
-    assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
+    assert.match(result.values.expandedContent, /<h3 class="[^"]*">H1<\/h3>/);
+    assert.match(result.values.expandedContent, /<p class="[^"]*">Body text<\/p>/);
+    assert.doesNotMatch(result.values.expandedContent, /<h2>/);
   });
 
   test('expand-content fails honestly with no sections', () => {
