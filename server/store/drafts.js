@@ -394,12 +394,17 @@ export async function getDraftedFindingIds(siteId) {
   return new Set(rows.map((r) => r.finding_id));
 }
 
-// Most recent draft for a finding, any status — used to make
+// Most recent NON-ABANDONED draft for a finding — used to make
 // /action-center/generate idempotent so a retry, double-click, or a second
 // browser tab can never create a second draft row for the same finding.
+// Excludes 'abandoned' for the same reason getDraftedFindingIds above does:
+// an abandoned draft's finding_id has already reopened for Recommendations,
+// so a fresh generate call for it must actually regenerate (new LLM call,
+// current content) instead of silently handing back the dead draft that
+// never shipped.
 export async function getDraftByFindingId(siteId, findingId) {
   const { rows } = await query(
-    'SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2 ORDER BY created_at DESC LIMIT 1',
+    "SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2 AND status != 'abandoned' ORDER BY created_at DESC LIMIT 1",
     [siteId, findingId]
   );
   return rows[0] || null;
