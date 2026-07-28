@@ -88,6 +88,28 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     const result = buildMergeValues('expand-content', { sections: [] });
     assert.equal(result.ok, false);
   });
+
+  test('internal-links renders a styled section, not a bare <ul>', () => {
+    const result = buildMergeValues('internal-links', {
+      suggestions: [{ targetUrl: '/products/search/', anchorText: 'Zunkiree Search' }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.links, /<a href="\/products\/search\/" class="[^"]*">Zunkiree Search<\/a>/);
+    assert.doesNotMatch(result.values.links, /<ul class="related-links">/);
+  });
+
+  test('internal-links escapes untrusted anchor text/URLs', () => {
+    const result = buildMergeValues('internal-links', {
+      suggestions: [{ targetUrl: '"><script>x</script>', anchorText: '<script>y</script>' }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.links, /<script>/);
+  });
+
+  test('internal-links fails honestly with no suggestions', () => {
+    const result = buildMergeValues('internal-links', { suggestions: [] });
+    assert.equal(result.ok, false);
+  });
 });
 
 describe('buildMergeValues — faq (matches the real site accordion, not a bare <dl>)', () => {
