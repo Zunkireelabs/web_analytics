@@ -307,11 +307,25 @@ function renderLinksHtml(suggestions) {
 // expand-content.js) — each section is a real, LLM-grounded heading+body
 // pair, escaped since it's untrusted LLM output same as internal-links'
 // anchor text above.
+// Matches zunkireelabs-web's own body-content typography (confirmed on
+// index.njk: h2 section titles use text-3xl md:text-4xl lg:text-5xl
+// font-normal text-gray-900, body copy uses text-gray-600) instead of bare
+// unstyled <h2>/<p> tags — same reasoning as renderFaqHtml above: injected
+// content should look like a real part of the page, not bolted-on markup.
+// h3 (not h2) so these subheadings nest under the page's own h2 section
+// titles rather than competing with them in the document outline.
 function renderExpandedHtml(sections) {
-  const rendered = sections.map((s) =>
-    `  <h2>${escapeHtml(s.heading)}</h2>\n  <p>${escapeHtml(s.body)}</p>`
+  const rows = sections.map((s) =>
+    `    <div class="mb-8 last:mb-0">
+      <h3 class="text-xl md:text-2xl font-normal text-gray-900 mb-3">${escapeHtml(s.heading)}</h3>
+      <p class="text-gray-600 leading-relaxed">${escapeHtml(s.body)}</p>
+    </div>`
   ).join('\n');
-  return `<section class="expanded-content">\n${rendered}\n</section>`;
+  return `<section class="py-12 md:py-20">
+  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
+${rows}
+  </div>
+</section>`;
 }
 
 // Turns one APPROVED draft's already-locked content into the literal
