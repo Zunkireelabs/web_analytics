@@ -246,16 +246,46 @@ export function spliceMarkers(fileContent, markerMap, values) {
   return { ok: true, newContent: result, changedRegions };
 }
 
-// Real, deterministic HTML for an FAQ block — a plain <dl> so it renders
-// sensibly with zero site-specific CSS assumptions. The JSON-LD itself
-// (content.schemaJsonLd) is already a deterministic transform of the same
-// approved items (server/generators/faq.js), reused verbatim here rather
-// than re-derived, so there's exactly one source of truth for it.
+// Real, deterministic HTML for an FAQ block — matches zunkireelabs-web's own
+// hand-built FAQ accordion (Tailwind + Alpine.js, confirmed identical on
+// /products/search/ and /products/gaamma/) instead of a generic unstyled
+// list, so an injected FAQ looks like a real section of the page rather than
+// bolted-on browser-default markup. The JSON-LD itself (content.schemaJsonLd)
+// is already a deterministic transform of the same approved items
+// (server/generators/faq.js), reused verbatim here rather than re-derived,
+// so there's exactly one source of truth for it.
 function renderFaqHtml(items) {
-  const rows = items.map((qa) =>
-    `  <dt>${qa.question}</dt>\n  <dd>${qa.answer}</dd>`
-  ).join('\n');
-  return `<dl class="faq">\n${rows}\n</dl>`;
+  const rows = items.map((qa, i) => {
+    const index = i + 1;
+    return `        <div class="py-5">
+          <button @click="activeIndex = (activeIndex === ${index} && !expandAll) ? null : ${index}" class="w-full flex items-center justify-between text-left group">
+            <span class="text-lg font-medium text-gray-900 group-hover:text-blue-600 transition-colors pr-4">${escapeHtml(qa.question)}</span>
+            <span class="flex-shrink-0 text-gray-400">
+              <svg class="w-5 h-5 transition-transform duration-200" :class="{ 'rotate-45': activeIndex === ${index} || expandAll }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+              </svg>
+            </span>
+          </button>
+          <div x-show="activeIndex === ${index} || expandAll" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-y-2" x-transition:enter-end="opacity-100 translate-y-0" x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 translate-y-0" x-transition:leave-end="opacity-0 -translate-y-2" class="overflow-hidden">
+            <p class="pt-4 text-gray-600 leading-relaxed">${escapeHtml(qa.answer)}</p>
+          </div>
+        </div>`;
+  }).join('\n');
+  return `<section class="py-12 md:py-20 bg-gray-50">
+  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div x-data="{ activeIndex: null, expandAll: false }">
+      <div class="flex items-center justify-between mb-6 border-b border-gray-300 pb-4">
+        <h3 class="text-2xl md:text-3xl font-normal text-gray-900">Frequently asked questions</h3>
+        <button @click="expandAll = !expandAll; activeIndex = expandAll ? 'all' : null" class="text-sm text-blue-600 hover:text-blue-800 transition-colors">
+          <span x-text="expandAll ? 'Collapse All' : 'Expand All'"></span>
+        </button>
+      </div>
+      <div class="divide-y divide-gray-200">
+${rows}
+      </div>
+    </div>
+  </div>
+</section>`;
 }
 
 function escapeHtml(s) {
