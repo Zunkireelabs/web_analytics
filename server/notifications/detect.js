@@ -1,4 +1,4 @@
-import { getFindingsDiff } from '../agents/lib/changes.js';
+import { getFindingsDiff, getAiRecommendationMetricChange } from '../agents/lib/changes.js';
 import { RECOMMENDATION_AGENT_IDS, OPPORTUNITY_AGENT_IDS } from '../agents/lib/insights.js';
 import { hasRecentNotification } from '../store/notifications.js';
 
@@ -11,6 +11,20 @@ const GROUP_THRESHOLD = 3;
 const MAX_OPPORTUNITIES = 2;
 const HEALTH_DROP_THRESHOLD = 5; // health score points, week-over-week
 const HEALTH_DROP_COOLDOWN_DAYS = 7; // matches the metric's own weekly comparison window
+export const AI_VISIBILITY_DROP_THRESHOLD = 15; // ai-recommendation's aiVisibilityPct points, run-over-run
+export const CITATION_GAP_WIDEN_THRESHOLD = 10; // ai-recommendation's competitorCitationGapPct points, run-over-run
+const AI_RECOMMENDATION_COOLDOWN_DAYS = 7; // same reasoning as HEALTH_DROP_COOLDOWN_DAYS — avoid re-notifying every run within a short window regardless of how often this agent actually runs (monthly by default, optionally weekly)
+
+// Pure threshold checks, exported purely for direct unit test coverage
+// (server/notifications/detect.test.js) without a live DB — the cooldown
+// check itself (hasRecentNotification) stays a real query, correctly so,
+// since "was this already notified recently" is inherently a DB fact.
+export function isVisibilityDrop(visibilityDelta) {
+  return visibilityDelta != null && visibilityDelta <= -AI_VISIBILITY_DROP_THRESHOLD;
+}
+export function isCitationGapWidened(gapDelta) {
+  return gapDelta != null && gapDelta >= CITATION_GAP_WIDEN_THRESHOLD;
+}
 
 // Real events only, derived from the same findings diff the Command Center's
 // Recent Changes section already shows — detection never invents a change
@@ -70,6 +84,38 @@ export async function detectNotificationEvents(siteId, { trendWeek } = {}) {
         body: `Health score fell by ${Math.abs(trendWeek)} points compared to last week — check Critical Issues for what changed.`,
         findingIds: [],
       });
+    }
+  }
+
+  // Metric-level alerts for ai-recommendation's own real percentages —
+  // distinct from the finding-level newHighPriority/newOpportunities above
+  // (which already fire generically for this agent via RECOMMENDATION_AGENT_IDS/
+  // OPPORTUNITY_AGENT_IDS): a percentage moving is itself the significant
+  // event here, whether or not it produced a brand-new finding this run.
+  // Returns null (no event) with no valid prior 'ok' run to compare against.
+  const aiRecMetricChange = await getAiRecommendationMetricChange(siteId);
+  if (aiRecMetricChange) {
+    if (isVisibilityDrop(aiRecMetricChange.visibilityDelta)) {
+      const alreadyNotified = await hasRecentNotification(siteId, 'citation-rate-drop', AI_RECOMMENDATION_COOLDOWN_DAYS);
+      if (!alreadyNotified) {
+        events.push({
+          type: 'citation-rate-drop', severity: 'high',
+          title: `AI citation rate dropped ${Math.abs(aiRecMetricChange.visibilityDelta)} points`,
+          body: `This company's real AI-citation rate fell by ${Math.abs(aiRecMetricChange.visibilityDelta)} percentage points since the last check.`,
+          findingIds: [],
+        });
+      }
+    }
+    if (isCitationGapWidened(aiRecMetricChange.gapDelta)) {
+      const alreadyNotified = await hasRecentNotification(siteId, 'citation-gap-widened', AI_RECOMMENDATION_COOLDOWN_DAYS);
+      if (!alreadyNotified) {
+        events.push({
+          type: 'citation-gap-widened', severity: 'medium',
+          title: `Competitor AI-citation gap widened ${aiRecMetricChange.gapDelta} points`,
+          body: `A competitor's AI-citation lead grew by ${aiRecMetricChange.gapDelta} percentage points since the last check.`,
+          findingIds: [],
+        });
+      }
     }
   }
 

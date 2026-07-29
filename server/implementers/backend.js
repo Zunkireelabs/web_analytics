@@ -8,6 +8,7 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { countVisibleFaqDrafts } from '../store/drafts.js';
+import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 
 export const meta = {
   id: 'backend',
@@ -80,6 +81,8 @@ async function computeSecurityHeadersMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const spliced = spliceHashBlock(file.content, 'SECURITY-HEADERS', draft.content.nginxBlock);
   if (!spliced.ok) return spliced;
   const validated = validateNginxBraces(spliced.newContent);
@@ -127,6 +130,8 @@ async function computeRobotsFixMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const spliced = spliceHashBlock(file.content, 'ROBOTS-FIX', draft.content.robotsBlock);
   if (!spliced.ok) return spliced;
   return {
@@ -167,6 +172,8 @@ async function computeHtmlLangMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const injected = injectHtmlLang(file.content, draft.content.lang);
   if (!injected.ok) {
     if (injected.reason === 'lang-already-present') return { ok: false, reason: 'already-applied', error: injected.error };
@@ -212,6 +219,8 @@ async function computeViewportMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const set = setViewportMeta(file.content, draft.content.viewportContent);
   if (!set.ok) {
     if (set.reason === 'viewport-already-correct') return { ok: false, reason: 'already-applied', error: set.error };
@@ -258,6 +267,8 @@ async function computeRedirectFixMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const rewritten = rewriteHref(file.content, draft.content.oldHref, draft.content.newHref);
   if (!rewritten.ok) return rewritten;
   return {
@@ -332,6 +343,8 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
 
     const file = await getFileContent(site, filePath, beforeRef);
     if (!file) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: 'file-not-found' }); continue; }
+    const conflict = detectConflictMarkers(file.content);
+    if (conflict) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: conflict.reason, error: conflict.error }); continue; }
 
     const stripped = stripLink(file.content, href);
     if (!stripped.ok) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: stripped.reason, error: stripped.error }); continue; }
@@ -361,6 +374,8 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
     seenPaths.add(filePath);
     const file = await getFileContent(site, filePath, beforeRef);
     if (!file) { attempted.push({ filePath, matchedVia: 'code-search', reason: 'file-not-found' }); continue; }
+    const conflict = detectConflictMarkers(file.content);
+    if (conflict) { attempted.push({ filePath, matchedVia: 'code-search', reason: conflict.reason, error: conflict.error }); continue; }
     const stripped = stripLink(file.content, href);
     if (!stripped.ok) { attempted.push({ filePath, matchedVia: 'code-search', reason: stripped.reason, error: stripped.error }); continue; }
     files.push({
@@ -452,6 +467,8 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${branch}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
 
   let mode, inspection;
   if (renderModeOverride) {
