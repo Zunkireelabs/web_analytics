@@ -76,11 +76,23 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.doesNotMatch(result.values.openGraph, /<script>/);
   });
 
-  test('expand-content renders sections matching the real site typography, not bare tags', () => {
+  test('expand-content falls back to plain, zero-CSS-assumption tags when the site has no configured template', () => {
     const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] });
     assert.equal(result.ok, true);
-    assert.match(result.values.expandedContent, /<h3 class="[^"]*">H1<\/h3>/);
-    assert.match(result.values.expandedContent, /<p class="[^"]*">Body text<\/p>/);
+    assert.match(result.values.expandedContent, /<h2>H1<\/h2>/);
+    assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
+  });
+
+  test('expand-content uses the site\'s own configured template when given one, not the fallback', () => {
+    const componentTemplates = {
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<h3 class="site-heading">H1<\/h3>/);
     assert.doesNotMatch(result.values.expandedContent, /<h2>/);
   });
 
@@ -88,29 +100,71 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     const result = buildMergeValues('expand-content', { sections: [] });
     assert.equal(result.ok, false);
   });
+
+  test('internal-links falls back to a bare, unstyled <ul> when the site has no configured template', () => {
+    const result = buildMergeValues('internal-links', {
+      suggestions: [{ targetUrl: '/products/search/', anchorText: 'Zunkiree Search' }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.links, /<ul class="related-links">/);
+    assert.match(result.values.links, /<a href="\/products\/search\/">Zunkiree Search<\/a>/);
+  });
+
+  test('internal-links uses the site\'s own configured template when given one, not the fallback', () => {
+    const componentTemplates = {
+      internalLinks: {
+        wrapper: '<nav class="related">\n{{ROWS}}\n</nav>',
+        row: '<a class="site-link" href="{{URL}}">{{ANCHOR_TEXT}}</a>',
+      },
+    };
+    const result = buildMergeValues('internal-links', {
+      suggestions: [{ targetUrl: '/products/search/', anchorText: 'Zunkiree Search' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.links, /<a class="site-link" href="\/products\/search\/">Zunkiree Search<\/a>/);
+    assert.doesNotMatch(result.values.links, /<ul class="related-links">/);
+  });
+
+  test('internal-links escapes untrusted anchor text/URLs', () => {
+    const result = buildMergeValues('internal-links', {
+      suggestions: [{ targetUrl: '"><script>x</script>', anchorText: '<script>y</script>' }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.links, /<script>/);
+  });
+
+  test('internal-links fails honestly with no suggestions', () => {
+    const result = buildMergeValues('internal-links', { suggestions: [] });
+    assert.equal(result.ok, false);
+  });
 });
 
-describe('buildMergeValues — faq (matches the real site accordion, not a bare <dl>)', () => {
+describe('buildMergeValues — faq (per-site template, not one tenant\'s markup hardcoded for everyone)', () => {
   const items = [
     { question: 'How do I get in touch?', answer: 'Email or call us.' },
     { question: 'What are your hours?', answer: '9-5 Nepal time.' },
   ];
 
-  test('renders the Tailwind/Alpine accordion structure, not a plain <dl>', () => {
+  test('falls back to a plain <dl>, zero site-specific CSS assumptions, when the site has no configured template', () => {
     const result = buildMergeValues('faq', { items });
     assert.equal(result.ok, true);
-    assert.doesNotMatch(result.values.faq, /<dl class="faq">/);
-    assert.match(result.values.faq, /x-data="\{ activeIndex: null, expandAll: false \}"/);
-    assert.match(result.values.faq, /Frequently asked questions/);
-    assert.match(result.values.faq, /divide-y divide-gray-200/);
+    assert.match(result.values.faq, /<dl class="faq">/);
+    assert.match(result.values.faq, /<dt>How do I get in touch\?<\/dt>/);
+    assert.match(result.values.faq, /<dd>Email or call us\.<\/dd>/);
   });
 
-  test('one toggle button + answer panel per item, indexed in order', () => {
-    const result = buildMergeValues('faq', { items });
-    assert.match(result.values.faq, /activeIndex = \(activeIndex === 1 && !expandAll\) \? null : 1/);
-    assert.match(result.values.faq, /activeIndex = \(activeIndex === 2 && !expandAll\) \? null : 2/);
-    assert.match(result.values.faq, /How do I get in touch\?/);
-    assert.match(result.values.faq, /Email or call us\./);
+  test('uses the site\'s own configured accordion template when given one, not the fallback', () => {
+    const componentTemplates = {
+      faq: {
+        wrapper: '<section x-data="{ activeIndex: null }">\n{{ROWS}}\n</section>',
+        row: '<button @click="activeIndex = {{INDEX}}">{{QUESTION}}</button><p>{{ANSWER}}</p>',
+      },
+    };
+    const result = buildMergeValues('faq', { items }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /<dl class="faq">/);
+    assert.match(result.values.faq, /<button @click="activeIndex = 1">How do I get in touch\?<\/button>/);
+    assert.match(result.values.faq, /<button @click="activeIndex = 2">What are your hours\?<\/button>/);
   });
 
   test('escapes untrusted question/answer content', () => {
@@ -119,7 +173,7 @@ describe('buildMergeValues — faq (matches the real site accordion, not a bare 
     assert.doesNotMatch(result.values.faq, /<script>/);
   });
 
-  test('still appends the JSON-LD schema after the visible accordion', () => {
+  test('still appends the JSON-LD schema after the visible block', () => {
     const schemaJsonLd = { '@type': 'FAQPage' };
     const result = buildMergeValues('faq', { items, schemaJsonLd });
     assert.match(result.values.faq, /<script type="application\/ld\+json">.*"@type":"FAQPage"/);

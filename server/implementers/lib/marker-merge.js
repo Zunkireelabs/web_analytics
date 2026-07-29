@@ -246,86 +246,83 @@ export function spliceMarkers(fileContent, markerMap, values) {
   return { ok: true, newContent: result, changedRegions };
 }
 
-// Real, deterministic HTML for an FAQ block — matches zunkireelabs-web's own
-// hand-built FAQ accordion (Tailwind + Alpine.js, confirmed identical on
-// /products/search/ and /products/gaamma/) instead of a generic unstyled
-// list, so an injected FAQ looks like a real section of the page rather than
-// bolted-on browser-default markup. The JSON-LD itself (content.schemaJsonLd)
-// is already a deterministic transform of the same approved items
-// (server/generators/faq.js), reused verbatim here rather than re-derived,
-// so there's exactly one source of truth for it.
-function renderFaqHtml(items) {
-  const rows = items.map((qa, i) => {
-    const index = i + 1;
-    return `        <div class="py-5">
-          <button @click="activeIndex = (activeIndex === ${index} && !expandAll) ? null : ${index}" class="w-full flex items-center justify-between text-left group">
-            <span class="text-lg font-medium text-gray-900 group-hover:text-blue-600 transition-colors pr-4">${escapeHtml(qa.question)}</span>
-            <span class="flex-shrink-0 text-gray-400">
-              <svg class="w-5 h-5 transition-transform duration-200" :class="{ 'rotate-45': activeIndex === ${index} || expandAll }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-              </svg>
-            </span>
-          </button>
-          <div x-show="activeIndex === ${index} || expandAll" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-y-2" x-transition:enter-end="opacity-100 translate-y-0" x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 translate-y-0" x-transition:leave-end="opacity-0 -translate-y-2" class="overflow-hidden">
-            <p class="pt-4 text-gray-600 leading-relaxed">${escapeHtml(qa.answer)}</p>
-          </div>
-        </div>`;
-  }).join('\n');
-  return `<section class="py-12 md:py-20 bg-gray-50">
-  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-    <div x-data="{ activeIndex: null, expandAll: false }">
-      <div class="flex items-center justify-between mb-6 border-b border-gray-300 pb-4">
-        <h3 class="text-2xl md:text-3xl font-normal text-gray-900">Frequently asked questions</h3>
-        <button @click="expandAll = !expandAll; activeIndex = expandAll ? 'all' : null" class="text-sm text-blue-600 hover:text-blue-800 transition-colors">
-          <span x-text="expandAll ? 'Collapse All' : 'Expand All'"></span>
-        </button>
-      </div>
-      <div class="divide-y divide-gray-200">
-${rows}
-      </div>
-    </div>
-  </div>
-</section>`;
-}
-
 function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Real, deterministic HTML for an internal-links block — anchorText/
-// targetUrl are escaped since they ultimately come from LLM output (already
-// filtered against real candidate URLs at generation time, see
-// generators/internal-links.js, but still untrusted as raw HTML).
-function renderLinksHtml(suggestions) {
-  const items = suggestions.map((s) =>
-    `  <li><a href="${escapeHtml(s.targetUrl)}">${escapeHtml(s.anchorText)}</a></li>`
-  ).join('\n');
-  return `<ul class="related-links">\n${items}\n</ul>`;
+// Fills a `{{PLACEHOLDER}}` template string with escaped-HTML values — the
+// one substitution mechanism shared by every injected content type below.
+// Split/join instead of a regex replace so a value that itself happens to
+// contain `{{...}}`-shaped text (rare but possible in LLM output) is never
+// misinterpreted as another placeholder.
+function fillTemplate(template, vars) {
+  return Object.entries(vars).reduce((s, [key, value]) => s.split(`{{${key}}}`).join(value), template);
 }
 
-// Real, deterministic HTML for a content-expansion block (generators/
-// expand-content.js) — each section is a real, LLM-grounded heading+body
-// pair, escaped since it's untrusted LLM output same as internal-links'
-// anchor text above.
-// Matches zunkireelabs-web's own body-content typography (confirmed on
-// index.njk: h2 section titles use text-3xl md:text-4xl lg:text-5xl
-// font-normal text-gray-900, body copy uses text-gray-600) instead of bare
-// unstyled <h2>/<p> tags — same reasoning as renderFaqHtml above: injected
-// content should look like a real part of the page, not bolted-on markup.
-// h3 (not h2) so these subheadings nest under the page's own h2 section
-// titles rather than competing with them in the document outline.
-function renderExpandedHtml(sections) {
-  const rows = sections.map((s) =>
-    `    <div class="mb-8 last:mb-0">
-      <h3 class="text-xl md:text-2xl font-normal text-gray-900 mb-3">${escapeHtml(s.heading)}</h3>
-      <p class="text-gray-600 leading-relaxed">${escapeHtml(s.body)}</p>
-    </div>`
-  ).join('\n');
-  return `<section class="py-12 md:py-20">
-  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-${rows}
-  </div>
-</section>`;
+// Real HTML for an injected content block is now a per-site config value
+// (site.url_file_map.siteRoot.componentTemplates.{faq,expandContent,
+// internalLinks} — see types.js), not code. Every tenant's real site has its
+// own template/CSS framework/component library; baking any one tenant's
+// markup into this shared implementer would inject the WRONG site's styling
+// into every OTHER tenant's pages. A site's real template is captured once,
+// at onboarding (`npm run connect-repo --url-file-map ...`), the same way
+// url_file_map.siteRoot.layoutTemplate/nginxConfig/robotsTxt already are.
+//
+// `wrapper` is filled once with {{ROWS}} (the joined, already-filled rows);
+// `row` is filled once per item with that content type's own fields. Sites
+// with no configured template yet fall back to the DEFAULT_* templates
+// below — deliberately plain, zero-CSS-assumption markup (the same shape
+// this code emitted before per-site templates existed) rather than any
+// specific tenant's real styling, so an unconfigured site never gets
+// another tenant's component injected into it.
+function renderFromTemplate(template, rows) {
+  return fillTemplate(template.wrapper, { ROWS: rows.join('\n') });
+}
+
+const DEFAULT_FAQ_TEMPLATE = {
+  wrapper: '<dl class="faq">\n{{ROWS}}\n</dl>',
+  row: '  <dt>{{QUESTION}}</dt>\n  <dd>{{ANSWER}}</dd>',
+};
+
+// The JSON-LD itself (content.schemaJsonLd) is already a deterministic
+// transform of the same approved items (server/generators/faq.js), reused
+// verbatim here rather than re-derived, so there's exactly one source of
+// truth for it — only the visible HTML representation varies per site.
+function renderFaqHtml(items, template = DEFAULT_FAQ_TEMPLATE) {
+  const rows = items.map((qa, i) => fillTemplate(template.row, {
+    INDEX: String(i + 1), QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
+  }));
+  return renderFromTemplate(template, rows);
+}
+
+const DEFAULT_LINKS_TEMPLATE = {
+  wrapper: '<ul class="related-links">\n{{ROWS}}\n</ul>',
+  row: '  <li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
+};
+
+// anchorText/targetUrl are escaped since they ultimately come from LLM
+// output (already filtered against real candidate URLs at generation time,
+// see generators/internal-links.js, but still untrusted as raw HTML).
+function renderLinksHtml(suggestions, template = DEFAULT_LINKS_TEMPLATE) {
+  const rows = suggestions.map((s) => fillTemplate(template.row, {
+    URL: escapeHtml(s.targetUrl), ANCHOR_TEXT: escapeHtml(s.anchorText),
+  }));
+  return renderFromTemplate(template, rows);
+}
+
+const DEFAULT_EXPAND_TEMPLATE = {
+  wrapper: '<div>\n{{ROWS}}\n</div>',
+  row: '  <h2>{{HEADING}}</h2>\n  <p>{{BODY}}</p>',
+};
+
+// Each section is a real, LLM-grounded heading+body pair (generators/
+// expand-content.js), escaped since it's untrusted LLM output same as
+// internal-links' anchor text above.
+function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
+  const rows = sections.map((s) => fillTemplate(template.row, {
+    HEADING: escapeHtml(s.heading), BODY: escapeHtml(s.body),
+  }));
+  return renderFromTemplate(template, rows);
 }
 
 // Turns one APPROVED draft's already-locked content into the literal
@@ -345,7 +342,12 @@ ${rows}
 //     nature). A content type with no schema fragment (meta-title,
 //     internal-links) honestly errors rather than silently no-op'ing —
 //     same no-fabrication discipline as agents/ai-visibility.js.
-export function buildMergeValues(actionType, content, mode = 'visible') {
+//
+// `componentTemplates` is the calling site's
+// url_file_map.siteRoot.componentTemplates ({faq,expandContent,
+// internalLinks}, each optional) — falls back per-type to the DEFAULT_*
+// templates above when a site hasn't configured its own yet.
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}) {
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
     if (!content.selectedTitle) {
@@ -358,7 +360,7 @@ export function buildMergeValues(actionType, content, mode = 'visible') {
 
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
-    const visible = renderFaqHtml(content.items);
+    const visible = renderFaqHtml(content.items, componentTemplates.faq || DEFAULT_FAQ_TEMPLATE);
     const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
     if (mode === 'schema-only') {
       if (!schema) return { ok: false, error: 'This FAQ draft has no schema/JSON-LD data to publish in schema-only mode.' };
@@ -379,7 +381,7 @@ export function buildMergeValues(actionType, content, mode = 'visible') {
   if (actionType === 'internal-links') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
-    return { ok: true, values: { links: renderLinksHtml(content.suggestions) } };
+    return { ok: true, values: { links: renderLinksHtml(content.suggestions, componentTemplates.internalLinks || DEFAULT_LINKS_TEMPLATE) } };
   }
 
   if (actionType === 'canonical') {
@@ -398,7 +400,7 @@ export function buildMergeValues(actionType, content, mode = 'visible') {
   if (actionType === 'expand-content') {
     if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
     if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
-    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections) } };
+    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, componentTemplates.expandContent || DEFAULT_EXPAND_TEMPLATE) } };
   }
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };

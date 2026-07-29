@@ -4,8 +4,9 @@ import { callLLM } from '../../llm.js';
 // old static url_file_map.pages[url].render config as the source of truth
 // for visible-vs-schema-only. Cheap regex/structural evidence is tried first
 // and short-circuits whenever it's decisive; a sitewide visible-FAQ cap
-// (visibleFaqCount/visibleFaqCap, see countVisibleFaqDrafts in
-// server/store/drafts.js) is checked next, since visible FAQ blocks are
+// (visibleFaqCount/visibleFaqCap, see countVisibleFaqPages in
+// server/store/drafts.js — tool-injected count PLUS the site's organic
+// baseline, migration 074) is checked next, since visible FAQ blocks are
 // meant to stay selective across a site rather than appear on every eligible
 // page; only genuinely ambiguous evidence under an unfilled cap reaches the
 // LLM, which decides the mode directly. This module never stops to ask a
@@ -83,6 +84,21 @@ export function scanVisibleFaqSignals(fileContent) {
 
 export function hasExistingFaqSchema(fileContent) {
   return FAQ_SCHEMA_PATTERN.test(fileContent);
+}
+
+// Narrower than scanVisibleFaqSignals' 'strong' bucket on purpose: that
+// bucket also fires on schema-only presence (correctly — duplicating a
+// schema-only page still shouldn't get a second visible block), but the
+// "Recalculate FAQ baseline" action (routes/clients.js) needs to count only
+// pages with a genuinely VISIBLE, human-readable FAQ already on them, not
+// ones that merely publish FAQPage JSON-LD with no on-page rendering.
+// Managed SEOAI markers are stripped first for the same reason
+// scanVisibleFaqSignals does — this tool's own empty markers must never
+// count as "already has a visible FAQ".
+export function hasVisibleFaqSignal(fileContent) {
+  const organicContent = stripManagedMarkers(fileContent);
+  return hasLoopQaPattern(organicContent) ||
+    (ACCORDION_KEYWORD_PATTERN.test(organicContent) && FAQ_TEXT_PATTERN.test(organicContent));
 }
 
 // The Action Center's own SEOAI marker comments are infrastructure, not
