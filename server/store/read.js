@@ -42,7 +42,7 @@ export async function getDailySeries(siteId, start, end) {
         to_char(d, 'YYYY-MM-DD') AS date,
         g.clicks, g.impressions, g.ctr, g.position,
         a.users, a.new_users, a.sessions, a.engaged_sessions,
-        a.avg_engagement_time, a.conversions
+        a.avg_engagement_time, a.conversions, a.bounce_rate
      FROM generate_series($2::date, $3::date, '1 day') AS d
      LEFT JOIN gsc_daily g ON g.site_id = $1 AND g.date = d::date
      LEFT JOIN ga4_daily a ON a.site_id = $1 AND a.date = d::date
@@ -459,7 +459,9 @@ export async function getRangeTotals(siteId, start, end) {
     `SELECT
         COALESCE(SUM(g.clicks),0)       AS clicks,
         COALESCE(SUM(g.impressions),0)  AS impressions,
-        AVG(g.position)                 AS avg_position,
+        CASE WHEN SUM(g.impressions) > 0
+             THEN ROUND(SUM(g.position * g.impressions) / SUM(g.impressions), 2)
+             ELSE NULL END              AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,
@@ -479,7 +481,9 @@ export async function getMonthlyTotals(siteId, year, month) {
     `SELECT
         COALESCE(SUM(g.clicks),0)       AS clicks,
         COALESCE(SUM(g.impressions),0)  AS impressions,
-        AVG(g.position)                 AS avg_position,
+        CASE WHEN SUM(g.impressions) > 0
+             THEN ROUND(SUM(g.position * g.impressions) / SUM(g.impressions), 2)
+             ELSE NULL END              AS avg_position,
         COALESCE(SUM(a.users),0)        AS users,
         COALESCE(SUM(a.new_users),0)    AS new_users,
         COALESCE(SUM(a.sessions),0)     AS sessions,

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   getSiteById, getDataRange, getDailySeries, getRangeTotals, getMonthlyTotals,
   getChannelsRange, getGscBreakdownRange, getGa4BreakdownRange, getTopMovers,
+  getHealthScoreSeries,
 } from '../../store/read.js';
 import { translateQuery } from '../../report/translate.js';
 import { buildReportSummary, buildCountryBreakdown } from '../../report/summary.js';
@@ -151,4 +152,9 @@ export function registerReadOnlyTools(server, siteId) {
     description: 'Action Center recommendations for this site — reads a cached build, never triggers a live refresh.',
     inputSchema: {},
   }, withErrorHandling('get_recommendations', async () => jsonResult(await buildRecommendations(siteId))));
+
+  server.registerTool('get_health_score_series', {
+    description: 'Real daily Website Health Score snapshots between two dates, oldest first. Sparse/empty for dates before snapshots existed — never interpolated or backfilled.',
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_health_score_series', async ({ start, end }) => jsonResult(await getHealthScoreSeries(siteId, start, end))));
 }

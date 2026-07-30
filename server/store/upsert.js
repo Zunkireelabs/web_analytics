@@ -50,15 +50,16 @@ export async function upsertGsc(siteId, { date, totals, queries, pages, devices 
 export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [] }) {
   await query(
     `INSERT INTO ga4_daily
-       (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions, bounce_rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (site_id, date) DO UPDATE SET
        users = EXCLUDED.users, new_users = EXCLUDED.new_users,
        sessions = EXCLUDED.sessions, engaged_sessions = EXCLUDED.engaged_sessions,
-       avg_engagement_time = EXCLUDED.avg_engagement_time, conversions = EXCLUDED.conversions`,
+       avg_engagement_time = EXCLUDED.avg_engagement_time, conversions = EXCLUDED.conversions,
+       bounce_rate = EXCLUDED.bounce_rate`,
     [
       siteId, date, totals.users, totals.new_users, totals.sessions,
-      totals.engaged_sessions, totals.avg_engagement_time, totals.conversions,
+      totals.engaged_sessions, totals.avg_engagement_time, totals.conversions, totals.bounce_rate,
     ]
   );
 
