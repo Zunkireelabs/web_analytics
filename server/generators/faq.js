@@ -21,6 +21,14 @@ const PAGE_PURPOSE_GUIDANCE = {
     '— that content belongs on other pages, not here.',
   AboutPage: 'This is an About page. Write FAQs about the company itself — its history, founding, mission, team, ' +
     'locations. Do NOT write product/pricing/support FAQs — that content belongs on other pages, not here.',
+  // The homepage (page-content.js's inferSchemaType returns 'Organization'
+  // for a bare root path when no more specific schema exists) has the same
+  // branded-query mismatch as Contact/About: its top GSC query is usually
+  // the company name itself, which isn't a real FAQ subject on its own.
+  Organization: 'This is the site\'s homepage. Write FAQs a first-time visitor would ask before deciding to ' +
+    'explore further — what the company/product actually does, who it\'s for, how to get started, pricing/plans ' +
+    'at a high level (only if the page text supports it). Do NOT write deep product-specific or support FAQs ' +
+    '— that content belongs on other pages, not here.',
 };
 
 // params: { page?: string, query?: string, topic?: string, schemaType?: string }

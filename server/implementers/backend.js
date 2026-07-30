@@ -7,8 +7,12 @@ import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
+
 import { countVisibleFaqDrafts } from '../store/drafts.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
+
+import { countVisibleFaqPages } from '../store/drafts.js';
+
 
 export const meta = {
   id: 'backend',
@@ -476,7 +480,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   } else {
     let inspectionOpts = {};
     if (INSPECTABLE_ACTION_TYPES.includes(draft.action_type)) {
-      inspectionOpts = { visibleFaqCount: await countVisibleFaqDrafts(site.id), visibleFaqCap: site.visible_faq_cap };
+      inspectionOpts = { visibleFaqCount: await countVisibleFaqPages(site), visibleFaqCap: site.visible_faq_cap };
     }
     inspection = await inspectRenderMode(file.content, draft.action_type, inspectionOpts);
     if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
@@ -488,7 +492,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     mode = inspection.mode;
   }
 
-  const built = buildMergeValues(draft.action_type, draft.content, mode);
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Auto-creates any marker in markerMap that isn't already in the live
