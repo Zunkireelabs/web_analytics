@@ -10,7 +10,7 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqDrafts, MERGE_MANDATORY_TYPES,
+  recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -75,7 +75,7 @@ async function buildRenderModeHint(siteId, actionType, page) {
     if (!filePath) return null;
     const file = await getFileContent(site, filePath, baseBranch(site));
     if (!file) return null;
-    const visibleFaqCount = await countVisibleFaqDrafts(siteId);
+    const visibleFaqCount = await countVisibleFaqPages(site);
     return await inspectRenderMode(file.content, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
   } catch {
     return null;

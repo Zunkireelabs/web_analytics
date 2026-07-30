@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { buildExtractionPrompt, parseExtractionResponse } from './extraction-prompt.js';
 
 // Dedicated OpenAI client for the AI Recommendation Agent's real prompt
 // probes — deliberately NOT routed through server/llm.js's callLLM().
@@ -8,9 +9,11 @@ import OpenAI from 'openai';
 // to for everything else," which callLLM has no per-call way to express.
 //
 // Kept in its own model-providers/ directory (not a one-off inline call) so
-// Claude/Gemini/Perplexity can be added later as sibling files implementing
-// the same `ask(prompt) -> {raw, model}` shape, with zero schema change —
-// ai_prompt_runs.model (server/migrations/036) is already free text.
+// Anthropic/Perplexity (see sibling files) implement the same
+// `id`/`configured()`/`ask(prompt) -> {raw, model}`/`extract(raw, {companyName,
+// domain})` shape, with zero schema change — ai_prompt_runs.model (migration
+// 036) is already free text, and ai_prompt_runs.provider (migration 075)
+// records which of these this row actually came from.
 
 export const id = 'openai';
 
@@ -51,26 +54,13 @@ export async function ask(prompt) {
 export async function extract(rawResponse, { companyName, domain }) {
   if (!configured()) throw new Error('OPENAI_API_KEY is not set — AI Recommendation probes cannot run.');
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const system = 'You extract structured facts from an AI assistant\'s response to a user question — you are ' +
-    'not answering the question yourself, only parsing an already-written response. Given the response text and ' +
-    `the real company "${companyName}" (domain: ${domain}), respond with ONLY a JSON object: ` +
-    '{"approximatePosition": number|null, "competitorsMentioned": string[], "sentiment": "positive"|"neutral"|"negative"|null, ' +
-    '"recommendationStrength": "strong"|"moderate"|"weak"|"none"}. approximatePosition is this company\'s rough ' +
-    'rank among any companies named (1 = mentioned/recommended first), null if not mentioned at all. ' +
-    'competitorsMentioned lists other real company names mentioned, excluding this one. Use ONLY what the response ' +
-    'text actually says — never invent a competitor or sentiment not evidenced in the text.';
   const res = await client.chat.completions.create({
     model: MODEL,
     max_tokens: 300,
     messages: [
-      { role: 'system', content: system },
+      { role: 'system', content: buildExtractionPrompt(companyName, domain) },
       { role: 'user', content: `Response text:\n${rawResponse}` },
     ],
   });
-  const raw = res.choices[0]?.message?.content?.trim() || '';
-  try {
-    return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ''));
-  } catch {
-    return { approximatePosition: null, competitorsMentioned: [], sentiment: null, recommendationStrength: null };
-  }
+  return parseExtractionResponse(res.choices[0]?.message?.content?.trim());
 }

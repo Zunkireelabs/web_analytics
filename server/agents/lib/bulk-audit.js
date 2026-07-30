@@ -136,7 +136,7 @@ export async function runFullSiteAudit(siteId, {
   // Every agent here must accept params.pages the same way technical-seo.js
   // does — an agent that doesn't (still most of them) is simply not a valid
   // addition to this default list yet.
-  agentIds = ['technical-seo', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability'],
+  agentIds = ['technical-seo', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'content-gap'],
   onStarted,
 } = {}) {
   const site = await getSiteById(siteId);

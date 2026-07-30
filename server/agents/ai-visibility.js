@@ -1,4 +1,4 @@
-import { analyzePageUrl, checkLlmsReadiness, effortForGenerator, inferSchemaType } from './lib/page-content.js';
+import { analyzePageUrl, checkLlmsReadiness, checkWebMcpPresence, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { getQueriesForPage } from '../store/read.js';
 import { scorePageCategories, scoreLlmsReadiness, combineScores } from './lib/visibility-score.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
@@ -10,12 +10,9 @@ export const meta = {
   name: 'AI Visibility Agent',
   description: 'Scores how ready each ranking page is to be cited by AI answer engines (schema, FAQ, entities, structured content, citation readiness, LLMS readiness).',
   category: 'geo',
-  version: 3, // bumped for the llms.txt dedup fix below (site-wide finding now
-              // built once via llmsTxtFinding(), see lines ~60-80) — that fix
-              // shipped without a version bump at the time, which is exactly
-              // why agent_runs rows from before it were indistinguishable
-              // from after it. See agents/lib/fresh-runs.js for how this
-              // number is now enforced on read.
+  version: 4, // bumped: facts now also carries webMcpReadiness (a new
+              // site-level fact, see checkWebMcpPresence in lib/page-content.js
+              // and webMcpFinding below) — a pre-v4 row has no such field.
   // Whether a page is ACTUALLY cited in AI Overviews/ChatGPT/Perplexity still
   // has no real data source — unchanged from v1, that remains unverifiable
   // here. This version answers a different, buildable question instead: is
@@ -88,6 +85,24 @@ function recommendationsFor(categories) {
   return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
 }
 
+// WebMCP is genuinely optional and forward-looking (low real-world adoption
+// today, unlike llms.txt) — always 'low' priority regardless of traffic at
+// stake, and never carries a recommendedAction: generating a real manifest
+// requires knowing this site's actual invocable actions, which no signal
+// here can honestly derive (see checkWebMcpPresence in lib/page-content.js).
+// This finding exists purely to inform, not to drive a draft.
+export function webMcpFinding({ webMcpReadiness, analyzedCount }) {
+  if (!webMcpReadiness || webMcpReadiness.hasManifest) return null;
+  return makeFinding({
+    id: 'ai-visibility:site:webmcp',
+    evidence: { analyzedPages: analyzedCount, hasManifest: false },
+    whyItMatters: 'No WebMCP manifest (/.well-known/mcp.json) found — an emerging, low-adoption standard that lets AI browsing agents call real site actions (e.g. "add to cart", "submit a form") directly instead of simulating clicks. Optional and forward-looking, not required today.',
+    priority: 'low',
+    recommendedAction: null,
+    expectedImpact: { label: 'Low', basis: 'estimate', value: null },
+  });
+}
+
 export async function run({ siteId, start, end, pageCache }) {
   // Falls back to a direct (uncached) fetch when run standalone, outside an
   // orchestrated run — keeps this agent independently runnable/testable
@@ -121,7 +136,9 @@ export async function run({ siteId, start, end, pageCache }) {
       try { origin = new URL(f.page).origin; break; } catch { /* try next page */ }
     }
   }
-  const llmsReadiness = origin ? await checkLlmsReadiness(origin) : null;
+  const [llmsReadiness, webMcpReadiness] = origin
+    ? await Promise.all([checkLlmsReadiness(origin), checkWebMcpPresence(origin)])
+    : [null, null];
   const llmsScore = llmsReadiness ? scoreLlmsReadiness(llmsReadiness) : null;
 
   const pages = fetched.map((f) => {
@@ -182,12 +199,15 @@ export async function run({ siteId, start, end, pageCache }) {
 
   const siteFinding = llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end });
   if (siteFinding) findings.push(siteFinding);
+  const webMcpSiteFinding = webMcpFinding({ webMcpReadiness, analyzedCount: prioritized.length });
+  if (webMcpSiteFinding) findings.push(webMcpSiteFinding);
 
   const facts = {
     rangeStart: start,
     rangeEnd: end,
     siteScore,
     llmsReadiness,
+    webMcpReadiness,
     pages: prioritized,
     findings,
     unanalyzedCount: pages.length - scoredPages.length,
