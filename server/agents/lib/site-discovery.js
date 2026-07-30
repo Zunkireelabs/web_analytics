@@ -18,13 +18,40 @@ function originForSite(site) {
   try { return new URL(url).origin; } catch { return null; }
 }
 
+// Pure parse of one already-fetched sitemap document's <url> entries —
+// split out from fetchSitemapEntries below so the actual parsing/metadata-
+// retention logic is unit-testable with a raw XML string, no network
+// involved. Returns null when this document is a <sitemapindex> rather than
+// a <urlset> (caller recurses into its children instead).
+export function parseUrlsetXml(xmlText) {
+  const $ = cheerio.load(xmlText, { xmlMode: true });
+  if ($('sitemapindex').length > 0) return null;
+
+  return $('urlset > url').map((_, el) => {
+    const $url = $(el);
+    const loc = $url.find('loc').first().text().trim();
+    if (!loc) return null;
+    return {
+      loc,
+      lastmod: $url.find('lastmod').first().text().trim() || null,
+      changefreq: $url.find('changefreq').first().text().trim() || null,
+      priority: $url.find('priority').first().text().trim() || null,
+    };
+  }).get().filter(Boolean);
+}
+
 // Fetches and parses one sitemap (or sitemap index) directly — GSC's
 // Sitemaps API (ingest/gsc-technical.js's listSitemaps) only reports
 // metadata (path, error/warning counts), never the actual URL list inside,
 // so this fetches the real file. Recurses into a sitemap index exactly one
 // level regardless of what a child sitemap claims about itself, to bound
-// worst-case fan-out.
-async function fetchSitemapUrls(path, depth = 0) {
+// worst-case fan-out. Returns full entries (not just <loc>) so a caller that
+// needs to preserve <lastmod>/<changefreq>/<priority> when regenerating a
+// sitemap (see generators/sitemap.js) has real data to preserve rather than
+// having to re-fetch separately — fetchSitemapUrls/discoverFromSitemaps
+// below are thin projections of this, so every existing URL-only caller
+// (job.js, technical-seo.js, bulk-audit.js) is unaffected.
+async function fetchSitemapEntries(path, depth = 0) {
   let hostname;
   try { hostname = new URL(path).hostname; } catch { return []; }
   if (isPrivateOrLocalHost(hostname)) return [];
@@ -38,23 +65,44 @@ async function fetchSitemapUrls(path, depth = 0) {
   if (isIndex) {
     if (depth >= 1) return []; // one level of recursion only, hard stop
     const childPaths = $('sitemapindex > sitemap > loc').map((_, el) => $(el).text().trim()).get().filter(Boolean);
-    const children = await Promise.all(childPaths.map((p) => fetchSitemapUrls(p, depth + 1)));
+    const children = await Promise.all(childPaths.map((p) => fetchSitemapEntries(p, depth + 1)));
     return children.flat();
   }
 
-  return $('urlset > url > loc').map((_, el) => $(el).text().trim()).get().filter(Boolean);
+  return parseUrlsetXml(fetched.text) || [];
 }
 
-// Every real URL from every sitemap GSC knows about for this site, deduped,
-// bounded at MAX_SITEMAP_URLS so a pathological sitemap can't blow up
-// memory or the resulting DB writes.
-export async function discoverFromSitemaps(site) {
+async function fetchSitemapUrls(path, depth = 0) {
+  return (await fetchSitemapEntries(path, depth)).map((e) => e.loc);
+}
+
+// Every real sitemap entry (loc + lastmod/changefreq/priority when present)
+// GSC knows about for this site, deduped by loc (first occurrence wins),
+// bounded at MAX_SITEMAP_URLS so a pathological sitemap can't blow up memory
+// or the resulting DB writes. Used by the sitemap agent/generator to compare
+// against page_inventory and to preserve existing entries' metadata when
+// drafting an additive sitemap update.
+export async function discoverSitemapEntries(site) {
   const sitemapResult = await listSitemaps(site);
   if (!sitemapResult.ok || !sitemapResult.sitemaps.length) return [];
 
-  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapUrls(s.path)));
-  const urls = [...new Set(perSitemap.flat())];
-  return urls.slice(0, MAX_SITEMAP_URLS);
+  const perSitemap = await Promise.all(sitemapResult.sitemaps.map((s) => fetchSitemapEntries(s.path)));
+  const seen = new Set();
+  const entries = [];
+  for (const entry of perSitemap.flat()) {
+    if (seen.has(entry.loc)) continue;
+    seen.add(entry.loc);
+    entries.push(entry);
+  }
+  return entries.slice(0, MAX_SITEMAP_URLS);
+}
+
+// Every real URL from every sitemap GSC knows about for this site, deduped,
+// bounded at MAX_SITEMAP_URLS — thin projection of discoverSitemapEntries
+// for every existing caller that only ever needed the URL list.
+export async function discoverFromSitemaps(site) {
+  const entries = await discoverSitemapEntries(site);
+  return entries.map((e) => e.loc);
 }
 
 const MAX_CRAWL_PAGES = 300;
