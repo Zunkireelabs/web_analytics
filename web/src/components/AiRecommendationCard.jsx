@@ -5,7 +5,8 @@ import Sparkline from './Sparkline.jsx';
 import { AlertTriangle, Sparkles, HelpCircle, CheckCircle2, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 function emptyMessage(meta) {
-  if (!meta?.openAiConfigured) return 'Not configured — needs OPENAI_API_KEY and AI_RECOMMENDATION_ENABLED=true to probe real prompts (a deliberate separate opt-in, not just the API key).';
+  const anyConfigured = meta?.providers?.some((p) => p.configured);
+  if (!anyConfigured) return 'Not configured — needs OPENAI_API_KEY and AI_RECOMMENDATION_ENABLED=true to probe real prompts (a deliberate separate opt-in, not just the API key — other providers can be added the same way, see lib/model-providers/).';
   if (!meta?.hasRun) return 'Not analyzed yet — runs monthly.';
   if (meta.status === 'error') return 'Last run failed — check Integration Health below.';
   if (meta.status === 'insufficient-data') return `Last run (${timeAgo(meta.lastRunAt)}) had no real prompt candidates or every probe failed.`;
@@ -73,7 +74,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
             <span className="text-xs font-bold text-slate-400">% visibility</span>
           </div>
           <div className="text-[10.5px] font-semibold text-slate-500 mt-2">
-            Mentioned in <span className="text-indigo-650 font-bold">{aiRecommendation.mentionedCount}</span> of <span className="text-slate-800 font-bold">{aiRecommendation.promptsChecked}</span> ChatGPT buyer-intent prompts
+            Mentioned in <span className="text-indigo-650 font-bold">{aiRecommendation.mentionedCount}</span> of <span className="text-slate-800 font-bold">{aiRecommendation.promptsChecked}</span> {aiRecommendation.providerCount > 1 ? 'AI' : 'ChatGPT'} buyer-intent prompts
           </div>
         </div>
         {history.length >= 2 && (
@@ -82,6 +83,43 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
           </div>
         )}
       </div>
+
+      {/* Per-provider breakdown — only rendered once more than one AI
+          provider is actually configured, so a single-provider deployment
+          (today's default) looks exactly like it always has. */}
+      {aiRecommendation.providerCount > 1 && aiRecommendation.providers?.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {aiRecommendation.providers.map((p) => (
+            <span key={p.id} className="text-[10px] font-bold px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+              {p.id} <span className="text-indigo-400 ml-0.5">· {p.aiVisibilityPct == null ? 'n/a' : `${p.aiVisibilityPct}%`}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Share of AI Voice / Competitor Citation Gap — both real, deterministic
+          window metrics (server/agents/ai-recommendation.js), only shown once
+          there's real window data to compute them from (null otherwise). */}
+      {(aiRecommendation.shareOfAiVoicePct != null || aiRecommendation.competitorCitationGapPct != null) && (
+        <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 gap-3">
+          {aiRecommendation.shareOfAiVoicePct != null && (
+            <div className="bg-slate-50/60 border border-slate-150 rounded-xl p-3">
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Share of AI Voice</div>
+              <div className="text-lg font-black tracking-tight text-slate-900 tabular-nums mt-0.5">{aiRecommendation.shareOfAiVoicePct}%</div>
+              <div className="text-[9px] text-slate-450 font-semibold">of all tracked mentions this period</div>
+            </div>
+          )}
+          {aiRecommendation.competitorCitationGapPct != null && (
+            <div className="bg-slate-50/60 border border-slate-150 rounded-xl p-3">
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Competitor Citation Gap</div>
+              <div className={`text-lg font-black tracking-tight tabular-nums mt-0.5 ${aiRecommendation.competitorCitationGapPct > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                {aiRecommendation.competitorCitationGapPct > 0 ? '+' : ''}{aiRecommendation.competitorCitationGapPct} pt{Math.abs(aiRecommendation.competitorCitationGapPct) === 1 ? '' : 's'}
+              </div>
+              <div className="text-[9px] text-slate-450 font-semibold">{aiRecommendation.competitorCitationGapPct > 0 ? 'a competitor leads' : 'you lead every tracked competitor'}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Collapsed Competitors Section */}
       {!showPrompts && aiRecommendation.competitorsAppearingInstead?.length > 0 && (
@@ -128,7 +166,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
                     )}
                   </ul>
                   <div className="text-[8px] font-bold text-emerald-600/70 border-t border-emerald-100/30 pt-2 mt-3">
-                    Top listed mentions from OpenAI checks
+                    Top listed mentions from {aiRecommendation.providerCount > 1 ? 'AI provider' : 'OpenAI'} checks
                   </div>
                 </div>
               </div>

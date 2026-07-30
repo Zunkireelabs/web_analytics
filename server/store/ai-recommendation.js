@@ -42,17 +42,20 @@ export async function getCheckedAtForPrompts(siteId, promptIds) {
   return new Map(rows.map((r) => [r.prompt_id, r.checked_at]));
 }
 
+// `provider` defaults to 'openai' (matching the column's own DEFAULT,
+// migration 075) so any caller written before multi-provider support still
+// behaves identically without passing it explicitly.
 export async function saveAiPromptRun(siteId, {
-  promptId, model, runDate, rawResponse, mentioned, approximatePosition, competitorsMentioned, sentiment, recommendationStrength,
+  promptId, provider = 'openai', model, runDate, rawResponse, mentioned, approximatePosition, competitorsMentioned, sentiment, recommendationStrength,
 }) {
   const { rows } = await query(
     `INSERT INTO ai_prompt_runs (
-       site_id, prompt_id, model, run_date, raw_response, mentioned,
+       site_id, prompt_id, provider, model, run_date, raw_response, mentioned,
        approximate_position, competitors_mentioned, sentiment, recommendation_strength
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
     [
-      siteId, promptId, model, runDate, rawResponse, mentioned,
+      siteId, promptId, provider, model, runDate, rawResponse, mentioned,
       approximatePosition ?? null, JSON.stringify(competitorsMentioned ?? []), sentiment ?? null, recommendationStrength ?? null,
     ]
   );
@@ -96,18 +99,24 @@ export async function getMentionRateHistory(siteId, limit = 12) {
 // real date window — used to compare "this run" vs "last real check" so a
 // finding like "Competitor X now appears more often" is a genuine
 // before/after comparison, not a single-run snapshot presented as a trend.
+// Also returns `ourMentions`/`totalProbes` from the SAME window/query — the
+// denominator "Share of AI Voice"/"Competitor Citation Gap" (facts in
+// ai-recommendation.js) need, so the caller never has to run a second query
+// against the same table to get its own side of the comparison.
 export async function getCompetitorMentionCounts(siteId, sinceDate, beforeDate) {
   const { rows } = await query(
-    `SELECT competitors_mentioned
+    `SELECT mentioned, competitors_mentioned
        FROM ai_prompt_runs
       WHERE site_id = $1 AND run_date >= $2 AND run_date < $3`,
     [siteId, sinceDate, beforeDate]
   );
-  const counts = new Map();
+  const competitorCounts = new Map();
+  let ourMentions = 0;
   for (const row of rows) {
+    if (row.mentioned) ourMentions++;
     for (const name of (row.competitors_mentioned || [])) {
-      counts.set(name, (counts.get(name) || 0) + 1);
+      competitorCounts.set(name, (competitorCounts.get(name) || 0) + 1);
     }
   }
-  return counts;
+  return { ourMentions, totalProbes: rows.length, competitorCounts };
 }

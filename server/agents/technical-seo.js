@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
-import { effortForGenerator, inferSchemaType, fetchTextIfExists } from './lib/page-content.js';
+import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus } from './lib/page-content.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
@@ -16,7 +16,18 @@ export const meta = {
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 2,
+  version: 4,
+  // v4 adds two real, previously-uncovered checks confirmed via a
+  // cross-check against the sibling audit tool: per-page response
+  // compression (Content-Encoding: gzip/br/deflate) and site-level
+  // HTTPS/SSL enablement (does the host serve HTTPS at all, and does a
+  // plain http:// request actually redirect there). Both informational —
+  // recommendedAction stays null, since fixing either is a server/CDN/DNS
+  // infra change (enabling gzip, issuing a cert, adding a redirect rule)
+  // this tool has no safe way to draft as a PR.
+  // v3 splits layout shift (CLS) out of the generic Core Web Vitals buckets
+  // into its own `technical-seo:site:layout-shift` finding — a pre-v3 row's
+  // findings won't have it.
   // v2 adds two real, previously-uncovered checks: sitemap URLs resolving to
   // a different domain than the site itself (a common sitemap-generation
   // bug GSC's own per-sitemap error/warning counts don't catch), and real
@@ -117,9 +128,11 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // existing crawl-politeness primitives rather than a second sitemap/robots
   // fetcher, just applied here as validation checks instead of crawl input.
   const origin = originForSite(site);
-  const [sitemapUrls, robotsFetch] = await Promise.all([
+  const siteHostname = origin ? new URL(origin).hostname : null;
+  const [sitemapUrls, robotsFetch, httpsStatus] = await Promise.all([
     discoverFromSitemaps(site).catch((err) => { console.error('[agents] technical-seo: sitemap fetch failed:', err.message); return []; }),
     origin ? fetchTextIfExists(`${origin}/robots.txt`) : Promise.resolve({ ok: false }),
+    checkHttpsStatus(siteHostname).catch((err) => { console.error('[agents] technical-seo: https check failed:', err.message); return { httpsEnabled: null, httpRedirectsToHttps: null }; }),
   ]);
   const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
 
@@ -172,6 +185,70 @@ export async function run({ siteId, start, end, pageCache, params }) {
       recommendedAction: null,
     }),
   ].filter(Boolean);
+
+  // Layout shift specifically, surfaced as its own finding rather than left
+  // folded into the generic CWV buckets above — the real CLS number is
+  // already fetched (server/ingest/pagespeed.js), this just gives it its own
+  // voice. 0.1 matches Google's own "NEEDS_IMPROVEMENT" CLS threshold (see
+  // pagespeed.js's categoryFor), same line the audit tool's own layout-
+  // stability check uses. Matters for more than human UX: a shifting layout
+  // can cause an AI browsing agent to click the wrong element mid-interaction,
+  // the same way it disrupts a human.
+  const layoutShiftCandidates = pageResults.filter((r) => r.coreWebVitals.ok && r.coreWebVitals.cls != null && r.coreWebVitals.cls > 0.1);
+  const layoutShiftFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:layout-shift',
+    affected: layoutShiftCandidates,
+    checkedCount: cwvCheckedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    extraEvidence: (affected) => ({ clsValues: affected.map((r) => ({ page: r.page, cls: r.coreWebVitals.cls })) }),
+    whyItMatters: (n, c) => `${n} of ${c} checked pages have unstable layout (Cumulative Layout Shift above 0.1) — this can cause a human, or an AI browsing agent, to interact with the wrong element as content shifts underneath them.`,
+    recommendedAction: null,
+  });
+  if (layoutShiftFinding) cwvFindings.push(layoutShiftFinding);
+
+  // Response compression (Content-Encoding: gzip/br/deflate) — a real,
+  // previously-uncovered check confirmed via a cross-check against the
+  // sibling audit tool. Uncompressed responses are usually one shared
+  // server/CDN config gap, not a per-page authoring choice, so this is one
+  // "N of M checked pages" finding like the CWV/canonical/schema checks
+  // above, not a card per page.
+  const compressionCheckedCount = pageResults.filter((r) => r.compression.ok).length;
+  const uncompressedCandidates = pageResults.filter((r) => r.compression.ok && !r.compression.compressed);
+  const compressionFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:uncompressed',
+    affected: uncompressedCandidates,
+    checkedCount: compressionCheckedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages are served without gzip/Brotli compression — enabling it reduces transfer size and improves load time at no content cost.`,
+    recommendedAction: null, // a server/CDN config change, not draftable content — same reasoning as security-headers.js's per-header findings
+  });
+  const compressionFindings = compressionFinding ? [compressionFinding] : [];
+
+  // Site-level SSL/HTTPS enablement — checked once per run against the
+  // site's own hostname, not per-page (a certificate/redirect rule is a
+  // host-level fact, not something that varies page to page).
+  const httpsFindings = [];
+  if (httpsStatus.httpsEnabled === false) {
+    httpsFindings.push(makeFinding({
+      id: 'technical-seo:site:no-https',
+      evidence: { hostname: siteHostname },
+      whyItMatters: `${siteHostname} does not serve content over HTTPS — this is both a real ranking factor and a browser-level trust warning shown to every visitor.`,
+      priority: 'high',
+      recommendedAction: null, // issuing/renewing a TLS certificate is an infra change this tool can't safely automate
+      expectedImpact: { label: 'High', basis: 'estimate', value: null },
+    }));
+  } else if (httpsStatus.httpsEnabled === true && httpsStatus.httpRedirectsToHttps === false) {
+    httpsFindings.push(makeFinding({
+      id: 'technical-seo:site:http-not-redirecting',
+      evidence: { hostname: siteHostname },
+      whyItMatters: `${siteHostname} serves HTTPS, but a plain http:// request does not redirect there — visitors and links using the http:// version never reach the secure site.`,
+      priority: 'medium',
+      recommendedAction: null, // a server-level redirect rule, not draftable content
+      expectedImpact: { label: 'Medium', basis: 'estimate', value: null },
+    }));
+  }
 
   const rankedDupes = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const dupePriorities = priorityByRank(rankedDupes);
@@ -315,7 +392,6 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // migration that never updated the generator) that GSC's own per-sitemap
   // error/warning counts above don't necessarily catch (a malformed-but-
   // wrong-domain URL can still be individually well-formed).
-  const siteHostname = origin ? new URL(origin).hostname : null;
   const crossDomainUrls = siteHostname
     ? sitemapUrls.filter((u) => { try { return new URL(u).hostname !== siteHostname; } catch { return false; } })
     : [];
@@ -356,7 +432,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
-    ...crossDomainSitemapFindings, ...robotsBlockedFindings,
+    ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
   ];
 
   const facts = {
@@ -366,6 +442,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       page: r.page, impressions: r.impressions,
       verdict: r.indexStatus.ok ? r.indexStatus.verdict : null,
       cwvCategory: r.coreWebVitals.ok ? r.coreWebVitals.category : null,
+      compressed: r.compression.ok ? r.compression.compressed : null,
     })),
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
@@ -375,6 +452,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
     crossDomainSitemapUrlCount: crossDomainUrls.length,
     robotsTxtFound: robotsFetch.ok,
     robotsBlockedTopPageCount: robotsBlockedCandidates.length,
+    httpsEnabled: httpsStatus.httpsEnabled,
+    httpRedirectsToHttps: httpsStatus.httpRedirectsToHttps,
     findings,
   };
 

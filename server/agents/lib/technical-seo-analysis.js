@@ -1,4 +1,4 @@
-import { analyzePageUrl, isPrivateOrLocalHost } from './page-content.js';
+import { analyzePageUrl, isPrivateOrLocalHost, fetchResponseHeaders, isCompressedEncoding } from './page-content.js';
 import { inspectUrl } from '../../ingest/gsc-technical.js';
 import { fetchCoreWebVitals, configured as pagespeedConfigured } from '../../ingest/pagespeed.js';
 import { listTitlesForSite } from '../../store/technical-seo-checks.js';
@@ -33,12 +33,15 @@ export async function runPageChecks(site, pages, pageCache) {
   // with identical output either way (see lib/fetch-cache.js).
   const fetchPage = pageCache || analyzePageUrl;
   return Promise.all(pages.map(async (page) => {
-    const [pageAnalysis, indexStatus, coreWebVitals] = await Promise.all([
+    const [pageAnalysis, indexStatus, coreWebVitals, headers] = await Promise.all([
       fetchPage(page),
       inspectUrl(site, page),
       pagespeedConfigured()
         ? fetchCoreWebVitals(page).catch((err) => ({ ok: false, error: String(err?.message || err) }))
         : Promise.resolve({ ok: false, error: 'not-configured' }),
+      // Separate, lightweight headers-only fetch (no body read) — real
+      // Content-Encoding, not guessed from response size or file extension.
+      fetchResponseHeaders(page).catch((err) => ({ ok: false, error: String(err?.message || err) })),
     ]);
     return {
       page,
@@ -48,6 +51,9 @@ export async function runPageChecks(site, pages, pageCache) {
         : { ok: false, error: pageAnalysis.error },
       indexStatus,
       coreWebVitals,
+      compression: headers.ok
+        ? { ok: true, compressed: isCompressedEncoding(headers.headers.get('content-encoding')) }
+        : { ok: false, error: headers.error },
     };
   }));
 }

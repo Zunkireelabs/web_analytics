@@ -11,6 +11,7 @@ import { listWatchlist } from '../../store/watchlist.js';
 import { listCompetitorProfiles } from '../../store/competitor-profiles.js';
 import { getAuthoritySnapshotHistory } from '../../store/authority.js';
 import { getMentionRateHistory } from '../../store/ai-recommendation.js';
+import { PROVIDERS } from './model-providers/index.js';
 import { getImplementedFindingIds } from '../../store/drafts.js';
 import { competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 
@@ -320,9 +321,13 @@ export async function getCommandCenterData(siteId) {
       visibilityPct: aiRecommendationRun.facts.aiVisibilityPct,
       mentionedCount: aiRecommendationRun.facts.mentionedCount,
       promptsChecked: aiRecommendationRun.facts.promptsChecked,
+      providers: aiRecommendationRun.facts.providers,
+      providerCount: aiRecommendationRun.facts.providerCount,
       topPrompts: aiRecommendationRun.facts.topPrompts,
       missedPrompts: aiRecommendationRun.facts.missedPrompts,
       competitorsAppearingInstead: aiRecommendationRun.facts.competitorsAppearingInstead,
+      shareOfAiVoicePct: aiRecommendationRun.facts.shareOfAiVoicePct,
+      competitorCitationGapPct: aiRecommendationRun.facts.competitorCitationGapPct,
       history: mentionRateHistory.map((r) => ({
         date: r.run_date,
         pct: r.total_count > 0 ? Math.round((r.mentioned_count / r.total_count) * 100) : null,
@@ -332,9 +337,12 @@ export async function getCommandCenterData(siteId) {
       hasRun: !!aiRecommendationRun,
       status: aiRecommendationRun?.status ?? null,
       lastRunAt: aiRecommendationRun?.created_at ?? null,
-      // Both must be true — see lib/model-providers/openai.js's configured()
-      // for why a bare OPENAI_API_KEY isn't treated as "on" for this agent.
-      openAiConfigured: !!process.env.OPENAI_API_KEY && process.env.AI_RECOMMENDATION_ENABLED === 'true',
+      // One entry per known provider (lib/model-providers/index.js's
+      // PROVIDERS) — each independently gated (its own key + dedicated
+      // enable flag, see that provider's own configured()); replaces the
+      // old single openAiConfigured boolean now that more than one provider
+      // can be configured at once.
+      providers: PROVIDERS.map((p) => ({ id: p.id, configured: p.configured() })),
     },
     geoIntelligence: countryIntelligenceRun?.status === 'ok' ? {
       topCountries: countryIntelligenceRun.facts.topCountries,
