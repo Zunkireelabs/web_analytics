@@ -201,3 +201,16 @@ export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];
 }
+
+// Count of pages that already had a visible, organic FAQ before this tool
+// ever ran (migration 074) — combined with countVisibleFaqDrafts to make
+// visible_faq_cap a true sitewide ceiling. Set only via the staff-triggered
+// "Recalculate FAQ baseline" action (routes/clients.js), never inferred.
+export async function updateSiteVisibleFaqBaseline({ siteId, visibleFaqBaseline }) {
+  const { rows } = await query(
+    `UPDATE sites SET visible_faq_baseline = $1 WHERE id = $2 RETURNING *`,
+    [visibleFaqBaseline, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}

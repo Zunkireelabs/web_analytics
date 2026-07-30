@@ -327,6 +327,8 @@ export default function ClientOnboarding() {
   const [oauthPolicyError, setOauthPolicyError] = useState({}); // {[clientId]: message}
   const [faqCapSaving, setFaqCapSaving] = useState({}); // {[clientId]: true}
   const [faqCapError, setFaqCapError] = useState({}); // {[clientId]: message}
+  const [faqBaselineBusy, setFaqBaselineBusy] = useState({}); // {[clientId]: true}
+  const [faqBaselineError, setFaqBaselineError] = useState({}); // {[clientId]: message}
 
   // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5).
   const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
@@ -417,6 +419,25 @@ export default function ClientOnboarding() {
       setFaqCapError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
     } finally {
       setFaqCapSaving((s) => ({ ...s, [client.id]: false }));
+    }
+  };
+
+  // Re-scans this client's real pages for organic (never-touched-by-us)
+  // visible FAQs and stores the count as sites.visible_faq_baseline
+  // (migration 074) — the cap above is only a true sitewide ceiling once
+  // this baseline is added to the tool's own injected count. Staff re-runs
+  // this after adding/removing an FAQ outside the tool, since it's not kept
+  // live automatically (server/routes/clients.js).
+  const recalculateFaqBaseline = async (client) => {
+    setFaqBaselineBusy((s) => ({ ...s, [client.id]: true }));
+    setFaqBaselineError((e) => ({ ...e, [client.id]: null }));
+    try {
+      const result = await api.clients.recalculateFaqBaseline(client.id);
+      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqBaseline: result.visibleFaqBaseline } : c)));
+    } catch (err) {
+      setFaqBaselineError((e) => ({ ...e, [client.id]: err.message || 'Could not recalculate.' }));
+    } finally {
+      setFaqBaselineBusy((s) => ({ ...s, [client.id]: false }));
     }
   };
 
@@ -793,6 +814,31 @@ export default function ClientOnboarding() {
                       {faqCapError[c.id] && (
                         <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
                           {faqCapError[c.id]}
+                        </div>
+                      )}
+
+                      {/* Organic (pre-existing, never-touched-by-us) visible
+                          FAQ pages — added to the tool's own injected count
+                          before comparing against the cap above, so the cap
+                          is a true sitewide ceiling (migration 074). Not
+                          kept live automatically — re-run after FAQs change
+                          outside this tool. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <RefreshCw size={11} className="text-slate-400 shrink-0" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Existing FAQ pages</span>
+                        <span className="text-[10px] font-bold text-slate-700">{c.visibleFaqBaseline ?? 0}</span>
+                        <button
+                          type="button"
+                          disabled={!!faqBaselineBusy[c.id]}
+                          onClick={() => recalculateFaqBaseline(c)}
+                          className="text-[10px] font-bold text-blue-600 hover:text-blue-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {faqBaselineBusy[c.id] ? 'Recalculating…' : 'Recalculate'}
+                        </button>
+                      </div>
+                      {faqBaselineError[c.id] && (
+                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
+                          {faqBaselineError[c.id]}
                         </div>
                       )}
 
