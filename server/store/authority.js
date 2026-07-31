@@ -20,6 +20,21 @@ export async function getAuthoritySnapshotHistory(siteId, limit = 12) {
   return rows;
 }
 
+// Real monthly snapshots in a date range, oldest first — the read path for
+// external monthly-cadence consumers (Data Analyst Agent MCP tool). Honestly
+// empty when no real DataForSEO-backed snapshot has been taken yet.
+export async function getAuthorityScoreSeries(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT to_char(snapshot_date, 'YYYY-MM-DD') AS snapshot_date,
+            authority_score, referring_domains, total_backlinks
+       FROM authority_snapshots
+      WHERE site_id = $1 AND snapshot_date BETWEEN $2 AND $3
+      ORDER BY snapshot_date ASC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 export async function saveAuthoritySnapshot(siteId, snapshotDate, data) {
   const { rows } = await query(
     `INSERT INTO authority_snapshots (

@@ -30,6 +30,7 @@ import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
+import dataAgentRouter from './routes/data-agent.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
@@ -112,6 +113,12 @@ app.use('/api', webhooksRouter);
 // them doesn't matter beyond "before the SPA catch-all" (already true; this
 // is far above it in the file).
 app.use(oauthRouter);
+// Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
+// is a root path, not under /api (see routes/data-agent.js), and must be
+// mounted before the production static/catch-all block below or that
+// catch-all's `app.get('*', ...)` would swallow every /data-agent/* request
+// first and serve index.html instead of proxying it.
+app.use(dataAgentRouter);
 app.use('/api', metricsRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);

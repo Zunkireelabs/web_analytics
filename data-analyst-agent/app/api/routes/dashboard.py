@@ -37,9 +37,13 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
     insights = []
     for i in insights_rows:
         rec = (await session.execute(select(Recommendation).where(Recommendation.insight_id == i.id))).scalar_one_or_none()
+        if rec is not None and rec.status == "resolved":
+            continue  # staff already marked this occurrence solved — same filter as GET /alerts
         insights.append({
             "metric_key": i.metric_key, "insight_type": i.insight_type, "severity": i.severity,
             "period_start": i.period_start.isoformat(), "evidence": i.evidence,
+            "recommendation_id": rec.id if rec else None,
+            "root_cause": rec.root_cause_text if rec else None,
             "recommendation": rec.recommendation_text if rec else None,
         })
 

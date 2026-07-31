@@ -1,6 +1,6 @@
 from datetime import datetime, date
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Date, ForeignKey, Numeric, String,
+    BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Numeric, String,
     Text, UniqueConstraint, LargeBinary, Index, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -23,6 +23,10 @@ class Client(Base):
     mcp_token_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     mcp_token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     mcp_permission_level: Mapped[str] = mapped_column(Text, nullable=False, default="read_only")
+    # No fixed enum — controlled vocabulary is a product/sales decision, not
+    # an engineering one. Populated at onboarding or backfilled later; null
+    # until then (see scripts/onboard_client.py --industry).
+    industry: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -85,6 +89,32 @@ class MetricObservation(Base):
     dimension_value: Mapped[str] = mapped_column(Text, primary_key=True, default="__site__")
     period_start: Mapped[date] = mapped_column(Date, primary_key=True)
     value: Mapped[float | None] = mapped_column(Numeric)
+
+
+class PageQueryObservation(Base):
+    """Deliberately separate from metric_observations — page/query
+    cardinality (thousands of distinct URLs/queries per client) makes the
+    per-dimension-value loop the stats/anomaly/forecast engines use for
+    site/channel/device/country dimensions performance-prohibitive here.
+    Top-N per day only (matches the GSC breakdown MCP tool's own cap), not
+    every real page/query — read live at request time, never run through
+    metric_period_stats/anomalies/forecast_runs. See
+    app/collectors/page_query.py."""
+
+    __tablename__ = "page_query_observations"
+
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), primary_key=True)
+    dimension_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    dimension_value: Mapped[str] = mapped_column(Text, primary_key=True)
+    period_start: Mapped[date] = mapped_column(Date, primary_key=True)
+    clicks: Mapped[float | None] = mapped_column(Numeric)
+    impressions: Mapped[float | None] = mapped_column(Numeric)
+    ctr: Mapped[float | None] = mapped_column(Numeric)
+    position: Mapped[float | None] = mapped_column(Numeric)
+
+    __table_args__ = (
+        CheckConstraint("dimension_type IN ('page','query')", name="page_query_observations_dimension_type_check"),
+    )
 
 
 class MetricPeriodStats(Base):
@@ -211,12 +241,25 @@ class Recommendation(Base):
     insight_id: Mapped[int] = mapped_column(ForeignKey("insights.id", ondelete="CASCADE"), nullable=False)
     priority: Mapped[str] = mapped_column(Text, nullable=False)
     recommendation_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Populated by the LLM enrichment path (falls back to null under the
+    # static-template path) — kept separate from recommendation_text so a
+    # UI can always render "why" and "fix" as two distinct lines.
+    root_cause_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="new")
+    # Explicit timezone=True — this is the one column in this model that the
+    # app actually assigns a Python datetime.now(timezone.utc) to (every
+    # other timestamp column here is server_default=func.now()-only), and
+    # without it SQLAlchemy binds as TIMESTAMP WITHOUT TIME ZONE and asyncpg
+    # rejects the tz-aware value at write time.
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Free text, not a user FK — this service only has one static admin key
+    # (see security/auth.py), no per-admin identity to reference yet.
+    resolved_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("priority IN ('high','medium','low')", name="recommendations_priority_check"),
-        CheckConstraint("status IN ('new','acknowledged','dismissed')", name="recommendations_status_check"),
+        CheckConstraint("status IN ('new','acknowledged','dismissed','resolved')", name="recommendations_status_check"),
     )
 
 

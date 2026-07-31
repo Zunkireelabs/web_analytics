@@ -3,6 +3,7 @@ import { runAgent } from '../../agents/runner.js';
 import { refreshCommandCenter } from '../../routes/command-center.js';
 import { refreshRecommendations, generateDraft, markDraftImplementedIfEligible } from '../../routes/action-center.js';
 import { updateDraft, deleteDraft, submitDraftForApproval } from '../../store/drafts.js';
+import { deliverToAllChannels } from '../../notifications/channels/index.js';
 import { dateStr, jsonResult, requireLevel, withErrorHandling } from './shared.js';
 
 // "AI Actions" tier tools — spend LLM/API budget and write to this app's own
@@ -95,5 +96,21 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
   }, withErrorHandling('mark_draft_implemented', async ({ id }) => {
     const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
     return jsonResult(await markDraftImplementedIfEligible(siteId, id));
+  }));
+
+  server.registerTool('push_predictive_alert', {
+    description: 'Pushes one or more real predictive-risk alerts (e.g. a metric forecast to decline) through this app\'s existing notification channels (in-app + email, if SMTP is configured). Intended for the Data Analyst Agent\'s nightly forecast-risk detection — never invents an alert; every field must reflect a real computed finding.',
+    inputSchema: {
+      alerts: z.array(z.object({
+        severity: z.enum(['high', 'medium']),
+        title: z.string().min(1),
+        body: z.string().min(1),
+      })).min(1),
+    },
+  }, withErrorHandling('push_predictive_alert', async ({ alerts }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    const events = alerts.map((a) => ({ type: 'predictive-risk', severity: a.severity, title: a.title, body: a.body, findingIds: [] }));
+    await deliverToAllChannels(siteId, events);
+    return jsonResult({ delivered: events.length });
   }));
 }

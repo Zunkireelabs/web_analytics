@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import {
   getSiteById, getDataRange, getDailySeries, getRangeTotals, getMonthlyTotals,
-  getChannelsRange, getGscBreakdownRange, getGa4BreakdownRange, getTopMovers,
-  getHealthScoreSeries,
+  getChannelsRange, getChannelsDailySeries, getGscBreakdownRange, getGa4BreakdownRange, getTopMovers,
+  getHealthScoreSeries, getGscBreakdownDailySeries, getGa4BreakdownDailySeries, getGscBreakdownDailyTopN,
 } from '../../store/read.js';
 import { translateQuery } from '../../report/translate.js';
 import { buildReportSummary, buildCountryBreakdown } from '../../report/summary.js';
@@ -14,6 +14,9 @@ import { getAgenticOrchestrationStatsSince } from '../../store/agentic-orchestra
 import { listGeneratorMeta } from '../../generators/registry.js';
 import { listDrafts, getDraft } from '../../store/drafts.js';
 import { buildRecommendations } from '../../agents/lib/recommendations.js';
+import { getAuthorityScoreSeries } from '../../store/authority.js';
+import { getMonthlyMentionRate } from '../../store/ai-recommendation.js';
+import { getOwnStructuralScoreSeries } from '../../store/competitor-profiles.js';
 import { dateStr, jsonResult, withErrorHandling } from './shared.js';
 
 // Read-only analytics/reporting/agent-status/Action-Center-read MCP tools.
@@ -55,6 +58,26 @@ export function registerReadOnlyTools(server, siteId) {
     description: 'Traffic by channel (organic, direct, referral, etc.) aggregated over a date range.',
     inputSchema: { start: dateStr, end: dateStr },
   }, withErrorHandling('get_channels_range', async ({ start, end }) => jsonResult(await getChannelsRange(siteId, start, end))));
+
+  server.registerTool('get_channels_daily_series', {
+    description: 'Real per-day sessions/users by channel (organic, direct, referral, etc.) over a date range — one row per (day, channel), unaggregated. Distinct from get_channels_range, which sums the whole range into one row per channel.',
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_channels_daily_series', async ({ start, end }) => jsonResult(await getChannelsDailySeries(siteId, start, end))));
+
+  server.registerTool('get_gsc_breakdown_daily_series', {
+    description: 'Real per-day Search Console clicks/impressions/ctr/position by device or country over a date range — one row per (day, dim_value), unaggregated. Distinct from get_gsc_breakdown, which sums the whole range into a top-N list.',
+    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['device', 'country']) },
+  }, withErrorHandling('get_gsc_breakdown_daily_series', async ({ start, end, dim }) => jsonResult(await getGscBreakdownDailySeries(siteId, start, end, dim))));
+
+  server.registerTool('get_ga4_breakdown_daily_series', {
+    description: 'Real per-day GA4 sessions/users by device or country over a date range — one row per (day, dim_value), unaggregated. Distinct from get_device_breakdown/get_country_breakdown, which sum the whole range into a top-N list.',
+    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['device', 'country']) },
+  }, withErrorHandling('get_ga4_breakdown_daily_series', async ({ start, end, dim }) => jsonResult(await getGa4BreakdownDailySeries(siteId, start, end, dim))));
+
+  server.registerTool('get_gsc_breakdown_daily_top_n', {
+    description: 'Real per-day Search Console clicks/impressions/ctr/position for the top N pages or queries (by clicks) each day over a date range — bounded per day, unlike get_gsc_breakdown_daily_series, since page/query cardinality is unbounded.',
+    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['page', 'query']), limit: z.number().int().min(1).max(50).default(50) },
+  }, withErrorHandling('get_gsc_breakdown_daily_top_n', async ({ start, end, dim, limit }) => jsonResult(await getGscBreakdownDailyTopN(siteId, start, end, dim, limit))));
 
   server.registerTool('get_gsc_breakdown', {
     description: 'Search Console breakdown (query, page, device, or country) aggregated over a date range.',
@@ -157,4 +180,19 @@ export function registerReadOnlyTools(server, siteId) {
     description: 'Real daily Website Health Score snapshots between two dates, oldest first. Sparse/empty for dates before snapshots existed — never interpolated or backfilled.',
     inputSchema: { start: dateStr, end: dateStr },
   }, withErrorHandling('get_health_score_series', async ({ start, end }) => jsonResult(await getHealthScoreSeries(siteId, start, end))));
+
+  server.registerTool('get_authority_score_series', {
+    description: 'Real monthly Authority Score snapshots between two dates, oldest first. Empty if DataForSEO backlink data is not yet configured for this site — never estimated.',
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_authority_score_series', async ({ start, end }) => jsonResult(await getAuthorityScoreSeries(siteId, start, end))));
+
+  server.registerTool('get_ai_recommendation_visibility_series', {
+    description: 'Real AI-engine recommendation mention rate (%), rolled up to calendar month, between two dates, oldest first. Empty if AI recommendation tracking is not enabled for this site.',
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_ai_recommendation_visibility_series', async ({ start, end }) => jsonResult(await getMonthlyMentionRate(siteId, start, end))));
+
+  server.registerTool('get_competitor_structural_score_series', {
+    description: "Real snapshots of this site's own competitor-structural-readiness score between two dates, oldest first, one value per real run (deduped across the competitor rows written in that run).",
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_competitor_structural_score_series', async ({ start, end }) => jsonResult(await getOwnStructuralScoreSeries(siteId, start, end))));
 }

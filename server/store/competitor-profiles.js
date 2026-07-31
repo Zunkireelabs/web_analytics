@@ -70,6 +70,22 @@ export async function getCompetitorStructuralTrend(siteId, domain, since) {
   return rows;
 }
 
+// The site's own structural score, deduped across the (usually several)
+// competitor rows written in the same run (own_score is repeated once per
+// competitor row per run — see migration 034) — the read path for external
+// monthly-cadence consumers (Data Analyst Agent MCP tool) that want one
+// site-level value per real run, not one per competitor.
+export async function getOwnStructuralScoreSeries(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT DISTINCT to_char(snapshot_at, 'YYYY-MM-DD') AS snapshot_date, own_score
+       FROM competitor_structural_snapshots
+      WHERE site_id = $1 AND snapshot_at BETWEEN $2 AND $3 AND own_score IS NOT NULL
+      ORDER BY snapshot_date ASC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 // Competitor identity isn't stable run to run (see migration 034's
 // comment) — this picks whichever domain actually has the most real
 // snapshots for a site (ties broken by most recent), so Growth/Review

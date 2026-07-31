@@ -20,11 +20,11 @@ from app.db.session import SessionLocal
 from app.security.secrets import encrypt_token
 
 
-async def onboard(client_id: int, name: str, token: str, timezone: str, permission_level: str) -> None:
+async def onboard(client_id: int, name: str, token: str, timezone: str, permission_level: str, industry: str | None) -> None:
     stmt = pg_insert(Client).values(
         id=client_id, name=name, status="active", timezone=timezone,
         mcp_token_ciphertext=encrypt_token(token), mcp_token_prefix=token[:8],
-        mcp_permission_level=permission_level,
+        mcp_permission_level=permission_level, industry=industry,
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["id"],
@@ -34,6 +34,10 @@ async def onboard(client_id: int, name: str, token: str, timezone: str, permissi
             "mcp_token_prefix": stmt.excluded.mcp_token_prefix,
             "mcp_permission_level": stmt.excluded.mcp_permission_level,
             "timezone": stmt.excluded.timezone,
+            # Only overwrite industry if a new value was actually passed —
+            # re-running onboarding to rotate a token must not silently wipe
+            # a previously-set industry back to null.
+            "industry": stmt.excluded.industry if industry is not None else Client.industry,
         },
     )
     async with SessionLocal() as session:
@@ -49,8 +53,9 @@ def main() -> None:
     parser.add_argument("--token", required=True, help="Raw MCP api_token, minted via the existing app")
     parser.add_argument("--timezone", default="UTC")
     parser.add_argument("--permission-level", default="read_only", choices=["read_only", "ai_actions", "automation", "admin"])
+    parser.add_argument("--industry", default=None, help="Free text, no fixed vocabulary yet — used for cross-client benchmarking.")
     args = parser.parse_args()
-    asyncio.run(onboard(args.client_id, args.name, args.token, args.timezone, args.permission_level))
+    asyncio.run(onboard(args.client_id, args.name, args.token, args.timezone, args.permission_level, args.industry))
 
 
 if __name__ == "__main__":

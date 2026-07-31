@@ -17,7 +17,9 @@ import {
   Users,
   KeyRound,
   HeartPulse,
-  ScrollText
+  ScrollText,
+  LineChart,
+  ExternalLink
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -57,6 +59,14 @@ const PLATFORM_ADMIN_NAV = [
   { to: '/admin/system-health', label: 'System Health', icon: HeartPulse },
   { to: '/admin/audit-log', label: 'Audit Log', icon: ScrollText },
 ];
+
+// Standalone service (data-analyst-agent/), not part of this app — reverse-
+// proxied under this same domain at /data-agent (server/routes/data-agent.js)
+// rather than a separate subdomain. Links to its Swagger UI (X-Admin-Key
+// auth, entered there via the "Try it out" panel) rather than a raw JSON
+// route, since this app has no page of its own yet to render its
+// dashboard/ask endpoints.
+const DATA_ANALYST_AGENT_URL = '/data-agent/docs';
 
 export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, onSite, onLogout, mobileOpen, onCloseMobile }) {
   const loc = useLocation();
@@ -144,6 +154,12 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
               <>
                 <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-[#6C63FF]">Platform Administration</div>
                 {PLATFORM_ADMIN_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+                <a href={DATA_ANALYST_AGENT_URL} target="_blank" rel="noopener noreferrer"
+                  className="group flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-bold text-slate-500 hover:text-slate-900 hover:bg-slate-100/60 transition-all duration-200">
+                  <LineChart size={15} strokeWidth={2} className="text-slate-400 group-hover:text-slate-600 transition-colors" />
+                  Data Analyst Agent
+                  <ExternalLink size={11} className="text-slate-300 group-hover:text-slate-500 ml-auto" />
+                </a>
               </>
             )}
           </nav>

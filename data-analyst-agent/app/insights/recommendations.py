@@ -1,14 +1,51 @@
-"""Recommendation Engine — templated text keyed to a specific insight_id,
-never LLM-generated. Mirrors the sibling Node app's own
+"""Recommendation Engine — a static template (recommendation_text) always
+computed first, mirroring the sibling Node app's own
 server/agents/lib/recommendations.js discipline: a recommendation always
-points back to real evidence, never a free-floating suggestion."""
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+points back to real evidence, never a free-floating suggestion. Layered on
+top, a nightly LLM enrichment pass asks the LLM to tailor that into a
+root_cause_text + a sharper recommendation_text, grounded strictly in the
+same evidence — never in the request path, so GET /dashboard/{client_id}
+stays cache-only. Any LLM failure (rate limit, malformed response) falls
+back to the static template alone; one client's one bad call never blocks
+the nightly run for anyone else."""
+import json
 
+from sqlalchemy import select
+
+from app.agent.narrator import call_llm
 from app.db.models import Client, Insight, MetricCatalog, Recommendation
 from app.db.session import SessionLocal
 
 SEVERITY_TO_PRIORITY = {"high": "high", "medium": "medium", "low": "low"}
+
+EXPLANATION_SYSTEM_PROMPT = (
+    "You are a data analyst writing a short explanation of a flagged SEO/growth metric change for internal "
+    "agency staff. You are given one structured insight — the metric, the type of change, and whatever "
+    "evidence was computed for it (which may include which dimension, e.g. device or query, drove the "
+    "change). Call submit_explanation with exactly two one-sentence fields. Ground every claim strictly in "
+    "the evidence given — never invent a cause, a number, or a dimension that isn't present in the input. If "
+    "the evidence doesn't point to a clear cause, say so plainly (e.g. 'no clear driver in the available "
+    "data yet') rather than guessing."
+)
+
+EXPLANATION_TOOL = {
+    "name": "submit_explanation",
+    "description": "Submit the root cause and recommended fix for this insight.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "root_cause": {
+                "type": "string",
+                "description": "One sentence: why this likely happened, grounded only in the given evidence.",
+            },
+            "recommendation": {
+                "type": "string",
+                "description": "One sentence: the concrete next action staff should take.",
+            },
+        },
+        "required": ["root_cause", "recommendation"],
+    },
+}
 
 
 async def run_recommendation_engine() -> None:
@@ -35,12 +72,35 @@ async def run_recommendation_engine() -> None:
                 text = _render(insight, metric)
                 if text is None:
                     continue
+                root_cause, tailored_recommendation = await _generate_llm(insight, metric)
                 session.add(Recommendation(
                     client_id=client.id, insight_id=insight.id,
                     priority=SEVERITY_TO_PRIORITY.get(insight.severity, "low"),
-                    recommendation_text=text,
+                    recommendation_text=tailored_recommendation or text,
+                    root_cause_text=root_cause,
                 ))
             await session.commit()
+
+
+async def _generate_llm(insight: Insight, metric: MetricCatalog | None) -> tuple[str | None, str | None]:
+    payload = {
+        "metric": metric.display_name if metric else insight.metric_key,
+        "insight_type": insight.insight_type, "severity": insight.severity,
+        "period_start": insight.period_start.isoformat(), "evidence": insight.evidence,
+    }
+    try:
+        response = await call_llm(
+            messages=[{"role": "user", "content": json.dumps(payload)}],
+            tools=[EXPLANATION_TOOL], tool_choice={"type": "tool", "name": "submit_explanation"},
+            system=EXPLANATION_SYSTEM_PROMPT,
+        )
+    except Exception:  # noqa: BLE001 — deliberately broad: must never block the nightly run
+        return None, None
+
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "submit_explanation":
+            return block.input.get("root_cause"), block.input.get("recommendation")
+    return None, None
 
 
 def _render(insight: Insight, metric: MetricCatalog | None) -> str | None:

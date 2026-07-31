@@ -102,6 +102,10 @@ jobs:
 
             # ── Deployment ───────────────────────────────────────────────────
             ANALYTICS_DOMAIN=${{ vars.PROD_DOMAIN }}
+
+            # Sibling container's name on the shared "hosting" Docker network —
+            # not a secret, just an internal hostname. See .env.example.
+            DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-prod:8000
             ENVEOF
 
             docker compose build

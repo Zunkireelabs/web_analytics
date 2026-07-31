@@ -41,7 +41,13 @@ async def _run_one(client: Client, collector, window_start: date, window_end: da
                 session=session, client=client, mcp=mcp,
                 window_start=window_start, window_end=window_end,
             )
-            if not observations:
+            if collector.writes_own_storage:
+                # Already persisted directly within collect() using the
+                # passed session — an empty return here is expected, not a
+                # failure signal (the collector would have raised on a real
+                # MCP failure).
+                status = "ok"
+            elif not observations:
                 status = "insufficient-data"
             else:
                 await _upsert_observations(session, client.id, observations)

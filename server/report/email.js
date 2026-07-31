@@ -165,3 +165,45 @@ export async function sendPasswordResetEmail({ to, resetUrl }) {
   console.log(`[email] password reset sent to ${to}`);
   return true;
 }
+
+// server/notifications/channels/email.js — the email delivery channel for
+// NotificationEvents (see server/notifications/types.js), including the
+// Data Analyst Agent's predictive-risk alerts pushed via the
+// push_predictive_alert MCP tool. Same per-site recipient convention as
+// sendDailyEmail above (site.report_email_to, falling back to the global
+// REPORT_EMAIL_TO), since these are genuinely per-site events, unlike the
+// fixed internal LEADS_EMAIL_TO above.
+export async function sendNotificationEmail(site, events) {
+  const recipient = site.report_email_to || process.env.REPORT_EMAIL_TO;
+  const transporter = getTransporter();
+  if (!transporter || !recipient) {
+    console.log('[email] SMTP not fully configured — skipping notification email.');
+    return false;
+  }
+  if (!events.length) return false;
+
+  const row = (e) => `
+    <tr>
+      <td style="padding:10px 14px;border:1px solid #eee">
+        <div style="font-size:11px;text-transform:uppercase;color:${e.severity === 'high' ? '#c0392b' : '#888'}">${escapeHtml(e.severity)}</div>
+        <div style="font-size:15px;font-weight:600;color:#111;margin:2px 0">${escapeHtml(e.title)}</div>
+        <div style="font-size:13px;color:#555">${escapeHtml(e.body)}</div>
+      </td>
+    </tr>`;
+
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px">
+    <h2 style="margin:0 0 4px">${escapeHtml(site.name)} — ${events.length} alert${events.length === 1 ? '' : 's'}</h2>
+    <table style="border-collapse:collapse;width:100%">${events.map(row).join('')}</table>
+    <p style="color:#999;font-size:12px;margin-top:16px">Automated alert. Open the dashboard for full detail.</p>
+  </div>`;
+
+  await transporter.sendMail({
+    from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
+    to: recipient,
+    subject: `${site.name}: ${events.length} alert${events.length === 1 ? '' : 's'}`,
+    html,
+  });
+  console.log(`[email] ${events.length} notification event(s) sent to ${recipient}`);
+  return true;
+}

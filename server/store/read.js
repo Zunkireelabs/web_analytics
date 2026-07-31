@@ -99,6 +99,23 @@ export async function getChannelsRange(siteId, start, end) {
   return rows;
 }
 
+// Real per-day, per-channel rows over a range, unaggregated — distinct from
+// getChannelsRange above (which sums the whole range into one row per
+// channel, for the dashboard's range-totals view). Callers needing a daily
+// time series per channel (e.g. the Data Analyst Agent's channel-level
+// ingestion/anomaly-detection/forecast pipeline) need this shape instead —
+// one call for the whole window rather than one call per day.
+export async function getChannelsDailySeries(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT to_char(date, 'YYYY-MM-DD') AS date, channel, sessions, users
+       FROM ga4_channels
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3
+      ORDER BY date ASC, channel ASC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 export async function getChannels(siteId, date) {
   const { rows } = await query(
     `SELECT channel, sessions, users
@@ -137,7 +154,7 @@ export async function getHealthScoreOnOrBefore(siteId, date) {
 // trend needs; honestly sparse/empty if snapshots haven't accumulated yet.
 export async function getHealthScoreSeries(siteId, start, end) {
   const { rows } = await query(
-    `SELECT date, website_health_score FROM daily_reports
+    `SELECT to_char(date, 'YYYY-MM-DD') AS date, website_health_score FROM daily_reports
       WHERE site_id = $1 AND date BETWEEN $2 AND $3 AND website_health_score IS NOT NULL
       ORDER BY date ASC`,
     [siteId, start, end]
@@ -230,6 +247,55 @@ export async function getGa4BreakdownRange(siteId, start, end, dimType, limit = 
       GROUP BY dim_value
       ORDER BY sessions DESC, users DESC
       LIMIT $5`,
+    [siteId, dimType, start, end, limit]
+  );
+  return rows;
+}
+
+// Real per-day, per-dim_value rows over a range, unaggregated — distinct
+// from getGscBreakdownRange/getGa4BreakdownRange above (which sum the whole
+// range into one row per dim_value, for the dashboard's top-N view).
+// Callers needing a daily time series per dimension value (e.g. the Data
+// Analyst Agent's device/country ingestion pipeline) need this shape
+// instead — one call for the whole window rather than one call per day.
+export async function getGscBreakdownDailySeries(siteId, start, end, dimType) {
+  const { rows } = await query(
+    `SELECT to_char(date, 'YYYY-MM-DD') AS date, dim_value, clicks, impressions, ctr, position
+       FROM gsc_breakdown
+      WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4
+      ORDER BY date ASC, dim_value ASC`,
+    [siteId, dimType, start, end]
+  );
+  return rows;
+}
+
+export async function getGa4BreakdownDailySeries(siteId, start, end, dimType) {
+  const { rows } = await query(
+    `SELECT to_char(date, 'YYYY-MM-DD') AS date, dim_value, sessions, users
+       FROM ga4_breakdown
+      WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4
+      ORDER BY date ASC, dim_value ASC`,
+    [siteId, dimType, start, end]
+  );
+  return rows;
+}
+
+// Real per-day rows for 'page'/'query' dim_types, but bounded to the top N
+// (by clicks) PER DAY, unlike getGscBreakdownDailySeries above — real page/
+// query cardinality can be thousands of distinct values per day, so an
+// unbounded per-day series (fine for the handful of devices/countries that
+// function serves) isn't safe here. Same shape as get_gsc_breakdown's
+// range-aggregated top-N, but per day.
+export async function getGscBreakdownDailyTopN(siteId, start, end, dimType, limit = 50) {
+  const { rows } = await query(
+    `SELECT date, dim_value, clicks, impressions, ctr, position FROM (
+       SELECT to_char(date, 'YYYY-MM-DD') AS date, dim_value, clicks, impressions, ctr, position,
+              ROW_NUMBER() OVER (PARTITION BY date ORDER BY clicks DESC NULLS LAST) AS rn
+         FROM gsc_breakdown
+        WHERE site_id = $1 AND dim_type = $2 AND date BETWEEN $3 AND $4
+     ) ranked
+     WHERE rn <= $5
+     ORDER BY date ASC, clicks DESC`,
     [siteId, dimType, start, end, limit]
   );
   return rows;

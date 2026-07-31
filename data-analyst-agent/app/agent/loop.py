@@ -1,5 +1,5 @@
 """Tool-calling orchestration for POST /ask/{client_id}. Decides which of
-the 5 cache tools to call (via Claude) and dispatches them to handlers.py,
+the 5 cache tools to call (via the LLM) and dispatches them to handlers.py,
 closed over the caller's already-validated client_id — client_id is never
 something the model can set. Mirrors the sibling Node app's
 agentic-orchestrator.js pattern (bounded rounds, bounded tool calls) but
@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.handlers import HANDLERS
-from app.agent.narrator import call_claude
+from app.agent.narrator import call_llm
 from app.agent.tools import build_tool_definitions
 from app.db.models import MetricCatalog
 
@@ -24,7 +24,7 @@ async def ask(session: AsyncSession, client_id: int, question: str) -> dict:
     trace = []
 
     for _round in range(MAX_ROUNDS):
-        response = await call_claude(messages, tools)
+        response = await call_llm(messages, tools)
         messages.append({"role": "assistant", "content": response.content})
 
         tool_uses = [block for block in response.content if block.type == "tool_use"]
