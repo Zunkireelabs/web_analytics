@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     iqr_multiplier: float = 1.5
     forecast_horizon_days: int = 14
     min_history_days_for_forecast: int = 30
+    forecast_horizon_weeks: int = 8
+    min_history_weeks_for_forecast: int = 8
     forecast_horizon_months: int = 3
     min_history_months_for_forecast: int = 3
 

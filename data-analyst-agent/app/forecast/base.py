@@ -23,8 +23,8 @@ class ForecastResult:
 
 
 class ForecastModel(ABC):
-    """One cadence's forecaster. 'weekly'/'monthly' register their own
-    subclass in registry.py later — never a change to daily.py."""
+    """One cadence's forecaster. Each cadence registers its own subclass
+    in registry.py — never a change to another cadence's module."""
 
     min_history_periods: int
 

@@ -10,6 +10,7 @@ from app.forecast.registry import FORECASTERS
 
 HORIZON_BY_CADENCE = {
     "daily": settings.forecast_horizon_days,
+    "weekly": settings.forecast_horizon_weeks,
     "monthly": settings.forecast_horizon_months,
 }
 
