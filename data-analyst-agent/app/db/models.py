@@ -27,11 +27,12 @@ class Client(Base):
     # an engineering one. Populated at onboarding or backfilled later; null
     # until then (see scripts/onboard_client.py --industry).
     industry: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("status IN ('active','paused','suspended')", name="clients_status_check"),
+        Index("idx_clients_industry", "industry"),
     )
 
 
@@ -56,7 +57,7 @@ class MetricCatalog(Base):
     supports_anomaly_detection: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     collector_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("cadence IN ('daily','weekly','monthly')", name="metrics_catalog_cadence_check"),
@@ -114,6 +115,7 @@ class PageQueryObservation(Base):
 
     __table_args__ = (
         CheckConstraint("dimension_type IN ('page','query')", name="page_query_observations_dimension_type_check"),
+        Index("idx_page_query_observations_lookup", "client_id", "dimension_type", "period_start"),
     )
 
 
@@ -131,7 +133,7 @@ class MetricPeriodStats(Base):
     prior_value: Mapped[float | None] = mapped_column(Numeric)
     abs_change: Mapped[float | None] = mapped_column(Numeric)
     pct_change: Mapped[float | None] = mapped_column(Numeric)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("period_type IN ('wow','mom')", name="metric_period_stats_type_check"),
@@ -156,7 +158,7 @@ class Anomaly(Base):
     score: Mapped[float | None] = mapped_column(Numeric)
     threshold_used: Mapped[float | None] = mapped_column(Numeric)
     direction: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("method IN ('zscore','iqr')", name="anomalies_method_check"),
@@ -182,7 +184,7 @@ class ForecastRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="ok")
     params: Mapped[dict | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
-    generated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("cadence IN ('daily','weekly','monthly')", name="forecast_runs_cadence_check"),
@@ -221,7 +223,7 @@ class Insight(Base):
     insight_type: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str] = mapped_column(Text, nullable=False)
     evidence: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    generated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint(
@@ -255,7 +257,7 @@ class Recommendation(Base):
     # Free text, not a user FK — this service only has one static admin key
     # (see security/auth.py), no per-admin identity to reference yet.
     resolved_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("priority IN ('high','medium','low')", name="recommendations_priority_check"),
@@ -273,7 +275,7 @@ class IngestionRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     took_ms: Mapped[int | None] = mapped_column()
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("status IN ('ok','insufficient-data','error')", name="ingestion_runs_status_check"),
