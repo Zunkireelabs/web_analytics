@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +55,39 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
     }
 
 
+@router.get("/dashboard/{client_id}/series/{metric_key}")
+async def get_metric_series(
+    metric_key: str, client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Cache-only, like GET /dashboard/{client_id} — the raw site-level
+    observation history _metric_card's latest_value/period_stats summarize
+    away. Exists for the Analyst trend chart, which needs the full series
+    (client-side bucketed into week/month) to draw alongside the same
+    forecast band _metric_card already exposes."""
+    metric = await session.get(MetricCatalog, metric_key)
+    if metric is None or not metric.enabled:
+        raise HTTPException(status_code=404, detail="Unknown or disabled metric")
+
+    rows = (
+        await session.execute(
+            select(MetricObservation.period_start, MetricObservation.value).where(
+                MetricObservation.client_id == client.id, MetricObservation.metric_key == metric_key,
+                MetricObservation.dimension_type == "site", MetricObservation.dimension_value == "__site__",
+            ).order_by(MetricObservation.period_start)
+        )
+    ).all()
+
+    return {
+        "client": {"id": client.id, "name": client.name},
+        "metric_key": metric.metric_key, "display_name": metric.display_name, "unit": metric.unit,
+        "series": [
+            {"date": period_start.isoformat(), "value": float(value) if value is not None else None}
+            for period_start, value in rows
+        ],
+        "forecast": await _latest_forecast(session, client.id, metric_key),
+    }
+
+
 async def _metric_card(session: AsyncSession, client_id: int, metric: MetricCatalog) -> dict:
     latest = (
         await session.execute(
@@ -90,32 +123,6 @@ async def _metric_card(session: AsyncSession, client_id: int, metric: MetricCata
         )
     ).scalars().all()
 
-    forecast_run = (
-        await session.execute(
-            select(ForecastRun).where(
-                ForecastRun.client_id == client_id, ForecastRun.metric_key == metric.metric_key,
-                ForecastRun.dimension_type == "site", ForecastRun.dimension_value == "__site__",
-            ).order_by(ForecastRun.generated_at.desc()).limit(1)
-        )
-    ).scalar_one_or_none()
-    forecast = None
-    if forecast_run is not None:
-        points = []
-        if forecast_run.status == "ok":
-            points = (
-                await session.execute(
-                    select(ForecastPoint).where(ForecastPoint.forecast_run_id == forecast_run.id).order_by(ForecastPoint.target_period)
-                )
-            ).scalars().all()
-        forecast = {
-            "status": forecast_run.status, "model": forecast_run.model,
-            "points": [
-                {"target_date": p.target_period.isoformat(), "point_estimate": float(p.point_estimate),
-                 "lower_bound": float(p.lower_bound), "upper_bound": float(p.upper_bound)}
-                for p in points
-            ],
-        }
-
     return {
         "metric_key": metric.metric_key, "display_name": metric.display_name, "unit": metric.unit,
         "visualization_type": metric.visualization_type, "icon": metric.icon,
@@ -127,5 +134,34 @@ async def _metric_card(session: AsyncSession, client_id: int, metric: MetricCata
              "score": float(a.score) if a.score is not None else None}
             for a in recent_anomalies
         ],
-        "forecast": forecast,
+        "forecast": await _latest_forecast(session, client_id, metric.metric_key),
+    }
+
+
+async def _latest_forecast(session: AsyncSession, client_id: int, metric_key: str) -> dict | None:
+    forecast_run = (
+        await session.execute(
+            select(ForecastRun).where(
+                ForecastRun.client_id == client_id, ForecastRun.metric_key == metric_key,
+                ForecastRun.dimension_type == "site", ForecastRun.dimension_value == "__site__",
+            ).order_by(ForecastRun.generated_at.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+    if forecast_run is None:
+        return None
+
+    points = []
+    if forecast_run.status == "ok":
+        points = (
+            await session.execute(
+                select(ForecastPoint).where(ForecastPoint.forecast_run_id == forecast_run.id).order_by(ForecastPoint.target_period)
+            )
+        ).scalars().all()
+    return {
+        "status": forecast_run.status, "model": forecast_run.model,
+        "points": [
+            {"target_date": p.target_period.isoformat(), "point_estimate": float(p.point_estimate),
+             "lower_bound": float(p.lower_bound), "upper_bound": float(p.upper_bound)}
+            for p in points
+        ],
     }

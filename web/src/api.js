@@ -117,6 +117,21 @@ export const api = {
     hardDelete: (id, confirmName) => req(`/internal/tenants/${id}/hard-delete`, { method: 'POST', body: JSON.stringify({ confirmName }) }),
   },
 
+  // Staff-only "Analyst" dashboard — thin passthrough to the standalone
+  // data-analyst-agent/ Python service via server/routes/dataAnalyst.js
+  // (which attaches the service's admin key server-side). Cross-client, same
+  // gate as `clients` above.
+  analyst: {
+    dashboard: (clientId) => req(`/internal/analyst/dashboard/${clientId}`),
+    series: (clientId, metricKey) => req(`/internal/analyst/dashboard/${clientId}/series/${metricKey}`),
+    breakdown: (clientId, metricKey, dimensionType) =>
+      req(`/internal/analyst/dashboard/${clientId}/breakdown/${metricKey}/${dimensionType}`),
+    ask: (clientId, question) => req(`/internal/analyst/ask/${clientId}`, { method: 'POST', body: JSON.stringify({ question }) }),
+    resolveRecommendation: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/resolve`, { method: 'POST' }),
+    alerts: () => req('/internal/analyst/alerts'),
+  },
+
   // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —
   // any tenant, any role including platform tiers. Distinct from `team`
   // below, which is scoped to the caller's own tenant.

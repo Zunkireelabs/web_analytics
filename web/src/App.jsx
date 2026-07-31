@@ -18,6 +18,7 @@ const CommandCenter = lazy(() => import('./pages/CommandCenter.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
+const Analyst = lazy(() => import('./pages/Analyst.jsx'));
 const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
@@ -150,6 +151,7 @@ export default function App() {
               <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this session's own. */}
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
+              {isInternal && <Route path="/analyst" element={<Analyst />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
                   server/mcp/oauth-provider.js's authorize(), scoped to this
                   session's own siteId server-side, same as every route above. */}
