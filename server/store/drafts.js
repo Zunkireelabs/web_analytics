@@ -236,6 +236,17 @@ export async function countVisibleFaqDrafts(siteId) {
   return rows[0].n;
 }
 
+// The true sitewide count the visible-FAQ cap must be checked against:
+// pages this tool itself gave a visible FAQ (countVisibleFaqDrafts) PLUS
+// pages that already had one organically before this tool ever ran
+// (site.visible_faq_baseline, migration 074, set via the staff-triggered
+// "Recalculate FAQ baseline" action). Using countVisibleFaqDrafts alone
+// would let a site's total visible-FAQ pages exceed visible_faq_cap once
+// any pre-existing organic FAQs are counted in.
+export async function countVisibleFaqPages(site) {
+  return (await countVisibleFaqDrafts(site.id)) + (site.visible_faq_baseline || 0);
+}
+
 // Same retryable-in-place pattern as recordApplyFailure, for a
 // mergeToStage() failure (e.g. a real merge conflict) — the branch itself
 // is already real/pushed at this point, only the merge call failed, so this
@@ -257,7 +268,7 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 // ONLY path to 'implemented' for all 10. The legacy manual bypass below is
 // kept only as an escape hatch for a draft whose type somehow isn't in this
 // list (defensive, not expected to ever apply today).
-export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content'];
+export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap'];
 
 // approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real

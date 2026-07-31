@@ -1,8 +1,12 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
+import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { getFileContent } from '../github/client.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
+import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
@@ -43,6 +47,7 @@ router.get('/internal/clients', async (req, res, next) => {
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
       oauthMaxPermissionLevel: s.oauth_max_permission_level,
       visibleFaqCap: s.visible_faq_cap,
+      visibleFaqBaseline: s.visible_faq_baseline,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -411,8 +416,9 @@ router.post('/internal/clients/:id/oauth-policy', async (req, res, next) => {
 
 // Sitewide ceiling on how many pages may get a visible on-page FAQ block
 // (migration 071) — read by render-inspector.js's inspectRenderMode via
-// countVisibleFaqDrafts to keep visible FAQs selective across a site rather
-// than appearing on every eligible page.
+// countVisibleFaqPages (tool-injected count + visible_faq_baseline below) to
+// keep visible FAQs selective across a site rather than appearing on every
+// eligible page.
 router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
   try {
     const siteId = Number(req.params.id);
@@ -437,6 +443,57 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
     });
 
     res.json({ id: site.id, visibleFaqCap: site.visible_faq_cap });
+  } catch (e) { next(e); }
+});
+
+// Scans every page the site has a concrete file mapping for (url_file_map.
+// pages — patterns[] template routes aren't enumerable, so aren't included)
+// and counts how many already have a genuinely visible, organic FAQ block
+// (hasVisibleFaqSignal, render-inspector.js) — i.e. ones this tool never
+// touched. Stored as sites.visible_faq_baseline (migration 074) so the
+// visible-FAQ cap (above) is checked against the site's TRUE total, not just
+// FAQs the tool itself injected. Deliberately staff-triggered, not run on
+// every apply — a site's real pages only change outside this tool
+// occasionally, so a one-time/on-demand scan here is the right cost/
+// freshness tradeoff (see migration 074's comment).
+router.post('/internal/clients/:id/recalculate-faq-baseline', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const site = await getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (!site.repo_owner || !site.repo_name) {
+      return res.status(400).json({ error: 'This site has no repo connected yet — connect it via `npm run connect-repo` before recalculating the FAQ baseline.' });
+    }
+
+    const pageUrls = Object.keys(site.url_file_map?.pages || {});
+    const branch = baseBranch(site);
+    const seenFiles = new Set();
+    const pagesWithFaq = [];
+    let pagesScanned = 0;
+
+    for (const pageUrl of pageUrls) {
+      const filePath = resolveFile(site, pageUrl);
+      if (!filePath || seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
+      const file = await getFileContent(site, filePath, branch);
+      if (!file) continue;
+      pagesScanned++;
+      if (hasVisibleFaqSignal(file.content)) pagesWithFaq.push(pageUrl);
+    }
+
+    const updated = await updateSiteVisibleFaqBaseline({ siteId, visibleFaqBaseline: pagesWithFaq.length });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.visible_faq_baseline_recalculated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { pagesScanned, visibleFaqBaseline: pagesWithFaq.length, pagesWithFaq },
+      success: true,
+    });
+
+    res.json({ id: updated.id, visibleFaqBaseline: updated.visible_faq_baseline, pagesScanned, pagesWithFaq });
   } catch (e) { next(e); }
 });
 

@@ -70,7 +70,7 @@ export async function fetchHtml(url) {
   }
 }
 
-function analyzePage(html, pageUrl) {
+export function analyzePage(html, pageUrl) {
   const $ = cheerio.load(html);
   const title = $('title').first().text().trim();
   const metaDescription = ($('meta[name="description"]').attr('content') || '').trim();
@@ -78,19 +78,56 @@ function analyzePage(html, pageUrl) {
 
   const schemaTypes = new Set();
   let hasFaqSchema = false;
+  // GEO signals confirmed via a cross-check against the sibling audit tool's
+  // geo checks (authorExpertise.js/freshnessSignals.js/reviewRatingSchema.js)
+  // — same detection logic, so a page verified by that tool and this one
+  // agree. Blocks (top-level JSON-LD items + their flattened @graph entries)
+  // are collected once so each of author/date/review can inspect them
+  // without three separate re-parses of the same script tags.
+  let hasAuthorSchema = false;
+  let hasFreshnessSchema = false;
+  let hasReviewSchema = false;
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
       const data = JSON.parse($(el).text());
       const items = Array.isArray(data) ? data : [data];
+      const blocks = [];
       for (const item of items) {
-        const types = [].concat(item['@type'] || [], (item['@graph'] || []).map((g) => g['@type']) || []).flat();
+        if (item && typeof item === 'object') blocks.push(item);
+        if (item && Array.isArray(item['@graph'])) {
+          for (const g of item['@graph']) if (g && typeof g === 'object') blocks.push(g);
+        }
+      }
+      for (const block of blocks) {
+        const types = [].concat(block['@type'] || []).flat();
         types.forEach((t) => t && schemaTypes.add(t));
         if (types.includes('FAQPage')) hasFaqSchema = true;
+        if (types.includes('Review') || types.includes('AggregateRating')) hasReviewSchema = true;
+        const rating = block.aggregateRating;
+        if (rating && typeof rating === 'object') {
+          const ratingTypes = [].concat(rating['@type'] || []).flat();
+          if (ratingTypes.includes('AggregateRating') || (rating.ratingValue && rating.reviewCount)) hasReviewSchema = true;
+        }
+        const author = block.author;
+        if (typeof author === 'string' && author.trim()) hasAuthorSchema = true;
+        else if (Array.isArray(author) && author.some((a) => a && (a.name || typeof a === 'string'))) hasAuthorSchema = true;
+        else if (author && typeof author === 'object' && author.name) hasAuthorSchema = true;
+        if (block.datePublished || block.dateModified) hasFreshnessSchema = true;
       }
     } catch { /* malformed JSON-LD on the page — ignore that block */ }
   });
   const hasAnySchema = schemaTypes.size > 0;
   const hasFaqHeading = /faq|frequently asked questions/i.test(headingText);
+
+  // Byline/date markup outside JSON-LD — same non-schema fallback signals
+  // the audit tool's authorExpertise.js/freshnessSignals.js check.
+  const hasAuthorMarkup = $('[rel="author"]').length > 0
+    || $('[itemprop="author"]').length > 0
+    || $('meta[name="author"]').length > 0
+    || $('.author, .byline, [class*="author-"]').length > 0;
+  const hasFreshnessMeta = $('meta[property="article:published_time"]').length > 0
+    || $('meta[property="article:modified_time"]').length > 0;
+  const hasFreshnessTimeTag = $('time[datetime]').length > 0;
 
   let host = null;
   try { host = new URL(pageUrl).hostname; } catch { /* leave host null */ }
@@ -116,6 +153,22 @@ function analyzePage(html, pageUrl) {
       return true;
     }).length
     : 0;
+
+  // Distinct external, non-self domains linked from the page's real content —
+  // same signal and >=2 threshold as the audit tool's externalCitations.js.
+  // Well-sourced content (citing outside authorities) is more likely to be
+  // reused/cited by an AI assistant than a page that never links out.
+  const externalCitationDomains = new Set();
+  if (host) {
+    $('article a[href], main a[href], body a[href]').each((_, el) => {
+      const href = ($(el).attr('href') || '').trim();
+      if (!/^https?:\/\//i.test(href)) return;
+      try {
+        const linkHost = new URL(href).hostname.replace(/^www\./, '');
+        if (linkHost !== host.replace(/^www\./, '')) externalCitationDomains.add(linkHost);
+      } catch { /* ignore malformed href */ }
+    });
+  }
 
   const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = bodyText ? bodyText.split(' ').filter(Boolean).length : 0;
@@ -224,18 +277,41 @@ function analyzePage(html, pageUrl) {
     hasViewportMeta, // mobile-usability.js
     viewportHasDeviceWidth, // mobile-usability.js
     viewportBlocksZoom, // mobile-usability.js
+    // GEO signals — see contentGapChecks below for the gap types these feed.
+    hasAuthorSignal: hasAuthorSchema || hasAuthorMarkup,
+    hasFreshnessSignal: hasFreshnessSchema || hasFreshnessMeta || hasFreshnessTimeTag,
+    hasReviewSchema,
+    externalCitationDomainCount: externalCitationDomains.size,
+    hasExternalCitations: externalCitationDomains.size >= 2,
   };
 }
 
-// Known AI-crawler user-agent tokens checked against robots.txt. Not
-// exhaustive, but covers the major LLM/answer-engine crawlers as of today.
-const AI_CRAWLER_AGENTS = ['GPTBot', 'ChatGPT-User', 'ClaudeBot', 'anthropic-ai', 'PerplexityBot', 'Google-Extended', 'Applebot-Extended', 'CCBot', 'Bytespider'];
+// Real-time answer-engine crawlers — the ones that actually fetch/browse a
+// page to ground a live AI answer, or (Google-Extended/Applebot-Extended)
+// opt a site into that vendor's own AI-answer features. Blocking one of
+// these is a genuine citation-readiness problem. Matches EXACTLY the "must
+// be Allow" list generators/llms-txt.js's own prompt defines — these two
+// files must never drift on what counts as an answer-engine crawler.
+//
+// Deliberately EXCLUDES CCBot and Bytespider (both training-data-only
+// scrapers, no live-citation role) — generators/llms-txt.js's own prompt
+// calls Bytespider out by name as "training-data scraping with no citation
+// benefit," and disallowing it (or CCBot) is a normal, even recommended,
+// choice that has no bearing on whether this site's pages can actually be
+// cited in a live AI answer. Confirmed as a real false-positive on a real
+// site: a robots.txt that correctly Allow'd every answer-engine bot while
+// disallowing only Bytespider was still reported as
+// robotsAllowsAiCrawlers: false before this fix, because the old version
+// of this list (AI_CRAWLER_AGENTS) lumped every "AI-related" token
+// together regardless of whether it fetches pages for live citation.
+const ANSWER_ENGINE_CRAWLER_AGENTS = ['GPTBot', 'ChatGPT-User', 'ClaudeBot', 'anthropic-ai', 'PerplexityBot', 'Google-Extended', 'Applebot-Extended'];
 
 // Simplified robots.txt scan (line-based, not a full RFC 9309 parser): for
-// each known AI-crawler user-agent block, treat a bare "Disallow: /" as
+// each known answer-engine user-agent block, treat a bare "Disallow: /" as
 // fully blocking that crawler. Anything more specific (partial paths) is
-// not evaluated — this only answers "is this bot flatly disallowed site-wide".
-function robotsAllowsAiCrawlers(robotsTxt) {
+// not evaluated — this only answers "is a real answer-engine bot flatly
+// disallowed site-wide".
+export function robotsAllowsAiCrawlers(robotsTxt) {
   const lines = robotsTxt.split('\n').map((l) => l.trim());
   let currentAgents = [];
   let blockedAny = false;
@@ -247,7 +323,7 @@ function robotsAllowsAiCrawlers(robotsTxt) {
     if (key === 'user-agent') {
       currentAgents = [value];
     } else if (key === 'disallow' && value === '/') {
-      if (currentAgents.some((a) => a === '*' || AI_CRAWLER_AGENTS.some((bot) => bot.toLowerCase() === a.toLowerCase()))) {
+      if (currentAgents.some((a) => a === '*' || ANSWER_ENGINE_CRAWLER_AGENTS.some((bot) => bot.toLowerCase() === a.toLowerCase()))) {
         blockedAny = true;
       }
     }
@@ -325,6 +401,65 @@ export async function checkLlmsReadiness(origin) {
   };
 }
 
+// WebMCP manifest detection — an emerging, low-adoption standard for a site
+// to declare real invocable actions (e.g. "add to cart", "submit form") that
+// an AI browsing agent can call directly instead of simulating clicks.
+// Checked the same site-level way as llms.txt/robots.txt above —
+// fetchTextIfExists already guards against a catch-all SPA fallback
+// returning the homepage (text/html) as a false "200 exists" for this path,
+// the same class of bug this codebase already had to fix once for robots.txt
+// detection. Deliberately detection-only: this tool never generates a
+// manifest itself, since a real one requires knowing this site's actual
+// invocable actions — a fact no page-content signal can honestly derive,
+// and fabricating one would be worse than not having it (see
+// ai-visibility.js's webMcpFinding — recommendedAction is always null).
+export async function checkWebMcpPresence(origin) {
+  const manifest = await fetchTextIfExists(`${origin}/.well-known/mcp.json`);
+  return { hasManifest: manifest.ok };
+}
+
+// Site-level SSL/HTTPS enablement — two distinct real signals (a host can
+// serve HTTPS while still leaving a stray non-redirecting http:// listener
+// live, or not serve HTTPS at all), matching the audit tool's
+// ssl-enabled/https-redirect checks. Deliberately its own fetch, not reused
+// from fetchTextIfExists: that helper treats a text/html response as "not
+// found" (a catch-all-SPA guard correct for llms.txt/robots.txt), which
+// would misreport a perfectly normal HTML homepage as HTTPS-unreachable.
+async function fetchFinalUrl(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0)' },
+    });
+    return { ok: true, finalUrl: res.url };
+  } catch (err) {
+    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err?.message || err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+export async function checkHttpsStatus(hostname) {
+  if (!hostname || isPrivateOrLocalHost(hostname)) return { httpsEnabled: null, httpRedirectsToHttps: null };
+  const [https, http] = await Promise.all([fetchFinalUrl(`https://${hostname}/`), fetchFinalUrl(`http://${hostname}/`)]);
+  return {
+    httpsEnabled: https.ok,
+    // null when the plain http:// listener isn't reachable at all — many
+    // hosts firewall port 80 entirely, which is a different, unremarkable
+    // fact from "serves http without redirecting to https."
+    httpRedirectsToHttps: http.ok ? http.finalUrl.startsWith('https://') : null,
+  };
+}
+
+// Pure — one Content-Encoding header value, real gzip/br/deflate detection.
+// Split out from the finding logic that calls it so it's directly testable
+// without a network mock.
+export function isCompressedEncoding(contentEncoding) {
+  return /gzip|br|deflate/i.test(contentEncoding || '');
+}
+
 function recommendActions(analysis, query) {
   const tags = [];
   const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -370,6 +505,16 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Missing question-style headings': null,
   'Title length': 'meta-title',
   'Meta description length': 'meta-title',
+  // GEO gaps — deliberately null on all four. Every generator that exists
+  // today drafts from real evidence already on the page or a caller-given
+  // param; none of these can be honestly auto-drafted without fabricating
+  // the underlying fact (a real author name, a real publish date, a real
+  // review/rating count, or a real external source) — informational-only
+  // findings, same principle as authority.js/ai-recommendation.js.
+  'Missing author/expertise signal': null,
+  'Missing freshness signal': null,
+  'Missing review/rating schema': null,
+  'Missing external citations': null,
 };
 
 // Effort is a property of the action itself (structural config fix vs
@@ -377,7 +522,7 @@ export const GAP_TYPE_TO_GENERATOR = {
 // honest, documented lookup instead of a per-agent guessed constant.
 const GENERATOR_EFFORT = {
   'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
-  'security-headers': 'Low', 'html-lang': 'Low',
+  'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High',
@@ -471,6 +616,29 @@ function contentGapChecks(analysis, queryTexts = []) {
   if (!analysis.hasOpenGraph) gaps.push({ type: 'Missing Open Graph tags', detail: 'No og:title/og:description found.' });
   if (analysis.listCount === 0) gaps.push({ type: 'Missing structured lists', detail: 'No ordered/unordered lists — lists help answer-engine extraction.' });
   if (analysis.questionHeadingCount === 0) gaps.push({ type: 'Missing question-style headings', detail: 'No headings phrased as questions — reduces AEO/featured-snippet eligibility.' });
+
+  // GEO (Generative Engine Optimization) gaps — confirmed via a cross-check
+  // against the sibling audit tool's geo checks (authorExpertise.js,
+  // freshnessSignals.js, reviewRatingSchema.js, externalCitations.js): real,
+  // previously-uncovered signals in what AI assistants weigh when deciding
+  // what to cite/recommend, on top of the classic SEO gaps above.
+  if (!analysis.hasAuthorSignal) {
+    gaps.push({ type: 'Missing author/expertise signal', detail: 'No author schema, rel="author", itemprop="author", meta author tag, or visible byline found — unattributed content is less likely to be cited by generative engines.' });
+  }
+  if (!analysis.hasFreshnessSignal) {
+    gaps.push({ type: 'Missing freshness signal', detail: 'No publish or last-updated date found (no datePublished/dateModified schema, article date meta tags, or a <time> element) — generative engines favor recently-updated content when choosing what to cite.' });
+  }
+  if (!analysis.hasReviewSchema) {
+    gaps.push({ type: 'Missing review/rating schema', detail: 'No Review or AggregateRating schema found — this is only worth adding if the page has real reviews/ratings to mark up; never fabricate rating data to fill this gap.' });
+  }
+  if (!analysis.hasExternalCitations) {
+    gaps.push({
+      type: 'Missing external citations',
+      detail: analysis.externalCitationDomainCount === 1
+        ? 'Only 1 distinct external domain linked — add a few more authoritative sources.'
+        : 'No links to external, authoritative sources found in the page content — AI assistants favor well-sourced content when deciding what to reuse or recommend.',
+    });
+  }
 
   return gaps;
 }

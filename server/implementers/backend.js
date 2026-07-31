@@ -7,13 +7,18 @@ import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
+
 import { countVisibleFaqDrafts } from '../store/drafts.js';
+import { detectConflictMarkers } from './lib/conflict-marker-check.js';
+
+import { countVisibleFaqPages } from '../store/drafts.js';
+
 
 export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
-  description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content'],
+  description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'sitemap'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -63,6 +68,18 @@ async function pushLlmsTxtBranch(site, draft, batchInfo) {
   return pushDraftBranch(site, draft, files, batchInfo);
 }
 
+// sitemap is site-level like llms-txt, and draft.content.sitemapXml is
+// already the complete new file body (server/generators/sitemap.js merges
+// existing entries + missing URLs itself, additive-only) — a straight file
+// write, zero content transformation here, same shape as pushLlmsTxtBranch.
+async function pushSitemapBranch(site, draft, batchInfo) {
+  const path = resolveSiteRootFile(site, 'sitemap');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  return pushDraftBranch(site, draft, [{ path, content: draft.content.sitemapXml }], batchInfo);
+}
+
 // Real, hash-comment-marker splice for the nginx security-headers block —
 // nginx doesn't understand `<!-- -->`, so this can't reuse marker-merge.js's
 // BLOCK convention. No auto-insert of a missing marker (see
@@ -80,6 +97,8 @@ async function computeSecurityHeadersMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const spliced = spliceHashBlock(file.content, 'SECURITY-HEADERS', draft.content.nginxBlock);
   if (!spliced.ok) return spliced;
   const validated = validateNginxBraces(spliced.newContent);
@@ -127,6 +146,8 @@ async function computeRobotsFixMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const spliced = spliceHashBlock(file.content, 'ROBOTS-FIX', draft.content.robotsBlock);
   if (!spliced.ok) return spliced;
   return {
@@ -167,6 +188,8 @@ async function computeHtmlLangMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const injected = injectHtmlLang(file.content, draft.content.lang);
   if (!injected.ok) {
     if (injected.reason === 'lang-already-present') return { ok: false, reason: 'already-applied', error: injected.error };
@@ -212,6 +235,8 @@ async function computeViewportMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const set = setViewportMeta(file.content, draft.content.viewportContent);
   if (!set.ok) {
     if (set.reason === 'viewport-already-correct') return { ok: false, reason: 'already-applied', error: set.error };
@@ -258,6 +283,8 @@ async function computeRedirectFixMerge(site, draft, beforeRef) {
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
   const rewritten = rewriteHref(file.content, draft.content.oldHref, draft.content.newHref);
   if (!rewritten.ok) return rewritten;
   return {
@@ -332,6 +359,8 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
 
     const file = await getFileContent(site, filePath, beforeRef);
     if (!file) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: 'file-not-found' }); continue; }
+    const conflict = detectConflictMarkers(file.content);
+    if (conflict) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: conflict.reason, error: conflict.error }); continue; }
 
     const stripped = stripLink(file.content, href);
     if (!stripped.ok) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: stripped.reason, error: stripped.error }); continue; }
@@ -361,6 +390,8 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
     seenPaths.add(filePath);
     const file = await getFileContent(site, filePath, beforeRef);
     if (!file) { attempted.push({ filePath, matchedVia: 'code-search', reason: 'file-not-found' }); continue; }
+    const conflict = detectConflictMarkers(file.content);
+    if (conflict) { attempted.push({ filePath, matchedVia: 'code-search', reason: conflict.reason, error: conflict.error }); continue; }
     const stripped = stripLink(file.content, href);
     if (!stripped.ok) { attempted.push({ filePath, matchedVia: 'code-search', reason: stripped.reason, error: stripped.error }); continue; }
     files.push({
@@ -452,6 +483,8 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   if (!file) {
     return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${branch}" — confirm the path in url_file_map is correct.` };
   }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
 
   let mode, inspection;
   if (renderModeOverride) {
@@ -459,7 +492,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   } else {
     let inspectionOpts = {};
     if (INSPECTABLE_ACTION_TYPES.includes(draft.action_type)) {
-      inspectionOpts = { visibleFaqCount: await countVisibleFaqDrafts(site.id), visibleFaqCap: site.visible_faq_cap };
+      inspectionOpts = { visibleFaqCount: await countVisibleFaqPages(site), visibleFaqCap: site.visible_faq_cap };
     }
     inspection = await inspectRenderMode(file.content, draft.action_type, inspectionOpts);
     if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
@@ -471,7 +504,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     mode = inspection.mode;
   }
 
-  const built = buildMergeValues(draft.action_type, draft.content, mode);
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Auto-creates any marker in markerMap that isn't already in the live
@@ -556,6 +589,7 @@ export async function apply(site, draft, opts = {}) {
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
+  if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
@@ -596,6 +630,12 @@ export async function preview(site, draft, opts = {}) {
       const file = await getFileContent(site, llmsPath, baseBranch(site));
       return { ok: true, filePath: llmsPath, live: true, changedRegions: [{ field: 'llmsTxt', content: file?.content || '' }] };
     }
+    if (draft.action_type === 'sitemap') {
+      const path = resolveSiteRootFile(site, 'sitemap');
+      if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured.' };
+      const file = await getFileContent(site, path, baseBranch(site));
+      return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'sitemapXml', content: file?.content || '' }] };
+    }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
     if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
@@ -615,6 +655,12 @@ export async function preview(site, draft, opts = {}) {
     if (!llmsPath) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.llmsTxt is not configured.' };
     const file = await getFileContent(site, llmsPath, beforeRef);
     return { ok: true, filePath: llmsPath, oldContent: file?.content || '', newContent: draft.content.llmsTxt };
+  }
+  if (draft.action_type === 'sitemap') {
+    const path = resolveSiteRootFile(site, 'sitemap');
+    if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured.' };
+    const file = await getFileContent(site, path, beforeRef);
+    return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.sitemapXml };
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
   if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);

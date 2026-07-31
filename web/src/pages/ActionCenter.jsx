@@ -43,6 +43,7 @@ const GENERATOR_META = {
   'broken-link-fix': { label: 'Broken Link Removal', icon: '⛔', color: '#dc2626' },
   'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
   'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
+  sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
 };
 
 const DRAFT_STATUS_LABEL = {

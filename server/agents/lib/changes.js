@@ -49,6 +49,43 @@ export async function getFindingsDiff(siteId, agentIds, limit = 10) {
   return perAgent.flat().sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, limit);
 }
 
+// Pure delta computation, split out from the DB fetch below purely for
+// testability (server/agents/lib/changes.test.js exercises this directly
+// with hand-built run objects — no live DB needed). Returns null whenever
+// there's no valid PRIOR 'ok' run to compare against, or either run
+// predates aiVisibilityPct existing at all — never fabricates a delta from
+// a single data point, same discipline as getFindingsDiff requiring both
+// current AND previous to be 'ok' before diffing.
+export function computeMetricChange(current, previous) {
+  if (!current || current.status !== 'ok' || !previous || previous.status !== 'ok') return null;
+
+  const currentPct = current.facts?.aiVisibilityPct;
+  const previousPct = previous.facts?.aiVisibilityPct;
+  if (currentPct == null || previousPct == null) return null;
+
+  const currentGap = current.facts?.competitorCitationGapPct;
+  const previousGap = previous.facts?.competitorCitationGapPct;
+
+  return {
+    visibilityDelta: currentPct - previousPct,
+    // Only present once both runs' competitorCitationGapPct are real
+    // numbers — a pre-Phase-3 historical run predates this field entirely,
+    // so a gap delta against it would be comparing against a value that
+    // was never really computed.
+    gapDelta: (currentGap != null && previousGap != null) ? currentGap - previousGap : null,
+  };
+}
+
+// Run-over-run deltas for ai-recommendation's own real metrics
+// (aiVisibilityPct, competitorCitationGapPct) — distinct from
+// getFindingsDiff above, which only diffs `facts.findings` and has no way
+// to express "a percentage moved." Feeds server/notifications/detect.js's
+// metric-level alert types (citation-rate-drop, citation-gap-widened).
+export async function getAiRecommendationMetricChange(siteId) {
+  const [current, previous] = await getAgentRunHistory(siteId, 'ai-recommendation', 2);
+  return computeMetricChange(current, previous);
+}
+
 // A pure week-over-week health delta, not a finding diff — its own
 // `type: 'health'` so a timeline can render it distinctly (a trend arrow,
 // not a new/resolved marker).

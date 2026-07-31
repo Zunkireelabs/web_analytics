@@ -31,19 +31,22 @@ import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from 
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
-// ai-recommendation all run monthly (see runAgentIfDue below — real
-// competitor movement, backlink profiles, and AI-answer patterns all move
-// too slowly to justify daily/weekly cost, and for authority/ai-
-// recommendation specifically, daily would multiply real DataForSEO/OpenAI
-// spend for no real signal gain). content-gap runs weekly (via
-// executive-report's requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID
-// — real content-completeness gaps don't meaningfully shift day to day).
-// A new agent added to RECOMMENDATION_AGENT_IDS (agents/lib/insights.js)
-// lands here in DAILY_AGENT_IDS automatically unless it's added to
-// MONTHLY_AGENT_IDS below or given its own WEEKLY_ONLY_AGENT_ID-style
+// ai-recommendation are all throttled (see runAgentIfDue below — real
+// competitor movement and backlink profiles move too slowly to justify
+// daily/weekly cost, and daily would multiply real DataForSEO spend for no
+// real signal gain). ai-recommendation defaults to the same monthly
+// throttle but can opt into a weekly one instead via AI_RECOMMENDATION_CADENCE
+// (see runAiRecommendationIfDue below) — it's still excluded from
+// DAILY_AGENT_IDS either way, since even its fastest opt-in cadence is
+// weekly, never daily. content-gap runs weekly (via executive-report's
+// requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID — real
+// content-completeness gaps don't meaningfully shift day to day). A new
+// agent added to RECOMMENDATION_AGENT_IDS (agents/lib/insights.js) lands
+// here in DAILY_AGENT_IDS automatically unless it's added to
+// THROTTLED_AGENT_IDS below or given its own WEEKLY_ONLY_AGENT_ID-style
 // exclusion — pick the cadence deliberately, don't leave it to default.
-const MONTHLY_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
-const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !MONTHLY_AGENT_IDS.has(id) && id !== 'content-gap');
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && id !== 'content-gap');
 
 // Records the shared Google OAuth connection's health from organic pipeline
 // outcomes (not just the on-demand "Test connection" check), so Integration
@@ -388,35 +391,43 @@ export async function runCompetitorCheckIfDueForAllSites() {
 }
 
 // Shared "checked often, acts rarely" guard for any agent that should only
-// really run once a real calendar month has passed — the exact pattern
-// competitor-intelligence proved first (see its comment history), now used
-// by three agents (competitor-intelligence, authority, ai-recommendation)
-// so a fourth doesn't need to hand-roll the same due-check a fourth time.
-// Checked via the weekly cron block, same as everything else here, but only
-// does real work once a month. persist:true since there's no wrapper (like
+// really run once a real calendar month (or, opt-in, week) has passed — the
+// exact pattern competitor-intelligence proved first (see its comment
+// history), now used by three agents (competitor-intelligence, authority,
+// ai-recommendation) so a fourth doesn't need to hand-roll the same
+// due-check a fourth time. Checked via the weekly cron block, same as
+// everything else here, but only does real work once the chosen cadence's
+// period has passed. persist:true since there's no wrapper (like
 // executive-report's orchestration) persisting a row on this agent's behalf.
-async function runAgentIfDue(site, agentId, { start, end } = {}) {
-  const { year, month } = previousMonth(site.timezone);
-  const threshold = monthBounds(year, month).start;
+//
+// `cadence` defaults to 'month' — every existing caller (competitor-
+// intelligence, authority) is unaffected. 'week' is currently only used by
+// ai-recommendation, and only when AI_RECOMMENDATION_CADENCE=week is
+// explicitly set (see runAiRecommendationIfDue below) — this parameter
+// exists so that opt-in lives entirely in the caller, not here.
+async function runAgentIfDue(site, agentId, { start, end, cadence = 'month' } = {}) {
+  const threshold = cadence === 'week'
+    ? previousWeek(site.timezone).start
+    : monthBounds(previousMonth(site.timezone).year, previousMonth(site.timezone).month).start;
   const [lastRun] = await getLatestAgentRuns(site.id, [agentId]);
   if (lastRun && new Date(lastRun.created_at) >= new Date(threshold)) {
-    console.log(`[${agentId}] site ${site.id} already analyzed this month — skipping.`);
+    console.log(`[${agentId}] site ${site.id} already analyzed this ${cadence} — skipping.`);
     return null;
   }
   const range = start && end ? { start, end } : previousWeek(site.timezone); // still analyze the most recent real week of data when it does run
   const output = await runAgent(agentId, { siteId: site.id, start: range.start, end: range.end }, { persist: true });
-  console.log(`[${agentId}] site ${site.id}: real monthly analysis complete (status: ${output.status}).`);
+  console.log(`[${agentId}] site ${site.id}: real ${cadence}ly analysis complete (status: ${output.status}).`);
   return { status: output.status, findingsCount: output.facts?.findings?.length || 0 };
 }
 
-async function runAgentIfDueForAllSites(agentId) {
+async function runAgentIfDueForAllSites(agentId, options) {
   const sites = await listConnectedSites();
   const results = [];
   for (const site of sites) {
     try {
-      results.push(await runAgentIfDue(site, agentId));
+      results.push(await runAgentIfDue(site, agentId, options));
     } catch (err) {
-      console.error(`[job] ${agentId} monthly run failed for site ${site.id} "${site.name}":`, err.message);
+      console.error(`[job] ${agentId} throttled run failed for site ${site.id} "${site.name}":`, err.message);
     }
   }
   return results;
@@ -439,11 +450,17 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
 
-// AI Recommendation — real OpenAI prompt probes have a real per-call cost;
-// monthly keeps that cost negligible while still tracking real drift in
-// what ChatGPT recommends over time.
-export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation');
-export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation');
+// AI Recommendation — real AI prompt probes have a real per-call cost that
+// multiplies with every additional configured provider (see
+// lib/model-providers/); monthly (the default) keeps that cost negligible
+// while still tracking real drift in what AI assistants recommend over
+// time. AI_RECOMMENDATION_CADENCE=week opts into a faster, ~4.3x costlier
+// cadence — left off by default; this is a real recurring-spend decision
+// (same category as DATAFORSEO_LOGIN/PASSWORD being a pending-budget gate
+// elsewhere in this codebase), never flipped on by this code itself.
+const aiRecommendationCadence = () => (process.env.AI_RECOMMENDATION_CADENCE === 'week' ? 'week' : 'month');
+export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation', { cadence: aiRecommendationCadence() });
+export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation', { cadence: aiRecommendationCadence() });
 
 // Real site-wide page discovery (sitemap, and BFS crawl once added) — kept
 // weekly, same reasoning as runCompetitorCheckIfDue: a real crawl of up to

@@ -10,7 +10,7 @@ export const meta = {
   name: 'Content Gap Agent',
   description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
-  version: 4,
+  version: 5,
   // True topical/SERP-based gap detection (a specific topic a competitor
   // ranks for that this site has no page for at all) still has no real data
   // source — that's a different, still-unbuilt question from what's below.
@@ -22,6 +22,13 @@ export const meta = {
   // v4 adds: a real canonical-target check (not just tag presence) — flags
   // a canonical pointing at a different domain, the most common real-world
   // canonical mistake (see lib/page-content.js's contentGapChecks).
+  // v5 adds: 4 real GEO (Generative Engine Optimization) gaps confirmed via
+  // a cross-check against the sibling audit tool — author/expertise signals,
+  // freshness signals (publish/update date), review/rating schema, and
+  // external citations. All four are informational-only (recommendedAction
+  // is always null, see GAP_TYPE_TO_GENERATOR): none of the real facts they
+  // depend on (a genuine author, a genuine publish date, genuine reviews, a
+  // genuine external source) can be honestly fabricated by a generator.
   dataSources: [
     { id: 'competitor-analysis', status: 'connected', description: 'Real structural signals (FAQ/schema/comparison-content presence) from competitor-intelligence\'s monthly crawl of tracked competitor homepages — used to note when most tracked competitors have a feature a page lacks. Needs at least 2 reachable competitor profiles to produce a meaningful ratio; degrades to no competitive framing otherwise, never fabricated.' },
     { id: 'serp-api', status: 'not-connected', description: 'SERP results for true topical gap detection (a specific topic/query a competitor ranks for that this site has no page for at all)' },
@@ -76,16 +83,19 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // orchestrated run — keeps this agent independently runnable/testable
   // with identical output either way (see lib/fetch-cache.js).
   const fetchPage = pageCache || analyzePageUrl;
-  // params.page (from the agentic tool-calling loop) bypasses the normal
-  // rotation entirely and checks exactly that one page — the caller already
-  // knows which page they care about, so there's no reason to make them wait
-  // for it to come up in rotation. Real impressions still come from GSC, not
-  // guessed; markPagesChecked is skipped below so this ad-hoc check doesn't
-  // perturb the normal rotation order for every other page.
+  // params.page (from the agentic tool-calling loop) or params.pages (from
+  // the bulk full-site-audit engine, agents/lib/bulk-audit.js) bypasses the
+  // normal rotation entirely and checks exactly the given page(s) — the
+  // caller already knows which page(s) it cares about, so there's no reason
+  // to make it wait for them to come up in rotation. Real impressions still
+  // come from GSC, not guessed; markPagesChecked is skipped below so this
+  // ad-hoc check doesn't perturb the normal rotation order for every other
+  // page. Same params-bypass pattern as technical-seo.js's params.pages.
+  const explicitPages = params?.pages?.length ? params.pages : (params?.page ? [params.page] : null);
   const [{ batch, impressionsByPage }, competitorProfiles] = await Promise.all([
-    params?.page
-      ? getSearchPerformanceForPages(siteId, start, end, [params.page]).then((rows) => ({
-        batch: [params.page],
+    explicitPages
+      ? getSearchPerformanceForPages(siteId, start, end, explicitPages).then((rows) => ({
+        batch: explicitPages,
         impressionsByPage: new Map(rows.map((r) => [r.dim_value, Number(r.impressions)])),
       }))
       // Merges real GSC top pages with the site-wide page inventory (sitemap
@@ -133,7 +143,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     };
   }));
 
-  if (!params?.page) await markPagesChecked(siteId, 'content-gap', batch);
+  if (!explicitPages) await markPagesChecked(siteId, 'content-gap', batch);
 
   // AI-inferred entity suggestions only for the top-impression pages that
   // fetched successfully — bounds LLM cost while still analyzing every
@@ -280,7 +290,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const system = 'You are a content strategist writing for a non-technical site owner, summarizing on-page ' +
     'completeness across the site\'s ranking pages. Given each page\'s deterministic gaps (verified from real ' +
     'fetched HTML — headings, FAQ, schema, comparisons, alt text, canonical, Open Graph, lists, question ' +
-    'headings) and any confidence-labeled AI-suggested missing entities, write 3-4 sentences naming the highest-' +
+    'headings, author/expertise signals, freshness/last-updated signals, review/rating schema, external ' +
+    'citations) and any confidence-labeled AI-suggested missing entities, write 3-4 sentences naming the highest-' +
     'impression pages with the most impactful gaps and the single most valuable fix each. ' +
     'Competitor mentions: ONLY mention competitors, and ONLY for a specific gap whose own whyItMatters text in ' +
     'the facts already contains the literal phrase "tracked real competitors already have this" — restate that ' +
