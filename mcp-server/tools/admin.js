@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { createApiToken, listApiTokensForSite, revokeApiToken } from '../../store/api-tokens.js';
+import { createApiToken, listApiTokensForSite, revokeApiToken } from '../../server/store/api-tokens.js';
 import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from '../permissions.js';
 import { jsonResult, requireLevel, withErrorHandling } from './shared.js';
 

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from './login.js';
 import { createApiToken, listApiTokensForSite, revokeApiToken } from '../store/api-tokens.js';
-import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from '../mcp/permissions.js';
+import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from '../../mcp-server/permissions.js';
 import { getSiteById } from '../store/read.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 

@@ -3,20 +3,20 @@ import {
   getSiteById, getDataRange, getDailySeries, getRangeTotals, getMonthlyTotals,
   getChannelsRange, getChannelsDailySeries, getGscBreakdownRange, getGa4BreakdownRange, getTopMovers,
   getHealthScoreSeries, getGscBreakdownDailySeries, getGa4BreakdownDailySeries, getGscBreakdownDailyTopN,
-} from '../../store/read.js';
-import { translateQuery } from '../../report/translate.js';
-import { buildReportSummary, buildCountryBreakdown } from '../../report/summary.js';
-import { listAgentMeta } from '../../agents/registry.js';
-import { getAgentStatusList } from '../../agents/lib/agent-status.js';
-import { getAgentActivityFeed, getCommandCenterData } from '../../agents/lib/command-center.js';
-import { getAgentRunHistory } from '../../store/agent-runs.js';
-import { getAgenticOrchestrationStatsSince } from '../../store/agentic-orchestration-runs.js';
-import { listGeneratorMeta } from '../../generators/registry.js';
-import { listDrafts, getDraft } from '../../store/drafts.js';
-import { buildRecommendations } from '../../agents/lib/recommendations.js';
-import { getAuthorityScoreSeries } from '../../store/authority.js';
-import { getMonthlyMentionRate } from '../../store/ai-recommendation.js';
-import { getOwnStructuralScoreSeries } from '../../store/competitor-profiles.js';
+} from '../../server/store/read.js';
+import { translateQuery } from '../../server/report/translate.js';
+import { buildReportSummary, buildCountryBreakdown } from '../../server/report/summary.js';
+import { listAgentMeta } from '../../server/agents/registry.js';
+import { getAgentStatusList } from '../../server/agents/lib/agent-status.js';
+import { getAgentActivityFeed, getCommandCenterData } from '../../server/agents/lib/command-center.js';
+import { getAgentRunHistory } from '../../server/store/agent-runs.js';
+import { getAgenticOrchestrationStatsSince } from '../../server/store/agentic-orchestration-runs.js';
+import { listGeneratorMeta } from '../../server/generators/registry.js';
+import { listDrafts, getDraft } from '../../server/store/drafts.js';
+import { buildRecommendations } from '../../server/agents/lib/recommendations.js';
+import { getAuthorityScoreSeries } from '../../server/store/authority.js';
+import { getMonthlyMentionRate } from '../../server/store/ai-recommendation.js';
+import { getOwnStructuralScoreSeries } from '../../server/store/competitor-profiles.js';
 import { dateStr, jsonResult, withErrorHandling } from './shared.js';
 
 // Read-only analytics/reporting/agent-status/Action-Center-read MCP tools.

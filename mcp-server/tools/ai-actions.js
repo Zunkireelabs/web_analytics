@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import { runAgent } from '../../agents/runner.js';
-import { refreshCommandCenter } from '../../routes/command-center.js';
-import { refreshRecommendations, generateDraft, markDraftImplementedIfEligible } from '../../routes/action-center.js';
-import { updateDraft, deleteDraft, submitDraftForApproval } from '../../store/drafts.js';
-import { deliverToAllChannels } from '../../notifications/channels/index.js';
+import { runAgent } from '../../server/agents/runner.js';
+import { refreshCommandCenter } from '../../server/routes/command-center.js';
+import { refreshRecommendations, generateDraft, markDraftImplementedIfEligible } from '../../server/routes/action-center.js';
+import { updateDraft, deleteDraft, submitDraftForApproval } from '../../server/store/drafts.js';
+import { deliverToAllChannels } from '../../server/notifications/channels/index.js';
 import { dateStr, jsonResult, requireLevel, withErrorHandling } from './shared.js';
 
 // "AI Actions" tier tools — spend LLM/API budget and write to this app's own
@@ -15,7 +15,7 @@ import { dateStr, jsonResult, requireLevel, withErrorHandling } from './shared.j
 //
 // approve_draft, push_draft_branch, open_draft_pr, and check_pr_status are
 // deliberately NOT here — they call GitHub, so they belong in the
-// `automation` tier (server/mcp/tools/automation.js). mark_draft_implemented
+// `automation` tier (mcp-server/tools/automation.js). mark_draft_implemented
 // IS here despite being part of the same publish lifecycle: it only flips
 // internal status + best-effort local site discovery, no external call, so
 // it doesn't cross the automation boundary (defined as "touches an external

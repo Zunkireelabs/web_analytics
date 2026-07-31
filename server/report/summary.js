@@ -23,7 +23,7 @@ function withDeltaPct(entries) {
 }
 
 // Shared by GET /api/report-summary (server/routes/metrics.js) and the MCP
-// get_report_summary tool (server/mcp/tools.js) — one implementation so the
+// get_report_summary tool (mcp-server/tools.js) — one implementation so the
 // two surfaces can never drift apart. `site` must already be loaded
 // (getSiteById) by the caller; this never re-fetches it.
 export async function buildReportSummary(site, period) {

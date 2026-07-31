@@ -9,7 +9,7 @@ export function jsonResult(data) {
 
 // Defense-in-depth re-check for a gated tool's handler — never trusted to
 // be dead code just because the tool wasn't registered for a lower tier.
-// See server/mcp/permissions.js for tier ordering.
+// See mcp-server/permissions.js for tier ordering.
 export function requireLevel(permissionLevel, min) {
   if (atLeast(permissionLevel, min)) return null;
   return { isError: true, content: [{ type: 'text', text: `This tool requires "${min}" permission or higher.` }] };

@@ -63,7 +63,7 @@ export default function App() {
   // covers explicit logout, a mid-session expiry caught above, and a stale
   // session landing on a protected URL from a fresh load/hard refresh alike.
   //
-  // Exception: an OAuth "Connect" flow (server/mcp/oauth-provider.js redirects
+  // Exception: an OAuth "Connect" flow (mcp-server/oauth-provider.js redirects
   // an unauthenticated browser here, to /oauth/authorize-consent, carrying
   // client_id/redirect_uri/code_challenge/state/scope in the query string).
   // Rewriting that away to '/' would lose those params before the user even
@@ -153,7 +153,7 @@ export default function App() {
               {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
               {isInternal && <Route path="/analyst" element={<Analyst />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
-                  server/mcp/oauth-provider.js's authorize(), scoped to this
+                  mcp-server/oauth-provider.js's authorize(), scoped to this
                   session's own siteId server-side, same as every route above. */}
               <Route path="/oauth/authorize-consent" element={<OAuthAuthorize />} />
               {/* Platform Administration — cross-tenant, platform_admin only.

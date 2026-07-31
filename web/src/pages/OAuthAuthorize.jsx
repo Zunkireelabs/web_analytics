@@ -4,14 +4,14 @@ import { api } from '../api.js';
 import { ShieldCheck, Sparkles, Check } from 'lucide-react';
 
 // The OAuth "Connect" consent screen — reached via a 302 from
-// server/mcp/oauth-provider.js's authorize() (server/routes/oauth.js's
+// mcp-server/oauth-provider.js's authorize() (mcp-server/routes/oauth.js's
 // mounted SDK handler redirects an unauthenticated browser through <Login>
 // first, see the App.jsx redirect-preservation fix, then lands here once
 // authed). Renders inside the normal authenticated app shell (Sidebar etc.)
 // like every other route — this is still the logged-in user's own session.
 //
 // Deliberately no permission-tier picker: what this connection will be
-// allowed to do is computed entirely server-side (server/mcp/oauth-provider.js
+// allowed to do is computed entirely server-side (mcp-server/oauth-provider.js
 // computeEffectivePermissionLevel, from sites.oauth_max_permission_level) —
 // this component only ever displays that result, never lets the user (or a
 // malicious query param) choose it.

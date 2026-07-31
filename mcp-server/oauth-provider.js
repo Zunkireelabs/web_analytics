@@ -1,15 +1,15 @@
 import crypto from 'node:crypto';
 import { InvalidGrantError, ServerError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { getClientById, registerClient } from '../store/oauth-clients.js';
-import { createAuthorizationCode, findActiveCodeByRawValue, consumeAuthorizationCode } from '../store/oauth-authorization-codes.js';
-import { createAccessToken, findActiveOauthAccessTokenByRawValue, revokeOauthAccessTokenByRawValue, revokeOauthAccessTokensForRefreshFamily } from '../store/oauth-access-tokens.js';
-import { createRefreshToken, findRefreshTokenByRawValue, rotateRefreshToken, revokeRefreshTokenFamily, revokeRefreshTokenByRawValue } from '../store/oauth-refresh-tokens.js';
-import { getSiteById } from '../store/read.js';
+import { getClientById, registerClient } from '../server/store/oauth-clients.js';
+import { createAuthorizationCode, findActiveCodeByRawValue, consumeAuthorizationCode } from '../server/store/oauth-authorization-codes.js';
+import { createAccessToken, findActiveOauthAccessTokenByRawValue, revokeOauthAccessTokenByRawValue, revokeOauthAccessTokensForRefreshFamily } from '../server/store/oauth-access-tokens.js';
+import { createRefreshToken, findRefreshTokenByRawValue, rotateRefreshToken, revokeRefreshTokenFamily, revokeRefreshTokenByRawValue } from '../server/store/oauth-refresh-tokens.js';
+import { getSiteById } from '../server/store/read.js';
 import { LEVEL_RANK, DEFAULT_PERMISSION_LEVEL } from './permissions.js';
 
 // Implements the MCP SDK's OAuthServerProvider interface
 // (@modelcontextprotocol/sdk/server/auth/provider.js), backed by Postgres via
-// the store modules above. Mounted by server/routes/oauth.js.
+// the store modules above. Mounted by mcp-server/routes/oauth.js.
 //
 // *** Permission-level derivation lives entirely in this file. ***
 // The OAuth client, the browser, and the consent UI never determine
@@ -92,7 +92,15 @@ export const oauthProvider = {
     if (params.state) qs.set('state', params.state);
     if (params.scopes && params.scopes.length) qs.set('scope', params.scopes.join(' '));
     if (params.resource) qs.set('resource', params.resource.href);
-    res.redirect(302, `/oauth/authorize-consent?${qs.toString()}`);
+    // Absolute when set: this handler now also runs from the standalone MCP
+    // process (mcp-server/index.js) on its own subdomain, but the consent
+    // SPA (web/src/pages/OAuthAuthorize.jsx, route /oauth/authorize-consent)
+    // only exists on the dashboard's own origin, with the dashboard's own
+    // session cookie. DASHBOARD_ORIGIN points the browser back there.
+    // Empty string when unset = today's relative-redirect behavior,
+    // byte-identical for any deployment that hasn't split the MCP process out.
+    const consentBase = process.env.DASHBOARD_ORIGIN || '';
+    res.redirect(302, `${consentBase}/oauth/authorize-consent?${qs.toString()}`);
   },
 
   async challengeForAuthorizationCode(client, authorizationCode) {
@@ -209,7 +217,7 @@ export const oauthProvider = {
     };
   },
 
-  // Not on requireMcpToken's hot path (server/mcp/auth.js calls the store
+  // Not on requireMcpToken's hot path (mcp-server/auth.js calls the store
   // lookup directly, matching the manual-token path's shape) — this exists
   // to satisfy the SDK's OAuthTokenVerifier contract for any future/generic
   // caller (e.g. a token-introspection endpoint).

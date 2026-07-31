@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { requireMcpToken } from '../mcp/auth.js';
-import { buildMcpServer } from '../mcp/tools/index.js';
+import { requireMcpToken } from '../auth.js';
+import { buildMcpServer } from '../tools/index.js';
 
 // Stateless mode (sessionIdGenerator: undefined) — every MCP tool call is a
 // discrete request/response, same as every other route in this app, so

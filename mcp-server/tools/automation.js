@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { approveAndPublishDraft, pushDraftBranch, openDraftPr, checkDraftPrStatus } from '../../routes/action-center.js';
+import { approveAndPublishDraft, pushDraftBranch, openDraftPr, checkDraftPrStatus } from '../../server/routes/action-center.js';
 import { jsonResult, requireLevel, withErrorHandling } from './shared.js';
 
 // "Automation" tier tools — the line is "interacts with an external system"

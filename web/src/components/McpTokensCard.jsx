@@ -5,7 +5,7 @@ import { KeyRound, Copy, Check, Ban, Info, Lock } from 'lucide-react';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 
-// Kept in sync by hand with server/mcp/permissions.js's PERMISSION_LEVELS —
+// Kept in sync by hand with mcp-server/permissions.js's PERMISSION_LEVELS —
 // no shared frontend/backend constants module exists in this repo to
 // import this from directly.
 const TIERS = [
@@ -16,7 +16,11 @@ const TIERS = [
 ];
 
 function connectSnippet(token) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // POST /api/mcp now lives on its own subdomain (mcp-server/index.js, see
+  // the plan: "Split the MCP server onto its own subdomain") — VITE_MCP_ORIGIN
+  // is baked in at build time (Dockerfile ARG/ENV). Falls back to this app's
+  // own origin if unset, so local dev (npm run dev:web) is unaffected.
+  const origin = import.meta.env.VITE_MCP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '');
   return `claude mcp add --transport http zunkiree-analytics ${origin}/api/mcp \\\n  --header "Authorization: Bearer ${token}"`;
 }
 

@@ -5,16 +5,24 @@ import mcpRouter from './routes/mcp.js';
 import oauthRouter from './routes/oauth.js';
 
 // Standalone MCP-only process (see plan: "Split the MCP server onto its own
-// subdomain"). Serves exactly the surface an MCP/OAuth client ever talks to
-// directly: POST /api/mcp (server/routes/mcp.js) and the OAuth 2.1
-// authorization-server endpoints + discovery docs (server/routes/oauth.js).
+// subdomain"). Lives in its own top-level folder, mcp-server/, sibling to
+// server/ (the main dashboard app) and data-analyst-agent/ — same repo,
+// same package.json/node_modules/deploy pipeline, but its own entrypoint and
+// its own Docker service. It still reaches into server/ for shared business
+// logic (store/, agents/, report/, db.js) via relative imports rather than
+// duplicating any of it.
+//
+// Serves exactly the surface an MCP/OAuth client ever talks to directly:
+// POST /api/mcp (mcp-server/routes/mcp.js) and the OAuth 2.1
+// authorization-server endpoints + discovery docs (mcp-server/routes/oauth.js).
 // Neither reads req.session — auth is 100% bearer-token
-// (server/mcp/auth.js) or Postgres-backed OAuth grants
-// (server/mcp/oauth-provider.js) — so this process deliberately runs with no
+// (mcp-server/auth.js) or Postgres-backed OAuth grants
+// (mcp-server/oauth-provider.js) — so this process deliberately runs with no
 // express-session, no connect-pg-simple, no loginRouter, no SPA static
 // serving, and none of server/index.js's cron/catchup/audit-reap startup
-// work. The session-gated token-management UI (mcp-tokens.js) and OAuth
-// consent screen (oauth-consent.js) stay on the main app.
+// work. The session-gated token-management UI (server/routes/mcp-tokens.js)
+// and OAuth consent screen (server/routes/oauth-consent.js) stay on the main
+// app, in server/.
 const app = express();
 app.set('trust proxy', 1); // behind Traefik — req.ip (requireMcpToken's rate
                             // limiter) and req.protocol/req.get('host')

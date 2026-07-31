@@ -10,7 +10,7 @@ import { atLeast } from '../permissions.js';
 // tools are always registered; AI Actions/Automation/Admin tiers register
 // conditionally on permissionLevel. tokenId (the calling token's own id) is
 // only used by the admin tier, to record provenance when it mints another
-// token — see server/mcp/tools/admin.js.
+// token — see mcp-server/tools/admin.js.
 export function buildMcpServer(siteId, permissionLevel, tokenId) {
   const server = new McpServer({ name: 'zunkiree-analytics', version: '1.0.0' });
 

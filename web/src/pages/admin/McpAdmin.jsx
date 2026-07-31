@@ -3,7 +3,7 @@ import { api, timeAgo } from '../../api.js';
 import PageHeader from '../../components/PageHeader.jsx';
 import { KeyRound, Ban } from 'lucide-react';
 
-// Kept in sync by hand with server/mcp/permissions.js's PERMISSION_LEVELS,
+// Kept in sync by hand with mcp-server/permissions.js's PERMISSION_LEVELS,
 // same as McpTokensCard.jsx's own TIERS list.
 const TIER_LABELS = { read_only: 'Read Only', ai_actions: 'AI Actions', automation: 'Automation', admin: 'Admin' };
 

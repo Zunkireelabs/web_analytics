@@ -19,6 +19,8 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "dev:server": "node --watch server/index.js",
+    "start:mcp": "node mcp-server/index.js",
+    "dev:mcp": "node --watch mcp-server/index.js",
     "dev:web": "vite",
     "build:web": "vite build",
     "preview:web": "vite preview"

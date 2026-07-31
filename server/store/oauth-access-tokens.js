@@ -3,7 +3,7 @@ import { query } from '../db.js';
 
 // OAuth-issued MCP access tokens. Prefixed distinctly from manual api_tokens
 // (which are bare 64-hex-char, see server/store/api-tokens.js) so
-// server/mcp/auth.js's requireMcpToken can dispatch to the right table by a
+// mcp-server/auth.js's requireMcpToken can dispatch to the right table by a
 // cheap prefix check instead of querying both tables on every request.
 export const OAUTH_ACCESS_TOKEN_PREFIX = 'mcp_oat_';
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -15,7 +15,7 @@ function generateAccessToken() {
 }
 
 // permission_level/refreshFamilyId are passed in already computed by the
-// caller (server/mcp/oauth-provider.js) — never derived here, never taken
+// caller (mcp-server/oauth-provider.js) — never derived here, never taken
 // from a request parameter.
 export async function createAccessToken({ clientId, siteId, userId, permissionLevel, scope, resource, refreshFamilyId }) {
   const { raw, hash } = generateAccessToken();
@@ -59,7 +59,7 @@ export async function revokeOauthAccessTokenByRawValue(rawToken) {
   return rows.length > 0;
 }
 
-// Reuse-detection fallout (server/mcp/oauth-provider.js's exchangeRefreshToken):
+// Reuse-detection fallout (mcp-server/oauth-provider.js's exchangeRefreshToken):
 // every access token minted alongside a compromised refresh chain is killed
 // in one query, keyed on the family_id they were stamped with at mint time.
 export async function revokeOauthAccessTokensForRefreshFamily(refreshFamilyId) {

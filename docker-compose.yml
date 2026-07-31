@@ -4,6 +4,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # So the built SPA's MCP "connect" snippet shows the canonical MCP
+        # subdomain directly (web/src/components/McpTokensCard.jsx).
+        VITE_MCP_ORIGIN: https://${MCP_DOMAIN}
     networks:
       - hosting
     restart: unless-stopped
@@ -34,6 +38,47 @@ services:
       - "traefik.http.routers.analytics-prod-http.middlewares=analytics-prod-redirect"
       - "traefik.http.middlewares.analytics-prod-redirect.redirectscheme.scheme=https"
       - "traefik.http.services.analytics-prod.loadbalancer.server.port=3002"
+
+  # Standalone MCP server (mcp-server/index.js) — POST /api/mcp + the OAuth
+  # 2.1 surface, on its own subdomain (MCP_DOMAIN). The canonical public
+  # endpoint for the Data Analyst Agent and any other MCP/OAuth client. No
+  # separate Postgres — reuses the main app's Neon DATABASE_URL via the same
+  # env_file. See the plan: "Split the MCP server onto its own subdomain."
+  analytics-mcp:
+    container_name: analytics-mcp-prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "mcp-server/index.js"]
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - MCP_API_PORT=3003
+      - DB_POOL_MAX=5
+      - DASHBOARD_ORIGIN=https://${ANALYTICS_DOMAIN}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set MCP_DOMAIN in .env, e.g. mcp.zunkireelabs.com
+      - "traefik.http.routers.analytics-mcp-prod.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-prod.entrypoints=websecure"
+      - "traefik.http.routers.analytics-mcp-prod.tls=true"
+      - "traefik.http.routers.analytics-mcp-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-mcp-prod-http.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-prod-http.entrypoints=web"
+      - "traefik.http.routers.analytics-mcp-prod-http.middlewares=analytics-mcp-prod-redirect"
+      - "traefik.http.middlewares.analytics-mcp-prod-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-mcp-prod.loadbalancer.server.port=3003"
 
 networks:
   hosting:

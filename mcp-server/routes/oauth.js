@@ -3,18 +3,19 @@ import { authorizationHandler } from '@modelcontextprotocol/sdk/server/auth/hand
 import { tokenHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/token.js';
 import { clientRegistrationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/register.js';
 import { revocationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/revoke.js';
-import { oauthProvider } from '../mcp/oauth-provider.js';
-import { PERMISSION_LEVELS } from '../mcp/permissions.js';
+import { oauthProvider } from '../oauth-provider.js';
+import { PERMISSION_LEVELS } from '../permissions.js';
 
 // OAuth 2.1 authorization-server surface for onboarded clients connecting
 // via ChatGPT/Claude.ai — a second, parallel auth path alongside the manual
-// bearer-token flow (server/routes/mcp-tokens.js, unchanged). Mounted at the
-// app root (not under /api) since these are OAuth-spec paths, not this
-// app's own API — see server/index.js for mount order.
+// bearer-token flow (server/routes/mcp-tokens.js, unchanged, lives in the
+// main app). Mounted at the root of the standalone MCP process
+// (mcp-server/index.js), not under /api, since these are OAuth-spec paths,
+// not this service's own API.
 //
 // Every handler below is the MCP SDK's own, tested implementation
 // (@modelcontextprotocol/sdk/server/auth/handlers/*) — this file only wires
-// them to our Postgres-backed provider (server/mcp/oauth-provider.js) and
+// them to our Postgres-backed provider (mcp-server/oauth-provider.js) and
 // adds the two discovery documents the SDK doesn't build a route for itself.
 // There is deliberately no /oauth/callback here — that URL belongs to the
 // connecting AI client (Claude.ai/ChatGPT's own domain); we only ever

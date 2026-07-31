@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { query } from '../db.js';
 
-// Authorization codes for the OAuth 2.1 + PKCE flow (see server/mcp/
+// Authorization codes for the OAuth 2.1 + PKCE flow (see mcp-server/
 // oauth-provider.js). Same high-entropy-random / SHA-256-hash-only
 // discipline as server/store/api-tokens.js.
 //

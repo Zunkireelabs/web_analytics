@@ -1,6 +1,6 @@
-import { findActiveTokenByRawValue, touchApiTokenLastUsed } from '../store/api-tokens.js';
-import { OAUTH_ACCESS_TOKEN_PREFIX, findActiveOauthAccessTokenByRawValue, touchOauthAccessTokenLastUsed } from '../store/oauth-access-tokens.js';
-import { getSiteStatus } from '../store/read.js';
+import { findActiveTokenByRawValue, touchApiTokenLastUsed } from '../server/store/api-tokens.js';
+import { OAUTH_ACCESS_TOKEN_PREFIX, findActiveOauthAccessTokenByRawValue, touchOauthAccessTokenLastUsed } from '../server/store/oauth-access-tokens.js';
+import { getSiteStatus } from '../server/store/read.js';
 
 // Tiny in-memory sliding-window limiter, keyed by token id. No rate
 // limiting exists anywhere else in this app today — this is a minimal
@@ -82,7 +82,7 @@ export async function requireMcpToken(req, res, next) {
     return res.status(401).json({ error: 'Missing bearer token.' });
   }
 
-  // OAuth-issued access tokens (server/mcp/oauth-provider.js) carry a
+  // OAuth-issued access tokens (mcp-server/oauth-provider.js) carry a
   // distinct prefix so this dispatches on a cheap string check instead of
   // querying both tables on every request. Manual tokens (server/store/
   // api-tokens.js) are bare 64-hex-char with no prefix — that lookup path
