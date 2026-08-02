@@ -112,3 +112,83 @@ describe('data-array-content computeChange — json-array format, synthetic fixt
     assert.equal(parsed[1].faqs.length, 1);
   });
 });
+
+describe('data-array-content computeChange — flat-array shape (zunkireelabs-web homepage faq.json shape)', () => {
+  const flatFixture = JSON.stringify([{ question: 'Existing?', answer: 'Kept as-is', _aiManaged: true }]);
+  const tenantD = {
+    id: 4,
+    url_file_map: {
+      pages: {
+        '/': { adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/faq.json', shape: 'flat-array' } } },
+      },
+    },
+  };
+  const fetchFlat = async () => ({ content: flatFixture });
+  const fetchEmptyFlat = async () => ({ content: '[]' });
+
+  test('appends to an empty flat array', async () => {
+    const r = await computeChange(tenantD, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'New?', answer: 'Yes.' }] },
+    }, fetchEmptyFlat);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/faq.json');
+    const parsed = JSON.parse(r.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].question, 'New?');
+  });
+
+  test('idempotent re-apply updates the AI-managed region instead of duplicating', async () => {
+    const r = await computeChange(tenantD, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'Existing?', answer: 'Updated answer' }] },
+    }, fetchFlat);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].answer, 'Updated answer');
+  });
+
+  test('hand-authored items (no _aiManaged flag) are preserved alongside AI-managed ones', async () => {
+    const mixedFixture = JSON.stringify([
+      { question: 'Hand-authored', answer: 'Never touched' },
+      { question: 'Existing?', answer: 'Kept as-is', _aiManaged: true },
+    ]);
+    const r = await computeChange(tenantD, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'New?', answer: 'Yes.' }] },
+    }, async () => ({ content: mixedFixture }));
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    assert.equal(parsed.length, 2);
+    assert.ok(parsed.some((f) => f.question === 'Hand-authored'));
+    assert.ok(parsed.some((f) => f.question === 'New?'));
+    assert.ok(!parsed.some((f) => f.question === 'Existing?'));
+  });
+
+  test('"shape: flat-array" + "idField" together is an honest invalid-config, not a silent guess', async () => {
+    const badTenant = {
+      id: 5,
+      url_file_map: {
+        pages: {
+          '/': { adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/faq.json', shape: 'flat-array', idField: 'id' } } },
+        },
+      },
+    };
+    const r = await computeChange(badTenant, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFlat);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'invalid-config');
+  });
+
+  test('flat-array config needs no itemsField — only dataFile/shape', async () => {
+    const r = await computeChange(tenantD, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'New?', answer: 'Yes.' }] },
+    }, fetchEmptyFlat);
+    assert.equal(r.ok, true);
+    assert.equal(r.changedRegions[0].field, '(root array)');
+  });
+});
