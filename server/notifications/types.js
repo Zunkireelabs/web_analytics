@@ -10,7 +10,7 @@
 /**
  * @typedef {Object} NotificationEvent
  * @property {string} type            'critical-issue' | 'critical-issues-group' | 'opportunity' |
- *                                     'health-drop' | 'competitor-change'
+ *                                     'health-drop' | 'competitor-change' | 'predictive-risk'
  * @property {'high'|'medium'} severity
  * @property {string} title           short, e.g. "3 new critical issues found"
  * @property {string} body            one sentence, real evidence, no fabrication

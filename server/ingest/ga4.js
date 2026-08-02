@@ -33,6 +33,7 @@ export async function fetchGa4ForDate(site, date) {
       { name: 'engagedSessions' },
       { name: 'averageSessionDuration' },
       { name: 'conversions' },
+      { name: 'bounceRate' },
     ],
   });
 
@@ -44,6 +45,7 @@ export async function fetchGa4ForDate(site, date) {
     engaged_sessions: num(row[3]?.value),
     avg_engagement_time: num(row[4]?.value),
     conversions: num(row[5]?.value),
+    bounce_rate: num(row[6]?.value),
   };
 
   // 2) Traffic by default channel group.

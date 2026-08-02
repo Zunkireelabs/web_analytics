@@ -29,7 +29,7 @@ router.get('/command-center', async (req, res, next) => {
 // executive-report.js, which would silently re-run every agent a second
 // time (double the page fetches/LLM calls for one "Refresh" click).
 //
-// Exported so the MCP `refresh_command_center` tool (server/mcp/tools/
+// Exported so the MCP `refresh_command_center` tool (mcp-server/tools/
 // ai-actions.js) reuses this exact logic instead of duplicating it — same
 // precedent as buildStalenessContext being shared across route files.
 export async function refreshCommandCenter(siteId, { start, end }) {

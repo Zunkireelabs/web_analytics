@@ -17,19 +17,20 @@ import integrationsRouter from './routes/integrations.js';
 import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
 import clientsRouter from './routes/clients.js';
+import dataAnalystRouter from './routes/dataAnalyst.js';
 import growthReportRouter from './routes/growth-report.js';
 import siteAuditRouter from './routes/site-audit.js';
 import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
-import mcpRouter from './routes/mcp.js';
+import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
-import oauthRouter from './routes/oauth.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
+import dataAgentRouter from './routes/data-agent.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
@@ -85,33 +86,36 @@ app.use('/api', loginRouter);
 // Fully public (no requireAuth at all, not even per-route) — parallel to
 // loginRouter's own public /signup-requests. Must be mounted before any
 // router with a blanket `router.use(requireAuth)` below (mcpTokensRouter,
-// the internal-only block), for the same reason mcpRouter must be — an
-// invitation-accept request carries no session cookie, so a blanket
+// the internal-only block), for the same reason apiBridgeRouter must be —
+// an invitation-accept request carries no session cookie, so a blanket
 // requireAuth encountered first would 401 it before this router's own
 // route is ever checked.
 app.use('/api', userInvitationsRouter);
-// mcpRouter gates itself with requireMcpToken (bearer-token auth), which
-// checks the Authorization header, not req.session — an MCP client sends
-// no session cookie at all. It must be mounted before every
-// requireAuth-scoped router below (they all run their blanket
-// `router.use(requireAuth)` against ANY path that reaches them, per the
-// hazard described above), or requireAuth intercepts a cookie-less MCP
-// request and rejects it with "Not authenticated." before requireMcpToken
-// ever runs (confirmed live during verification: POST /api/mcp with a
-// valid bearer token still hit metricsRouter's requireAuth first and 401'd).
-app.use('/api', mcpRouter);
+// POST /api/mcp and the OAuth 2.1 surface (/oauth/*, /.well-known/*) now
+// live on their own standalone process (mcp-server/index.js), on their own
+// subdomain (MCP_DOMAIN) — see the plan: "Split the MCP server onto its own
+// subdomain." apiBridgeRouter/rootBridgeRouter (server/routes/mcp-bridge.js)
+// are a temporary compatibility bridge: anything still hitting the old
+// paths on this app gets a 307 redirect to the new domain instead of a
+// 404/401. Same mount-order hazard as everything else on this app's root
+// still applies — a bridged request carries no session cookie either, so it
+// must precede every requireAuth-scoped router below, or requireAuth
+// intercepts it and rejects with "Not authenticated." before the bridge
+// ever runs. Remove both mounts (and the file) once nothing hits them
+// anymore — see server/routes/mcp-bridge.js.
+app.use('/api', apiBridgeRouter);
 // Public, GitHub-signature-authenticated (no session cookie, no bearer
-// token) — same mount-order hazard as mcpRouter above: must precede every
-// blanket-requireAuth router below, or requireAuth 401s the webhook before
-// this router's own route is ever checked.
+// token) — same mount-order hazard as apiBridgeRouter above: must precede
+// every blanket-requireAuth router below, or requireAuth 401s the webhook
+// before this router's own route is ever checked.
 app.use('/api', webhooksRouter);
-// OAuth 2.1 surface for the client-facing "Connect" flow (see MCP-PLAN.md's
-// successor, the OAuth plan) — /oauth/* and /.well-known/* are OAuth-spec
-// paths at the app root, not under /api, and don't collide with any
-// requireAuth-gated router's blanket middleware, so mount order relative to
-// them doesn't matter beyond "before the SPA catch-all" (already true; this
-// is far above it in the file).
-app.use(oauthRouter);
+app.use(rootBridgeRouter);
+// Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
+// is a root path, not under /api (see routes/data-agent.js), and must be
+// mounted before the production static/catch-all block below or that
+// catch-all's `app.get('*', ...)` would swallow every /data-agent/* request
+// first and serve index.html instead of proxying it.
+app.use(dataAgentRouter);
 app.use('/api', metricsRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
@@ -136,6 +140,7 @@ app.use('/api', integrationsRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', watchlistRouter);
 app.use('/api', clientsRouter);
+app.use('/api', dataAnalystRouter);
 app.use('/api', commoncrawlBacklinksRouter);
 app.use('/api', mcpAdminRouter);
 app.use('/api', systemHealthRouter);

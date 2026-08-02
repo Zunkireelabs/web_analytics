@@ -7,7 +7,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
-import { PERMISSION_LEVELS } from '../mcp/permissions.js';
+import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
@@ -383,7 +383,7 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
 // ever written. Deliberately excludes 'admin' from the accepted values (the
 // DB CHECK constraint from migration 061 would reject it anyway, but
 // failing here gives a clearer error than a raw constraint-violation would).
-// See server/mcp/oauth-provider.js's computeEffectivePermissionLevel for how
+// See mcp-server/oauth-provider.js's computeEffectivePermissionLevel for how
 // this is actually applied to an OAuth grant.
 const OAUTH_POLICY_LEVELS = PERMISSION_LEVELS.filter((level) => level !== 'admin');
 

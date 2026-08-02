@@ -39,7 +39,7 @@ async function notifyGscBestEffort(site, draft) {
 
 // Shared convention for the 4 automation-tier route handlers below (approve,
 // push-branch, open-pr, check-pr-status) and their MCP tool counterparts
-// (server/mcp/tools/automation.js): throw an Error carrying `.status` plus
+// (mcp-server/tools/automation.js): throw an Error carrying `.status` plus
 // whichever extra fields (reason/confidence/suggestedMode/draftStatus) the
 // original inline res.status(...).json({...}) calls used to send, so both
 // callers can reconstruct the exact same response shape from one thrown value.
@@ -117,7 +117,7 @@ export async function buildStalenessContext(siteId) {
   }).join('\n');
 }
 
-// Exported so the MCP `refresh_recommendations` tool (server/mcp/tools/
+// Exported so the MCP `refresh_recommendations` tool (mcp-server/tools/
 // ai-actions.js) reuses this exact logic instead of duplicating it.
 export async function refreshRecommendations(siteId, { start, end }) {
   if (agenticOrchestrationEnabled()) {
@@ -152,7 +152,7 @@ router.get('/action-center/generators', async (req, res, next) => {
 // Runs one generator and persists the result as a new draft. Never writes
 // anywhere else — no publish path exists.
 //
-// Exported so the MCP `generate_draft` tool (server/mcp/tools/ai-actions.js)
+// Exported so the MCP `generate_draft` tool (mcp-server/tools/ai-actions.js)
 // reuses this exact logic instead of duplicating it. Throws with a `.status`
 // (400/404) for the route below to map to a response — same convention
 // runAgent() (server/agents/runner.js) already uses.
@@ -254,7 +254,7 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
 // Once past that, any failure below (GitHub API hiccup, a genuinely
 // transient error) is a legitimate post-approval concern — same retryable
 // apply_error path as before, via /push-branch and /open-pr.
-// Exported so the MCP `approve_draft` tool (server/mcp/tools/automation.js)
+// Exported so the MCP `approve_draft` tool (mcp-server/tools/automation.js)
 // reuses this exact logic instead of duplicating it. Note this can return a
 // draft reflecting a *recorded* apply/merge failure (recordApplyFailure/
 // recordMergeFailure) rather than throwing — those are legitimate,
@@ -360,7 +360,7 @@ async function finalizeImplemented(siteId, draftId, site) {
 // in the `ai_actions` tier, not `automation` — it makes no external
 // (GitHub/etc) call, only an internal status flip plus a best-effort local
 // site-discovery refresh, so it doesn't cross the "touches an external
-// system" line that defines the automation tier (see server/mcp/tools/
+// system" line that defines the automation tier (see mcp-server/tools/
 // automation.js's own comment).
 export async function markDraftImplementedIfEligible(siteId, draftId) {
   const existing = await getDraft(siteId, draftId);

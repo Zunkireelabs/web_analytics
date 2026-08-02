@@ -3,7 +3,7 @@ import { requireAuth } from './login.js';
 import { getSiteById } from '../store/read.js';
 import { getClientById } from '../store/oauth-clients.js';
 import { createAuthorizationCode } from '../store/oauth-authorization-codes.js';
-import { computeEffectivePermissionLevel } from '../mcp/oauth-provider.js';
+import { computeEffectivePermissionLevel } from '../../mcp-server/oauth-provider.js';
 import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js';
 
 // Session-cookie-gated (requireAuth), mounted under /api alongside
@@ -11,7 +11,7 @@ import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handle
 //
 // Neither route here accepts a `permissionLevel` field from the request body
 // or query string, even though a malicious or buggy OAuth client could send
-// one — computeEffectivePermissionLevel (server/mcp/oauth-provider.js) is
+// one — computeEffectivePermissionLevel (mcp-server/oauth-provider.js) is
 // the only source of that value, derived from req.siteId (the logged-in
 // user's own site, from their session — never client-supplied) and
 // sites.oauth_max_permission_level (staff-set, migration 061).
@@ -21,7 +21,7 @@ router.use(requireAuth);
 // Plain-language, display-only description of what a computed level grants —
 // mirrors web/src/components/McpTokensCard.jsx's TIERS copy for the manual-
 // token UI. Duplicated rather than shared, same as that file already is
-// relative to server/mcp/permissions.js — there's no shared constants module
+// relative to mcp-server/permissions.js — there's no shared constants module
 // for this copy anywhere in the codebase yet.
 const CAPABILITY_COPY = {
   read_only: 'View reports, analytics, and drafts. Cannot change anything.',

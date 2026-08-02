@@ -17,7 +17,8 @@ import {
   Users,
   KeyRound,
   HeartPulse,
-  ScrollText
+  ScrollText,
+  LineChart
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -41,10 +42,11 @@ const GROWTH_TOOLS_NAV = [
   { to: '/site-audit', label: 'Site Audit', icon: Radar },
 ];
 
-// The one remaining staff-only page — operates across every client's site,
-// not just the session's own, so it stays behind isInternal.
+// Staff-only pages — operate across every client's site, not just the
+// session's own, so they stay behind isInternal.
 const INTERNAL_NAV = [
   { to: '/clients', label: 'Clients', icon: Building2 },
+  { to: '/analyst', label: 'Analyst', icon: LineChart },
 ];
 
 // Platform Administration (PLATFORM-ADMIN-DESIGN.md §H, §K Phase 7) —

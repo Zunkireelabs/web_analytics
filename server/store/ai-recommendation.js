@@ -95,6 +95,26 @@ export async function getMentionRateHistory(siteId, limit = 12) {
   return rows.reverse();
 }
 
+// Real mention-rate rolled up to calendar month, for a given date range —
+// the read path for external monthly-cadence consumers (Data Analyst Agent
+// MCP tool). Distinct from getMentionRateHistory above (per real run_date,
+// most-recent-N) since a monthly series needs one point per month, not one
+// per check.
+export async function getMonthlyMentionRate(siteId, start, end) {
+  const { rows } = await query(
+    `SELECT to_char(date_trunc('month', run_date), 'YYYY-MM-DD') AS month,
+            COUNT(*) FILTER (WHERE mentioned)::int AS mentioned_count,
+            COUNT(*)::int AS total_count,
+            ROUND((COUNT(*) FILTER (WHERE mentioned) * 100.0 / COUNT(*))::numeric, 2)::float8 AS visibility_pct
+       FROM ai_prompt_runs
+      WHERE site_id = $1 AND run_date BETWEEN $2 AND $3
+      GROUP BY date_trunc('month', run_date)
+      ORDER BY 1 ASC`,
+    [siteId, start, end]
+  );
+  return rows;
+}
+
 // Real competitor mention counts aggregated across all runs in a given
 // real date window — used to compare "this run" vs "last real check" so a
 // finding like "Competitor X now appears more often" is a genuine

@@ -250,34 +250,6 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-
-// Real, deterministic HTML for an internal-links block — anchorText/
-// targetUrl are escaped since they ultimately come from LLM output (already
-// filtered against real candidate URLs at generation time, see
-// generators/internal-links.js, but still untrusted as raw HTML).
-// Unlike renderFaqHtml/renderExpandedHtml above, zunkireelabs-web has no
-// existing "related links" component anywhere to confirm a match against —
-// internal-links has never actually been implemented on a real page yet
-// (zero live drafts as of this writing). This uses the site's general
-// section/typography/link-color conventions (py-12 md:py-20 wrapper,
-// text-gray-900 heading, text-blue-600 hover:text-blue-800 links — same
-// values confirmed on index.njk and the FAQ accordion) so it isn't bare
-// browser-default markup, but — without a real component to copy — this
-// should still get eyeballed on its first real PR preview before shipping,
-// unlike FAQ/expand-content which are now confirmed matches.
-function renderLinksHtml(suggestions) {
-  const items = suggestions.map((s) =>
-    `      <li><a href="${escapeHtml(s.targetUrl)}" class="text-blue-600 hover:text-blue-800 transition-colors">${escapeHtml(s.anchorText)}</a></li>`
-  ).join('\n');
-  return `<section class="py-12 md:py-20">
-  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-    <h3 class="text-2xl md:text-3xl font-normal text-gray-900 mb-6">Related</h3>
-    <ul class="space-y-3">
-${items}
-    </ul>
-  </div>
-</section>`;
-
 // Fills a `{{PLACEHOLDER}}` template string with escaped-HTML values — the
 // one substitution mechanism shared by every injected content type below.
 // Split/join instead of a regex replace so a value that itself happens to

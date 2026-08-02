@@ -102,6 +102,17 @@ jobs:
 
             # ── Deployment ───────────────────────────────────────────────────
             ANALYTICS_DOMAIN=${{ vars.PROD_DOMAIN }}
+
+            # Sibling container's name on the shared "hosting" Docker network —
+            # not a secret, just an internal hostname. See .env.example.
+            DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-prod:8000
+
+            # ── Standalone MCP server (mcp-server/index.js) ─────────────────
+            # POST /api/mcp + the OAuth 2.1 surface, on their own subdomain —
+            # see the plan: "Split the MCP server onto its own subdomain".
+            # *.zunkireelabs.com is already wildcarded to this VPS, so no DNS
+            # change is needed for a new MCP_DOMAIN value.
+            MCP_DOMAIN=${{ vars.PROD_MCP_DOMAIN }}
             ENVEOF
 
             docker compose build
@@ -111,21 +122,26 @@ jobs:
 
             docker compose up -d
 
-            echo "Waiting for container to be healthy..."
+            echo "Waiting for containers to be healthy..."
             sleep 10
-            CONTAINER="analytics-app-prod"
-            for i in $(seq 1 12); do
-              STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
-              if [ "$STATUS" = "healthy" ]; then
-                echo "Container is healthy!"
-                exit 0
+            for CONTAINER in analytics-app-prod analytics-mcp-prod; do
+              HEALTHY=0
+              for i in $(seq 1 12); do
+                STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+                if [ "$STATUS" = "healthy" ]; then
+                  echo "$CONTAINER is healthy!"
+                  HEALTHY=1
+                  break
+                fi
+                echo "$CONTAINER attempt $i/12: Status is $STATUS, waiting..."
+                sleep 10
+              done
+              if [ "$HEALTHY" != "1" ]; then
+                echo "$CONTAINER did not become healthy within 2 minutes"
+                docker logs "$CONTAINER" --tail 50
+                exit 1
               fi
-              echo "Attempt $i/12: Status is $STATUS, waiting..."
-              sleep 10
             done
-            echo "Container did not become healthy within 2 minutes"
-            docker logs "$CONTAINER" --tail 50
-            exit 1
 
       - name: Verify Health
         run: |
@@ -134,5 +150,13 @@ jobs:
             echo "Production health check passed (HTTP $HTTP_CODE)"
           else
             echo "Production health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          MCP_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.PROD_MCP_DOMAIN }}/api/health")
+          if [ "$MCP_HTTP_CODE" = "200" ]; then
+            echo "Production MCP health check passed (HTTP $MCP_HTTP_CODE)"
+          else
+            echo "Production MCP health check failed (HTTP $MCP_HTTP_CODE)"
             exit 1
           fi

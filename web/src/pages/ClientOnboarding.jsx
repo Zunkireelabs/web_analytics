@@ -31,10 +31,10 @@ const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-sl
 
 // The ceiling on what this client's OAuth "Connect" flow (server/routes/
 // oauth-consent.js) can ever grant — 'admin' is deliberately not an option
-// here, same reasoning as its absence from server/mcp/oauth-provider.js's
+// here, same reasoning as its absence from mcp-server/oauth-provider.js's
 // computeEffectivePermissionLevel: OAuth tokens must never reach the tier
 // that can mint/revoke other tokens unattended. Kept in sync by hand with
-// server/mcp/permissions.js, same as McpTokensCard.jsx's TIERS already is.
+// mcp-server/permissions.js, same as McpTokensCard.jsx's TIERS already is.
 const OAUTH_POLICY_OPTIONS = [
   { value: 'read_only', label: 'Read Only' },
   { value: 'ai_actions', label: 'AI Actions' },

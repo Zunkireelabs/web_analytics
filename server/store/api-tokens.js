@@ -1,11 +1,11 @@
 import crypto from 'node:crypto';
 import { query } from '../db.js';
-import { DEFAULT_PERMISSION_LEVEL } from '../mcp/permissions.js';
+import { DEFAULT_PERMISSION_LEVEL } from '../../mcp-server/permissions.js';
 
-// Bearer tokens for the MCP endpoint (see server/mcp/auth.js). One token
+// Bearer tokens for the MCP endpoint (see mcp-server/auth.js). One token
 // maps to exactly one site — same isolation model as session auth, just
 // token- instead of cookie-based. Each token also carries a permission_level
-// (server/mcp/permissions.js) controlling which MCP tools it can reach.
+// (mcp-server/permissions.js) controlling which MCP tools it can reach.
 
 // High-entropy 256-bit random secret, not a human password — no bcrypt
 // here, its deliberate slowness would only add latency to every MCP call

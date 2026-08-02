@@ -3,7 +3,7 @@ import { pool, query } from '../db.js';
 
 // Refresh tokens with mandatory rotate-on-use (OAuth 2.1 requirement for
 // public clients) and reuse detection. permission_level is always passed in
-// already computed by the caller (server/mcp/oauth-provider.js) — never
+// already computed by the caller (mcp-server/oauth-provider.js) — never
 // derived here from anything in the refresh request.
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days, sliding — reset on every rotation
 

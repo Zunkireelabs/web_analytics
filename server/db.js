@@ -13,9 +13,14 @@ if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is not set. Copy .env.example to .env and fill it in.');
 }
 
+// DB_POOL_MAX defaults to 10, unchanged from before this was configurable —
+// the standalone MCP process (mcp-server/index.js) overrides it smaller
+// (read-heavy, short queries) since it holds its own independent Pool
+// against this same DATABASE_URL, and two processes' pools now share
+// whatever connection ceiling Neon's pooler enforces.
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 10,
+  max: Number(process.env.DB_POOL_MAX || 10),
   idleTimeoutMillis: 10_000,
   connectionTimeoutMillis: 10_000,
   ssl: { rejectUnauthorized: false },
@@ -177,7 +182,7 @@ export async function hardDeleteSite(siteId) {
 // Sets the trusted ceiling on what an OAuth-issued MCP token can ever reach
 // for this site (migration 061) — staff-only, never reachable from a
 // client-facing route. See server/routes/oauth-consent.js and
-// server/mcp/oauth-provider.js, which read this value to compute an OAuth
+// mcp-server/oauth-provider.js, which read this value to compute an OAuth
 // grant's effective permission_level; a client's requested scope can only
 // narrow it, never raise it.
 export async function updateSiteOauthPolicy({ siteId, oauthMaxPermissionLevel }) {

@@ -2,7 +2,7 @@ import { query } from '../db.js';
 
 // RFC 7591 Dynamic Client Registration store — backs the OAuthRegisteredClientsStore
 // interface the MCP SDK's authorizationHandler/tokenHandler/clientRegistrationHandler
-// expect (see server/mcp/oauth-provider.js).
+// expect (see mcp-server/oauth-provider.js).
 //
 // Confidential clients (token_endpoint_auth_method='client_secret_post') are
 // deliberately not supported: the SDK's own authenticateClient middleware
