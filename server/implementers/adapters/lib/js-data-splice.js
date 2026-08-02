@@ -75,7 +75,13 @@ const ROOT_ARRAY_PATTERN_BY_FORMAT = {
   'json-array': /^\s*\[/,
 };
 
-function findRootArrayBounds(content, format) {
+// Exported for the 'flat-array' shape (adapters/data-array-content.js): a
+// content file whose root array IS the item list directly (e.g.
+// zunkireelabs-web's faq.json — a bare `[{question,answer}, ...]`), as
+// opposed to today's array-of-parent-objects-matched-by-id shape
+// (locations.js/comparisons.js). Same bounds-finding either way — only the
+// caller's notion of "what these bounds mean" differs.
+export function findRootArrayBounds(content, format) {
   const pattern = ROOT_ARRAY_PATTERN_BY_FORMAT[format];
   if (!pattern) return null;
   const m = pattern.exec(content);

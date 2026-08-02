@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  scanBalanced, findObjectRange, findArrayFieldRange, spliceMarkedArray,
+  scanBalanced, findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray,
   insertNewArrayField, assertValidContent, dedupeAndValidateFaqItems,
   parseExistingFaqItems, parseManagedFaqItems, diffFaqItems,
 } from './js-data-splice.js';
@@ -258,6 +258,45 @@ describe('diffFaqItems', () => {
     const diff = diffFaqItems([{ question: 'Old?', answer: 'A' }], [{ question: 'New?', answer: 'B' }]);
     assert.equal(diff.removed.length, 1);
     assert.equal(diff.added.length, 1);
+  });
+});
+
+describe('findRootArrayBounds — flat-array shape (root array IS the item list, e.g. zunkireelabs-web faq.json)', () => {
+  test('bounds a js-export-array root array', () => {
+    const content = `export default [
+  { question: "Q1?", answer: "A1." },
+  { question: "Q2?", answer: "A2." }
+];
+`;
+    const r = findRootArrayBounds(content, 'js-export-array');
+    assert.ok(r);
+    assert.match(content.slice(r.start, r.end), /Q1\?/);
+    assert.match(content.slice(r.start, r.end), /Q2\?/);
+  });
+
+  test('bounds a bare json-array root array', () => {
+    const content = JSON.stringify([{ question: 'Q1?', answer: 'A1.' }]);
+    const r = findRootArrayBounds(content, 'json-array');
+    assert.ok(r);
+    assert.match(content.slice(r.start, r.end), /Q1\?/);
+  });
+
+  test('never mistakes a bracket inside a string/comment for the root array boundary', () => {
+    const content = `export default [
+  { question: "What about [brackets]?", answer: "Still one item." }
+];
+`;
+    const r = findRootArrayBounds(content, 'js-export-array');
+    assert.ok(r);
+    assert.match(content.slice(r.start, r.end), /Still one item\./);
+  });
+
+  test('returns null for an unrecognized format rather than guessing', () => {
+    assert.equal(findRootArrayBounds('[]', 'yaml-array'), null);
+  });
+
+  test('returns null when the file has no root array at all', () => {
+    assert.equal(findRootArrayBounds('export default { foo: 1 };', 'js-export-array'), null);
   });
 });
 

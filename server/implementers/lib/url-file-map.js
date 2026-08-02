@@ -146,6 +146,20 @@ export function resolveMarkers(site, pageUrl, actionType) {
 // FIELD NAMES to use are per-site config, never hardcoded in the adapter's
 // own code. Page-level wins over pattern-level. No config → no adapter,
 // default routing.
+//
+// This is the deliberate seam for "content-only" generation: an adapter
+// writes pure structured content into a file the SITE's own template
+// already renders with its own current styling (see
+// adapters/data-array-content.js), never HTML/CSS. The default routing —
+// marker-merge.js splicing a componentTemplates-supplied HTML template — is
+// the correct, permanent fallback for any (site, page, action type) that
+// has no real site-side component to write into yet, not a mechanism to
+// eliminate outright. Expect this fallback's footprint to shrink over time
+// as more pages grow real, data-driven components (and more adapter config
+// gets added here to route to them) — never auto-detected or LLM-guessed:
+// a wrong adapter-routing guess can corrupt a file every page's build
+// imports (breaking the whole site's build), a materially higher blast
+// radius than a wrong render-mode guess below, which affects one page.
 export function resolveAdapter(site, pageUrl, actionType) {
   const entry = getPageEntry(site, pageUrl);
   if (entry?.adapters?.[actionType]) return entry.adapters[actionType];

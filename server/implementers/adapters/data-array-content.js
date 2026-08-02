@@ -2,7 +2,7 @@ import { getFileContent } from '../../github/client.js';
 import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter } from '../lib/url-file-map.js';
 import {
-  findObjectRange, findArrayFieldRange, spliceMarkedArray, insertNewArrayField,
+  findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray, insertNewArrayField,
   assertValidContent, dedupeAndValidateFaqItems, diffFaqItems, parseManagedFaqItems,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
@@ -21,6 +21,15 @@ import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer
 // Config shape (see resolveAdapter's doc comment): { id: 'data-array-content',
 // format: 'js-export-array' | 'json-array', dataFile: 'src/_data/x.js',
 // idField?: 'id', itemsField: 'faqs' }.
+//
+// `shape: 'flat-array'` is a second, simpler config shape for a data file
+// whose root array already IS the item list (e.g. zunkireelabs-web's
+// faq.json/aboutFaq.json — a bare `[{question,answer}, ...]`), as opposed
+// to the default shape above (an array of parent objects, one per URL,
+// each holding its own `itemsField`). In this mode `idField` must be
+// absent (there's no parent object to match by id — see the guard in
+// computeChange) and `itemsField` is optional/cosmetic only (used solely
+// to label the diff, since the root array itself is the target).
 export const meta = {
   id: 'data-array-content',
   description: 'Config-driven writer for array-of-objects content files (Eleventy data arrays, JSON collections) — file path/id field/items field/format all come from the tenant\'s own url_file_map config.',
@@ -44,14 +53,15 @@ function idFromPageUrl(pageUrl) {
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
   const config = resolveAdapter(site, page, draft.action_type);
-  if (!config?.dataFile || !config?.itemsField) {
+  const flatArray = config?.shape === 'flat-array';
+  if (!config?.dataFile || (!flatArray && !config?.itemsField)) {
     return { ok: false, reason: 'no-file-mapping', error: `No data-array-content adapter config (dataFile/itemsField) found for "${page || '(no page)'}".` };
   }
+  if (flatArray && config?.idField) {
+    return { ok: false, reason: 'invalid-config', error: '"shape: flat-array" and "idField" are mutually exclusive — a flat array has no parent object to match by id.' };
+  }
   const format = config.format || 'js-export-array';
-  const idField = config.idField || 'id';
-
-  const id = idFromPageUrl(page);
-  if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page || '(no page)'}".` };
+  const itemsFieldLabel = config.itemsField || '(root array)';
 
   const validated = dedupeAndValidateFaqItems(draft.content?.items);
   if (!validated.ok) return { ok: false, reason: 'draft-not-ready', error: validated.error };
@@ -59,12 +69,25 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
   const file = await fetchFile(site, config.dataFile, beforeRef);
   if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
 
-  const objRange = findObjectRange(file.content, idField, id, format);
-  if (!objRange) {
-    return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+  let arrayRange;
+  let objRange = null;
+  if (flatArray) {
+    arrayRange = findRootArrayBounds(file.content, format);
+    if (!arrayRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `Could not find a top-level array in ${config.dataFile}.` };
+    }
+  } else {
+    const idField = config.idField || 'id';
+    const id = idFromPageUrl(page);
+    if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page || '(no page)'}".` };
+
+    objRange = findObjectRange(file.content, idField, id, format);
+    if (!objRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+    }
+    arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
   }
 
-  const arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
   const existingItems = arrayRange ? parseManagedFaqItems(file.content.slice(arrayRange.start, arrayRange.end), format) : [];
   const newContent = arrayRange
     ? spliceMarkedArray(file.content, arrayRange, validated.items, format)
@@ -77,7 +100,7 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
   return {
     ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
-    changedRegions: [{ field: config.itemsField, markerName: 'AI-managed', before: arrayRange ? '(previously AI-added items)' : '(none)', after: JSON.stringify(validated.items) }],
+    changedRegions: [{ field: itemsFieldLabel, markerName: 'AI-managed', before: arrayRange ? '(previously AI-added items)' : '(none)', after: JSON.stringify(validated.items) }],
     faqDiff: diffFaqItems(existingItems, validated.items),
   };
 }
