@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api.routes import alerts, ask, benchmarks, breakdown, dashboard, health, recommendations
+from app.api.routes import alerts, ask, benchmarks, breakdown, business_values, dashboard, health, intelligence, recommendations
 from app.config import settings
 
 # root_path tells FastAPI (and the /docs Swagger UI it generates) the public
@@ -21,3 +21,5 @@ app.include_router(benchmarks.router)
 app.include_router(ask.router)
 app.include_router(alerts.router)
 app.include_router(recommendations.router)
+app.include_router(intelligence.router)
+app.include_router(business_values.router)

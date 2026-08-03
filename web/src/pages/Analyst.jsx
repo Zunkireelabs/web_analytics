@@ -1,44 +1,20 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
+import AnalystExecutiveSummary from '../components/AnalystExecutiveSummary.jsx';
+import AnalystIntelligenceCard from '../components/AnalystIntelligenceCard.jsx';
 import AnalystTrendCard from '../components/AnalystTrendCard.jsx';
+import AnalystDiagnosticsPanel from '../components/AnalystDiagnosticsPanel.jsx';
+import AnalystFeatureImportanceChart from '../components/AnalystFeatureImportanceChart.jsx';
+import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer.jsx';
+import AnalystRecommendationPriorityList from '../components/AnalystRecommendationPriorityList.jsx';
 import AnalystInsightCard from '../components/AnalystInsightCard.jsx';
 import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
-import { LineChart, Clock, ListChecks, Sparkles, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
+import { LineChart, Clock, ListChecks, Sparkles, AlertTriangle } from 'lucide-react';
 
-function formatValue(value, unit) {
-  if (value == null) return '—';
-  if (unit === 'ratio') return `${(value * 100).toFixed(1)}%`;
-  if (unit === 'seconds') return `${Math.round(value)}s`;
-  if (unit === 'rank' || unit === 'score_0_100') return (Math.round(value * 10) / 10).toString();
-  return Math.round(value).toLocaleString();
-}
-
-function KpiTile({ metric }) {
-  const wow = metric.period_stats?.wow;
-  const up = wow?.pct_change > 0;
-  const flat = !wow || wow.pct_change === 0;
-  return (
-    <div className="card p-4 flex flex-col gap-1.5">
-      <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 truncate">{metric.display_name}</span>
-      <span className="text-xl font-extrabold text-slate-900 tracking-tight">{formatValue(metric.latest_value, metric.unit)}</span>
-      {wow?.pct_change != null && (
-        <span className={`inline-flex items-center gap-1 text-[10px] font-bold w-fit ${
-          flat ? 'text-slate-400' : up ? 'text-emerald-600' : 'text-rose-600'
-        }`}>
-          {!flat && (up ? <TrendingUp size={11} /> : <TrendingDown size={11} />)}
-          {wow.pct_change > 0 ? '+' : ''}{Math.round(wow.pct_change * 10) / 10}% WoW
-        </span>
-      )}
-    </div>
-  );
-}
-
-function insightKey(i) {
-  return `${i.metric_key}-${i.insight_type}-${i.period_start}`;
-}
-
-function InsightGroup({ title, icon: Icon, tint, insights, metricLabel, onResolve, resolvingId, emptyText }) {
+function InsightGroup({
+  title, icon: Icon, tint, insights, metricFor, clientId, onResolve, resolvingId, onDismiss, dismissingId, onAnalyzeFurther, emptyText,
+}) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-3">
@@ -52,15 +28,31 @@ function InsightGroup({ title, icon: Icon, tint, insights, metricLabel, onResolv
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {insights.map((i) => (
             <AnalystInsightCard
-              key={insightKey(i)}
+              key={i.id}
               insight={i}
-              metricLabel={metricLabel(i.metric_key)}
+              metric={metricFor(i.metric_key)}
+              clientId={clientId}
               onResolve={onResolve}
               resolving={resolvingId === i.recommendation_id}
+              onDismiss={onDismiss}
+              dismissing={dismissingId === i.recommendation_id}
+              onAnalyzeFurther={() => onAnalyzeFurther(i.metric_key)}
             />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function SectionHeader({ icon: Icon, iconColor, title, subtitle }) {
+  return (
+    <div className="flex items-center gap-2 mb-4">
+      <Icon size={14} style={{ color: iconColor }} />
+      <div>
+        <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">{title}</h3>
+        {subtitle && <p className="text-[10px] font-medium text-slate-400 -mt-0.5">{subtitle}</p>}
+      </div>
     </div>
   );
 }
@@ -70,6 +62,7 @@ function AnalystBody({ clientId }) {
   const [error, setError] = useState(null);
   const [selectedMetricKey, setSelectedMetricKey] = useState(null);
   const [resolvingId, setResolvingId] = useState(null);
+  const [dismissingId, setDismissingId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const load = () => {
@@ -96,9 +89,10 @@ function AnalystBody({ clientId }) {
   }
 
   const allMetrics = Object.values(dashboard.groups).flat();
-  const metricLabel = (key) => allMetrics.find((m) => m.metric_key === key)?.display_name || key;
+  const metricFor = (key) => allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
   const earlyWarnings = dashboard.insights.filter((i) => i.insight_type === 'forecast_risk');
   const whatChanged = dashboard.insights.filter((i) => i.insight_type !== 'forecast_risk');
+  const severityForMetric = (metricKey) => dashboard.insights.find((i) => i.metric_key === metricKey)?.severity;
 
   const resolve = async (insight) => {
     if (!insight.recommendation_id) return;
@@ -113,6 +107,27 @@ function AnalystBody({ clientId }) {
     }
   };
 
+  const dismiss = async (insight) => {
+    if (!insight.recommendation_id) return;
+    setDismissingId(insight.recommendation_id);
+    try {
+      await api.analyst.dismissRecommendation(clientId, insight.recommendation_id);
+      load(); // dashboard.py filters dismissed recommendations' insights out too
+    } catch (e) {
+      setError(e.message || 'Failed to dismiss');
+    } finally {
+      setDismissingId(null);
+    }
+  };
+
+  // "Analyze Further" — reuses the existing trend-chart metric switcher
+  // rather than a separate zoom view; scrolled into view since the chart
+  // sits above a potentially long insights list.
+  const analyzeMetric = (metricKey) => {
+    setSelectedMetricKey(metricKey);
+    document.getElementById('analyst-forecast-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="space-y-8">
       {dashboard.last_ingested_at && (
@@ -121,40 +136,91 @@ function AnalystBody({ clientId }) {
         </p>
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-        {allMetrics.slice(0, 8).map((m) => <KpiTile key={m.metric_key} metric={m} />)}
-      </div>
+      {/* 1. AI Executive Summary — the hero */}
+      <AnalystExecutiveSummary clientId={clientId} />
 
-      {selectedMetricKey && (
-        <AnalystTrendCard
-          clientId={clientId}
-          metrics={allMetrics}
-          selectedMetricKey={selectedMetricKey}
-          onSelectMetric={setSelectedMetricKey}
-        />
-      )}
-
+      {/* 2. Predicted Risks — findings that haven't happened yet. This and
+          Recommendation Priority right below it are the page's headline
+          content: predict, warn early, say what to fix. Everything "what
+          already happened" (current value, WoW %, plain trend lines) lives
+          in the Core Dashboard (/overview, /insights), not here. */}
       <InsightGroup
-        title="Early Warning — predicted, hasn't happened yet"
+        title="Predicted Risks — hasn't happened yet"
         icon={Clock}
         tint="#8b5cf6"
         insights={earlyWarnings}
-        metricLabel={metricLabel}
+        metricFor={metricFor}
+        clientId={clientId}
         onResolve={resolve}
         resolvingId={resolvingId}
+        onDismiss={dismiss}
+        dismissingId={dismissingId}
+        onAnalyzeFurther={analyzeMetric}
         emptyText="No forecasted declines right now."
       />
 
+      {/* 3. Recommendation Priority — client-wide ranked work queue: what to
+          fix first. */}
+      <AnalystRecommendationPriorityList clientId={clientId} insights={dashboard.insights} metricFor={metricFor} />
+
+      {/* 4. Investigation Workspace — things that already happened, each
+          expanding inline into Root Cause / Repair Strategy / Forecast /
+          Projected Impact / Opportunity Score / Deploy (see
+          AnalystFindingPipeline). */}
       <InsightGroup
-        title="What Changed"
+        title="What Changed — Investigation Workspace"
         icon={ListChecks}
         tint="#ea580c"
         insights={whatChanged}
-        metricLabel={metricLabel}
+        metricFor={metricFor}
+        clientId={clientId}
         onResolve={resolve}
         resolvingId={resolvingId}
+        onDismiss={dismiss}
+        dismissingId={dismissingId}
+        onAnalyzeFurther={analyzeMetric}
         emptyText="No anomalies, trend shifts, or milestones to review."
       />
+
+      {/* 5. Diagnostic Tools — supporting evidence for investigating a
+          specific metric, demoted below the action-oriented sections above.
+          Kept minimal on "what happened" (no WoW badges here — see
+          AnalystIntelligenceCard); the forecast/root-cause/stats content is
+          what's actually new versus the Core Dashboard. */}
+      <div>
+        <SectionHeader icon={Sparkles} iconColor="#6C63FF" title="Diagnostic Tools" subtitle="Select a metric to investigate its forecast, drivers, and statistics" />
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          {allMetrics.map((m) => (
+            <AnalystIntelligenceCard
+              key={m.metric_key} clientId={clientId} metric={m}
+              severity={severityForMetric(m.metric_key)}
+              selected={m.metric_key === selectedMetricKey}
+              onClick={() => analyzeMetric(m.metric_key)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {selectedMetricKey && (
+        <div id="analyst-forecast-center">
+          <AnalystTrendCard
+            clientId={clientId}
+            metrics={allMetrics}
+            selectedMetricKey={selectedMetricKey}
+            onSelectMetric={setSelectedMetricKey}
+            insights={dashboard.insights}
+          />
+        </div>
+      )}
+
+      {selectedMetricKey && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <AnalystDiagnosticsPanel clientId={clientId} metricKey={selectedMetricKey} />
+          <AnalystFeatureImportanceChart clientId={clientId} targetMetricKey={selectedMetricKey} />
+        </div>
+      )}
+
+      <AnalystCorrelationExplorer clientId={clientId} />
 
       {!drawerOpen && (
         <button
@@ -191,7 +257,7 @@ export default function Analyst() {
     <div className="space-y-6">
       <PageHeader
         title="Analyst"
-        subtitle="Cross-client trend, forecast & root cause"
+        subtitle="AI Analyst Workspace — forecasting, root cause & autonomous recommendations"
         icon={<LineChart size={20} />}
         right={
           clients?.length > 1 && (

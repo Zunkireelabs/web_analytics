@@ -50,7 +50,7 @@ async def get_gsc_breakdown_daily_series(mcp: McpClient, start: str, end: str, d
 
 async def get_ga4_breakdown_daily_series(mcp: McpClient, start: str, end: str, dim: str) -> list[dict]:
     """[{date, dim_value, sessions, users}] — one row per (day, dim_value).
-    dim is 'device' or 'country'."""
+    dim is 'device', 'country', 'browser', or 'source_medium'."""
     return await mcp.call_tool("get_ga4_breakdown_daily_series", {"start": start, "end": end, "dim": dim})
 
 

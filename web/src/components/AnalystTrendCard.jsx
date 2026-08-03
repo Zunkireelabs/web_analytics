@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ComposedChart, Area, Line, ReferenceLine, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
+import { ComposedChart, Area, Line, ReferenceLine, ReferenceDot, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { api } from '../api.js';
 
 const GRANULARITIES = ['Day', 'Week', 'Month'];
@@ -76,7 +76,7 @@ function CustomTooltip({ active, payload, label, unit }) {
   );
 }
 
-export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey, onSelectMetric }) {
+export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey, onSelectMetric, insights = [] }) {
   const [granularity, setGranularity] = useState('Week');
   const [data, setData] = useState(null); // null = loading
   const [error, setError] = useState(null);
@@ -122,8 +122,28 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
       byDate.get(lastActualBucket).forecast = byDate.get(lastActualBucket).value;
     }
     const merged = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
-    return { rows: merged, lastActualDate };
-  }, [data, granularity, metric?.unit]);
+
+    // Anomaly/trend-shift markers — positioned at the bucket their real
+    // date falls into, y-value read back off that bucket's own (possibly
+    // aggregated) plotted value, never a separately-computed number.
+    const anomalyMarkers = (metric?.anomalies || [])
+      .map((a) => {
+        const key = bucketKey(a.date, granularity);
+        const row = byDate.get(key);
+        return row?.value != null ? { date: key, value: row.value, direction: a.direction } : null;
+      })
+      .filter(Boolean);
+    const trendShiftMarkers = insights
+      .filter((i) => i.metric_key === metric?.metric_key && i.insight_type === 'trend_shift')
+      .map((i) => {
+        const key = bucketKey(i.period_start, granularity);
+        const row = byDate.get(key);
+        return row?.value != null ? { date: key, value: row.value, direction: i.evidence?.pct_change > 0 ? 'up' : 'down' } : null;
+      })
+      .filter(Boolean);
+
+    return { rows: merged, lastActualDate, anomalyMarkers, trendShiftMarkers };
+  }, [data, granularity, metric?.unit, metric?.anomalies, metric?.metric_key, insights]);
 
   return (
     <div className="card p-6 flex flex-col justify-between">
@@ -189,8 +209,26 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
                 fill="url(#trendFill)" dot={false} activeDot={{ r: 5, strokeWidth: 0, fill: '#6C63FF' }} connectNulls={false} />
               <Line type="monotone" dataKey="forecast" stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5"
                 dot={{ r: 2 }} connectNulls={false} />
+              {chartRows.anomalyMarkers?.map((m, idx) => (
+                <ReferenceDot key={`a-${idx}`} x={m.date} y={m.value} r={5}
+                  fill={m.direction === 'high' ? '#e11d48' : '#0ea5e9'} stroke="white" strokeWidth={1.5} />
+              ))}
+              {chartRows.trendShiftMarkers?.map((m, idx) => (
+                <ReferenceDot key={`t-${idx}`} x={m.date} y={m.value} r={5} shape="diamond"
+                  fill={m.direction === 'up' ? '#10b981' : '#ea580c'} stroke="white" strokeWidth={1.5} />
+              ))}
             </ComposedChart>
           </ResponsiveContainer>
+        )}
+        {data?.forecast?.status === 'ok' && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[9px] font-bold text-slate-400">
+            <span>Model: <span className="text-slate-600">{data.forecast.model}</span></span>
+            {data.forecast.horizon_periods && <span>Horizon: <span className="text-slate-600">{data.forecast.horizon_periods}d</span></span>}
+            {data.forecast.confidence != null && <span>Confidence: <span className="text-slate-600">{Math.round(data.forecast.confidence * 100)}%</span></span>}
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-600" /> High anomaly</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-sky-500" /> Low anomaly</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rotate-45 bg-emerald-500" /> Trend shift</span>
+          </div>
         )}
       </div>
     </div>

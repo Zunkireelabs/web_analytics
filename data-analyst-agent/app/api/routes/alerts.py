@@ -36,7 +36,7 @@ async def get_alerts(
             rec = (
                 await session.execute(select(Recommendation).where(Recommendation.insight_id == insight.id))
             ).scalar_one_or_none()
-            if rec is not None and rec.status == "resolved":
+            if rec is not None and rec.status in ("resolved", "dismissed"):
                 continue
             metric = catalog_by_key.get(insight.metric_key)
             alerts.append({

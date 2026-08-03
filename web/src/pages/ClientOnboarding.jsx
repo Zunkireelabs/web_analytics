@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
+import ClientBusinessValuesPanel from '../components/ClientBusinessValuesPanel.jsx';
 import {
   Building,
   Globe,
@@ -23,7 +24,8 @@ import {
   PlayCircle,
   Trash2,
   AlertOctagon,
-  HelpCircle
+  HelpCircle,
+  DollarSign
 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
@@ -334,6 +336,7 @@ export default function ClientOnboarding() {
   const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
   const [lifecycleError, setLifecycleError] = useState({}); // {[clientId]: message}
   const [hardDeleteOpen, setHardDeleteOpen] = useState({}); // {[clientId]: true}
+  const [businessValuesOpen, setBusinessValuesOpen] = useState({}); // {[clientId]: true}
   const [hardDeleteName, setHardDeleteName] = useState({}); // {[clientId]: string}
 
   const [requests, setRequests] = useState(null); // null = loading
@@ -816,6 +819,23 @@ export default function ClientOnboarding() {
                           {faqCapError[c.id]}
                         </div>
                       )}
+
+                      {/* Real $ inputs for the Analyst dashboard's Expected
+                          Business Impact projections (data-analyst-agent's
+                          ClientBusinessValue) — without at least one of
+                          these, that card permanently reads "not configured". */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <DollarSign size={11} className="text-slate-400 shrink-0" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Business values</span>
+                        <button
+                          type="button"
+                          onClick={() => setBusinessValuesOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
+                          className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition"
+                        >
+                          {businessValuesOpen[c.id] ? 'Hide' : 'Configure…'}
+                        </button>
+                      </div>
+                      {businessValuesOpen[c.id] && <ClientBusinessValuesPanel clientId={c.id} />}
 
                       {/* Organic (pre-existing, never-touched-by-us) visible
                           FAQ pages — added to the tool's own injected count
