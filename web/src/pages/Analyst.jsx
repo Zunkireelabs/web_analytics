@@ -64,8 +64,6 @@ function AnalystBody({ clientId }) {
   // filter/icon by it without a second lookup.
   const allMetrics = Object.entries(dashboard.groups).flatMap(([group, ms]) => ms.map((m) => ({ ...m, dashboard_group: group })));
   const metricFor = (key) => allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
-  const earlyWarnings = dashboard.insights.filter((i) => i.insight_type === 'forecast_risk');
-  const whatChanged = dashboard.insights.filter((i) => i.insight_type !== 'forecast_risk');
   const severityForMetric = (metricKey) => dashboard.insights.find((i) => i.metric_key === metricKey)?.severity;
 
   const resolve = async (insight) => {
