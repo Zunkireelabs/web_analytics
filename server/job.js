@@ -29,6 +29,8 @@ import { getSearchPerformanceRange } from './store/read.js';
 import { knownDomain, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
+import { meta as geoAuditMeta } from './generators/geo-audit.js';
+import { getGenerator } from './generators/registry.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
 // ai-recommendation are all throttled (see runAgentIfDue below — real
@@ -462,6 +464,48 @@ const aiRecommendationCadence = () => (process.env.AI_RECOMMENDATION_CADENCE ===
 export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation', { cadence: aiRecommendationCadence() });
 export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation', { cadence: aiRecommendationCadence() });
 
+// GEO Audit — runs weekly, same cadence as the weekly doc report.
+// Uses the geo-audit generator to produce an AI visibility score,
+// per-page findings, and prioritized fix list mapped to generators.
+// Idempotent per week: skips if already run for the current week's
+// start date (Monday in the site's timezone).
+export async function runGeoAuditIfDue(site) {
+  const { start } = previousWeek(site.timezone);
+  const { rows } = await query(
+    "SELECT to_char(geo_audit_last_done, 'YYYY-MM-DD') AS geo_audit_last_done FROM sites WHERE id = $1",
+    [site.id]
+  );
+  const lastStr = rows[0]?.geo_audit_last_done || null;
+  if (lastStr && lastStr >= start) {
+    console.log(`[geo-audit] site ${site.id} already run this week — skipping.`);
+    return null;
+  }
+
+  const generator = await getGenerator('geo-audit');
+  if (!generator) {
+    console.error(`[geo-audit] generator "geo-audit" not found — skipping site ${site.id}.`);
+    return null;
+  }
+
+  const { content, summary } = await generator.generate({ siteId: site.id, params: { start, end: daysAgoInTz(site.timezone, 0) } });
+  await query('UPDATE sites SET geo_audit_last_done = $1 WHERE id = $2', [start, site.id]);
+  console.log(`[geo-audit] site ${site.id} weekly GEO audit complete: ${summary}`);
+  return { content, summary };
+}
+
+export async function runGeoAuditIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runGeoAuditIfDue(site));
+    } catch (err) {
+      console.error(`[job] geo-audit failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 // Real site-wide page discovery (sitemap, and BFS crawl once added) — kept
 // weekly, same reasoning as runCompetitorCheckIfDue: a real crawl of up to
 // a few hundred pages against a live site, run inside every daily cycle,
@@ -680,6 +724,7 @@ export async function runStartupCatchup() {
       await runDailyJobForSite(site);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await runGeoAuditIfDue(site);
       await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);
