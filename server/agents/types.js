@@ -15,12 +15,13 @@
  * @property {string} id            stable kebab-case slug, e.g. "opportunity" — used in URLs
  * @property {string} name          display name
  * @property {string} description   one sentence, shown by GET /api/agents
- * @property {string} category      "seo" | "content" | "geo" | "meta" | "technical" | "on-page" |
- *                                          "accessibility" | "performance" | "security" — the last 5 are
- *                                          reserved for the Website Intelligence expansion (see the
- *                                          ai-growth-platform-audit plan); a category not in this list
- *                                          still works (registry.js enforces nothing beyond meta.id/run()
- *                                          existing) but won't have a dedicated Command Center treatment yet
+ * @property {string} category      "seo" | "content" | "geo" | "meta" | "compliance" | "technical" |
+ *                                          "on-page" | "accessibility" | "performance" | "security" — "compliance"
+ *                                          has a dedicated Command Center treatment (Trust & Compliance); the
+ *                                          remaining 4 are reserved for the Website Intelligence expansion (see
+ *                                          the ai-growth-platform-audit plan). A category not in this list still
+ *                                          works (registry.js enforces nothing beyond meta.id/run() existing)
+ *                                          but won't have a dedicated Command Center treatment yet
  * @property {number} version       bump when the `facts` shape changes (stored per-row in agent_runs)
  * @property {string[]} [requires]  ids of sub-agents this one composes (meta-agents only, e.g. executive-report)
  * @property {DataSource[]} [dataSources] external data sources this agent depends on beyond the

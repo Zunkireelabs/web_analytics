@@ -62,7 +62,11 @@ export async function fetchHtml(url) {
     // and cheerio parsing binary content as HTML is a waste at best.
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('html')) return { ok: false, error: `not HTML: ${contentType || 'unknown content-type'}` };
-    return { ok: true, html: await res.text() };
+    // `res.url` is the real final URL after `fetch`'s default redirect-follow
+    // — lets a caller notice "this link redirected back to the page it was
+    // linked from" (trust-compliance.js's dead cookie/privacy/terms link
+    // check) without a second request.
+    return { ok: true, html: await res.text(), url: res.url };
   } catch (err) {
     return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
   } finally {
@@ -117,7 +121,18 @@ export function analyzePage(html, pageUrl) {
     } catch { /* malformed JSON-LD on the page — ignore that block */ }
   });
   const hasAnySchema = schemaTypes.size > 0;
-  const hasFaqHeading = /faq|frequently asked questions/i.test(headingText);
+  // Heading text alone misses real FAQ sections that don't literally say "FAQ"
+  // (e.g. a "Get to know Us" accordion) — so also check for FAQ-labeled markup
+  // (id/class/aria-label, including framework refs like Alpine's x-ref) and,
+  // failing that, the structural shape of an accordion: several clickable
+  // question elements whose text ends in "?".
+  const hasFaqMarkup = $('[id*="faq" i], [class*="faq" i], [aria-label*="faq" i], [aria-label*="frequently asked" i], [x-ref*="faq" i]').length > 0;
+  const questionElements = $('button, summary, dt, [role="button"]').filter((_, el) => {
+    const text = $(el).text().trim();
+    return text.length > 0 && text.length < 200 && text.endsWith('?');
+  });
+  const hasFaqAccordion = questionElements.length >= 2;
+  const hasFaqHeading = /faq|frequently asked questions/i.test(headingText) || hasFaqMarkup || hasFaqAccordion;
 
   // Byline/date markup outside JSON-LD — same non-schema fallback signals
   // the audit tool's authorExpertise.js/freshnessSignals.js check.
@@ -398,6 +413,7 @@ export async function checkLlmsReadiness(origin) {
     hasLlmsTxt: llms.ok,
     hasRobotsTxt: robots.ok,
     robotsAllowsAiCrawlers: robots.ok ? robotsAllowsAiCrawlers(robots.text) : null, // null = robots.txt not found, inconclusive
+    robotsText: robots.ok ? robots.text : null, // real current file body — generators/llms-txt.js needs this to append to, never blindly overwrite
   };
 }
 
@@ -526,6 +542,7 @@ const GENERATOR_EFFORT = {
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High',
+  'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
@@ -574,7 +591,7 @@ function contentGapChecks(analysis, queryTexts = []) {
   else if (analysis.h1Count > 1) gaps.push({ type: 'Missing H1', detail: `${analysis.h1Count} H1 tags found — should be exactly one.` });
   if (analysis.h2Count === 0) gaps.push({ type: 'Missing H2', detail: 'No H2 subheadings — thin content structure.' });
 
-  if (!analysis.hasFaq) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema or FAQ heading detected.' });
+  if (!analysis.hasFaq) gaps.push({ type: 'Missing FAQ', detail: 'No FAQ schema, heading, or Q&A accordion detected.' });
   if (!analysis.hasSchema) gaps.push({ type: 'Missing schema', detail: 'No structured data (JSON-LD) found on the page.' });
 
   const titleLen = analysis.title?.length || 0;

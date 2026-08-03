@@ -1,14 +1,16 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderCompliancePageBody } from './lib/newpage-render.js';
 
 export const meta = {
   id: 'frontend',
   name: 'Frontend/Content Implementer',
-  description: 'Places long-form draft content (landing pages, blog outlines, translated pages) into the site\'s real templates as a pull request.',
-  handles: ['landing-page', 'blog-outline', 'translation'],
+  description: 'Places long-form draft content (landing pages, blog outlines, translated pages, trust/compliance pages) into the site\'s real templates as a pull request.',
+  handles: ['landing-page', 'blog-outline', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service'],
 };
+
+const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
 
 // landing-page/blog-outline are net-new content — resolveNewContentTarget
 // gives a deterministic new file path, removing the "don't corrupt an
@@ -44,6 +46,14 @@ async function resolveTargetAndBody(site, draft) {
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
     return { ok: true, filePath, body: renderTranslationBody(content) };
+  }
+
+  if (COMPLIANCE_ACTION_TYPES.has(actionType)) {
+    const filePath = resolveNewContentTarget(site, actionType, content.metaTitle || content.headline);
+    if (!filePath) {
+      return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via \`npm run connect-repo\` before this can be applied.` };
+    }
+    return { ok: true, filePath, body: renderCompliancePageBody(content) };
   }
 
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };

@@ -1,19 +1,67 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { callLLM } from '../llm.js';
 
 export const meta = {
   id: 'llms-txt',
   name: 'llms.txt & AI-Crawler Robots.txt Generator',
-  description: 'Drafts a site-wide llms.txt discovery file and AI-crawler-aware robots.txt directives, grounded in the site\'s real top pages and current robots.txt/llms.txt status.',
+  description: 'Drafts a site-wide llms.txt discovery file and AI-crawler-aware robots.txt directives, grounded entirely in the site\'s real top pages and current robots.txt/llms.txt content — no generated text.',
   recommendationTags: [],
 };
 
 const KEY_PAGES_LIMIT = 8;
 const MIN_IMPRESSIONS = 5;
 const DEFAULT_WINDOW_DAYS = 90;
-const PLACEHOLDER_NOTE = '[NEEDS INPUT — not verifiable from real site data]';
+
+// The exact answer-engine crawlers this tool advocates always allowing —
+// same list ai-visibility.js's robotsAllowsAiCrawlers check already
+// recognizes (page-content.js's ANSWER_ENGINE_CRAWLER_AGENTS), duplicated
+// here as the literal set of User-agent blocks a fresh/appended robots.txt
+// needs so a later check of the applied file actually passes.
+const AI_CRAWLER_AGENTS = ['GPTBot', 'ClaudeBot', 'PerplexityBot', 'Google-Extended', 'Applebot-Extended'];
+
+// Deterministically builds robots.txt directives — never asks an LLM to
+// invent robots rules, since (a) it has no way to know this site's real
+// existing crawl rules (per-path Allow/Disallow, sitemap references, etc.)
+// and a full-file overwrite from a model with no knowledge of that content
+// would silently destroy them, and (b) the actual policy (always allow
+// these 5 named answer-engine crawlers, disallow Bytespider) is fixed and
+// fully known ahead of time — nothing here needs to be composed per-site.
+// Returns null when the site's real robots.txt already passes
+// robotsAllowsAiCrawlers (nothing to change — never fabricate a diff where
+// none exists). Otherwise appends explicit named-bot Allow blocks to the
+// END of the real existing file text (verbatim, untouched above that
+// point) — a more specific named User-agent group taking precedence over a
+// wildcard/blocking one is standard robots.txt matching behavior, so this
+// never has to parse or rewrite the existing rules to take effect.
+export function buildRobotsDirectives(llmsReadiness) {
+  const botBlocks = AI_CRAWLER_AGENTS.map((bot) => `User-agent: ${bot}\nAllow: /`).join('\n\n');
+  const bytespiderBlock = 'User-agent: Bytespider\nDisallow: /';
+
+  if (!llmsReadiness.hasRobotsTxt) {
+    return [
+      '# AI answer-engine crawler access — added by Zunkiree Analytics',
+      'User-agent: *',
+      'Allow: /',
+      '',
+      botBlocks,
+      '',
+      bytespiderBlock,
+    ].join('\n');
+  }
+
+  if (llmsReadiness.robotsAllowsAiCrawlers) return null;
+
+  const existing = (llmsReadiness.robotsText || '').replace(/\s+$/, '');
+  return [
+    existing,
+    '',
+    '# AI answer-engine crawler access — appended by Zunkiree Analytics (existing rules above left untouched)',
+    botBlocks,
+    '',
+    bytespiderBlock,
+  ].join('\n');
+}
 
 function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
@@ -27,13 +75,12 @@ function escapeLinkText(s) {
   return String(s ?? '').replace(/\[/g, '(').replace(/\]/g, ')');
 }
 
-// Deterministically assembles the actual llms.txt file body — the only
-// LLM-authored input is `description`; `siteName`/`keyPages` are already
-// real, verified facts (never invented here). Guarantees the three real
-// llms.txt convention signals (llmstxt.org) a compliance check looks for:
-// a top-level "# Site Name" heading, real markdown links to key pages, and
-// enough real content — regardless of how the model chose to phrase the
-// description, unlike asking it to format the whole file itself.
+// Deterministically assembles the actual llms.txt file body from real,
+// verified facts only — siteName, keyPages, and now description (the
+// site's own real homepage meta description, never LLM-composed).
+// Guarantees the three real llms.txt convention signals (llmstxt.org) a
+// compliance check looks for: a top-level "# Site Name" heading, real
+// markdown links to key pages, and enough real content.
 export function renderLlmsTxt({ siteName, description, keyPages }) {
   const lines = [`# ${siteName}`];
   if (description) lines.push('', description);
@@ -96,54 +143,17 @@ export async function generate({ siteId, params }) {
     };
   }))).filter(Boolean);
 
-  const facts = { siteName, origin, llmsReadiness, keyPages };
+  // description is the site's own real, already-published homepage meta
+  // description — verbatim, never LLM-paraphrased. If the homepage has
+  // none, the description line is simply omitted (it's optional per the
+  // llms.txt convention) rather than inventing one.
+  const homepageFetch = await analyzePageUrl(`${origin}/`);
+  const description = homepageFetch.ok ? (homepageFetch.analysis.metaDescription || '').trim() : '';
 
-  // The LLM is asked for a short description + robots directives only —
-  // never the llms.txt file's actual structure/headings/links. The real
-  // llms.txt convention (llmstxt.org) requires a top-level "# Site Name"
-  // heading and real markdown links to key pages; asking the model to
-  // follow that format via instructions alone was unreliable in practice
-  // (confirmed: a real merged draft came back as plain "Key Pages:\n- URL: ..."
-  // labeled text, with no heading and no markdown links, failing a real
-  // spec-compliance check). renderLlmsTxt() below builds that structure
-  // deterministically from data already fully known/verified (siteName,
-  // keyPages' real url/title/metaDescription) — same "never trust the LLM
-  // for a checkable, derivable fact" discipline this codebase already
-  // applies to FAQ JSON-LD (generators/faq.js) and detectMention
-  // (agents/ai-recommendation.js).
-  const system = 'You are an AEO (answer-engine optimization) foundations architect producing two things from ' +
-    'the real facts given below: (1) a short 2-4 sentence PLAIN TEXT description of what this company/site does ' +
-    '— grounded ONLY in the real page titles/meta descriptions in `keyPages`, never inventing a product, service, ' +
-    'or fact not evidenced there — and (2) AI-crawler-aware robotsDirectives (full raw robots.txt directive text). ' +
-    'Default posture is to ALLOW AI crawlers (GPTBot, ClaudeBot, PerplexityBot, Google-Extended, ' +
-    'Applebot-Extended) — in the robotsDirectives you output, every one of these MUST be set to Allow. This is ' +
-    'not optional or a suggestion: blocking any of them by default is the most common AEO failure, and you must ' +
-    'never emit a Disallow rule for any of them yourself. The ONLY crawler that defaults to Disallow is ' +
-    'Bytespider (ByteDance, training-data scraping with no citation benefit). Separately — as a comment only, ' +
-    'never as an actual directive you emit — you may note that blocking AI TRAINING crawlers specifically ' +
-    '(GPTBot, ClaudeBot, Google-Extended, Applebot-Extended) while still allowing search-augmented crawlers like ' +
-    'PerplexityBot is a business decision the site owner could choose to make later; do not act on that decision ' +
-    'yourself under any circumstance — the directives you actually output must still Allow all of them. If a ' +
-    'fact needed for either output can\'t be verified from the data given, use the exact literal string ' +
-    `"${PLACEHOLDER_NOTE}" — never invent it. State plainly in a comment whether robots.txt already exists for ` +
-    'this site (from `llmsReadiness`) so robotsDirectives reads as "add this" vs "update this" appropriately. ' +
-    'Respond with ONLY a JSON object: {"description": "...", "robotsDirectives": "..."} — description is plain ' +
-    'text (no markdown, no heading); robotsDirectives is the full raw file body (use \\n for newlines), not ' +
-    'markdown-fenced.';
-  const user = `Facts: ${JSON.stringify(facts)}`;
-  const raw = await callLLM(system, user, { maxTokens: 700 });
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
-  } catch {
-    throw Object.assign(new Error('llms.txt generation failed: model did not return valid JSON'), { status: 400 });
-  }
-
-  const description = typeof parsed.description === 'string' ? parsed.description.trim() : '';
-  const robotsDirectives = typeof parsed.robotsDirectives === 'string' ? parsed.robotsDirectives : '';
   const llmsTxt = renderLlmsTxt({ siteName, description, keyPages });
-  const placeholderCount = (llmsTxt.match(/\[NEEDS INPUT/g) || []).length + (robotsDirectives.match(/\[NEEDS INPUT/g) || []).length;
+  // null when the real robots.txt already allows every AI crawler — never
+  // fabricate a diff where none exists (see buildRobotsDirectives above).
+  const robotsDirectives = buildRobotsDirectives(llmsReadiness);
 
   const content = {
     siteName,
@@ -152,11 +162,10 @@ export async function generate({ siteId, params }) {
     keyPages: keyPages.map(({ url, title, impressions }) => ({ url, title, impressions })),
     llmsTxt,
     robotsDirectives,
-    placeholderCount,
   };
   return {
     content,
-    summary: `llms.txt + AI-crawler robots.txt draft for ${origin} (${keyPages.length} key page(s)` +
-      (placeholderCount ? `, ${placeholderCount} field(s) need manual input)` : ')'),
+    summary: `llms.txt draft for ${origin} (${keyPages.length} key page(s))` +
+      (robotsDirectives ? ' + robots.txt update' : ' — robots.txt already allows AI crawlers, no change needed'),
   };
 }

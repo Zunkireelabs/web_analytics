@@ -44,6 +44,9 @@ const GENERATOR_META = {
   'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
   'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
   sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
+  'cookie-policy': { label: 'Cookie Policy', icon: '🍪', color: '#f59e0b' },
+  'privacy-policy': { label: 'Privacy Policy', icon: '🔒', color: '#d97706' },
+  'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
 };
 
 const DRAFT_STATUS_LABEL = {
@@ -543,7 +546,7 @@ export default function ActionCenter() {
                       )}
                       <div>
                         <h3 className="text-sm font-black text-slate-900 leading-none">{selectedRecommendation.tag}</h3>
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Diagnosed by: {selectedRecommendation.agentName || activeMeta?.label}</p>
+                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
                       </div>
                     </div>
 

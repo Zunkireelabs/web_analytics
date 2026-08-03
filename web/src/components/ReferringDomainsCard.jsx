@@ -40,10 +40,7 @@ export default function ReferringDomainsCard({ summary, loading }) {
         </span>
         <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="font-black text-teal-950 text-[11px] uppercase tracking-wider">Referring Domains (Free)</span>
-            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-teal-100 text-teal-800 border border-teal-200/80 shadow-2xs">
-              Common Crawl
-            </span>
+            <span className="font-black text-teal-950 text-[11px] uppercase tracking-wider">Referring Domains</span>
           </div>
           <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
             {emptyMessage(summary)}
@@ -59,29 +56,18 @@ export default function ReferringDomainsCard({ summary, loading }) {
         <div className="space-y-1">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
             <Network size={12} className="text-teal-600" />
-            <span>Referring Domains (Free)</span>
+            <span>Referring Domains</span>
           </div>
           <div className="flex items-baseline gap-1.5">
             <span className="text-4xl font-black tracking-tight text-slate-900 tabular-nums">{animatedCount}</span>
             <span className="text-xs font-bold text-slate-400">domains</span>
           </div>
         </div>
-        <span className="text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-full border text-teal-700 bg-teal-50 border-teal-100 whitespace-nowrap">
-          Common Crawl
-        </span>
       </div>
 
-      <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 gap-3">
-        <div>
-          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Graph Release</div>
-          <div className="text-xs font-bold text-slate-700 mt-1 truncate" title={summary.graphRelease || ''}>
-            {summary.graphRelease || '—'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Updated</div>
-          <div className="text-xs font-bold text-slate-700 mt-1">{timeAgo(summary.updatedAt)}</div>
-        </div>
+      <div className="mt-4 pt-4 border-t border-slate-100">
+        <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Last Checked</div>
+        <div className="text-xs font-bold text-slate-700 mt-1">{timeAgo(summary.updatedAt)}</div>
       </div>
     </div>
   );

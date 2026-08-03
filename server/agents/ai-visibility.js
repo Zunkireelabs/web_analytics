@@ -44,7 +44,19 @@ const RECOMMENDATION_RULES = [
   { test: (c) => c.faq === 0, label: 'Add an FAQ section.', generatorId: 'faq' },
   { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
   { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
-  { test: (c) => c.citationReadiness < 60, label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.', generatorId: 'expand-content' },
+  // Retired 2026-08-03: citationReadiness < 60 used to recommend
+  // expand-content's 'qa-subheadings' focus — bare question-form
+  // subheadings spliced straight into body copy via componentTemplates.
+  // expandContent (or the zero-CSS DEFAULT_EXPAND_TEMPLATE). In production
+  // this rendered as a second, visually inconsistent Q&A pattern next to the
+  // site's real FAQ accordion (no "Frequently asked questions" heading, no
+  // collapse, different typography) — confusing on any page since it looked
+  // like a broken/mismatched FAQ rather than a deliberate distinct feature.
+  // Low citationReadiness is still surfaced (see visibility-score.js's
+  // citationReadinessScore, part of siteScore.categories), just no longer
+  // turned into its own separate content-generation recommendation — a page
+  // lacking extractable Q&A content should get a real FAQ instead, which the
+  // faq rules above already cover.
 ];
 
 // llms.txt/robots readiness is a SITE-WIDE fact (one checkLlmsReadiness() call
@@ -182,15 +194,11 @@ export async function run({ siteId, start, end, pageCache }) {
         generatorId: rec.generatorId,
         // faq.js needs a real query/topic (schemaType is secondary there —
         // only used to steer utility-page FAQs like Contact/About away from
-        // generic brand content, see generators/faq.js); expand-content
-        // needs the qa-subheadings focus for this specific rule
-        // (citationReadiness) — everything else keeps the page+schemaType
-        // shape schema.js actually consumes.
+        // generic brand content, see generators/faq.js) — everything else
+        // keeps the page+schemaType shape schema.js actually consumes.
         params: rec.generatorId === 'faq'
           ? { page: p.page, query: p.topQuery, schemaType: inferSchemaType(p.page, p.schemaTypes) }
-          : rec.generatorId === 'expand-content'
-            ? { page: p.page, query: p.topQuery, focus: 'qa-subheadings' }
-            : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
+          : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
         effort: effortForGenerator(rec.generatorId),
       },
       expectedImpact,
