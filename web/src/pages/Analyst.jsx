@@ -10,6 +10,9 @@ import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer
 import AnalystRecommendationPriorityList from '../components/AnalystRecommendationPriorityList.jsx';
 import AnalystInsightCard from '../components/AnalystInsightCard.jsx';
 import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
+import AnalystMetricNavigator from '../components/AnalystMetricNavigator.jsx';
+import AnalystAiAnalystCard from '../components/AnalystAiAnalystCard.jsx';
+import AnalystInvestigationTimeline from '../components/AnalystInvestigationTimeline.jsx';
 import { LineChart, Clock, ListChecks, Sparkles, AlertTriangle } from 'lucide-react';
 
 function InsightGroup({
@@ -88,7 +91,10 @@ function AnalystBody({ clientId }) {
     return <div className="py-24 text-center text-sm text-slate-400 animate-pulse font-medium">Loading client analysis…</div>;
   }
 
-  const allMetrics = Object.values(dashboard.groups).flat();
+  // dashboard_group is the outer dict key in dashboard.groups, not a field
+  // on the metric card itself — attach it per metric so the navigator can
+  // filter/icon by it without a second lookup.
+  const allMetrics = Object.entries(dashboard.groups).flatMap(([group, ms]) => ms.map((m) => ({ ...m, dashboard_group: group })));
   const metricFor = (key) => allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
   const earlyWarnings = dashboard.insights.filter((i) => i.insight_type === 'forecast_risk');
   const whatChanged = dashboard.insights.filter((i) => i.insight_type !== 'forecast_risk');
@@ -184,41 +190,52 @@ function AnalystBody({ clientId }) {
 
       {/* 5. Diagnostic Tools — supporting evidence for investigating a
           specific metric, demoted below the action-oriented sections above.
-          Kept minimal on "what happened" (no WoW badges here — see
-          AnalystIntelligenceCard); the forecast/root-cause/stats content is
-          what's actually new versus the Core Dashboard. */}
-      <div>
+          Metric Navigator replaces the old card grid: pick a metric on the
+          left, everything on the right investigates that one metric. */}
+      <div id="analyst-forecast-center">
         <SectionHeader icon={Sparkles} iconColor="#6C63FF" title="Diagnostic Tools" subtitle="Select a metric to investigate its forecast, drivers, and statistics" />
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {allMetrics.map((m) => (
-            <AnalystIntelligenceCard
-              key={m.metric_key} clientId={clientId} metric={m}
-              severity={severityForMetric(m.metric_key)}
-              selected={m.metric_key === selectedMetricKey}
-              onClick={() => analyzeMetric(m.metric_key)}
-            />
-          ))}
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
+          <AnalystMetricNavigator
+            metrics={allMetrics}
+            insights={dashboard.insights}
+            selectedMetricKey={selectedMetricKey}
+            onSelect={setSelectedMetricKey}
+          />
+
+          {selectedMetricKey && (
+            <div className="space-y-6 min-w-0">
+              <AnalystIntelligenceCard
+                clientId={clientId} metric={metricFor(selectedMetricKey)}
+                severity={severityForMetric(selectedMetricKey)}
+                selected
+                onClick={() => {}}
+              />
+
+              <AnalystTrendCard
+                clientId={clientId}
+                metrics={allMetrics}
+                selectedMetricKey={selectedMetricKey}
+                onSelectMetric={setSelectedMetricKey}
+                insights={dashboard.insights}
+              />
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <AnalystAiAnalystCard
+                  clientId={clientId}
+                  metric={metricFor(selectedMetricKey)}
+                  insight={dashboard.insights.find((i) => i.metric_key === selectedMetricKey)}
+                />
+                <AnalystInvestigationTimeline metric={metricFor(selectedMetricKey)} insights={dashboard.insights} />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <AnalystDiagnosticsPanel clientId={clientId} metricKey={selectedMetricKey} />
+                <AnalystFeatureImportanceChart clientId={clientId} targetMetricKey={selectedMetricKey} />
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {selectedMetricKey && (
-        <div id="analyst-forecast-center">
-          <AnalystTrendCard
-            clientId={clientId}
-            metrics={allMetrics}
-            selectedMetricKey={selectedMetricKey}
-            onSelectMetric={setSelectedMetricKey}
-            insights={dashboard.insights}
-          />
-        </div>
-      )}
-
-      {selectedMetricKey && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <AnalystDiagnosticsPanel clientId={clientId} metricKey={selectedMetricKey} />
-          <AnalystFeatureImportanceChart clientId={clientId} targetMetricKey={selectedMetricKey} />
-        </div>
-      )}
 
       <AnalystCorrelationExplorer clientId={clientId} />
 
