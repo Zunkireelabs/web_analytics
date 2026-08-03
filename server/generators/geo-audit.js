@@ -1,7 +1,7 @@
 import { getSiteById, getSearchPerformanceRange, getQueriesForPage } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
 import { knownDomain } from '../agents/lib/site-domain.js';
-import { scorePageCategories, scoreLlmsReadiness, combineScores } from '../agents/lib/visibility-score.js';
+import { scorePageCategories, scoreLlmsReadiness, combineScores, geoSignalsScore } from '../agents/lib/visibility-score.js';
 import { priorityByRank, impactFromPriority, makeFinding } from '../agents/lib/findings.js';
 import { callLLM } from '../llm.js';
 
@@ -81,6 +81,48 @@ function buildPageFindings(page, score, priority) {
     });
   }
 
+  // GEO signal findings
+  if (!page.analysis?.hasAuthorSignal) {
+    findings.push({
+      label: 'Add author/byline markup (schema author field or visible byline) so AI engines attribute the content.',
+      generatorId: 'expand-content',
+      params: { page: page.page, query: page.topQuery || '', focus: 'author-byline' },
+      effort: 'Low',
+    });
+  }
+  if (!page.analysis?.hasFreshnessSignal) {
+    findings.push({
+      label: 'Add publish or last-updated date (datePublished/dateModified schema, article meta tag, or visible <time> element).',
+      generatorId: 'expand-content',
+      params: { page: page.page, query: page.topQuery || '', focus: 'freshness-date' },
+      effort: 'Low',
+    });
+  }
+  if (!page.analysis?.hasComparisonContent) {
+    findings.push({
+      label: 'Add comparison, alternatives, or "best of" content — generative engines disproportionately cite this shape.',
+      generatorId: 'expand-content',
+      params: { page: page.page, query: page.topQuery || '', focus: 'comparison-content' },
+      effort: 'Medium',
+    });
+  }
+  if (!page.analysis?.hasExternalCitations) {
+    findings.push({
+      label: 'Cite external authoritative sources within the page content — AI assistants favor well-sourced content.',
+      generatorId: 'expand-content',
+      params: { page: page.page, query: page.topQuery || '', focus: 'external-citations' },
+      effort: 'Low',
+    });
+  }
+  if (!page.analysis?.hasReviewSchema) {
+    findings.push({
+      label: 'Add Review or AggregateRating JSON-LD schema so AI assistants can surface social proof.',
+      generatorId: 'schema',
+      params: { page: page.page, schemaType: 'Review' },
+      effort: 'Low',
+    });
+  }
+
   return findings.map((f) =>
     makeFinding({
       id: `geo-audit:${page.page}:${f.label}`,
@@ -128,7 +170,8 @@ export async function generate({ siteId, params }) {
   const pages = fetched.map((f) => {
     if (!f.result.ok) return { page: f.page, score: null, fetchError: f.result.error, impressions: f.impressions };
     const categories = scorePageCategories(f.result.analysis);
-    const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
+    const geoScore = geoSignalsScore(f.result.analysis);
+        const scored = llmsScore != null ? combineScores(categories, llmsScore, geoScore) : { overall: null, categories };
     return { page: f.page, score: scored, topQuery: f.topQuery, impressions: f.impressions, fetchError: null };
   });
 
@@ -144,7 +187,7 @@ export async function generate({ siteId, params }) {
   const siteScore = scoredPages.length
     ? {
       overall: Math.round(scoredPages.reduce((s, p) => s + p.score.overall, 0) / scoredPages.length),
-      categories: ['schema', 'structuredContent', 'faq', 'entities', 'citationReadiness', 'llmsReadiness'].reduce((acc, cat) => {
+      categories: ['schema', 'structuredContent', 'faq', 'entities', 'citationReadiness', 'llmsReadiness', 'geoSignals'].reduce((acc, cat) => {
         acc[cat] = Math.round(scoredPages.reduce((s, p) => s + p.score.categories[cat], 0) / scoredPages.length);
         return acc;
       }, {}),

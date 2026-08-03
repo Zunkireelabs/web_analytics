@@ -65,8 +65,16 @@ export function scoreLlmsReadiness(llmsReadiness) {
 // Combines a page's five on-page category scores with the run's one
 // site-level LLMS readiness score into the full six-category breakdown plus
 // an unweighted overall average.
-export function combineScores(pageCategories, llmsScore) {
-  const categories = { ...pageCategories, llmsReadiness: llmsScore };
+export function geoSignalsScore(analysis) {
+  let score = 0;
+  if (analysis.hasAuthorSignal) score += 33;
+  if (analysis.hasComparisonContent) score += 33;
+  if (analysis.hasFreshnessSignal) score += 34;
+  return Math.min(100, score);
+}
+
+export function combineScores(pageCategories, llmsScore, geoSignalsScore) {
+  const categories = { ...pageCategories, llmsReadiness: llmsScore, geoSignals: geoSignalsScore };
   const values = Object.values(categories);
   const overall = Math.round(values.reduce((s, v) => s + v, 0) / values.length);
   return { overall, categories };

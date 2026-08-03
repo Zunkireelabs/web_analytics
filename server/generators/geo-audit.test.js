@@ -32,6 +32,11 @@ describe('geo-audit report structure', () => {
     assert.ok(report.includes('| Category | Score | Status |'));
   });
 
+  test('report includes geoSignals category in breakdown', () => {
+    const report = '| geoSignals | 75/100 | Good |';
+    assert.ok(report.includes('| geoSignals |'));
+  });
+
   test('report includes crawlability section', () => {
     const report = '## Crawlability & AI-Crawler Access\n\n⚠️ No llms.txt file found.';
     assert.ok(report.includes('## Crawlability & AI-Crawler Access'));
