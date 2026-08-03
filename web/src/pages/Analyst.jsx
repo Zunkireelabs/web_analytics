@@ -2,51 +2,19 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import AnalystExecutiveSummary from '../components/AnalystExecutiveSummary.jsx';
-import AnalystIntelligenceCard from '../components/AnalystIntelligenceCard.jsx';
 import AnalystTrendCard from '../components/AnalystTrendCard.jsx';
 import AnalystDiagnosticsPanel from '../components/AnalystDiagnosticsPanel.jsx';
 import AnalystFeatureImportanceChart from '../components/AnalystFeatureImportanceChart.jsx';
 import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer.jsx';
 import AnalystRecommendationPriorityList from '../components/AnalystRecommendationPriorityList.jsx';
-import AnalystInsightCard from '../components/AnalystInsightCard.jsx';
 import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
 import AnalystMetricNavigator from '../components/AnalystMetricNavigator.jsx';
 import AnalystAiAnalystCard from '../components/AnalystAiAnalystCard.jsx';
 import AnalystInvestigationTimeline from '../components/AnalystInvestigationTimeline.jsx';
-import { LineChart, Clock, ListChecks, Sparkles, AlertTriangle } from 'lucide-react';
-
-function InsightGroup({
-  title, icon: Icon, tint, insights, metricFor, clientId, onResolve, resolvingId, onDismiss, dismissingId, onAnalyzeFurther, emptyText,
-}) {
-  return (
-    <div>
-      <div className="flex items-center gap-2 mb-3">
-        <Icon size={14} style={{ color: tint }} />
-        <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">{title}</h3>
-        <span className="text-[10px] font-bold text-slate-400">({insights.length})</span>
-      </div>
-      {insights.length === 0 ? (
-        <div className="text-xs font-medium text-slate-400 bg-slate-50/60 border border-slate-150 rounded-2xl p-4">{emptyText}</div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-          {insights.map((i) => (
-            <AnalystInsightCard
-              key={i.id}
-              insight={i}
-              metric={metricFor(i.metric_key)}
-              clientId={clientId}
-              onResolve={onResolve}
-              resolving={resolvingId === i.recommendation_id}
-              onDismiss={onDismiss}
-              dismissing={dismissingId === i.recommendation_id}
-              onAnalyzeFurther={() => onAnalyzeFurther(i.metric_key)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+import AnalystDiagnosticHero from '../components/AnalystDiagnosticHero.jsx';
+import AnalystForecastSummaryCard from '../components/AnalystForecastSummaryCard.jsx';
+import AnalystInvestigationWorkspace from '../components/AnalystInvestigationWorkspace.jsx';
+import { LineChart, ListChecks, Sparkles, AlertTriangle } from 'lucide-react';
 
 function SectionHeader({ icon: Icon, iconColor, title, subtitle }) {
   return (
@@ -145,48 +113,30 @@ function AnalystBody({ clientId }) {
       {/* 1. AI Executive Summary — the hero */}
       <AnalystExecutiveSummary clientId={clientId} />
 
-      {/* 2. Predicted Risks — findings that haven't happened yet. This and
-          Recommendation Priority right below it are the page's headline
-          content: predict, warn early, say what to fix. Everything "what
-          already happened" (current value, WoW %, plain trend lines) lives
-          in the Core Dashboard (/overview, /insights), not here. */}
-      <InsightGroup
-        title="Predicted Risks — hasn't happened yet"
-        icon={Clock}
-        tint="#8b5cf6"
-        insights={earlyWarnings}
-        metricFor={metricFor}
-        clientId={clientId}
-        onResolve={resolve}
-        resolvingId={resolvingId}
-        onDismiss={dismiss}
-        dismissingId={dismissingId}
-        onAnalyzeFurther={analyzeMetric}
-        emptyText="No forecasted declines right now."
-      />
-
-      {/* 3. Recommendation Priority — client-wide ranked work queue: what to
+      {/* 2. Recommendation Priority — client-wide ranked work queue: what to
           fix first. */}
       <AnalystRecommendationPriorityList clientId={clientId} insights={dashboard.insights} metricFor={metricFor} />
 
-      {/* 4. Investigation Workspace — things that already happened, each
-          expanding inline into Root Cause / Repair Strategy / Forecast /
-          Projected Impact / Opportunity Score / Deploy (see
-          AnalystFindingPipeline). */}
-      <InsightGroup
-        title="What Changed — Investigation Workspace"
-        icon={ListChecks}
-        tint="#ea580c"
-        insights={whatChanged}
-        metricFor={metricFor}
-        clientId={clientId}
-        onResolve={resolve}
-        resolvingId={resolvingId}
-        onDismiss={dismiss}
-        dismissingId={dismissingId}
-        onAnalyzeFurther={analyzeMetric}
-        emptyText="No anomalies, trend shifts, or milestones to review."
-      />
+      {/* 3. Investigation Workspace — every active finding (forecast risks,
+          anomalies, trend shifts, milestones) in one sorted list + a
+          persistent detail pane, instead of a grid of independently-
+          expanding cards. The detail pane's content (Root Cause, Repair
+          Strategy, Forecast, Projected Impact, Opportunity Score, AI
+          Reasoning) is the same real AnalystFindingPipeline as before —
+          only the shell changed. */}
+      <div>
+        <SectionHeader icon={ListChecks} iconColor="#ea580c" title="Investigation Workspace" subtitle="Predicted risks and things that already changed, sorted by severity" />
+        <AnalystInvestigationWorkspace
+          clientId={clientId}
+          insights={dashboard.insights}
+          metricFor={metricFor}
+          onResolve={resolve}
+          resolvingId={resolvingId}
+          onDismiss={dismiss}
+          dismissingId={dismissingId}
+          onAnalyzeFurther={analyzeMetric}
+        />
+      </div>
 
       {/* 5. Diagnostic Tools — supporting evidence for investigating a
           specific metric, demoted below the action-oriented sections above.
@@ -204,20 +154,18 @@ function AnalystBody({ clientId }) {
 
           {selectedMetricKey && (
             <div className="space-y-6 min-w-0">
-              <AnalystIntelligenceCard
-                clientId={clientId} metric={metricFor(selectedMetricKey)}
-                severity={severityForMetric(selectedMetricKey)}
-                selected
-                onClick={() => {}}
-              />
+              <AnalystDiagnosticHero metric={metricFor(selectedMetricKey)} lastIngestedAt={dashboard.last_ingested_at} />
 
-              <AnalystTrendCard
-                clientId={clientId}
-                metrics={allMetrics}
-                selectedMetricKey={selectedMetricKey}
-                onSelectMetric={setSelectedMetricKey}
-                insights={dashboard.insights}
-              />
+              <div className="grid grid-cols-1 lg:grid-cols-[1.85fr_1fr] gap-6 items-start">
+                <AnalystTrendCard
+                  clientId={clientId}
+                  metrics={allMetrics}
+                  selectedMetricKey={selectedMetricKey}
+                  onSelectMetric={setSelectedMetricKey}
+                  insights={dashboard.insights}
+                />
+                <AnalystForecastSummaryCard clientId={clientId} metric={metricFor(selectedMetricKey)} />
+              </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <AnalystAiAnalystCard
@@ -239,11 +187,14 @@ function AnalystBody({ clientId }) {
 
       <AnalystCorrelationExplorer clientId={clientId} />
 
+      {/* bottom-24, not bottom-6: the app-wide AI Copilot trigger (App.jsx)
+          already occupies fixed bottom-6 right-6 on every internal page —
+          stacked above it with a clear gap instead of sitting on top of it. */}
       {!drawerOpen && (
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
-          className="fixed bottom-6 right-6 z-30 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-white px-5 py-3.5 rounded-2xl shadow-lg hover:scale-[1.03] active:scale-[0.98] transition cursor-pointer"
+          className="fixed bottom-24 right-6 z-30 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-white px-5 py-3.5 rounded-2xl shadow-lg hover:scale-[1.03] active:scale-[0.98] transition cursor-pointer"
           style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', boxShadow: '0 12px 28px -8px rgba(108,99,255,0.45)' }}
         >
           <Sparkles size={14} /> Ask deeper
