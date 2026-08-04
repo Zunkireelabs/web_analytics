@@ -129,10 +129,45 @@ export const api = {
     series: (clientId, metricKey) => req(`/internal/analyst/dashboard/${clientId}/series/${metricKey}`),
     breakdown: (clientId, metricKey, dimensionType) =>
       req(`/internal/analyst/dashboard/${clientId}/breakdown/${metricKey}/${dimensionType}`),
+    availableDimensions: (clientId, metricKey) =>
+      req(`/internal/analyst/clients/${clientId}/metrics/${metricKey}/dimensions`),
     ask: (clientId, question) => req(`/internal/analyst/ask/${clientId}`, { method: 'POST', body: JSON.stringify({ question }) }),
     resolveRecommendation: (clientId, recommendationId) =>
       req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/resolve`, { method: 'POST' }),
+    dismissRecommendation: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/dismiss`, { method: 'POST' }),
+    recommendationSummary: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/recommendations/${recommendationId}/summary`, { method: 'POST' }),
+    investigationReport: (clientId, title, sections) =>
+      req(`/internal/analyst/clients/${clientId}/insights/investigation-report`, {
+        method: 'POST', body: JSON.stringify({ title, sections }),
+      }),
+    generateSeoDraft: (clientId, insight) =>
+      req(`/internal/analyst/clients/${clientId}/insights/generate-draft`, {
+        method: 'POST', body: JSON.stringify({ insight }),
+      }),
     alerts: () => req('/internal/analyst/alerts'),
+    // AI Analyst Workspace — Phase 2 intelligence engines.
+    diagnostics: (clientId, metricKey) => req(`/internal/analyst/clients/${clientId}/diagnostics/${metricKey}`),
+    correlations: (clientId) => req(`/internal/analyst/clients/${clientId}/correlations`),
+    rootCause: (clientId, insightId) => req(`/internal/analyst/clients/${clientId}/root-cause/${insightId}`),
+    effortEstimation: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/effort-estimation/${recommendationId}`),
+    timeToImpact: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/time-to-impact/${recommendationId}`),
+    opportunityScore: (clientId, recommendationId) =>
+      req(`/internal/analyst/clients/${clientId}/opportunity-score/${recommendationId}`),
+    recommendationRankings: (clientId) =>
+      req(`/internal/analyst/clients/${clientId}/recommendation-rankings`),
+    featureImportance: (clientId, targetMetricKey) =>
+      req(`/internal/analyst/clients/${clientId}/feature-importance/${targetMetricKey}`),
+    impactProjection: (clientId, body) =>
+      req(`/internal/analyst/clients/${clientId}/impact-projection`, { method: 'POST', body: JSON.stringify(body) }),
+    executiveSummary: (clientId) =>
+      req(`/internal/analyst/dashboard/${clientId}/executive-summary`, { method: 'POST' }),
+    getBusinessValues: (clientId) => req(`/internal/analyst/clients/${clientId}/business-values`),
+    setBusinessValues: (clientId, body) =>
+      req(`/internal/analyst/clients/${clientId}/business-values`, { method: 'PUT', body: JSON.stringify(body) }),
   },
 
   // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —
@@ -163,6 +198,10 @@ export const api = {
 
   systemHealth: {
     get: () => req('/internal/system-health'),
+  },
+
+  opsCenter: {
+    get: () => req('/internal/ops-center'),
   },
 
   auditLog: {

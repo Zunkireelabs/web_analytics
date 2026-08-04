@@ -1,66 +1,29 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
+import AnalystExecutiveSummary from '../components/AnalystExecutiveSummary.jsx';
 import AnalystTrendCard from '../components/AnalystTrendCard.jsx';
-import AnalystInsightCard from '../components/AnalystInsightCard.jsx';
+import AnalystDiagnosticsPanel from '../components/AnalystDiagnosticsPanel.jsx';
+import AnalystFeatureImportanceChart from '../components/AnalystFeatureImportanceChart.jsx';
+import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer.jsx';
+import AnalystRecommendationPriorityList from '../components/AnalystRecommendationPriorityList.jsx';
 import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
-import { LineChart, Clock, ListChecks, Sparkles, TrendingUp, TrendingDown, AlertTriangle } from 'lucide-react';
+import AnalystMetricNavigator from '../components/AnalystMetricNavigator.jsx';
+import AnalystAiAnalystCard from '../components/AnalystAiAnalystCard.jsx';
+import AnalystInvestigationTimeline from '../components/AnalystInvestigationTimeline.jsx';
+import AnalystDiagnosticHero from '../components/AnalystDiagnosticHero.jsx';
+import AnalystForecastSummaryCard from '../components/AnalystForecastSummaryCard.jsx';
+import AnalystInvestigationWorkspace from '../components/AnalystInvestigationWorkspace.jsx';
+import { LineChart, ListChecks, Sparkles, AlertTriangle } from 'lucide-react';
 
-function formatValue(value, unit) {
-  if (value == null) return '—';
-  if (unit === 'ratio') return `${(value * 100).toFixed(1)}%`;
-  if (unit === 'seconds') return `${Math.round(value)}s`;
-  if (unit === 'rank' || unit === 'score_0_100') return (Math.round(value * 10) / 10).toString();
-  return Math.round(value).toLocaleString();
-}
-
-function KpiTile({ metric }) {
-  const wow = metric.period_stats?.wow;
-  const up = wow?.pct_change > 0;
-  const flat = !wow || wow.pct_change === 0;
+function SectionHeader({ icon: Icon, iconColor, title, subtitle }) {
   return (
-    <div className="card p-4 flex flex-col gap-1.5">
-      <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 truncate">{metric.display_name}</span>
-      <span className="text-xl font-extrabold text-slate-900 tracking-tight">{formatValue(metric.latest_value, metric.unit)}</span>
-      {wow?.pct_change != null && (
-        <span className={`inline-flex items-center gap-1 text-[10px] font-bold w-fit ${
-          flat ? 'text-slate-400' : up ? 'text-emerald-600' : 'text-rose-600'
-        }`}>
-          {!flat && (up ? <TrendingUp size={11} /> : <TrendingDown size={11} />)}
-          {wow.pct_change > 0 ? '+' : ''}{Math.round(wow.pct_change * 10) / 10}% WoW
-        </span>
-      )}
-    </div>
-  );
-}
-
-function insightKey(i) {
-  return `${i.metric_key}-${i.insight_type}-${i.period_start}`;
-}
-
-function InsightGroup({ title, icon: Icon, tint, insights, metricLabel, onResolve, resolvingId, emptyText }) {
-  return (
-    <div>
-      <div className="flex items-center gap-2 mb-3">
-        <Icon size={14} style={{ color: tint }} />
+    <div className="flex items-center gap-2 mb-4">
+      <Icon size={14} style={{ color: iconColor }} />
+      <div>
         <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">{title}</h3>
-        <span className="text-[10px] font-bold text-slate-400">({insights.length})</span>
+        {subtitle && <p className="text-[10px] font-medium text-slate-400 -mt-0.5">{subtitle}</p>}
       </div>
-      {insights.length === 0 ? (
-        <div className="text-xs font-medium text-slate-400 bg-slate-50/60 border border-slate-150 rounded-2xl p-4">{emptyText}</div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-          {insights.map((i) => (
-            <AnalystInsightCard
-              key={insightKey(i)}
-              insight={i}
-              metricLabel={metricLabel(i.metric_key)}
-              onResolve={onResolve}
-              resolving={resolvingId === i.recommendation_id}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -70,6 +33,7 @@ function AnalystBody({ clientId }) {
   const [error, setError] = useState(null);
   const [selectedMetricKey, setSelectedMetricKey] = useState(null);
   const [resolvingId, setResolvingId] = useState(null);
+  const [dismissingId, setDismissingId] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const load = () => {
@@ -95,10 +59,12 @@ function AnalystBody({ clientId }) {
     return <div className="py-24 text-center text-sm text-slate-400 animate-pulse font-medium">Loading client analysis…</div>;
   }
 
-  const allMetrics = Object.values(dashboard.groups).flat();
-  const metricLabel = (key) => allMetrics.find((m) => m.metric_key === key)?.display_name || key;
-  const earlyWarnings = dashboard.insights.filter((i) => i.insight_type === 'forecast_risk');
-  const whatChanged = dashboard.insights.filter((i) => i.insight_type !== 'forecast_risk');
+  // dashboard_group is the outer dict key in dashboard.groups, not a field
+  // on the metric card itself — attach it per metric so the navigator can
+  // filter/icon by it without a second lookup.
+  const allMetrics = Object.entries(dashboard.groups).flatMap(([group, ms]) => ms.map((m) => ({ ...m, dashboard_group: group })));
+  const metricFor = (key) => allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
+  const severityForMetric = (metricKey) => dashboard.insights.find((i) => i.metric_key === metricKey)?.severity;
 
   const resolve = async (insight) => {
     if (!insight.recommendation_id) return;
@@ -113,6 +79,27 @@ function AnalystBody({ clientId }) {
     }
   };
 
+  const dismiss = async (insight) => {
+    if (!insight.recommendation_id) return;
+    setDismissingId(insight.recommendation_id);
+    try {
+      await api.analyst.dismissRecommendation(clientId, insight.recommendation_id);
+      load(); // dashboard.py filters dismissed recommendations' insights out too
+    } catch (e) {
+      setError(e.message || 'Failed to dismiss');
+    } finally {
+      setDismissingId(null);
+    }
+  };
+
+  // "Analyze Further" — reuses the existing trend-chart metric switcher
+  // rather than a separate zoom view; scrolled into view since the chart
+  // sits above a potentially long insights list.
+  const analyzeMetric = (metricKey) => {
+    setSelectedMetricKey(metricKey);
+    document.getElementById('analyst-forecast-center')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <div className="space-y-8">
       {dashboard.last_ingested_at && (
@@ -121,46 +108,91 @@ function AnalystBody({ clientId }) {
         </p>
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-        {allMetrics.slice(0, 8).map((m) => <KpiTile key={m.metric_key} metric={m} />)}
+      {/* 1. AI Executive Summary — the hero */}
+      <AnalystExecutiveSummary clientId={clientId} />
+
+      {/* 2. Recommendation Priority — client-wide ranked work queue: what to
+          fix first. */}
+      <AnalystRecommendationPriorityList clientId={clientId} insights={dashboard.insights} metricFor={metricFor} />
+
+      {/* 3. Investigation Workspace — every active finding (forecast risks,
+          anomalies, trend shifts, milestones) in one sorted list + a
+          persistent detail pane, instead of a grid of independently-
+          expanding cards. The detail pane's content (Root Cause, Repair
+          Strategy, Forecast, Projected Impact, Opportunity Score, AI
+          Reasoning) is the same real AnalystFindingPipeline as before —
+          only the shell changed. */}
+      <div>
+        <SectionHeader icon={ListChecks} iconColor="#ea580c" title="Investigation Workspace" subtitle="Predicted risks and things that already changed, sorted by severity" />
+        <AnalystInvestigationWorkspace
+          clientId={clientId}
+          insights={dashboard.insights}
+          metricFor={metricFor}
+          onResolve={resolve}
+          resolvingId={resolvingId}
+          onDismiss={dismiss}
+          dismissingId={dismissingId}
+          onAnalyzeFurther={analyzeMetric}
+        />
       </div>
 
-      {selectedMetricKey && (
-        <AnalystTrendCard
-          clientId={clientId}
-          metrics={allMetrics}
-          selectedMetricKey={selectedMetricKey}
-          onSelectMetric={setSelectedMetricKey}
-        />
-      )}
+      {/* 5. Diagnostic Tools — supporting evidence for investigating a
+          specific metric, demoted below the action-oriented sections above.
+          Metric Navigator replaces the old card grid: pick a metric on the
+          left, everything on the right investigates that one metric. */}
+      <div id="analyst-forecast-center">
+        <SectionHeader icon={Sparkles} iconColor="#6C63FF" title="Diagnostic Tools" subtitle="Select a metric to investigate its forecast, drivers, and statistics" />
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
+          <AnalystMetricNavigator
+            metrics={allMetrics}
+            insights={dashboard.insights}
+            selectedMetricKey={selectedMetricKey}
+            onSelect={setSelectedMetricKey}
+          />
 
-      <InsightGroup
-        title="Early Warning — predicted, hasn't happened yet"
-        icon={Clock}
-        tint="#8b5cf6"
-        insights={earlyWarnings}
-        metricLabel={metricLabel}
-        onResolve={resolve}
-        resolvingId={resolvingId}
-        emptyText="No forecasted declines right now."
-      />
+          {selectedMetricKey && (
+            <div className="space-y-6 min-w-0">
+              <AnalystDiagnosticHero metric={metricFor(selectedMetricKey)} lastIngestedAt={dashboard.last_ingested_at} />
 
-      <InsightGroup
-        title="What Changed"
-        icon={ListChecks}
-        tint="#ea580c"
-        insights={whatChanged}
-        metricLabel={metricLabel}
-        onResolve={resolve}
-        resolvingId={resolvingId}
-        emptyText="No anomalies, trend shifts, or milestones to review."
-      />
+              <div className="grid grid-cols-1 lg:grid-cols-[1.85fr_1fr] gap-6 items-start">
+                <AnalystTrendCard
+                  clientId={clientId}
+                  metrics={allMetrics}
+                  selectedMetricKey={selectedMetricKey}
+                  onSelectMetric={setSelectedMetricKey}
+                  insights={dashboard.insights}
+                />
+                <AnalystForecastSummaryCard clientId={clientId} metric={metricFor(selectedMetricKey)} />
+              </div>
 
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <AnalystAiAnalystCard
+                  clientId={clientId}
+                  metric={metricFor(selectedMetricKey)}
+                  insight={dashboard.insights.find((i) => i.metric_key === selectedMetricKey)}
+                />
+                <AnalystInvestigationTimeline metric={metricFor(selectedMetricKey)} insights={dashboard.insights} />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <AnalystDiagnosticsPanel clientId={clientId} metricKey={selectedMetricKey} />
+                <AnalystFeatureImportanceChart clientId={clientId} targetMetricKey={selectedMetricKey} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <AnalystCorrelationExplorer clientId={clientId} />
+
+      {/* bottom-24, not bottom-6: the app-wide AI Copilot trigger (App.jsx)
+          already occupies fixed bottom-6 right-6 on every internal page —
+          stacked above it with a clear gap instead of sitting on top of it. */}
       {!drawerOpen && (
         <button
           type="button"
           onClick={() => setDrawerOpen(true)}
-          className="fixed bottom-6 right-6 z-30 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-white px-5 py-3.5 rounded-2xl shadow-lg hover:scale-[1.03] active:scale-[0.98] transition cursor-pointer"
+          className="fixed bottom-24 right-6 z-30 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-white px-5 py-3.5 rounded-2xl shadow-lg hover:scale-[1.03] active:scale-[0.98] transition cursor-pointer"
           style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)', boxShadow: '0 12px 28px -8px rgba(108,99,255,0.45)' }}
         >
           <Sparkles size={14} /> Ask deeper
@@ -191,7 +223,7 @@ export default function Analyst() {
     <div className="space-y-6">
       <PageHeader
         title="Analyst"
-        subtitle="Cross-client trend, forecast & root cause"
+        subtitle="AI Analyst Workspace — forecasting, root cause & autonomous recommendations"
         icon={<LineChart size={20} />}
         right={
           clients?.length > 1 && (

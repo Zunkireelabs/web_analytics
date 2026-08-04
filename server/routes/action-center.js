@@ -9,7 +9,7 @@ import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
@@ -237,6 +237,29 @@ router.post('/action-center/drafts/:id/submit', async (req, res, next) => {
   try {
     const draft = await submitDraftForApproval(req.siteId, req.params.id);
     if (!draft) return res.status(404).json({ error: 'Draft not found, or not in a submittable state' });
+    res.json(draft);
+  } catch (e) { next(e); }
+});
+
+// Phase 3 approval workflow — Reject (reuses the existing 'abandoned'
+// terminal status, now with a reviewer/reason attached — see
+// markDraftAbandoned's own comment) and Request Revision (a non-terminal
+// bounce back to the author — see requestDraftRevision's own comment).
+// Both valid from any non-terminal state, same guard style as approve.
+router.post('/action-center/drafts/:id/reject', async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    const draft = await markDraftAbandoned(req.siteId, req.params.id, reason || 'rejected_by_reviewer', req.userId);
+    if (!draft) return res.status(404).json({ error: 'Draft not found, or already in a terminal state' });
+    res.json(draft);
+  } catch (e) { next(e); }
+});
+
+router.post('/action-center/drafts/:id/request-revision', async (req, res, next) => {
+  try {
+    const { reason } = req.body || {};
+    const draft = await requestDraftRevision(req.siteId, req.params.id, { reviewerId: req.userId, reason });
+    if (!draft) return res.status(404).json({ error: 'Draft not found, or not in a reviewable state' });
     res.json(draft);
   } catch (e) { next(e); }
 });

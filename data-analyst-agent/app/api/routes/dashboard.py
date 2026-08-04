@@ -37,14 +37,20 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
     insights = []
     for i in insights_rows:
         rec = (await session.execute(select(Recommendation).where(Recommendation.insight_id == i.id))).scalar_one_or_none()
-        if rec is not None and rec.status == "resolved":
-            continue  # staff already marked this occurrence solved — same filter as GET /alerts
+        if rec is not None and rec.status in ("resolved", "dismissed"):
+            continue  # staff already marked this occurrence solved or not worth acting on
         insights.append({
+            # id — added for the AI Analyst Workspace's Root Cause /
+            # Reasoning Panel (GET /clients/{client_id}/root-cause/{insight_id}),
+            # which needs the Insight row's own id, not just its natural key.
+            "id": i.id,
             "metric_key": i.metric_key, "insight_type": i.insight_type, "severity": i.severity,
             "period_start": i.period_start.isoformat(), "evidence": i.evidence,
+            "dimension_type": i.dimension_type, "dimension_value": i.dimension_value,
             "recommendation_id": rec.id if rec else None,
             "root_cause": rec.root_cause_text if rec else None,
             "recommendation": rec.recommendation_text if rec else None,
+            "narration_status": rec.narration_status if rec else None,
         })
 
     return {
@@ -84,7 +90,7 @@ async def get_metric_series(
             {"date": period_start.isoformat(), "value": float(value) if value is not None else None}
             for period_start, value in rows
         ],
-        "forecast": await _latest_forecast(session, client.id, metric_key),
+        "forecast": await get_latest_forecast(session, client.id, metric_key),
     }
 
 
@@ -134,11 +140,11 @@ async def _metric_card(session: AsyncSession, client_id: int, metric: MetricCata
              "score": float(a.score) if a.score is not None else None}
             for a in recent_anomalies
         ],
-        "forecast": await _latest_forecast(session, client_id, metric.metric_key),
+        "forecast": await get_latest_forecast(session, client_id, metric.metric_key),
     }
 
 
-async def _latest_forecast(session: AsyncSession, client_id: int, metric_key: str) -> dict | None:
+async def get_latest_forecast(session: AsyncSession, client_id: int, metric_key: str) -> dict | None:
     forecast_run = (
         await session.execute(
             select(ForecastRun).where(
@@ -159,6 +165,13 @@ async def _latest_forecast(session: AsyncSession, client_id: int, metric_key: st
         ).scalars().all()
     return {
         "status": forecast_run.status, "model": forecast_run.model,
+        # horizon_periods/params/generated_at/confidence — added for the AI
+        # Analyst Workspace's Statistical Analysis panel (Model Used/
+        # Training Window/Forecast Horizon/Forecast Confidence), which reads
+        # straight off this run rather than a separate call.
+        "horizon_periods": forecast_run.horizon_periods, "params": forecast_run.params,
+        "generated_at": forecast_run.generated_at.isoformat(),
+        "confidence": float(forecast_run.confidence) if forecast_run.confidence is not None else None,
         "points": [
             {"target_date": p.target_period.isoformat(), "point_estimate": float(p.point_estimate),
              "lower_bound": float(p.lower_bound), "upper_bound": float(p.upper_bound)}
