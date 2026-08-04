@@ -57,16 +57,16 @@ export default function AnalystActionPipeline({ clientId, insight, seoEligible, 
           <div key={stage.key} className="flex gap-3">
             <div className="flex flex-col items-center">
               <StageIcon status={status} />
-              {!isLast && <div className={`w-px flex-1 min-h-[18px] ${status === 'done' ? 'bg-emerald-300' : 'bg-slate-200'}`} />}
+              {!isLast && <div className={`w-px flex-1 min-h-[18px] ${status === 'done' ? 'bg-emerald-400/60' : 'bg-slate-700/60'}`} />}
             </div>
             <div className="pb-4">
               <div className={`text-[10px] font-black uppercase tracking-wider ${
-                status === 'dead-end' ? 'text-slate-300' : status === 'skipped' ? 'text-slate-400' : status === 'pending' ? 'text-slate-400' : 'text-slate-700'
+                status === 'dead-end' ? 'text-slate-800' : status === 'skipped' ? 'text-slate-400' : status === 'pending' ? 'text-slate-500' : 'text-slate-800'
               }`}>
                 {stage.label}
               </div>
               {stage.key === 'impact' && simulationOk && (
-                <div className="text-[11px] font-bold text-slate-600 mt-0.5">
+                <div className="text-[11px] font-bold text-slate-800 mt-0.5">
                   {impactResult.currency} {Math.round(impactResult.projected_dollar_delta).toLocaleString()}
                 </div>
               )}
@@ -85,9 +85,9 @@ export default function AnalystActionPipeline({ clientId, insight, seoEligible, 
 }
 
 function StageIcon({ status }) {
-  if (status === 'done') return <CheckCircle2 size={16} className="text-emerald-500 shrink-0" />;
-  if (status === 'active') return <Loader2 size={16} className="text-indigo-500 animate-spin shrink-0" />;
-  if (status === 'dead-end') return <Ban size={16} className="text-slate-300 shrink-0" />;
-  if (status === 'skipped') return <Circle size={16} className="text-slate-300 shrink-0" />;
-  return <Circle size={16} className="text-slate-200 shrink-0" />;
+  if (status === 'done') return <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />;
+  if (status === 'active') return <Loader2 size={16} className="text-indigo-600 animate-spin shrink-0" />;
+  if (status === 'dead-end') return <Ban size={16} className="text-slate-700 shrink-0" />;
+  if (status === 'skipped') return <Circle size={16} className="text-slate-400 shrink-0" />;
+  return <Circle size={16} className="text-slate-500 shrink-0" />;
 }

@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, RefreshCw, TrendingUp, Search, DollarSign, ArrowRight, CheckCircle2 } from 'lucide-react';
 import { api } from '../api.js';
+import AnalystSkeletonLoader from './AnalystSkeletonLoader.jsx';
+import AnalystEmptyState from './AnalystEmptyState.jsx';
 
-// Ordered to lead with forward-looking/prescriptive fields (Forecast, Root
-// Cause, Recommended Action) — Biggest Issue is still shown, but as framing
-// for the rest rather than the headline; see the Analyst page redesign
-// plan (predict/diagnose/fix, not "what happened" reporting).
 const FIELD_META = [
   { key: 'forecast_summary', label: 'Forecast', icon: TrendingUp },
   { key: 'root_cause_summary', label: 'Root Cause', icon: Search },
@@ -14,11 +12,6 @@ const FIELD_META = [
   { key: 'biggest_issue', label: 'Biggest Issue', icon: Sparkles },
 ];
 
-// The page's visual focal point — a single LLM-synthesized narrative
-// grounded entirely in real fetched fields (see generate_dashboard_
-// executive_summary on the backend). On-demand only: this calls an LLM, so
-// it fires once per client mount, not on every render, with an explicit
-// refresh button rather than polling.
 export default function AnalystExecutiveSummary({ clientId }) {
   const [state, setState] = useState(null); // null=loading | {error} | {data}
 
@@ -31,64 +24,86 @@ export default function AnalystExecutiveSummary({ clientId }) {
 
   useEffect(load, [clientId]);
 
+  if (state === null) {
+    return <AnalystSkeletonLoader variant="hero" />;
+  }
+
   return (
     <div
-      className="rounded-3xl p-7 text-white relative overflow-hidden"
-      style={{ background: 'linear-gradient(135deg,#1e1b4b,#312e81 45%,#4c1d95)' }}
+      className="rounded-3xl p-7 text-slate-900 relative overflow-hidden shadow-2xl border border-indigo-500/20"
+      style={{ background: 'linear-gradient(135deg,#ffffff 0%,#ffffff 45%,#4338ca 100%)' }}
     >
-      <div className="absolute -top-16 -right-16 w-64 h-64 rounded-full opacity-20 blur-3xl" style={{ background: '#8b5cf6' }} />
-      <div className="relative flex items-start justify-between gap-4 mb-5">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center">
-            <Sparkles size={16} className="text-violet-300" />
+      <div className="absolute -top-20 -right-20 w-80 h-80 rounded-full opacity-20 blur-3xl pointer-events-none" style={{ background: '#8b5cf6' }} />
+      
+      <div className="relative flex items-center justify-between gap-4 mb-5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-slate-100 border border-white/15 flex items-center justify-center shadow-xs">
+            <Sparkles size={18} className="text-indigo-500 animate-pulse" />
           </div>
           <div>
-            <h2 className="text-sm font-black uppercase tracking-widest text-violet-300">AI Executive Summary</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-black uppercase tracking-widest text-indigo-500">AI Executive Summary</h2>
+              <span className="text-[9px] font-mono font-bold bg-indigo-100 border border-violet-400/30 text-indigo-500 px-2 py-0.5 rounded-md">
+                LLM Synthesized
+              </span>
+            </div>
             {state?.data?.metric && (
-              <p className="text-[11px] font-semibold text-white/50">
-                Highest-priority finding · {state.data.metric} · {state.data.severity} severity
+              <p className="text-[11px] font-semibold text-slate-900/60 mt-0.5">
+                Highest-priority finding · <span className="text-indigo-500 font-bold">{state.data.metric}</span> · <span className="capitalize text-amber-600">{state.data.severity}</span> severity
               </p>
             )}
           </div>
         </div>
+
         <button
-          type="button" onClick={load} disabled={state === null}
-          className="text-white/50 hover:text-white transition disabled:opacity-30 cursor-pointer"
-          title="Regenerate"
+          type="button"
+          onClick={load}
+          disabled={state === null}
+          className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-white/10 text-slate-900/70 hover:text-slate-900 transition disabled:opacity-30 cursor-pointer"
+          title="Regenerate Executive Summary"
         >
-          <RefreshCw size={15} className={state === null ? 'animate-spin' : ''} />
+          <RefreshCw size={14} className={state === null ? 'animate-spin' : ''} />
         </button>
       </div>
 
-      {state === null && (
-        <p className="text-sm text-white/60 font-medium animate-pulse">Synthesizing the current state of this account…</p>
-      )}
-
       {state?.error && (
-        <p className="text-sm text-rose-300 font-semibold">{state.error}</p>
+        <div className="p-4 rounded-2xl bg-rose-950/60 border border-rose-800/80 text-rose-600 text-xs font-semibold">
+          {state.error}
+        </div>
       )}
 
       {state?.data?.status === 'no-active-insights' && (
-        <div className="flex items-center gap-2 text-emerald-300 font-bold text-lg">
-          <CheckCircle2 size={20} /> All clear — no active findings for this client.
+        <div className="my-2">
+          <AnalystEmptyState
+            icon={CheckCircle2}
+            title="All Clear — No Active Insights"
+            description="The AI Analyst agent found no active anomalies or risks requiring immediate executive triage."
+          />
         </div>
       )}
 
       {state?.data?.status === 'ok' && (
-        <div className="relative">
-          <div className="inline-flex items-center gap-2 text-2xl font-black tracking-tight mb-5">
-            {state.data.overall_status}
-          </div>
+        <div className="relative space-y-5">
+          {state.data.overall_status && (
+            <div className="inline-flex items-center gap-2.5 px-4 py-2 rounded-2xl bg-slate-100 border border-white/15 backdrop-blur-md text-lg font-black tracking-tight text-slate-900 shadow-xs">
+              <span>{state.data.overall_status}</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {FIELD_META.map(({ key, label, icon: Icon }) => (
-              <div key={key} className="rounded-2xl bg-white/5 border border-white/10 p-4">
-                <div className="flex items-center gap-1.5 mb-1.5 text-violet-300">
-                  <Icon size={12} />
-                  <span className="text-[9px] font-black uppercase tracking-wider">{label}</span>
+            {FIELD_META.map(({ key, label, icon: Icon }) => {
+              const val = state.data[key];
+              if (!val) return null;
+              return (
+                <div key={key} className="rounded-2xl bg-slate-50 border border-white/10 p-4 hover:bg-slate-100 transition">
+                  <div className="flex items-center gap-2 mb-2 text-indigo-500">
+                    <Icon size={13} />
+                    <span className="text-[10px] font-black uppercase tracking-wider">{label}</span>
+                  </div>
+                  <p className="text-xs font-medium text-slate-900/90 leading-relaxed">{val}</p>
                 </div>
-                <p className="text-[13px] font-medium text-white/90 leading-relaxed">{state.data[key]}</p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

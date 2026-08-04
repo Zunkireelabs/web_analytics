@@ -27,14 +27,14 @@ export default function AnalystConfidenceBadge({
   }
 
   return (
-    <div className="rounded-xl border border-slate-150 bg-slate-50/60 p-2.5 flex flex-col gap-1">
+    <div className="rounded-xl border border-slate-200 bg-slate-100/70 p-2.5 flex flex-col gap-1">
       <div className="flex items-center gap-1.5" style={{ color }}>
         <Icon size={12} />
         <span className="text-[9px] font-black uppercase tracking-wider">
           {insufficient ? 'Insufficient data' : `${pct}% confidence`}
         </span>
       </div>
-      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-semibold text-slate-400">
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-semibold text-slate-500">
         {sampleSize != null && <span>Sample: {sampleSize.toLocaleString()}</span>}
         {modelVersion && <span>Model: {modelVersion}</span>}
         {lastAnalysis && <span>Updated {new Date(lastAnalysis).toLocaleDateString()}</span>}

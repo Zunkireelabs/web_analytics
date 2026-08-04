@@ -20,7 +20,6 @@ const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
 const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
-const GeoAudit = lazy(() => import('./pages/GeoAudit.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
 const AdminUsers = lazy(() => import('./pages/admin/Users.jsx'));
@@ -132,8 +131,8 @@ export default function App() {
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes>
-              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth. */}
-              <Route path="/" element={<Navigate to="/ai-growth" replace />} />
+              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth (the agent runner console, AiGrowth.jsx). */}
+              <Route path="/" element={<Navigate to="/ai-orchestration" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />
@@ -153,7 +152,6 @@ export default function App() {
               <Route path="/ai-orchestration" element={<AiGrowth />} />
               <Route path="/action-center" element={<ActionCenter />} />
               <Route path="/site-audit" element={<SiteAudit />} />
-              <Route path="/geo-audit" element={<GeoAudit />} />
               {/* Every account, not internal-only — same session's own password either way. */}
               <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this session's own. */}

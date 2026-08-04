@@ -99,8 +99,8 @@ const ACTION_BUTTON_BASE =
 
 function ActionButton({ icon: Icon, label, onClick, disabled, title, tone = 'default', loading }) {
   const toneClass = tone === 'primary'
-    ? 'text-white shadow-sm'
-    : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-900';
+    ? 'text-slate-900 shadow-sm'
+    : 'bg-transparent border border-slate-200 text-slate-700 hover:border-slate-500 hover:text-slate-900';
   const style = tone === 'primary' ? { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' } : undefined;
   return (
     <button type="button" onClick={onClick} disabled={disabled} title={title}
@@ -113,10 +113,10 @@ function ActionButton({ icon: Icon, label, onClick, disabled, title, tone = 'def
 
 function Section({ icon: Icon, iconColor, title, children }) {
   return (
-    <div className="rounded-2xl border border-slate-150 bg-slate-50/60 p-3">
+    <div className="rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
       <div className="flex items-center gap-1.5 mb-1.5">
         <Icon size={12} style={{ color: iconColor }} />
-        <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">{title}</span>
+        <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">{title}</span>
       </div>
       {children}
     </div>
@@ -209,19 +209,19 @@ export default function AnalystFindingPipeline({
         style={{ color: status.color, backgroundColor: `${status.color}0c`, borderColor: `${status.color}1e` }}>
         <Bot size={11} className={status.pulse ? 'animate-pulse' : ''} />
         <span>Data Analytics Agent</span>
-        <span className="text-slate-300">·</span>
+        <span className="text-slate-700">·</span>
         <span>{status.label}</span>
       </div>
 
       <Section icon={insight.root_cause ? Sparkles : FileSearch} iconColor="#0ea5e9" title={insight.root_cause ? 'AI Root Cause' : 'Root Cause Analysis'}>
-        <p className="text-[10px] font-bold text-slate-700 leading-relaxed">
+        <p className="text-[10px] font-bold text-slate-800 leading-relaxed">
           {insight.root_cause || rootCauseFallback(insight)}
         </p>
         {bullets.length > 0 && (
           <ul className="mt-1.5 space-y-1">
             {bullets.map((b, i) => (
-              <li key={i} className="text-[9.5px] font-semibold text-slate-500 flex items-start gap-1.5">
-                <span className="w-1 h-1 rounded-full bg-slate-400 mt-1.5 shrink-0" />
+              <li key={i} className="text-[9.5px] font-semibold text-slate-400 flex items-start gap-1.5">
+                <span className="w-1 h-1 rounded-full bg-slate-500 mt-1.5 shrink-0" />
                 <span>{b}</span>
               </li>
             ))}
@@ -230,15 +230,15 @@ export default function AnalystFindingPipeline({
       </Section>
 
       <Section icon={ListChecks} iconColor="#10b981" title="Repair Strategy">
-        <p className="text-[10px] font-semibold text-slate-600 leading-relaxed flex items-start gap-1.5">
-          <CheckCircle2 size={11} className="text-emerald-500 mt-0.5 shrink-0" />
+        <p className="text-[10px] font-semibold text-slate-700 leading-relaxed flex items-start gap-1.5">
+          <CheckCircle2 size={11} className="text-emerald-600 mt-0.5 shrink-0" />
           <span>{insight.recommendation || 'No recommendation generated yet.'}</span>
         </p>
       </Section>
 
       <Section icon={TrendingUp} iconColor="#8b5cf6" title="Forecast">
         {forecast?.status === 'ok' ? (
-          <p className="text-[10px] font-semibold text-slate-600 leading-relaxed">
+          <p className="text-[10px] font-semibold text-slate-700 leading-relaxed">
             {forecast.model} model projects {formatByUnit(forecast.points?.[forecast.points.length - 1]?.point_estimate, metric.unit)}
             {' '}by {forecast.points?.[forecast.points.length - 1]?.target_date}
             {forecast.confidence != null && ` · ${Math.round(forecast.confidence * 100)}% confidence`}.
@@ -280,8 +280,8 @@ export default function AnalystFindingPipeline({
             disabled={!hasRecommendation || resolving} loading={resolving} tone="primary"
             title={!hasRecommendation ? 'No recommendation to resolve yet' : undefined} />
         </div>
-        {reportState?.error && <p className="text-[9px] font-bold text-rose-500 mt-1.5">{reportState.error}</p>}
-        {draftState?.error && <p className="text-[9px] font-bold text-rose-500 mt-1.5">{draftState.error}</p>}
+        {reportState?.error && <p className="text-[9px] font-bold text-rose-600 mt-1.5">{reportState.error}</p>}
+        {draftState?.error && <p className="text-[9px] font-bold text-rose-600 mt-1.5">{draftState.error}</p>}
       </Section>
 
       <Section icon={Workflow} iconColor="#6C63FF" title="AI Action Pipeline">
@@ -294,21 +294,21 @@ export default function AnalystFindingPipeline({
       <AnalystReasoningPanel clientId={clientId} insight={insight} metric={metric} />
 
       {summary && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4" onClick={() => setSummary(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-white backdrop-blur-sm p-4" onClick={() => setSummary(null)}>
+          <div className="bg-[#ffffff] border border-slate-200 rounded-2xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-xs font-black text-slate-900 flex items-center gap-1.5">
-                <Sparkles size={13} className="text-indigo-500" /> Executive Summary
+                <Sparkles size={13} className="text-indigo-600" /> Executive Summary
               </h4>
-              <button type="button" onClick={() => setSummary(null)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
+              <button type="button" onClick={() => setSummary(null)} className="text-slate-500 hover:text-slate-900 cursor-pointer">
                 <X size={16} />
               </button>
             </div>
-            {summary.loading && <p className="text-xs text-slate-400 animate-pulse">Generating summary…</p>}
-            {summary.error && <p className="text-xs text-rose-500 font-semibold">{summary.error}</p>}
+            {summary.loading && <p className="text-xs text-slate-500 animate-pulse">Generating summary…</p>}
+            {summary.error && <p className="text-xs text-rose-600 font-semibold">{summary.error}</p>}
             {summary.text && (
               <>
-                <p className="text-xs text-slate-700 leading-relaxed">{summary.text}</p>
+                <p className="text-xs text-slate-800 leading-relaxed">{summary.text}</p>
                 <button type="button" onClick={() => navigator.clipboard.writeText(summary.text)}
                   className="mt-3 text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:underline cursor-pointer">
                   Copy to clipboard

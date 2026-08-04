@@ -30,10 +30,10 @@ export default function AnalystDiagnosticsPanel({ clientId, metricKey }) {
   ];
 
   return (
-    <div className="card p-6">
+    <div className="an-panel p-6">
       <div className="flex items-center gap-2 mb-4">
-        <Activity size={14} className="text-sky-500" />
-        <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">Statistical Analysis</h3>
+        <Activity size={14} className="text-sky-600" />
+        <h3 className="text-xs font-black uppercase tracking-wider text-slate-400">Statistical Analysis</h3>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -41,13 +41,13 @@ export default function AnalystDiagnosticsPanel({ clientId, metricKey }) {
           const r = diag?.[key];
           const ok = r?.status === 'ok' && r.value != null;
           return (
-            <div key={key} className="rounded-xl border border-slate-150 bg-slate-50/60 p-3">
-              <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">{label}</div>
+            <div key={key} className="rounded-xl border border-slate-200 bg-slate-100/70 p-3">
+              <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">{label}</div>
               <div className="text-sm font-extrabold text-slate-800 mt-1">
                 {diag === null ? '…' : ok ? fmt(r.value) : '—'}
               </div>
               {!ok && diag !== null && (
-                <div className="text-[8px] font-semibold text-slate-400 mt-0.5">{r?.detail?.reason || 'insufficient data'}</div>
+                <div className="text-[8px] font-semibold text-slate-500 mt-0.5">{r?.detail?.reason || 'insufficient data'}</div>
               )}
             </div>
           );
@@ -59,7 +59,7 @@ export default function AnalystDiagnosticsPanel({ clientId, metricKey }) {
         <StaticStat label="Forecast Confidence" value={forecast?.confidence != null ? `${Math.round(forecast.confidence * 100)}%` : '—'} />
         <StaticStat label="Data Completeness" value={diag?.volatility?.detail?.n_observations ? `${diag.volatility.detail.n_observations}/${diag.volatility.detail.window_days || 28} days` : '—'} />
       </div>
-      <p className="text-[9px] font-semibold text-slate-400 mt-4 flex items-center gap-1">
+      <p className="text-[9px] font-semibold text-slate-500 mt-4 flex items-center gap-1">
         <Gauge size={10} /> Statistics computed live from this client's own observed history — never an industry benchmark.
       </p>
     </div>
@@ -68,8 +68,8 @@ export default function AnalystDiagnosticsPanel({ clientId, metricKey }) {
 
 function StaticStat({ label, value }) {
   return (
-    <div className="rounded-xl border border-slate-150 bg-slate-50/60 p-3">
-      <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">{label}</div>
+    <div className="rounded-xl border border-slate-200 bg-slate-100/70 p-3">
+      <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">{label}</div>
       <div className="text-sm font-extrabold text-slate-800 mt-1">{value}</div>
     </div>
   );

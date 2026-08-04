@@ -33,11 +33,11 @@ export default function AnalystAiAnalystCard({ clientId, metric, insight }) {
   }, [clientId, insight?.id]);
 
   return (
-    <div className="card p-6 flex flex-col">
+    <div className="an-panel p-6 flex flex-col">
       <div className="flex items-center justify-between gap-2 mb-3">
         <div className="flex items-center gap-2">
-          <Sparkles size={14} className="text-indigo-500" />
-          <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">AI Analyst</h3>
+          <Sparkles size={14} className="text-indigo-600" />
+          <h3 className="text-xs font-black uppercase tracking-wider text-slate-400">AI Analyst</h3>
         </div>
         {insight && confidence && (
           <AnalystConfidenceBadge status={confidence.score != null ? 'ok' : 'insufficient-data'} score={confidence.score} compact />
@@ -45,13 +45,13 @@ export default function AnalystAiAnalystCard({ clientId, metric, insight }) {
       </div>
 
       {!insight ? (
-        <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700 bg-emerald-50/60 border border-emerald-100 rounded-2xl p-4">
-          <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+        <div className="flex items-center gap-2 text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-500/25 rounded-2xl p-4">
+          <CheckCircle2 size={14} className="text-emerald-600 shrink-0" />
           No active investigation for this metric — nothing anomalous or shifting has been flagged.
         </div>
       ) : (
         <>
-          <p className="text-[9px] font-black uppercase tracking-wider mb-1.5" style={{ color: TYPE_META[insight.insight_type]?.color || '#6C63FF' }}>
+          <p className="text-[9px] font-black uppercase tracking-wider mb-1.5" style={{ color: TYPE_META[insight.insight_type]?.color || '#8b5cf6' }}>
             {TYPE_META[insight.insight_type]?.label || 'Finding'}
           </p>
           <p className="text-sm font-semibold text-slate-800 leading-relaxed">
@@ -60,15 +60,15 @@ export default function AnalystAiAnalystCard({ clientId, metric, insight }) {
           {evidenceBullets(insight, metric).length > 0 && (
             <ul className="mt-3 space-y-1">
               {evidenceBullets(insight, metric).map((b, i) => (
-                <li key={i} className="text-[10.5px] font-semibold text-slate-500 flex items-start gap-1.5">
-                  <span className="w-1 h-1 rounded-full bg-slate-400 mt-1.5 shrink-0" />
+                <li key={i} className="text-[10.5px] font-semibold text-slate-400 flex items-start gap-1.5">
+                  <span className="w-1 h-1 rounded-full bg-slate-500 mt-1.5 shrink-0" />
                   <span>{b}</span>
                 </li>
               ))}
             </ul>
           )}
           {insight.recommendation && (
-            <p className="text-[11px] font-semibold text-slate-600 mt-3 pt-3 border-t border-slate-100">
+            <p className="text-[11px] font-semibold text-slate-500 mt-3 pt-3 border-t border-slate-200">
               {insight.recommendation}
             </p>
           )}
