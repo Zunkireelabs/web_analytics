@@ -73,3 +73,22 @@ export function renderTranslationBody(content) {
   ]);
   return `${front}\n${content.translatedContent || ''}\n`;
 }
+
+// Cookie Policy / Privacy Policy / Terms of Service — same minimal
+// front-matter + heading/section shape as renderLandingPageBody, plus the
+// generator's disclaimer rendered as a visible callout at the very top of
+// the file (not just a `content` field a reviewer could miss), so "this is
+// a template, not legal advice, have it reviewed" survives into the real PR
+// diff a human reviews before merging.
+export function renderCompliancePageBody(content) {
+  const front = frontMatter([
+    ['title', content.metaTitle || content.headline],
+    ['description', content.metaDescription],
+  ]);
+  const parts = [`# ${content.headline}`];
+  if (content.disclaimer) parts.push(`> **${content.disclaimer}**`);
+  for (const s of content.sections || []) {
+    if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
+  }
+  return `${front}\n${parts.join('\n\n')}\n`;
+}

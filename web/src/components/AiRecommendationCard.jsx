@@ -6,11 +6,11 @@ import { AlertTriangle, Sparkles, HelpCircle, CheckCircle2, ArrowUpRight, ArrowD
 
 function emptyMessage(meta) {
   const anyConfigured = meta?.providers?.some((p) => p.configured);
-  if (!anyConfigured) return 'Not configured — needs OPENAI_API_KEY and AI_RECOMMENDATION_ENABLED=true to probe real prompts (a deliberate separate opt-in, not just the API key — other providers can be added the same way, see lib/model-providers/).';
-  if (!meta?.hasRun) return 'Not analyzed yet — runs monthly.';
-  if (meta.status === 'error') return 'Last run failed — check Integration Health below.';
-  if (meta.status === 'insufficient-data') return `Last run (${timeAgo(meta.lastRunAt)}) had no real prompt candidates or every probe failed.`;
-  return `Last run (${timeAgo(meta.lastRunAt)}) completed but returned no data.`;
+  if (!anyConfigured) return "We haven't set this up yet — check back soon.";
+  if (!meta?.hasRun) return 'Not checked yet — this updates monthly.';
+  if (meta.status === 'error') return "We couldn't check this — see Data Connection below.";
+  if (meta.status === 'insufficient-data') return `Checked ${timeAgo(meta.lastRunAt)}, but there wasn't enough data yet.`;
+  return `Checked ${timeAgo(meta.lastRunAt)}, but no data was available.`;
 }
 
 const pctColor = (pct) => (pct >= 60 ? '#10b981' : pct >= 25 ? '#f59e0b' : '#ef4444');
@@ -33,23 +33,21 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
 
   if (!aiRecommendation) {
     return (
-      <div className="relative overflow-hidden card-dark p-6 flex items-start gap-4 shadow-md hover:border-teal-500/50 transition-all duration-300 min-h-[140px]">
-        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-teal-400 to-indigo-500" />
-        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-20 bg-teal-500" />
+      <div className="relative overflow-hidden card bg-gradient-to-br from-teal-50/70 via-emerald-50/30 to-white border border-teal-150 p-5 flex items-start gap-3.5 shadow-2xs hover:shadow-md hover:border-teal-300 transition-all duration-300 min-h-[140px]">
+        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-teal-500 to-emerald-500" />
+        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-40 bg-teal-200" />
 
-        <span className="w-10 h-10 rounded-2xl grid place-items-center bg-teal-500/20 text-teal-400 border border-teal-500/30 shrink-0 shadow-inner mt-0.5">
-          <Sparkles size={20} className="animate-pulse" />
+        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-teal-100/80 text-teal-600 border border-teal-200/60 shrink-0 shadow-2xs mt-0.5">
+          <Sparkles size={18} strokeWidth={2.25} />
         </span>
         <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="font-black text-teal-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
-              <span>✦</span> AI Recommendation Rate
-            </span>
-            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-              Pending Setup
+            <span className="font-black text-teal-950 text-[11px] uppercase tracking-wider">AI Search Visibility</span>
+            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200/80 shadow-2xs">
+              Not Yet Available
             </span>
           </div>
-          <p className="text-xs leading-relaxed text-slate-300 font-medium">
+          <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
             {emptyMessage(meta)}
           </p>
         </div>
@@ -67,7 +65,7 @@ export default function AiRecommendationCard({ aiRecommendation, meta, loading }
         <div className="space-y-1">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
             <Sparkles size={12} className="text-[#14b8a6]" />
-            <span>AI Recommendation Rate</span>
+            <span>AI Search Visibility</span>
           </div>
           <div className="flex items-baseline gap-1">
             <span className="text-4xl font-black tracking-tight text-slate-900 tabular-nums">{animatedPct}</span>

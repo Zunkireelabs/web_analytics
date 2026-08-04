@@ -57,6 +57,8 @@ function sendHttpError(res, e) {
   if (e.suggestedMode !== undefined) body.suggestedMode = e.suggestedMode;
   if (e.draftStatus !== undefined) body.status = e.draftStatus;
   if (e.attempted !== undefined) body.attempted = e.attempted;
+  if (e.missingClasses !== undefined) body.missingClasses = e.missingClasses;
+  if (e.componentKey !== undefined) body.componentKey = e.componentKey;
   res.status(e.status).json(body);
 }
 
@@ -271,13 +273,17 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   const site = await getSiteById(siteId);
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
-    resolved = await resolveImplementerForApply(site, draft);
+    resolved = await resolveImplementerForApply(site, draft, renderMode);
+    if (resolved.reason === 'render-mode-uncertain') {
+      throw httpError(422, resolved.error, { reason: resolved.reason, confidence: resolved.confidence, suggestedMode: resolved.suggestedMode });
+    }
     if (resolved.error) throw httpError(400, resolved.error);
     if (typeof resolved.implementer.preview === 'function') {
       const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: renderMode });
       if (!previewResult.ok) {
         throw httpError(422, previewResult.error, {
           reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
+          missingClasses: previewResult.missingClasses, componentKey: previewResult.componentKey,
         });
       }
     }
@@ -405,6 +411,9 @@ router.get('/action-center/drafts/:id/preview', async (req, res, next) => {
     const resolved = draft.status === 'implemented'
       ? await resolveImplementerForMerge(draft)
       : await resolveImplementerForApply(site, draft);
+    if (resolved.reason === 'render-mode-uncertain') {
+      return res.status(422).json({ error: resolved.error, reason: resolved.reason, confidence: resolved.confidence, suggestedMode: resolved.suggestedMode });
+    }
     if (resolved.error) return res.status(400).json({ error: resolved.error });
     const { implementer } = resolved;
     if (typeof implementer.preview !== 'function') {
@@ -431,7 +440,10 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
   const site = await getSiteById(siteId);
   if (!site.repo_owner || !site.repo_name) throw httpError(400, 'This site has no repository configured yet — run `npm run connect-repo` first.');
 
-  const resolved = await resolveImplementerForApply(site, draft);
+  const resolved = await resolveImplementerForApply(site, draft, renderMode);
+  if (resolved.reason === 'render-mode-uncertain') {
+    throw httpError(422, resolved.error, { reason: resolved.reason, confidence: resolved.confidence, suggestedMode: resolved.suggestedMode });
+  }
   if (resolved.error) throw httpError(400, resolved.error);
   const { implementer, implementerId } = resolved;
 
@@ -441,7 +453,10 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
       ? { reason: result.error, confidence: result.confidence, suggestedMode: result.suggestedMode }
       : null;
     await recordApplyFailure(siteId, draft.id, result.error, renderModeInfo);
-    throw httpError(422, result.error, { reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted });
+    throw httpError(422, result.error, {
+      reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted,
+      missingClasses: result.missingClasses, componentKey: result.componentKey,
+    });
   }
   return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });
 }

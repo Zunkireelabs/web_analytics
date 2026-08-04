@@ -102,17 +102,11 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
   });
 
 
-  test('internal-links renders a styled section, not a bare <ul>', () => {
-
   test('internal-links falls back to a bare, unstyled <ul> when the site has no configured template', () => {
-
     const result = buildMergeValues('internal-links', {
       suggestions: [{ targetUrl: '/products/search/', anchorText: 'Zunkiree Search' }],
     });
     assert.equal(result.ok, true);
-
-    assert.match(result.values.links, /<a href="\/products\/search\/" class="[^"]*">Zunkiree Search<\/a>/);
-
     assert.match(result.values.links, /<ul class="related-links">/);
     assert.match(result.values.links, /<a href="\/products\/search\/">Zunkiree Search<\/a>/);
   });

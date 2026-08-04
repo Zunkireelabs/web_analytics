@@ -102,6 +102,16 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
     ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
     changedRegions: [{ field: itemsFieldLabel, markerName: 'AI-managed', before: arrayRange ? '(previously AI-added items)' : '(none)', after: JSON.stringify(validated.items) }],
     faqDiff: diffFaqItems(existingItems, validated.items),
+    // Always 'visible' — resolve.js's resolveImplementerForApply only ever
+    // routes a 'faq' draft to this adapter once the real render-mode
+    // decision (lib/faq-render-mode.js) has already come out 'visible';
+    // 'schema-only' goes through the default marker-merge implementer
+    // instead (see that module's own comment). Stamping it here is what lets
+    // store/drafts.js's countVisibleFaqDrafts/hasImplementedVisibleFaqForPage
+    // actually see this draft — without it, drafts written by this adapter
+    // were invisible to both the sitewide visible-FAQ cap and the
+    // cross-mechanism duplicate guard.
+    renderMode: 'visible',
   };
 }
 

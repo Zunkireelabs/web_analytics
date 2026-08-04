@@ -8,7 +8,7 @@ import { AlertTriangle, CheckCircle2, Search, ArrowUpRight, ArrowDownRight } fro
 // sky-blue accent keeps all three "how do we compare" families visually
 // distinct at a glance.
 
-const SOURCE_LABEL = { dataforseo: 'DataForSEO', 'google-cse': 'Google Custom Search' };
+const SOURCE_LABEL = { dataforseo: 'Live Search Data', 'google-cse': 'Google Search' };
 
 function AmberState({ title, message }) {
   return (
@@ -46,7 +46,7 @@ export default function CompetitorRankingCard({ rankingComparison, meta, loading
   }
 
   if (!meta?.hasRun || !rankingComparison) {
-    return <AmberState title="Who Outranks You (Google Search)" message="Competitor Intelligence hasn't run yet." />;
+    return <AmberState title="Who Outranks You (Google Search)" message="We haven't checked this yet — check back soon." />;
   }
 
   if (!rankingComparison.serpProviderConfigured) {

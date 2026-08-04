@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
+import DesignDriftPanel from '../components/DesignDriftPanel.jsx';
 import {
   Building,
   Globe,
@@ -334,6 +335,7 @@ export default function ClientOnboarding() {
   const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
   const [lifecycleError, setLifecycleError] = useState({}); // {[clientId]: message}
   const [hardDeleteOpen, setHardDeleteOpen] = useState({}); // {[clientId]: true}
+  const [designDriftOpen, setDesignDriftOpen] = useState({}); // {[clientId]: true}
   const [hardDeleteName, setHardDeleteName] = useState({}); // {[clientId]: string}
 
   const [requests, setRequests] = useState(null); // null = loading
@@ -816,6 +818,25 @@ export default function ClientOnboarding() {
                           {faqCapError[c.id]}
                         </div>
                       )}
+
+                      {/* Checks whether a stored FAQ/expand-content/internal-links
+                          component template still matches the site's real live
+                          design (implementers/lib/design-drift.js) — surfaces
+                          after a draft fails to apply with reason
+                          'template-stale' in Action Center, or after a known
+                          site redesign. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <AlertTriangle size={11} className="text-slate-400 shrink-0" />
+                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Design drift check</span>
+                        <button
+                          type="button"
+                          onClick={() => setDesignDriftOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
+                          className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition"
+                        >
+                          {designDriftOpen[c.id] ? 'Hide' : 'Check…'}
+                        </button>
+                      </div>
+                      {designDriftOpen[c.id] && <DesignDriftPanel clientId={c.id} />}
 
                       {/* Organic (pre-existing, never-touched-by-us) visible
                           FAQ pages — added to the tool's own injected count
