@@ -14,14 +14,19 @@ export async function listActivePrompts(siteId) {
 // Idempotent — a prompt already tracked (same real text) is left alone
 // rather than duplicated; only genuinely new prompts derived this run are
 // inserted. `source` is not updated on conflict since the original
-// derivation reason is the more meaningful one to keep.
-export async function upsertTrackedPrompt(siteId, promptText, source) {
+// derivation reason is the more meaningful one to keep. `growthQueryId`
+// (optional) links this prompt back to a tracked_growth_queries row
+// (migration 077) so server/agents/growth-queries.js can read this agent's
+// own already-probed ai_prompt_runs for its Phase 5 AI-mention check,
+// without a second, duplicate probing implementation — every pre-existing
+// caller that omits it behaves identically to before.
+export async function upsertTrackedPrompt(siteId, promptText, source, growthQueryId = null) {
   const { rows } = await query(
-    `INSERT INTO ai_tracked_prompts (site_id, prompt_text, source)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (site_id, prompt_text) DO UPDATE SET active = true
+    `INSERT INTO ai_tracked_prompts (site_id, prompt_text, source, growth_query_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (site_id, prompt_text) DO UPDATE SET active = true, growth_query_id = COALESCE(ai_tracked_prompts.growth_query_id, EXCLUDED.growth_query_id)
      RETURNING *`,
-    [siteId, promptText, source]
+    [siteId, promptText, source, growthQueryId]
   );
   return rows[0];
 }

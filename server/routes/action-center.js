@@ -20,6 +20,7 @@ import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib
 import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
+import { markQueryDrafted } from '../store/growth-queries.js';
 
 // Best-effort post-merge Search Console notification (multi-tenant
 // refactor Part 3) — never blocks or fails the caller's response, since
@@ -178,6 +179,14 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
   });
+
+  // Stamps growth_query_status.drafted_at so server/agents/growth-queries.js's
+  // Phase 5 verification rotation picks this query up — best-effort only,
+  // never blocks or fails draft creation over this bookkeeping write.
+  if (generatorId === 'direct-answer' && params?.queryId) {
+    await markQueryDrafted(siteId, params.queryId).catch((err) => console.error('[action-center] failed to mark growth query drafted:', err.message));
+  }
+
   const renderModeHint = await buildRenderModeHint(siteId, generatorId, params?.page || content?.page);
   return { ...draft, summary, renderModeHint };
 }
