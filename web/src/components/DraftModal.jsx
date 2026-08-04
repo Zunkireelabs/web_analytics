@@ -27,7 +27,7 @@ const ACTION_LABELS = {
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
 
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report',
-=======
+
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update',
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
 
