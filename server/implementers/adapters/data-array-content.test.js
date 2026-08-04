@@ -191,4 +191,19 @@ describe('data-array-content computeChange — flat-array shape (zunkireelabs-we
     assert.equal(r.ok, true);
     assert.equal(r.changedRegions[0].field, '(root array)');
   });
+
+  // renderMode is always 'visible' here — resolve.js's resolveImplementerForApply
+  // only ever routes a 'faq' draft to this adapter once the real render-mode
+  // decision (lib/faq-render-mode.js) has already come out 'visible', so this
+  // adapter never has to (and never does) redecide it. Without this field,
+  // store/drafts.js's countVisibleFaqDrafts/hasImplementedVisibleFaqForPage
+  // can't see drafts this adapter wrote at all — see that function's comment.
+  test('always stamps renderMode: visible on its result', async () => {
+    const r = await computeChange(tenantD, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/', items: [{ question: 'New?', answer: 'Yes.' }] },
+    }, fetchEmptyFlat);
+    assert.equal(r.ok, true);
+    assert.equal(r.renderMode, 'visible');
+  });
 });

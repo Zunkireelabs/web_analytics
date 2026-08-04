@@ -36,9 +36,12 @@ import {
   ChevronUp,
   Workflow,
   Sparkles,
-  Terminal,
   ActivitySquare
 } from 'lucide-react';
+
+// Plain-English steps shown while a check is running (no agent/internal
+// names) — see ACTIVITY_STEPS usage in the refreshing panel below.
+const ACTIVITY_STEPS = ['Website scanned', 'SEO analyzed', 'Content reviewed', 'Recommendations prepared', 'Monitoring continues'];
 
 const STATUS_INFO = {
   complete: { label: 'Audit Complete', dotClass: 'bg-emerald-500', textClass: 'text-emerald-700', bgClass: 'bg-emerald-50' },
@@ -67,13 +70,7 @@ export default function CommandCenter() {
   const [integrations, setIntegrations] = useState(null);
   const [checkingId, setCheckingId] = useState(null);
 
-  // Real agent names (for the live log below) — same /agents/status endpoint
-  // AiGrowth.jsx uses, never a guessed/hardcoded id->label map.
-  const [agentsMeta, setAgentsMeta] = useState([]);
-  useEffect(() => { api.agentsStatus().then(setAgentsMeta).catch(() => {}); }, []);
-  const agentName = (id) => agentsMeta.find((a) => a.id === id)?.name || id;
-
-  // Real-time log of the actual agent run triggered by "Run Agent Core" —
+  // Real-time log of the actual agent run triggered by "Fix Everything Automatically" —
   // same live SSE stream as the orchestration console (AiGrowth.jsx), not a
   // scripted/simulated timeline. Only ever populated by genuine start/done
   // events broadcast by server/agents/runner.js for this site.
@@ -243,9 +240,20 @@ export default function CommandCenter() {
     return { issues, discoveries, opportunities, watchlist, actions };
   };
 
+  // Plain business-facing summary for a left-rail card: healthy/needs
+  // attention, how many issues, and the worst priority among them — the
+  // "Website SEO / ✓ Healthy / Issues Found / Priority" card shape.
+  const tabSummary = (info) => {
+    const items = [...info.issues, ...info.opportunities, ...info.discoveries];
+    const priority = items.some((f) => f.priority === 'high') ? 'High'
+      : items.some((f) => f.priority === 'medium') ? 'Medium'
+      : items.length ? 'Low' : null;
+    return { issuesFound: info.issues.length, priority, healthy: info.issues.length === 0 };
+  };
+
   const focusRing = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]';
 
-  // "Run Agent Core" genuinely re-runs every recommendation agent server-side
+  // "Fix Everything Automatically" genuinely re-runs every recommendation agent server-side
   // (~1-2 min, per the button label) — this panel shows that real run via
   // the live SSE stream (liveLogs), never a scripted/simulated timeline.
   if (refreshing) {
@@ -264,23 +272,26 @@ export default function CommandCenter() {
           </div>
 
           <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">
-            Orchestrating AI Agents
+            Checking Your Website
           </h2>
           <p className="text-xs text-slate-500 font-bold mt-1.5 max-w-xs">
-            Specialist agents are running diagnostics, compiling market shares, and executive narratives.
+            We're scanning your pages, checking your rankings, and preparing your report.
           </p>
 
-          <div className="w-full mt-6 bg-slate-50 border border-slate-200 rounded-3xl p-4 shadow-inner text-left font-mono text-[9px] text-slate-655 space-y-2 h-[150px] overflow-y-auto custom-scrollbar">
-            {liveLogs.length === 0 ? (
-              <div className="text-slate-400">Waiting for agents to report in…</div>
-            ) : liveLogs.map((log, idx) => (
-              <div key={idx} className="flex items-start gap-2 leading-relaxed">
-                <span className="text-slate-400 shrink-0 select-none">[{new Date(log.at).toLocaleTimeString()}]</span>
-                <span className={log.type === 'start' ? 'text-slate-650' : 'text-indigo-650 font-bold'}>
-                  {agentName(log.agentId)} {log.type === 'start' ? 'started…' : 'finished.'}
-                </span>
-              </div>
-            ))}
+          <div className="w-full mt-6 bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-inner text-left space-y-3">
+            {ACTIVITY_STEPS.map((step, idx) => {
+              const done = liveLogs.filter((l) => l.type === 'done').length > idx;
+              return (
+                <div key={step} className="flex items-center gap-2.5">
+                  <span className={`w-5 h-5 rounded-full grid place-items-center shrink-0 text-[10px] font-black ${
+                    done ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-400'
+                  }`}>
+                    {done ? '✓' : idx + 1}
+                  </span>
+                  <span className={`text-xs font-bold ${done ? 'text-slate-700' : 'text-slate-400'}`}>{step}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -303,6 +314,9 @@ export default function CommandCenter() {
   const seoInfo = getAgentWorkspace('seo');
   const contentInfo = getAgentWorkspace('content');
   const geoInfo = getAgentWorkspace('geo');
+  const seoSummary = tabSummary(seoInfo);
+  const contentSummary = tabSummary(contentInfo);
+  const geoSummary = tabSummary(geoInfo);
 
   // Real analysis status (never-run/complete/partial/error, computed server-
   // side from the actual latest executive-report run) — shared across all 3
@@ -382,13 +396,13 @@ export default function CommandCenter() {
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <PageHeader
           title="AI Growth Command Center"
-          subtitle="Interactive Agent Workspace Board"
+          subtitle="Your Website's Health, Issues & Next Steps"
           icon="🧠"
           right={
             <button type="button" onClick={refresh} disabled={refreshing}
               className={`text-xs font-bold px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.99] shadow-sm hover:shadow-indigo-500/20 active-pill-shadow hover:brightness-105 cursor-pointer ${focusRing}`}
               style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-              {refreshing ? 'Refreshing Pipeline… (~1-2 min)' : 'Run Agent Core'}
+              {refreshing ? 'Checking your website… (~1-2 min)' : 'Fix Everything Automatically'}
             </button>
           }
         />
@@ -416,8 +430,8 @@ export default function CommandCenter() {
                 <Globe size={14} />
               </span>
               <div className="leading-tight">
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Who's beating you</h3>
-                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">Structural & AI-Readiness</span>
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Competitor Overview</h3>
+                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">How you compare online</span>
               </div>
             </div>
             {data?.competitors && data.competitors.length > 0 ? (
@@ -441,8 +455,8 @@ export default function CommandCenter() {
                 <Workflow size={14} />
               </span>
               <div className="leading-tight">
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Connection Health</h3>
-                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">Google Data Pipeline</span>
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Data Connection</h3>
+                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">Google Analytics & Search Console</span>
               </div>
             </div>
             {integrations && integrations.length > 0 ? (
@@ -464,7 +478,7 @@ export default function CommandCenter() {
             )}
           </div>
           <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5 flex justify-between items-center">
-            <span>Pipelines fully synced.</span>
+            <span>Everything's connected.</span>
             {integrations && integrations.length > 2 && <span className="text-indigo-650 font-black tracking-wide cursor-pointer hover:underline">+{integrations.length - 2} more</span>}
           </div>
         </div>
@@ -485,7 +499,7 @@ export default function CommandCenter() {
         {/* Left Side: Agent Board Directory (4-cols) */}
         <div className="lg:col-span-4 flex flex-col gap-3.5 bg-slate-50 border border-slate-200 rounded-3xl p-4 shadow-inner">
           <div className="border-b border-slate-200 pb-2">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Agent Taskforce Workspace</h3>
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Website Improvements</h3>
           </div>
 
           {/* SEO Agent Select Card */}
@@ -504,20 +518,27 @@ export default function CommandCenter() {
                   <Target size={16} strokeWidth={2.25} />
                 </span>
                 <div>
-                  <h4 className="text-xs font-black text-slate-900 leading-none">SEO & Technical Auditor</h4>
-                  <span className="text-[9px] font-bold text-slate-400 block mt-1.5">{WORKSPACE_AGENT_IDS.seo.length} underlying specialist models</span>
+                  <h4 className="text-xs font-black text-slate-900 leading-none">Website SEO Check</h4>
+                  <span className={`text-[9px] font-black uppercase tracking-wider block mt-1.5 ${seoSummary.healthy ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {seoSummary.healthy ? '✓ Healthy' : '⚠ Needs Attention'}
+                  </span>
                 </div>
               </div>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             </div>
 
-            <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
-              <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className={`font-bold ${analysisStatusInfo.textClass}`}>{analysisStatusInfo.label}</span></span>
-              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'seo' ? 'border-indigo-200 text-indigo-650 bg-indigo-50/40' : 'border-slate-200 text-slate-500'
-              }`}>
-                {seoInfo.issues.length + seoInfo.opportunities.length} findings
-              </span>
+            <div className="w-full mt-4 pt-3 border-t border-slate-100 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Issues Found</span><span className="font-black text-slate-800">{seoSummary.issuesFound}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Priority</span><span className="font-black text-slate-800">{seoSummary.priority || 'None'}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Last Checked</span><span className="font-black text-slate-800">{lastAnalyzedLabel}</span>
+              </div>
+              <div className={`text-[9.5px] font-black uppercase tracking-wider pt-1 ${selectedAgent === 'seo' ? 'text-indigo-650' : 'text-slate-400'}`}>
+                View Report →
+              </div>
             </div>
           </button>
 
@@ -537,20 +558,27 @@ export default function CommandCenter() {
                   <FileText size={16} strokeWidth={2.25} />
                 </span>
                 <div>
-                  <h4 className="text-xs font-black text-slate-900 leading-none">Content Strategy Agent</h4>
-                  <span className="text-[9px] font-bold text-slate-400 block mt-1.5">Content gap & copy optimization</span>
+                  <h4 className="text-xs font-black text-slate-900 leading-none">Content Recommendations</h4>
+                  <span className={`text-[9px] font-black uppercase tracking-wider block mt-1.5 ${contentSummary.healthy ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {contentSummary.healthy ? '✓ Healthy' : '⚠ Needs Attention'}
+                  </span>
                 </div>
               </div>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             </div>
 
-            <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
-              <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className={`font-bold ${analysisStatusInfo.textClass}`}>{analysisStatusInfo.label}</span></span>
-              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'content' ? 'border-teal-200 text-teal-650 bg-teal-50/40' : 'border-slate-200 text-slate-500'
-              }`}>
-                {contentInfo.issues.length + contentInfo.opportunities.length} findings
-              </span>
+            <div className="w-full mt-4 pt-3 border-t border-slate-100 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Issues Found</span><span className="font-black text-slate-800">{contentSummary.issuesFound}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Priority</span><span className="font-black text-slate-800">{contentSummary.priority || 'None'}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Last Checked</span><span className="font-black text-slate-800">{lastAnalyzedLabel}</span>
+              </div>
+              <div className={`text-[9.5px] font-black uppercase tracking-wider pt-1 ${selectedAgent === 'content' ? 'text-teal-650' : 'text-slate-400'}`}>
+                View Report →
+              </div>
             </div>
           </button>
 
@@ -570,20 +598,27 @@ export default function CommandCenter() {
                   <Globe size={16} strokeWidth={2.25} />
                 </span>
                 <div>
-                  <h4 className="text-xs font-black text-slate-900 leading-none">Geographical Investigator</h4>
-                  <span className="text-[9px] font-bold text-slate-400 block mt-1.5">Demographics & click changes</span>
+                  <h4 className="text-xs font-black text-slate-900 leading-none">Audience Insights</h4>
+                  <span className={`text-[9px] font-black uppercase tracking-wider block mt-1.5 ${geoSummary.healthy ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {geoSummary.healthy ? '✓ Healthy' : '⚠ Needs Attention'}
+                  </span>
                 </div>
               </div>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
             </div>
 
-            <div className="flex items-center justify-between w-full mt-4 pt-3 border-t border-slate-100">
-              <span className="text-[10px] font-bold text-slate-500">Audit Status: <span className={`font-bold ${analysisStatusInfo.textClass}`}>{analysisStatusInfo.label}</span></span>
-              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border bg-slate-50 ${
-                selectedAgent === 'geo' ? 'border-sky-200 text-sky-600 bg-sky-50/40' : 'border-slate-200 text-slate-505'
-              }`}>
-                {geoInfo.issues.length + geoInfo.opportunities.length} findings
-              </span>
+            <div className="w-full mt-4 pt-3 border-t border-slate-100 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Issues Found</span><span className="font-black text-slate-800">{geoSummary.issuesFound}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Priority</span><span className="font-black text-slate-800">{geoSummary.priority || 'None'}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-500">
+                <span>Last Checked</span><span className="font-black text-slate-800">{lastAnalyzedLabel}</span>
+              </div>
+              <div className={`text-[9.5px] font-black uppercase tracking-wider pt-1 ${selectedAgent === 'geo' ? 'text-sky-600' : 'text-slate-400'}`}>
+                View Report →
+              </div>
             </div>
           </button>
         </div>
@@ -603,13 +638,10 @@ export default function CommandCenter() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-black uppercase tracking-widest text-slate-900">
-                      {selectedAgent === 'seo' ? 'SEO & Tech Workspace File'
-                        : selectedAgent === 'content' ? 'Content Strategy Workspace File'
-                        : 'Geo Investigator Workspace File'}
+                      {selectedAgent === 'seo' ? 'Website Health Details'
+                        : selectedAgent === 'content' ? 'Content Health Details'
+                        : 'Audience Health Details'}
                     </h3>
-                    <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-200/60">
-                      Autonomous Agent
-                    </span>
                   </div>
                   <span className="text-[10px] font-bold text-slate-400 block mt-0.5">Last analyzed {lastAnalyzedLabel}</span>
                 </div>
@@ -621,20 +653,17 @@ export default function CommandCenter() {
               </span>
             </div>
 
-            {/* HIGH-TECH LIVE AI TERMINAL BAR */}
-            <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950 text-slate-200 rounded-2xl p-3.5 flex items-center justify-between gap-3 text-[11px] font-mono border border-slate-800 shadow-md">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <Terminal size={14} className={`${agentTheme.terminalText} animate-pulse shrink-0`} />
-                <span className="text-slate-500 font-bold select-none shrink-0">[Agent Execution Log]</span>
-                <span className="text-emerald-400 truncate font-semibold">
+            {/* Latest AI Activity */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex items-center gap-3 text-[11px] shadow-sm">
+              <ActivitySquare size={14} className={`${agentTheme.textClass} shrink-0`} />
+              <div className="min-w-0">
+                <span className="text-slate-400 font-bold select-none">Latest AI Activity: </span>
+                <span className="text-slate-700 truncate font-semibold">
                   {workspaceActivity
-                    ? `🤖 ${workspaceActivity.label} (${timeAgo(workspaceActivity.createdAt)})`
-                    : `🤖 No real activity recorded yet for this agent group.`}
+                    ? `✓ ${workspaceActivity.label} (${timeAgo(workspaceActivity.createdAt)})`
+                    : 'No activity recorded yet for this section.'}
                 </span>
               </div>
-              <span className="text-[9px] font-black tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20 shrink-0 hidden sm:inline-block">
-                LIVE POLLING
-              </span>
             </div>
           </div>
 
@@ -685,7 +714,7 @@ export default function CommandCenter() {
                 <div className="md:col-span-7 flex flex-col">
                   <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
                     <span className="flex items-center gap-2">
-                      <AlertTriangle size={14} className="text-rose-500" /> Critical Gaps: What We Lack
+                      <AlertTriangle size={14} className="text-rose-500" /> Needs Your Attention
                     </span>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${activeWorkspace.issues.length > 0 ? 'bg-rose-100 text-rose-700 font-extrabold' : 'bg-slate-100 text-slate-500'}`}>
                       {activeWorkspace.issues.length}
@@ -713,7 +742,7 @@ export default function CommandCenter() {
                 <div className="md:col-span-5 flex flex-col">
                   <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
                     <span className="flex items-center gap-2">
-                      <CheckCircle2 size={14} className={agentTheme.textClass} /> Open Opportunity Watchlist
+                      <CheckCircle2 size={14} className={agentTheme.textClass} /> Quick Wins
                     </span>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${activeWorkspace.watchlist.length > 0 ? 'bg-indigo-100 text-indigo-700 font-extrabold' : 'bg-slate-100 text-slate-500'}`}>
                       {activeWorkspace.watchlist.length}
@@ -768,7 +797,7 @@ export default function CommandCenter() {
                     <div>
                       <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
                         <span className="flex items-center gap-2">
-                          <BrainCircuit size={14} className={agentTheme.textClass} /> Agent Discoveries
+                          <BrainCircuit size={14} className={agentTheme.textClass} /> Growth Opportunities
                         </span>
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${activeWorkspace.discoveries.length > 0 ? 'bg-indigo-100 text-indigo-700 font-extrabold' : 'bg-slate-100 text-slate-500'}`}>
                           {activeWorkspace.discoveries.length}
@@ -778,7 +807,7 @@ export default function CommandCenter() {
                         <div className="space-y-3">
                           {(showAllDiscoveries ? activeWorkspace.discoveries : activeWorkspace.discoveries.slice(0, 2)).map((f) => (
                             <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
-                              <DiscoveryCard finding={f} />
+                              <DiscoveryCard finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
                             </div>
                           ))}
                         </div>
@@ -806,7 +835,7 @@ export default function CommandCenter() {
                     <div>
                       <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
                         <span className="flex items-center gap-2">
-                          <TrendingUp size={14} className="text-emerald-600" /> Opportunities We Miss
+                          <TrendingUp size={14} className="text-emerald-600" /> Ideas To Try
                         </span>
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${activeWorkspace.opportunities.length > 0 ? 'bg-emerald-100 text-emerald-700 font-extrabold' : 'bg-slate-100 text-slate-500'}`}>
                           {activeWorkspace.opportunities.length}
@@ -816,7 +845,7 @@ export default function CommandCenter() {
                         <div className="space-y-3">
                           {(showAllOpportunities ? activeWorkspace.opportunities : activeWorkspace.opportunities.slice(0, 2)).map((f) => (
                             <div key={f.id} data-finding-id={f.id} className={highlightClass(f.id)}>
-                              <OpportunityCard finding={f} />
+                              <OpportunityCard finding={f} generating={generatingId === f.id} onGenerate={generateFromFinding} />
                             </div>
                           ))}
                         </div>
@@ -857,10 +886,10 @@ export default function CommandCenter() {
                    <Sparkles size={20} className={`${agentTheme.textClass} animate-pulse`} />
                  </div>
                  <h4 className="text-sm font-black text-slate-800 uppercase tracking-wider mb-1">
-                   Audit Complete & Verified
+                   All Clear
                  </h4>
                  <p className="text-[11.5px] font-bold text-slate-400 max-w-sm leading-relaxed">
-                   The {selectedAgent === 'seo' ? 'SEO & Technical Auditor' : selectedAgent === 'content' ? 'Content Strategy Agent' : 'Geographical Investigator'} has run all diagnostics. No issues, gaps, or anomalies were detected.
+                   We checked your {selectedAgent === 'seo' ? 'website SEO' : selectedAgent === 'content' ? 'content' : 'audience insights'} — nothing to fix right now.
                  </p>
                </div>
              </div>
@@ -878,7 +907,7 @@ export default function CommandCenter() {
           >
             <span className="flex items-center gap-2">
               <Workflow size={14} className="text-emerald-500" />
-              <span>Connection & Integration Health Details</span>
+              <span>Data Connection Details</span>
             </span>
             {showIntegrations ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
@@ -922,7 +951,7 @@ export default function CommandCenter() {
                   </span>
                   <div className="leading-tight">
                     <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">AI Audit Activity</h3>
-                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">Specialist model executions</span>
+                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What our AI checked</span>
                   </div>
                 </div>
                 <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
@@ -940,8 +969,8 @@ export default function CommandCenter() {
                     <History size={14} />
                   </span>
                   <div className="leading-tight">
-                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Recent Structural Changes</h3>
-                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">Discovered anomalies & updates</span>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Recent Website Changes</h3>
+                    <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What changed on your site</span>
                   </div>
                 </div>
                 <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">

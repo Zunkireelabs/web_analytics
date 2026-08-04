@@ -25,7 +25,12 @@ const ACTION_LABELS = {
   'security-headers': 'Security Headers', 'html-lang': 'Page Language',
   viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
+
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report',
+
+  'expand-content': 'Content Expansion', sitemap: 'Sitemap Update',
+  'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
+
 };
 
 const GENERATOR_COLORS = {
@@ -47,13 +52,19 @@ const GENERATOR_COLORS = {
   'redirect-fix': '#d97706',
   'expand-content': '#4f46e5',
   sitemap: '#65a30d',
+
   'geo-audit': '#0ea5e9',
+=======
+  'cookie-policy': '#f59e0b',
+  'privacy-policy': '#d97706',
+  'terms-of-service': '#b45309',
+
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
 // type here has a real merge-to-stage strategy, so "mark implemented
 // manually" (the legacy bypass button) must never show for it.
-const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap'];
+const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service'];
 
 const STATUS_INFO = {
   draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },

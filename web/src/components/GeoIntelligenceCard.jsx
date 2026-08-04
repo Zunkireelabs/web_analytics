@@ -35,23 +35,21 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
 
   if (!geoIntelligence) {
     return (
-      <div className="relative overflow-hidden card-dark p-6 flex items-start gap-4 shadow-md hover:border-cyan-500/50 transition-all duration-300 min-h-[140px]">
-        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-cyan-400 to-blue-500" />
-        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-20 bg-cyan-500" />
+      <div className="relative overflow-hidden card bg-gradient-to-br from-sky-50/70 via-blue-50/30 to-white border border-sky-150 p-5 flex items-start gap-3.5 shadow-2xs hover:shadow-md hover:border-sky-300 transition-all duration-300 min-h-[140px]">
+        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-sky-500 to-blue-500" />
+        <div className="absolute -right-8 -bottom-8 w-24 h-24 rounded-full blur-2xl opacity-40 bg-sky-200" />
 
-        <span className="w-10 h-10 rounded-2xl grid place-items-center bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 shrink-0 shadow-inner mt-0.5">
-          <Globe2 size={20} className="animate-pulse" />
+        <span className="w-9 h-9 rounded-2xl grid place-items-center bg-sky-100/80 text-sky-600 border border-sky-200/60 shrink-0 shadow-2xs mt-0.5">
+          <Globe2 size={18} strokeWidth={2.25} />
         </span>
         <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="font-black text-cyan-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
-              <span>🌐</span> Geographical Intelligence
-            </span>
-            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-              Analysis Pending
+            <span className="font-black text-sky-950 text-[11px] uppercase tracking-wider">Geographic Audience Share</span>
+            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200/80 shadow-2xs">
+              Not Yet Available
             </span>
           </div>
-          <p className="text-xs leading-relaxed text-slate-300 font-medium">
+          <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
             {emptyMessage(meta)}
           </p>
         </div>
@@ -94,7 +92,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
       {/* Collapsed view growing markets summary */}
       {!showDetails && growing.length > 0 && (
         <div className="mt-4 pt-4 border-t border-slate-100/85 space-y-2.5 animate-fade-in">
-          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Growing Market Vectors</div>
+          <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Growing Markets</div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {growing.slice(0, 3).map((g) => (
               <div key={g.country} className="bg-emerald-500/[0.03] border border-emerald-500/10 rounded-xl p-2.5 flex flex-col justify-between shadow-sm">
@@ -122,7 +120,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4 pt-4 border-t border-slate-100 items-stretch animate-slide-down">
             {/* Left Column: Growing and Declining markets list */}
             <div className="space-y-4 flex flex-col">
-              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Target Session Deltas</div>
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-400">Session Changes by Country</div>
               <div className="space-y-2.5 flex-1">
                 {growing.slice(0, 3).map((g) => (
                   <div key={g.country} className="bg-emerald-500/[0.03] border border-emerald-500/10 rounded-xl p-3 flex items-center justify-between gap-3 shadow-sm animate-fade-in">
@@ -153,7 +151,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
             <div className="space-y-4 flex flex-col">
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
                 <Compass size={11} className="text-sky-500" />
-                <span>Audience Demographics & CTR Health</span>
+                <span>Audience Demographics</span>
               </div>
               <div className="bg-slate-905 border border-slate-100 bg-slate-50 rounded-2xl p-4 flex-1 flex flex-col justify-between space-y-4 shadow-inner">
                 <div className="space-y-2">
@@ -169,7 +167,7 @@ export default function GeoIntelligenceCard({ geoIntelligence, meta, loading }) 
                 {lowCtr.length > 0 && (
                   <div className="border-t border-slate-205 pt-3">
                     <div className="text-[8px] font-black uppercase tracking-widest text-rose-600 mb-2 flex items-center gap-0.5">
-                      <AlertTriangle size={9} /> Search Anomalies (Low CTR)
+                      <AlertTriangle size={9} /> Search Attention Needed
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {lowCtr.map((c) => (

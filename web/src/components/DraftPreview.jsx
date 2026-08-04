@@ -309,16 +309,45 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
         </div>
       );
 
+    case 'cookie-policy':
+    case 'privacy-policy':
+    case 'terms-of-service':
+      return (
+        <div className="space-y-4">
+          {content.disclaimer && (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100/50 rounded-2xl p-4 leading-relaxed flex items-start gap-2">
+              <Info size={14} className="text-amber-500 shrink-0 mt-0.5" />
+              <span className="font-semibold">{content.disclaimer}</span>
+            </div>
+          )}
+
+          <Field label="Page Title" icon={PanelTop}>{content.headline}</Field>
+
+          <div className="space-y-2">
+            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+              <ListOrdered size={12} />
+              <span>Proposed Sections</span>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm space-y-4">
+              {content.sections.map((s, i) => (
+                <div key={i} className="border-b border-slate-100 last:border-none pb-4 last:pb-0">
+                  <h5 className="text-xs font-black text-slate-900 flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                    {s.heading}
+                  </h5>
+                  <p className="text-[11px] font-medium text-slate-500 mt-2 pl-3.5 leading-relaxed border-l border-slate-200">{s.body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <Field label="Page SEO Metadata" icon={FileCode}>{content.metaTitle} — {content.metaDescription}</Field>
+        </div>
+      );
+
     case 'llms-txt':
       return (
         <div className="space-y-4">
-          {content.placeholderCount > 0 && (
-            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100/50 rounded-2xl p-4 leading-relaxed flex items-center gap-2">
-              <Info size={14} className="text-amber-500 shrink-0" />
-              <span>Needs manual check: {content.placeholderCount} placeholders.</span>
-            </div>
-          )}
-          
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
@@ -335,9 +364,16 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
                 <FileCode size={12} />
                 <span>robots.txt additions</span>
               </div>
-              <div className="rounded-2xl bg-slate-950 border border-slate-800 p-4 relative">
-                <pre className="text-[11px] font-mono text-emerald-400/90 leading-relaxed overflow-x-auto max-h-64 overflow-y-auto custom-scrollbar whitespace-pre-wrap">{content.robotsDirectives}</pre>
-              </div>
+              {content.robotsDirectives ? (
+                <div className="rounded-2xl bg-slate-950 border border-slate-800 p-4 relative">
+                  <pre className="text-[11px] font-mono text-emerald-400/90 leading-relaxed overflow-x-auto max-h-64 overflow-y-auto custom-scrollbar whitespace-pre-wrap">{content.robotsDirectives}</pre>
+                </div>
+              ) : (
+                <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-100/50 rounded-2xl p-4 leading-relaxed flex items-center gap-2">
+                  <Info size={14} className="text-emerald-500 shrink-0" />
+                  <span>robots.txt already allows all AI crawlers — no changes needed.</span>
+                </div>
+              )}
             </div>
           </div>
 

@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
 // Force with REPORT_PROVIDER=openai|anthropic.
-function pickProvider() {
+export function pickProvider() {
   if (process.env.REPORT_PROVIDER) return process.env.REPORT_PROVIDER.toLowerCase();
   const oa = process.env.OPENAI_API_KEY;
   if (oa && !oa.startsWith('sk-xxxx')) return 'openai';
@@ -48,7 +48,7 @@ export async function withRetry(fn) {
 // world-knowledge matters more than per-call cost (e.g. weekly competitor
 // discovery, where a cheap model reliably misses real, niche local
 // companies), pass tier: 'monthly' to use the stronger default.
-const MODEL_DEFAULTS = {
+export const MODEL_DEFAULTS = {
   openai: { daily: 'gpt-4o-mini', monthly: 'gpt-4o' },
   anthropic: { daily: 'claude-haiku-4-5', monthly: 'claude-opus-4-8' },
 };

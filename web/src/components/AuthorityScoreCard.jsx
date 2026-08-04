@@ -5,11 +5,11 @@ import Sparkline from './Sparkline.jsx';
 import { AlertTriangle, Award, Link2, Info, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 function emptyMessage(meta) {
-  if (!meta?.dataForSeoBacklinksConfigured) return 'DataForSEO not configured, and no Common Crawl data imported for this domain yet — run npm run refresh-commoncrawl-graph for a coarser free estimate, or connect DataForSEO for the full score.';
-  if (!meta?.hasRun) return 'Not analyzed yet — runs monthly.';
-  if (meta.status === 'error') return 'Last run failed — check Integration Health below.';
-  if (meta.status === 'insufficient-data') return `Last run (${timeAgo(meta.lastRunAt)}) had no usable backlink data for this domain yet.`;
-  return `Last run (${timeAgo(meta.lastRunAt)}) completed but returned no score.`;
+  if (!meta?.dataForSeoBacklinksConfigured) return "We haven't calculated this yet — check back soon.";
+  if (!meta?.hasRun) return 'Not checked yet — this updates monthly.';
+  if (meta.status === 'error') return "We couldn't check this — see Data Connection below.";
+  if (meta.status === 'insufficient-data') return `Checked ${timeAgo(meta.lastRunAt)}, but there wasn't enough data yet.`;
+  return `Checked ${timeAgo(meta.lastRunAt)}, but no score was available.`;
 }
 
 const scoreColor = (score) => (score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444');
@@ -43,7 +43,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
           <div className="flex items-center justify-between gap-2">
             <span className="font-black text-indigo-950 text-[11px] uppercase tracking-wider">SEO Domain Authority</span>
             <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200/80 shadow-2xs">
-              Pending Setup
+              Not Yet Available
             </span>
           </div>
           <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
@@ -73,7 +73,7 @@ export default function AuthorityScoreCard({ authority, meta, loading }) {
           </div>
           {authority.dataSource === 'commoncrawl' && (
             <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border text-amber-700 bg-amber-50 border-amber-100">
-              <Info size={10} strokeWidth={3} /> Coarse estimate — referring domains only
+              <Info size={10} strokeWidth={3} /> Estimated score
             </span>
           )}
           {authority.scoreDelta != null && authority.scoreDelta !== 0 && (

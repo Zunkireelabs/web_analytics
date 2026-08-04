@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import Logo from './Logo.jsx';
 import NotificationBell from './NotificationBell.jsx';
@@ -19,7 +19,8 @@ import {
   KeyRound,
   HeartPulse,
   ScrollText,
-  LineChart
+  LineChart,
+  ChevronDown
 } from 'lucide-react';
 
 const PURPLE = '#6C63FF';
@@ -62,11 +63,58 @@ const PLATFORM_ADMIN_NAV = [
   { to: '/admin/audit-log', label: 'Audit Log', icon: ScrollText },
 ];
 
+// Which of the three collapsible nav groups (below) each route belongs to
+// — used to auto-expand a group on load/navigation so a deep link never
+// lands on a page whose own sidebar entry is hidden behind a collapsed
+// section.
+const NAV_SECTIONS = [
+  { id: 'growth', links: GROWTH_TOOLS_NAV },
+  { id: 'internal', links: INTERNAL_NAV },
+  { id: 'platform', links: PLATFORM_ADMIN_NAV },
+];
+
+const COLLAPSE_STORAGE_KEY = 'sidebar-collapsed-sections';
+
+// Growth Tools starts open, Internal Console/Platform Administration start
+// collapsed — matches the approved sidebar mockup. Only applies until the
+// user first toggles something; from then on their saved choice wins.
+const DEFAULT_COLLAPSED = { internal: true, platform: true };
+
+function loadCollapsedSections() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLLAPSE_STORAGE_KEY));
+    if (saved) return saved;
+  } catch {
+    // fall through to default
+  }
+  return DEFAULT_COLLAPSED;
+}
+
 export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, onSite, onLogout, mobileOpen, onCloseMobile }) {
   const loc = useLocation();
   const isActive = (to) => loc.pathname === to;
+  const [collapsed, setCollapsed] = useState(loadCollapsedSections);
+
+  const toggleSection = (id) => {
+    setCollapsed((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
 
   useEffect(() => { onCloseMobile?.(); }, [loc.pathname]);
+
+  useEffect(() => {
+    const active = NAV_SECTIONS.find((s) => s.links.some((n) => n.to === loc.pathname));
+    if (!active) return;
+    setCollapsed((prev) => {
+      if (!prev[active.id]) return prev;
+      const next = { ...prev, [active.id]: false };
+      localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, [loc.pathname]);
 
   // Locks background scroll while the mobile drawer is open — otherwise a
   // scroll/swipe gesture that starts on the backdrop or overscrolls past the
@@ -134,21 +182,17 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
-            <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Growth Tools</div>
-            {GROWTH_TOOLS_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+            <SidebarSection id="growth" label="Growth Tools" tint="text-slate-400 hover:text-slate-600"
+              links={GROWTH_TOOLS_NAV} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
 
             {isInternal && (
-              <>
-                <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">Internal Console</div>
-                {INTERNAL_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
-              </>
+              <SidebarSection id="internal" label="Internal Console" tint="text-slate-400 hover:text-slate-600"
+                links={INTERNAL_NAV} isActive={isActive} open={!collapsed.internal} onToggle={toggleSection} />
             )}
 
             {isPlatformAdmin && (
-              <>
-                <div className="px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest text-[#6C63FF]">Platform Administration</div>
-                {PLATFORM_ADMIN_NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
-              </>
+              <SidebarSection id="platform" label="Platform Administration" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
+                links={PLATFORM_ADMIN_NAV} isActive={isActive} open={!collapsed.platform} onToggle={toggleSection} />
             )}
           </nav>
 
@@ -180,6 +224,23 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
         </div>
       </aside>
     </>
+  );
+}
+
+function SidebarSection({ id, label, tint, links, isActive, open, onToggle }) {
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => onToggle(id)}
+        aria-expanded={open}
+        className={`w-full flex items-center justify-between gap-2 px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer ${tint}`}
+      >
+        <span>{label}</span>
+        <ChevronDown size={12} strokeWidth={2.5} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
+      </button>
+      {open && links.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
+    </div>
   );
 }
 

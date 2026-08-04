@@ -7,6 +7,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
+import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate } from '../implementers/lib/design-drift.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
@@ -494,6 +495,84 @@ router.post('/internal/clients/:id/recalculate-faq-baseline', async (req, res, n
     });
 
     res.json({ id: updated.id, visibleFaqBaseline: updated.visible_faq_baseline, pagesScanned, pagesWithFaq });
+  } catch (e) { next(e); }
+});
+
+// Design-drift check + regeneration proposal (implementers/lib/design-drift.js)
+// for the three action types whose visible output comes from a stored
+// componentTemplates snapshot (faq/expand-content/internal-links) rather
+// than a live-rendered site component — see that module's own comment for
+// why only these three can go stale at all. `pageUrl` is staff-supplied
+// (a real page they've noticed the issue on, or any live page using this
+// component) rather than auto-selected, since which page is "representative"
+// isn't something to guess. Read-only: never writes anything — saving a
+// proposal is the separate /confirm route below, requiring an explicit
+// human review first (see design-drift.js's own comment on why an
+// auto-extracted template is a proposal, not an auto-apply).
+router.post('/internal/clients/:id/component-templates/:actionType/regenerate', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const { actionType } = req.params;
+    const { pageUrl } = req.body || {};
+    const site = await getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (!pageUrl) return res.status(400).json({ error: 'pageUrl is required — a real, live page currently using this component.' });
+
+    const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+    if (!componentKey) return res.status(400).json({ error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` });
+    const oldTemplate = site.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null;
+    if (!oldTemplate) return res.status(400).json({ error: `No componentTemplates.${componentKey} is configured for this site yet — nothing to regenerate.` });
+
+    const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: oldTemplate });
+    if (!freshness.ok) return res.status(502).json({ error: freshness.error });
+    if (!freshness.stale) return res.json({ stale: false, message: 'This template still matches the live design on that page — no changes needed.' });
+
+    const proposal = await proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate, missingClasses: freshness.missingClasses });
+    if (!proposal.ok) return res.status(422).json({ error: proposal.error, missingClasses: freshness.missingClasses });
+
+    res.json({ stale: true, missingClasses: freshness.missingClasses, oldTemplate, proposedTemplate: proposal.template });
+  } catch (e) { next(e); }
+});
+
+// Saves a reviewed-and-approved template proposal from the /regenerate route
+// above into site.url_file_map.siteRoot.componentTemplates — the one place a
+// staff member's approval is required before an auto-extracted template can
+// affect every future draft of this action type sitewide.
+router.post('/internal/clients/:id/component-templates/:actionType/confirm', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const { actionType } = req.params;
+    const { template } = req.body || {};
+    const site = await getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+    if (!componentKey) return res.status(400).json({ error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` });
+    if (!template?.wrapper || !template?.row) return res.status(400).json({ error: 'template.wrapper and template.row are both required.' });
+
+    const urlFileMap = {
+      ...site.url_file_map,
+      siteRoot: {
+        ...site.url_file_map?.siteRoot,
+        componentTemplates: {
+          ...site.url_file_map?.siteRoot?.componentTemplates,
+          [componentKey]: template,
+        },
+      },
+    };
+    const updated = await updateSiteRepoConfig({ siteId, urlFileMap });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.component_template_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { actionType, componentKey },
+      success: true,
+    });
+
+    res.json({ id: updated.id, componentKey, template: updated.url_file_map?.siteRoot?.componentTemplates?.[componentKey] });
   } catch (e) { next(e); }
 });
 
