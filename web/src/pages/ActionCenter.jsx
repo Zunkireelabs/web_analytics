@@ -44,6 +44,7 @@ const GENERATOR_META = {
   'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
   'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
   sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
+  'geo-audit': { label: 'GEO Audit Reports', icon: '🌐', color: '#0ea5e9' },
 };
 
 const DRAFT_STATUS_LABEL = {

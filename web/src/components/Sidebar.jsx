@@ -13,6 +13,7 @@ import {
   Network,
   Building2,
   Radar,
+  Globe2,
   Settings as SettingsIcon,
   Users,
   KeyRound,
@@ -40,6 +41,7 @@ const GROWTH_TOOLS_NAV = [
   { to: '/action-center', label: 'Action Center', icon: Zap },
   { to: '/ai-orchestration', label: 'Orchestration', icon: Network },
   { to: '/site-audit', label: 'Site Audit', icon: Radar },
+  { to: '/geo-audit', label: 'GEO Audit', icon: Globe2 },
 ];
 
 // Staff-only pages — operate across every client's site, not just the

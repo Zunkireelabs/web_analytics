@@ -25,7 +25,7 @@ const ACTION_LABELS = {
   'security-headers': 'Security Headers', 'html-lang': 'Page Language',
   viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
-  'expand-content': 'Content Expansion', sitemap: 'Sitemap Update',
+  'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report',
 };
 
 const GENERATOR_COLORS = {
@@ -47,6 +47,7 @@ const GENERATOR_COLORS = {
   'redirect-fix': '#d97706',
   'expand-content': '#4f46e5',
   sitemap: '#65a30d',
+  'geo-audit': '#0ea5e9',
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every

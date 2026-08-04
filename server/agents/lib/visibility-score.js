@@ -1,4 +1,4 @@
-// AI Visibility scoring — six 0-100 category scores plus an unweighted
+// AI Visibility scoring — seven 0-100 category scores plus an unweighted
 // overall average, computed only from real, deterministic page/site signals
 // (never a fabricated or estimated value). Each category is graduated by
 // tiers of real evidence rather than a flat pass/fail, so the score reflects
@@ -62,9 +62,6 @@ export function scoreLlmsReadiness(llmsReadiness) {
   return llmsReadinessScore(llmsReadiness);
 }
 
-// Combines a page's five on-page category scores with the run's one
-// site-level LLMS readiness score into the full six-category breakdown plus
-// an unweighted overall average.
 export function geoSignalsScore(analysis) {
   let score = 0;
   if (analysis.hasAuthorSignal) score += 33;
@@ -73,6 +70,10 @@ export function geoSignalsScore(analysis) {
   return Math.min(100, score);
 }
 
+// Combines a page's five on-page category scores (schema, structuredContent,
+// faq, entities, citationReadiness) and its own geoSignals score with the
+// run's one site-level LLMS readiness score into the full seven-category
+// breakdown plus an unweighted overall average.
 export function combineScores(pageCategories, llmsScore, geoSignalsScore) {
   const categories = { ...pageCategories, llmsReadiness: llmsScore, geoSignals: geoSignalsScore };
   const values = Object.values(categories);

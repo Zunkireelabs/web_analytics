@@ -29,8 +29,6 @@ import { getSearchPerformanceRange } from './store/read.js';
 import { knownDomain, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
-import { meta as geoAuditMeta } from './generators/geo-audit.js';
-import { getGenerator } from './generators/registry.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
 // ai-recommendation are all throttled (see runAgentIfDue below — real
@@ -481,16 +479,23 @@ export async function runGeoAuditIfDue(site) {
     return null;
   }
 
-  const generator = await getGenerator('geo-audit');
-  if (!generator) {
-    console.error(`[geo-audit] generator "geo-audit" not found — skipping site ${site.id}.`);
-    return null;
-  }
-
-  const { content, summary } = await generator.generate({ siteId: site.id, params: { start, end: daysAgoInTz(site.timezone, 0) } });
+  // generateDraft is the one shared persistence path — also used by the
+  // MCP generate_geo_audit tool and the manual "Run Audit" button
+  // (routes/action-center.js's generic /action-center/generate) — so
+  // cron/MCP/manual can never diverge into separate implementations, and
+  // the report this computes is actually saved as a draft instead of
+  // being discarded. Dynamic import avoids a static circular dependency
+  // with routes/action-center.js (which already imports from this file) —
+  // same convention as runPrStatusPollForAllSites above.
+  const { generateDraft } = await import('./routes/action-center.js');
+  const draft = await generateDraft(site.id, {
+    generatorId: 'geo-audit',
+    params: { start, end: daysAgoInTz(site.timezone, 0) },
+    source: 'cron',
+  });
   await query('UPDATE sites SET geo_audit_last_done = $1 WHERE id = $2', [start, site.id]);
-  console.log(`[geo-audit] site ${site.id} weekly GEO audit complete: ${summary}`);
-  return { content, summary };
+  console.log(`[geo-audit] site ${site.id} weekly GEO audit complete: ${draft.summary}`);
+  return draft;
 }
 
 export async function runGeoAuditIfDueForAllSites() {
