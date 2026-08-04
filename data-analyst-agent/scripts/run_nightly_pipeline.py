@@ -57,6 +57,7 @@ import asyncio
 
 from app.activity.log import track
 from app.alerts.deliver import deliver_predictive_alerts
+from app.briefings.generator import generate_morning_briefing
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
 from app.forecast.run import run_forecasts
 from app.ingestion.run_nightly import run_nightly
@@ -100,6 +101,12 @@ async def main() -> None:
     async with track("preparing_drafts"):
         await run_draft_trigger()
     await deliver_predictive_alerts()
+    # Morning Briefing (Phase 3 Step 10) — the nightly run IS "this morning"
+    # for every client (single timezone-agnostic cron, see the module
+    # docstring in app/briefings/generator.py); weekly/monthly cadences run
+    # from their own separate cron entries (scripts/run_weekly_briefing.py,
+    # scripts/run_monthly_briefing.py), not from here.
+    await generate_morning_briefing()
 
 
 if __name__ == "__main__":

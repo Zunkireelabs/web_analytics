@@ -883,3 +883,34 @@ class ApprovalHistory(Base):
         ),
         Index("idx_approval_history_lookup", "investigation_id", "created_at"),
     )
+
+
+class ExecutiveBriefing(Base):
+    """Phase 3 Step 10 — see app/briefings/generator.py. No new computation:
+    every field is a rollup of Investigation/Insight/RecommendationRanking/
+    Opportunity/MetricObservation rows an earlier stage already wrote.
+    narrative is optional and best-effort (an LLM call that never blocks
+    the structured fields on failure) — null is a legitimate value, not a
+    sign something's broken."""
+
+    __tablename__ = "executive_briefings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    cadence: Mapped[str] = mapped_column(Text, nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    biggest_wins: Mapped[list] = mapped_column(JSONB, nullable=False)
+    biggest_risks: Mapped[list] = mapped_column(JSONB, nullable=False)
+    forecast_summary: Mapped[list] = mapped_column(JSONB, nullable=False)
+    recommendations_summary: Mapped[list] = mapped_column(JSONB, nullable=False)
+    opportunity_score: Mapped[float | None] = mapped_column(Numeric)
+    website_health_score: Mapped[float | None] = mapped_column(Numeric)
+    trend_summary: Mapped[list] = mapped_column(JSONB, nullable=False)
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("cadence IN ('morning','weekly','monthly')", name="executive_briefings_cadence_check"),
+        Index("idx_executive_briefings_lookup", "client_id", "cadence", "generated_at"),
+    )

@@ -50,6 +50,14 @@ services:
   # Nightly pipeline — no in-process scheduler for v1 (see plan Phase 6).
   # A host-level cron entry is simpler than adding APScheduler complexity:
   #   0 3 * * * docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_nightly_pipeline
+  #
+  # Phase 3 Executive Briefings (Step 10) — weekly/monthly cadences, same
+  # host-level cron approach, scheduled after the nightly pipeline finishes
+  # so that day's data is already current. Morning cadence needs no
+  # separate entry — it's generated as the last step of the nightly run
+  # itself (see scripts/run_nightly_pipeline.py):
+  #   0 6 * * 1 docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_weekly_briefing
+  #   0 6 1 * * docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_monthly_briefing
 
 volumes:
   db_data:

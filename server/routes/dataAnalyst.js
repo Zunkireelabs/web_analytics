@@ -318,4 +318,11 @@ router.get('/internal/analyst/activity', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+router.get('/internal/analyst/clients/:clientId/briefings', async (req, res, next) => {
+  try {
+    const { cadence, limit } = req.query;
+    res.json(await callPython(`/clients/${req.params.clientId}/briefings`, { query: { cadence, limit } }));
+  } catch (e) { next(e); }
+});
+
 export default router;
