@@ -46,7 +46,7 @@ const GENERATOR_META = {
   sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
 
   'geo-audit': { label: 'GEO Audit Reports', icon: '🌐', color: '#0ea5e9' },
-=======
+
   'cookie-policy': { label: 'Cookie Policy', icon: '🍪', color: '#f59e0b' },
   'privacy-policy': { label: 'Privacy Policy', icon: '🔒', color: '#d97706' },
   'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
