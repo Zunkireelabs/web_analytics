@@ -22,7 +22,11 @@ import {
   Calendar,
   Layers,
   SlidersHorizontal,
-  FolderSync
+  FolderSync,
+  Zap,
+  GitPullRequest,
+  ShieldCheck,
+  ShieldAlert
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -167,6 +171,9 @@ export default function ActionCenter() {
   const [generatingId, setGeneratingId] = useState(null);
   const [activeDraft, setActiveDraft] = useState(null);
   const [error, setError] = useState(null);
+  const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
+  const [executionResult, setExecutionResult] = useState(null);
+  const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'geo' | 'analytics'
 
@@ -257,6 +264,47 @@ export default function ActionCenter() {
     }
   };
 
+  // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to 15)
+  // through the existing Generate -> Submit -> Approve chain automatically,
+  // one execution job, one shared branch/PR. Manual-tier recommendations
+  // (landing pages, pricing, nav, etc.) are never included — they always
+  // need the stepped flow below.
+  const executeSafeFixes = async () => {
+    setExecutingSafeFixes(true);
+    setError(null);
+    setExecutionResult(null);
+    try {
+      const result = await api.actionCenter.executeSafeFixes(15);
+      setExecutionResult(result);
+      loadRecs();
+      loadDrafts();
+    } catch (e) {
+      setError(e.message || 'Execute Safe Fixes failed');
+    } finally {
+      setExecutingSafeFixes(false);
+    }
+  };
+
+  // Single-item version of the same chain — for a safe-tier recommendation
+  // the user wants to ship right now instead of waiting for the next bulk
+  // run, without the separate Generate/Submit/Approve clicks.
+  const approveAndShip = async (item) => {
+    setShippingId(item.id);
+    setError(null);
+    setExecutionResult(null);
+    try {
+      const draft = await api.actionCenter.approveAndShip(item.id);
+      setExecutionResult({ shipped: 1, failed: 0, job: { pr_url: draft.pr_url, pr_number: draft.pr_number } });
+      setSelectedRecommendation(null);
+      loadRecs();
+      loadDrafts();
+    } catch (e) {
+      setError(`${item.tag}: ${e.message || 'Approve & Ship failed'}`);
+    } finally {
+      setShippingId(null);
+    }
+  };
+
   const bucketFiltered = (recs?.items || []).filter((item) => sourceFilter === 'all' || item.bucket === sourceFilter);
   const grouped = bucketFiltered.reduce((acc, item) => {
     (acc[item.category || 'Technical Fixes'] ||= []).push(item);
@@ -277,6 +325,7 @@ export default function ActionCenter() {
     .sort((a, b) => new Date(b.implemented_at) - new Date(a.implemented_at));
 
   const highPriorityCount = (recs?.items || []).filter((i) => i.priority === 'high').length;
+  const safeEligibleCount = (recs?.items || []).filter((i) => i.riskTier === 'safe').length;
   const pendingApprovalCount = (drafts || []).filter((d) => d.status === 'submitted_for_approval').length;
   const implementedThisWeekCount = (drafts || []).filter((d) => d.status === 'implemented' && d.implemented_at >= daysAgo(7)).length;
 
@@ -317,6 +366,26 @@ export default function ActionCenter() {
         </div>
       )}
 
+      {executionResult && (
+        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
+            <span>
+              Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+            </span>
+          </span>
+          <span className="flex items-center gap-2 shrink-0">
+            {executionResult.job?.pr_url && (
+              <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
+                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
+                <GitPullRequest size={11} /> View PR
+              </a>
+            )}
+            <button onClick={() => setExecutionResult(null)} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
+          </span>
+        </div>
+      )}
+
       {/* QUICK COMMAND METRIC HEADER PANEL */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
         
@@ -349,6 +418,7 @@ export default function ActionCenter() {
             <span className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 text-indigo-700 px-3 py-1.5 rounded-xl shadow-sm"><Sparkles size={11} className="text-indigo-550 animate-pulse" /> Recs: <strong className="ml-0.5">{recs?.items.length ?? 0}</strong></span>
             <span className="flex items-center gap-1.5 bg-rose-50 border border-rose-100 text-rose-700 px-3 py-1.5 rounded-xl shadow-sm"><AlertTriangle size={11} className="text-rose-550" /> High: <strong className="ml-0.5">{highPriorityCount}</strong></span>
             <span className="flex items-center gap-1.5 bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1.5 rounded-xl shadow-sm"><Clock size={11} className="text-amber-550" /> Review: <strong className="ml-0.5">{pendingApprovalCount}</strong></span>
+            <span className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-100 text-emerald-700 px-3 py-1.5 rounded-xl shadow-sm"><ShieldCheck size={11} className="text-emerald-550" /> Auto-eligible: <strong className="ml-0.5">{safeEligibleCount}</strong></span>
           </div>
 
           <div className="flex items-center flex-wrap gap-2 gap-y-2 ml-auto">
@@ -362,13 +432,23 @@ export default function ActionCenter() {
               <input type="date" value={range.end} onChange={(e) => setRange((r) => ({ ...r, end: e.target.value }))}
                 className="bg-transparent border-none outline-none font-bold text-slate-700 w-[90px] sm:w-[105px]" />
             </div>
-            <button 
-              onClick={refresh} 
+            <button
+              onClick={refresh}
               disabled={refreshing}
               className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
               style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
             >
               {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <button
+              onClick={executeSafeFixes}
+              disabled={executingSafeFixes || safeEligibleCount === 0}
+              title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
+              className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/10 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
+              style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
+            >
+              <Zap size={12} className={executingSafeFixes ? 'animate-pulse' : ''} />
+              {executingSafeFixes ? 'Executing…' : `Execute Today's Safe Fixes (${Math.min(15, safeEligibleCount)})`}
             </button>
           </div>
         </div>
@@ -513,6 +593,11 @@ export default function ActionCenter() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
+                              {item.riskTier === 'safe' && (
+                                <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
+                                  <ShieldCheck size={8} /> Safe
+                                </span>
+                              )}
                               {BUCKET_META[item.bucket] && (
                                 <span
                                   className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
@@ -647,6 +732,15 @@ export default function ActionCenter() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
+                          {selectedRecommendation.riskTier === 'safe' ? (
+                            <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
+                              <ShieldCheck size={9} /> Safe — auto-eligible
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-50 border border-amber-100 text-amber-600">
+                              <ShieldAlert size={9} /> Manual review required
+                            </span>
+                          )}
                           {BUCKET_META[selectedRecommendation.bucket] && (
                             <span
                               className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
@@ -656,6 +750,7 @@ export default function ActionCenter() {
                             </span>
                           )}
                         </div>
+                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
                       </div>
                     </div>
 
@@ -702,14 +797,29 @@ export default function ActionCenter() {
                     </div>
                   </div>
 
-                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex justify-end">
+                  <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex items-center justify-end gap-2.5">
+                    {selectedRecommendation.riskTier === 'safe' && (
+                      <button
+                        onClick={() => generate(selectedRecommendation)}
+                        disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
+                        className="text-[10.5px] font-black uppercase tracking-wider px-4 py-3 rounded-xl text-slate-600 bg-white border border-slate-200 transition hover:border-slate-350 disabled:opacity-60 cursor-pointer"
+                      >
+                        {generatingId === selectedRecommendation.id ? 'Drafting…' : 'Preview Draft Only'}
+                      </button>
+                    )}
                     <button
-                      onClick={() => generate(selectedRecommendation)}
-                      disabled={generatingId === selectedRecommendation.id}
-                      className="text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/10 disabled:opacity-60 cursor-pointer"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                      onClick={() => selectedRecommendation.riskTier === 'safe' ? approveAndShip(selectedRecommendation) : generate(selectedRecommendation)}
+                      disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
+                      className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md disabled:opacity-60 cursor-pointer"
+                      style={selectedRecommendation.riskTier === 'safe'
+                        ? { background: 'linear-gradient(135deg,#10b981,#059669)' }
+                        : { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
                     >
-                      {generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'}
+                      {selectedRecommendation.riskTier === 'safe' ? (
+                        <><Zap size={12} /> {shippingId === selectedRecommendation.id ? 'Shipping…' : 'Approve & Ship'}</>
+                      ) : (
+                        generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'
+                      )}
                     </button>
                   </div>
                 </div>

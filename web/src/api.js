@@ -225,6 +225,8 @@ export const api = {
     checkPrStatus: (id) => req(`/action-center/drafts/${id}/check-pr-status`, { method: 'POST' }),
     previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
     rollback: (id) => req(`/action-center/drafts/${id}/rollback`, { method: 'POST' }),
+    executeSafeFixes: (limit) => req('/action-center/execute-safe-fixes', { method: 'POST', body: JSON.stringify({ limit }) }),
+    approveAndShip: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/approve-and-ship`, { method: 'POST' }),
   },
 
   siteAudit: {
