@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderLlmsTxt } from './llms-txt.js';
+import { renderLlmsTxt, buildRobotsDirectives } from './llms-txt.js';
 
 // Regression coverage for a real finding from a separate spec-compliance
 // checker (llmstxt.org convention): a real merged llms.txt draft came back
@@ -73,5 +73,41 @@ describe('renderLlmsTxt', () => {
     assert.doesNotMatch(text, /invented|placeholder|lorem ipsum/i);
     assert.match(text, /Real Title/);
     assert.match(text, /Real description of Example Co\./);
+  });
+});
+
+// Regression coverage for a second real finding: robotsDirectives used to be
+// LLM-composed as a full-file body with no knowledge of the site's actual
+// existing robots.txt content — a real site's custom per-path Allow/Disallow
+// rules would have been silently destroyed on apply. buildRobotsDirectives
+// replaced that with a deterministic builder that only ever appends to real
+// existing content, or returns null when nothing needs to change.
+describe('buildRobotsDirectives', () => {
+  test('no existing robots.txt: builds a fresh minimal file allowing all 5 named AI crawlers and blocking Bytespider', () => {
+    const text = buildRobotsDirectives({ hasRobotsTxt: false, robotsAllowsAiCrawlers: null, robotsText: null });
+    assert.match(text, /User-agent: GPTBot\nAllow: \//);
+    assert.match(text, /User-agent: ClaudeBot\nAllow: \//);
+    assert.match(text, /User-agent: PerplexityBot\nAllow: \//);
+    assert.match(text, /User-agent: Google-Extended\nAllow: \//);
+    assert.match(text, /User-agent: Applebot-Extended\nAllow: \//);
+    assert.match(text, /User-agent: Bytespider\nDisallow: \//);
+  });
+
+  test('existing robots.txt already allows AI crawlers: returns null, never fabricates a diff', () => {
+    const result = buildRobotsDirectives({
+      hasRobotsTxt: true,
+      robotsAllowsAiCrawlers: true,
+      robotsText: 'User-agent: *\nAllow: /\n',
+    });
+    assert.equal(result, null);
+  });
+
+  test('existing robots.txt blocks AI crawlers: real existing content is preserved verbatim, new blocks only appended', () => {
+    const existing = 'User-agent: *\nDisallow: /private/\n\nUser-agent: GPTBot\nDisallow: /\n';
+    const text = buildRobotsDirectives({ hasRobotsTxt: true, robotsAllowsAiCrawlers: false, robotsText: existing });
+    assert.match(text, /^User-agent: \*\nDisallow: \/private\//);
+    assert.match(text, /User-agent: GPTBot\nDisallow: \//); // the real original blocking line, untouched
+    assert.match(text, /User-agent: GPTBot\nAllow: \//); // the new, more-specific override appended after it
+    assert.match(text, /User-agent: ClaudeBot\nAllow: \//);
   });
 });

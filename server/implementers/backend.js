@@ -7,11 +7,9 @@ import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
-
-import { countVisibleFaqDrafts } from '../store/drafts.js';
+import { decideFaqRenderMode } from './lib/faq-render-mode.js';
+import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
-
-import { countVisibleFaqPages } from '../store/drafts.js';
 
 
 export const meta = {
@@ -490,11 +488,15 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   if (renderModeOverride) {
     mode = renderModeOverride;
   } else {
-    let inspectionOpts = {};
-    if (INSPECTABLE_ACTION_TYPES.includes(draft.action_type)) {
-      inspectionOpts = { visibleFaqCount: await countVisibleFaqPages(site), visibleFaqCap: site.visible_faq_cap };
-    }
-    inspection = await inspectRenderMode(file.content, draft.action_type, inspectionOpts);
+    // 'faq' additionally checks whether the OTHER FAQ writer mechanism
+    // (the data-array-content adapter) already published a visible FAQ for
+    // this exact page — see lib/faq-render-mode.js. Every other
+    // marker-merge type keeps calling inspectRenderMode directly, which
+    // short-circuits to 'visible'/100/deterministic for anything outside
+    // INSPECTABLE_ACTION_TYPES anyway.
+    inspection = INSPECTABLE_ACTION_TYPES.includes(draft.action_type)
+      ? await decideFaqRenderMode(site, page, file.content)
+      : await inspectRenderMode(file.content, draft.action_type, {});
     if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
       return {
         ok: false, reason: 'render-mode-uncertain', error: inspection.reason,
@@ -502,6 +504,25 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       };
     }
     mode = inspection.mode;
+  }
+
+  // Checked only when this action type has a REAL configured componentTemplates
+  // entry (the zero-config DEFAULT_* fallback in marker-merge.js makes no
+  // claim to match the site's real design, so there's nothing to go stale)
+  // and only in 'visible' mode (schema-only publishes no styled markup at
+  // all). A failed check (network/infra) fails OPEN — see design-drift.js's
+  // own comment on why that's not treated the same as confirmed staleness.
+  const componentKey = COMPONENT_TEMPLATE_KEY[draft.action_type];
+  const templateEntry = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
+  if (mode === 'visible' && templateEntry) {
+    const freshness = await checkTemplateFreshness({ pageUrl: page, templateEntry });
+    if (freshness.ok && freshness.stale) {
+      return {
+        ok: false, reason: 'template-stale',
+        error: `This page's live site no longer defines the CSS classes this template expects (${freshness.missingClasses.join(', ')}) — the site's design may have changed since "${componentKey}" was configured. Regenerate it from the site's current design before applying.`,
+        missingClasses: freshness.missingClasses, componentKey, actionType: draft.action_type,
+      };
+    }
   }
 
   const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);

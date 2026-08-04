@@ -1,6 +1,8 @@
 import { getImplementerForGenerator } from './registry.js';
 import { getAdapter } from './adapters/registry.js';
 import { resolveAdapter } from './lib/url-file-map.js';
+import { resolveFaqRenderMode } from './lib/faq-render-mode.js';
+import { CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 
 // Which implementer actually handles a draft's apply()/mergeToStage() is no
 // longer fixed per action type — a page's adapter config (url_file_map.pages
@@ -29,9 +31,47 @@ import { resolveAdapter } from './lib/url-file-map.js';
 // again with the same site/page/actionType) inside apply()/preview()/
 // mergeToStage() rather than having it threaded through here, so this
 // module only ever needs the `id` for adapter lookup + persistence.
-export async function resolveImplementerForApply(site, draft) {
+//
+// 'faq' is the one action type where an adapter config doesn't fully decide
+// the writer on its own: a page wired to a data-array-content adapter is
+// only actually routed there once the real render-mode decision (see
+// lib/render-inspector.js via lib/faq-render-mode.js) comes out 'visible'.
+// 'schema-only' always goes through the default marker-merge implementer
+// instead — publishing just a JSON-LD fragment into the page's own template
+// marker is a marker-merge concern regardless of which mechanism would have
+// written the VISIBLE representation, and it keeps every adapter's own
+// apply/mergeToStage/rollback honestly scoped to the one file format (its
+// own dataFile) it actually knows how to snapshot and restore, rather than
+// retrofitting HTML-marker rollback into a JSON/JS-data writer.
+// `renderModeOverride` is a human's already-confirmed choice re-entering
+// after a prior 'render-mode-uncertain' stop (see routes/action-center.js) —
+// when present, the fresh inspection below is skipped entirely, same as
+// backend.js's own computeMarkerMerge, so a human's answer is never
+// re-litigated into the same uncertain stop on retry.
+export async function resolveImplementerForApply(site, draft, renderModeOverride) {
   const page = draft.content?.page || draft.input?.page;
   const adapterConfig = resolveAdapter(site, page, draft.action_type);
+
+  if (adapterConfig && draft.action_type === 'faq') {
+    let mode = renderModeOverride || null;
+    if (!mode) {
+      const inspection = await resolveFaqRenderMode(site, draft);
+      if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
+        return {
+          error: inspection.reason, reason: 'render-mode-uncertain',
+          confidence: inspection.confidence, suggestedMode: inspection.mode,
+        };
+      }
+      mode = inspection.mode;
+    }
+    if (mode === 'schema-only') {
+      const implementer = await getImplementerForGenerator(draft.action_type);
+      if (!implementer) return { error: `No implementer wired for "${draft.action_type}" yet` };
+      return { implementer, implementerId: implementer.meta.id };
+    }
+    // mode === 'visible' (auto-decided or human-confirmed) falls through to
+    // the adapter below, same as today.
+  }
 
   if (adapterConfig) {
     const adapter = await getAdapter(adapterConfig.id);

@@ -30,6 +30,7 @@ import userInvitationsRouter from './routes/user-invitations.js';
 import mcpAdminRouter from './routes/mcp-admin.js';
 import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
+import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
@@ -145,6 +146,7 @@ app.use('/api', commoncrawlBacklinksRouter);
 app.use('/api', mcpAdminRouter);
 app.use('/api', systemHealthRouter);
 app.use('/api', auditLogRouter);
+app.use('/api', opsCenterRouter);
 
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);
