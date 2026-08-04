@@ -1,9 +1,10 @@
-// AI Executive Summary
+// Today's AI Summary — plain-English bullets for non-technical readers.
 export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
-  const label = source === 'executive-report' ? 'AI Executive Summary' : 'AI Summary';
+  const label = "Today's AI Summary";
   const sub = generatedAt
-    ? `Generated ${new Date(generatedAt).toLocaleDateString()}`
-    : 'written by your analytics agent';
+    ? `Updated ${new Date(generatedAt).toLocaleDateString()}`
+    : 'Prepared by your AI assistant';
+  const lines = (text || '').split('\n').map((l) => l.trim()).filter(Boolean);
 
   return (
     <div className="relative card overflow-hidden bg-gradient-to-br from-white via-white to-violet-50/15 border border-slate-200 shadow-md rounded-3xl text-slate-700">
@@ -21,9 +22,20 @@ export default function ExecutiveSummaryPanel({ text, source, generatedAt }) {
           </div>
           <span className="ml-auto text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full bg-gradient-to-r from-[#6C63FF]/10 to-[#8b5cf6]/10 text-indigo-700 border border-indigo-200/30">AI Insight</span>
         </div>
-        <p className="text-[13.5px] leading-relaxed text-slate-705 font-medium bg-slate-50/50 p-4.5 rounded-2xl border border-violet-100/50 whitespace-pre-line shadow-inner">
-          {text || 'Report generating — check back after today\'s update.'}
-        </p>
+        {lines.length > 1 ? (
+          <ul className="space-y-2 bg-slate-50/50 p-4.5 rounded-2xl border border-violet-100/50 shadow-inner">
+            {lines.map((line, i) => (
+              <li key={i} className="flex items-start gap-2.5 text-[13.5px] leading-relaxed text-slate-705 font-medium">
+                <span className="mt-1.5 w-1.5 h-1.5 rounded-full shrink-0" style={{ background: '#8b5cf6' }} />
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-[13.5px] leading-relaxed text-slate-705 font-medium bg-slate-50/50 p-4.5 rounded-2xl border border-violet-100/50 whitespace-pre-line shadow-inner">
+            {lines[0] || 'Report generating — check back after today\'s update.'}
+          </p>
+        )}
       </div>
     </div>
   );

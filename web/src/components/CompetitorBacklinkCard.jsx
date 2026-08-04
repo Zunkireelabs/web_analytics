@@ -9,8 +9,8 @@ import { AlertTriangle, Network } from 'lucide-react';
 // two read as one family of free-data cards.
 
 function emptyMessage(meta) {
-  if (!meta?.hasRun) return "Competitor Intelligence hasn't analyzed backlinks yet.";
-  return meta.message || 'No Common Crawl backlink comparison available yet.';
+  if (!meta?.hasRun) return "We haven't compared backlinks yet.";
+  return meta.message || 'No backlink comparison available yet.';
 }
 
 export default function CompetitorBacklinkCard({ backlinkComparison, meta, loading }) {
@@ -38,9 +38,6 @@ export default function CompetitorBacklinkCard({ backlinkComparison, meta, loadi
         <div className="min-w-0 flex-1 relative z-10 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
             <span className="font-black text-cyan-950 text-[11px] uppercase tracking-wider">Competitor Backlink Comparison</span>
-            <span className="text-[9px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 border border-cyan-200/80 shadow-2xs">
-              Common Crawl
-            </span>
           </div>
           <p className="text-[11.5px] leading-relaxed text-slate-600 font-semibold">
             {emptyMessage(meta)}
@@ -60,9 +57,6 @@ export default function CompetitorBacklinkCard({ backlinkComparison, meta, loadi
           <Network size={12} className="text-teal-600" />
           <span>Competitor Backlink Comparison</span>
         </div>
-        <span className="text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-full border text-teal-700 bg-teal-50 border-teal-100 whitespace-nowrap">
-          Common Crawl
-        </span>
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3">
@@ -100,7 +94,7 @@ export default function CompetitorBacklinkCard({ backlinkComparison, meta, loadi
         </div>
       ) : (
         <div className="mt-3 pt-3 border-t border-slate-100">
-          <p className="text-xs text-emerald-700 font-bold">You lead every tracked competitor with real Common Crawl data.</p>
+          <p className="text-xs text-emerald-700 font-bold">You lead every tracked competitor here.</p>
         </div>
       )}
 

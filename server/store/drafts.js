@@ -249,6 +249,28 @@ export async function countVisibleFaqPages(site) {
   return (await countVisibleFaqDrafts(site.id)) + (site.visible_faq_baseline || 0);
 }
 
+// Cross-mechanism duplicate guard for lib/faq-render-mode.js: marker-merge
+// (an HTML splice into a template file) and the data-array-content adapter
+// (writing into a data file the site's own component renders) are two
+// independent ways a page can end up with a visible FAQ, and neither can see
+// the other's published output by scanning file content alone — a data
+// file's raw JSON has no HTML signal, and a template that renders from a
+// data file at build time may have no FAQ-shaped markup in its own source at
+// all. The drafts table is the one place both mechanisms' history is
+// visible, so this is checked before either one decides to publish a new
+// visible FAQ for the same page.
+export async function hasImplementedVisibleFaqForPage(siteId, page) {
+  if (!page) return false;
+  const { rows } = await query(
+    `SELECT 1 FROM drafts
+     WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible' AND status = 'implemented'
+       AND (content->>'page' = $2 OR input->>'page' = $2)
+     LIMIT 1`,
+    [siteId, page]
+  );
+  return rows.length > 0;
+}
+
 // Same retryable-in-place pattern as recordApplyFailure, for a
 // mergeToStage() failure (e.g. a real merge conflict) — the branch itself
 // is already real/pushed at this point, only the merge call failed, so this
@@ -270,7 +292,7 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 // ONLY path to 'implemented' for all 10. The legacy manual bypass below is
 // kept only as an escape hatch for a draft whose type somehow isn't in this
 // list (defensive, not expected to ever apply today).
-export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap'];
+export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service'];
 
 // approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real

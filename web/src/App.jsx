@@ -26,6 +26,7 @@ const AdminUsers = lazy(() => import('./pages/admin/Users.jsx'));
 const McpAdmin = lazy(() => import('./pages/admin/McpAdmin.jsx'));
 const SystemHealth = lazy(() => import('./pages/admin/SystemHealth.jsx'));
 const AuditLog = lazy(() => import('./pages/admin/AuditLog.jsx'));
+const AiOperationsCenter = lazy(() => import('./pages/admin/AiOperationsCenter.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
@@ -142,8 +143,12 @@ export default function App() {
                   specialist agents actually connect (AiGrowth.jsx) — and still
                   the place to run or inspect one agent directly. Client-facing
                   like the rest of the routes above — each is server-scoped to
-                  req.session.siteId, never a cross-client view. */}
-              <Route path="/ai-growth" element={<CommandCenter />} />
+                  req.session.siteId, never a cross-client view. Exception:
+                  when the logged-in session's own site IS the company's own
+                  site (isInternal), /ai-growth shows the platform-wide AI
+                  Operations Center instead of the simplified client view —
+                  every real client still sees the normal CommandCenter. */}
+              <Route path="/ai-growth" element={isInternal ? <AiOperationsCenter /> : <CommandCenter />} />
               <Route path="/ai-orchestration" element={<AiGrowth />} />
               <Route path="/action-center" element={<ActionCenter />} />
               <Route path="/site-audit" element={<SiteAudit />} />

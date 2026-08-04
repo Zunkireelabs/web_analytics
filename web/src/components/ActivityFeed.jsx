@@ -9,10 +9,10 @@ import {
 } from 'lucide-react';
 
 const CATEGORY_META = {
-  seo: { label: 'SEO Audit', icon: Target, color: '#6C63FF', bgLight: '#6C63FF0c' },
-  geo: { label: 'Geo Target', icon: Globe, color: '#0ea5e9', bgLight: '#0ea5e90c' },
-  content: { label: 'Content Strategy', icon: FileText, color: '#14b8a6', bgLight: '#14b8a60c' },
-  meta: { label: 'Executive Brain', icon: BrainCircuit, color: '#ec4899', bgLight: '#ec48990c' }
+  seo: { label: 'SEO', icon: Target, color: '#6C63FF', bgLight: '#6C63FF0c' },
+  geo: { label: 'Audience', icon: Globe, color: '#0ea5e9', bgLight: '#0ea5e90c' },
+  content: { label: 'Content', icon: FileText, color: '#14b8a6', bgLight: '#14b8a60c' },
+  meta: { label: 'Overview', icon: BrainCircuit, color: '#ec4899', bgLight: '#ec48990c' }
 };
 
 export default function ActivityFeed({ items }) {
