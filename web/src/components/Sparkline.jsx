@@ -1,7 +1,5 @@
 // Shared sparkline — smooth area + line from a number[]. Pure SVG, no deps.
-// `stretch` fills the parent container (viewBox + preserveAspectRatio="none") instead of a
-// fixed pixel size — used where the sparkline must fill a card's full width (StatCard).
-export default function Sparkline({ data = [], color = '#6C63FF', width = 72, height = 24, fill = true, dot = true, stretch = false }) {
+export default function Sparkline({ data = [], color = '#6C63FF', width = 120, height = 36, fill = true, dot = true, stretch = false }) {
   const vals = (data || []).map(Number).filter(Number.isFinite);
   if (vals.length < 2) return stretch ? null : <svg width={width} height={height} aria-hidden />;
 
@@ -11,7 +9,7 @@ export default function Sparkline({ data = [], color = '#6C63FF', width = 72, he
   const max = Math.max(...vals);
   const span = max - min || 1;
   const stepX = w / (vals.length - 1);
-  const pad = stretch ? 2 : 3;
+  const pad = stretch ? 3 : 4;
   const y = (v) => h - pad - ((v - min) / span) * (h - pad * 2);
   const pts = vals.map((v, i) => [i * stepX, y(v)]);
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
@@ -27,14 +25,23 @@ export default function Sparkline({ data = [], color = '#6C63FF', width = 72, he
     <svg {...svgProps} aria-hidden>
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor={color} stopOpacity="0.18" />
+          <stop offset="0" stopColor={color} stopOpacity="0.25" />
           <stop offset="1" stopColor={color} stopOpacity="0" />
         </linearGradient>
       </defs>
       {fill && <path d={area} fill={`url(#${id})`} />}
-      <path d={line} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
-        vectorEffect={stretch ? 'non-scaling-stroke' : undefined} />
-      {dot && <circle cx={last[0]} cy={last[1]} r="2.1" fill="#fff" stroke={color} strokeWidth="1.4" />}
+      <path
+        d={line}
+        fill="none"
+        stroke={color}
+        strokeWidth={stretch ? '1.8' : '2'}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        vectorEffect={stretch ? 'non-scaling-stroke' : undefined}
+      />
+      {dot && !stretch && (
+        <circle cx={last[0]} cy={last[1]} r="3" fill="#fff" stroke={color} strokeWidth="2" />
+      )}
     </svg>
   );
 }
