@@ -34,11 +34,25 @@ Opportunity Rollup and Investigation Reasoning stages (also Phase 3) both
 run after the Investigation Engine, since they key off investigation_id;
 Reasoning runs last of the three since it also reads the Rollup's output
 (business impact/opportunity data) for its business_summary field.
+
+Every stage is wrapped in app/activity/log.track() (Phase 3 Step 9 — AI
+Command Center), grouped into 5 task_types rather than one row per
+function: 'monitoring' (ingest/stats/anomalies), 'forecasting' (forecasts +
+accuracy evaluation), 'investigating' (feature importance/insight engine/
+root cause — NOT the Investigation Engine itself, despite the name
+overlap; that one must stay grouped with the recommendation stages it
+depends on), 'generating_recommendations' (recommendation/intelligence
+engines through the Investigation Engine, Opportunity Rollup, and
+Investigation Reasoning — kept in one group specifically so the ordering
+above is never disturbed by which track() block a call sits in). Alert
+delivery is left unwrapped — it's a delivery/notification step, not
+analysis work the Command Center needs to show progress on.
 Run via cron (see docker-compose.yml comment) as:
     docker compose exec app python -m scripts.run_nightly_pipeline
 """
 import asyncio
 
+from app.activity.log import track
 from app.alerts.deliver import deliver_predictive_alerts
 from app.forecast.accuracy import run_forecast_accuracy_evaluation
 from app.forecast.run import run_forecasts
@@ -59,22 +73,26 @@ from app.stats.deltas import run_stats
 
 
 async def main() -> None:
-    await run_nightly()
-    await run_stats()
-    await run_anomaly_detection()
-    await run_forecasts()
-    await run_forecast_accuracy_evaluation()
-    await run_feature_importance()
-    await run_insight_engine()
-    await run_root_cause_analysis()
-    await run_recommendation_engine()
-    await run_effort_estimation()
-    await run_impact_prediction()
-    await run_opportunity_scoring()
-    await run_recommendation_prioritizer()
-    await run_investigation_engine()
-    await run_opportunity_rollup()
-    await run_investigation_reasoning()
+    async with track("monitoring"):
+        await run_nightly()
+        await run_stats()
+        await run_anomaly_detection()
+    async with track("forecasting"):
+        await run_forecasts()
+        await run_forecast_accuracy_evaluation()
+    async with track("investigating"):
+        await run_feature_importance()
+        await run_insight_engine()
+        await run_root_cause_analysis()
+    async with track("generating_recommendations"):
+        await run_recommendation_engine()
+        await run_effort_estimation()
+        await run_impact_prediction()
+        await run_opportunity_scoring()
+        await run_recommendation_prioritizer()
+        await run_investigation_engine()
+        await run_opportunity_rollup()
+        await run_investigation_reasoning()
     await deliver_predictive_alerts()
 
 

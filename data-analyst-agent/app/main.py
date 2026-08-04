@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.routes import (
-    alerts, ask, benchmarks, breakdown, business_values, dashboard, health, intelligence, investigations,
+    activity, alerts, ask, benchmarks, breakdown, business_values, dashboard, health, intelligence, investigations,
     opportunities, recommendations,
 )
 from app.config import settings
@@ -27,4 +27,5 @@ app.include_router(recommendations.router)
 app.include_router(intelligence.router)
 app.include_router(investigations.router)
 app.include_router(opportunities.router)
+app.include_router(activity.router)
 app.include_router(business_values.router)

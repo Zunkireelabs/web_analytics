@@ -817,3 +817,43 @@ class ForecastAccuracy(Base):
     __table_args__ = (
         Index("idx_forecast_accuracy_lookup", "client_id", "metric_key", "evaluated_at"),
     )
+
+
+class AiActivityLog(Base):
+    """AI Command Center feed (Phase 3 Step 9 — see app/activity/log.py).
+    Stage-level, NOT per-client: one row per nightly-pipeline task_type per
+    run, wrapping the existing engine calls without changing any of their
+    internals. The per-client detail Command Center staff actually want
+    when digging into ONE client already exists in the per-client run
+    tables (ForecastRun, IngestionRun, RootCauseAnalysisRun, ...) — this
+    table is the cross-cutting "what is the AI doing right now" feed, not a
+    duplicate of those. client_id is nullable and left null for every
+    nightly-pipeline row (client_id is reserved for a future on-demand,
+    single-client action, e.g. a staff-triggered per-client refresh).
+    task_type is deliberately NOT the full 8-value spec list — 'waiting_
+    approval'/'completed'/'failed' from that list are run *outcomes*, not
+    *kinds* of work, so they live in status instead of being duplicated as
+    task_types (same kind of honest plan-to-implementation simplification
+    Opportunity.status already documents for its own dropped 'in_progress'
+    value)."""
+
+    __tablename__ = "ai_activity_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int | None] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=True)
+    task_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    took_ms: Mapped[int | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "task_type IN ('monitoring','forecasting','investigating','generating_recommendations','preparing_drafts')",
+            name="ai_activity_log_task_type_check",
+        ),
+        CheckConstraint("status IN ('queued','running','completed','failed')", name="ai_activity_log_status_check"),
+        Index("idx_ai_activity_log_lookup", "started_at"),
+    )

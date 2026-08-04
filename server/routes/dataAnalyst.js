@@ -293,4 +293,12 @@ router.get('/internal/analyst/clients/:clientId/opportunities', async (req, res,
   } catch (e) { next(e); }
 });
 
+// AI Command Center feed (Phase 3) — cross-client, matches the Python route.
+router.get('/internal/analyst/activity', async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+    res.json(await callPython('/activity', { query: { limit } }));
+  } catch (e) { next(e); }
+});
+
 export default router;
