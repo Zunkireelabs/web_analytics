@@ -27,10 +27,7 @@ const ACTION_LABELS = {
   'open-graph': 'Open Graph Tags', 'broken-link-fix': 'Broken Link Removal', 'redirect-fix': 'Redirect Link Fix',
 
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report',
-=======
-  'expand-content': 'Content Expansion', sitemap: 'Sitemap Update',
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
-
 };
 
 const GENERATOR_COLORS = {
@@ -52,13 +49,10 @@ const GENERATOR_COLORS = {
   'redirect-fix': '#d97706',
   'expand-content': '#4f46e5',
   sitemap: '#65a30d',
-
   'geo-audit': '#0ea5e9',
-=======
   'cookie-policy': '#f59e0b',
   'privacy-policy': '#d97706',
   'terms-of-service': '#b45309',
-
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
