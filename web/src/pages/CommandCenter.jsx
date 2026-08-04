@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
-import HealthScoreCard from '../components/HealthScoreCard.jsx';
+import GrowthScores from '../components/GrowthScores.jsx';
+import GeoScorecard from '../components/GeoScorecard.jsx';
 import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
 import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
 import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
@@ -76,7 +77,7 @@ export default function CommandCenter() {
   // events broadcast by server/agents/runner.js for this site.
   const [liveLogs, setLiveLogs] = useState([]);
   useEffect(() => {
-    const es = new EventSource('/api/agents/live');
+    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
     es.onmessage = (raw) => {
       let event;
       try { event = JSON.parse(raw.data); } catch { return; }
@@ -408,20 +409,21 @@ export default function CommandCenter() {
         />
       </div>
 
-      {/* REDESIGNED TOP ROW: Balanced 3-column Layout with shadows and rank badges */}
+      {/* SCORE ROW: Overall / SEO / AEO / GEO — four real, independently
+          computed 0–100 signals shown at the top. Overall comes from Website
+          Health, SEO from Authority Score, AEO from AI-visibility readiness,
+          and GEO from the latest geo-audit draft (fetched in-component). */}
+      <div className="grid grid-cols-1 gap-4" data-finding-id="health-score">
+        <div className={highlightClass('health-score')}>
+          <GrowthScores data={data} loading={data === null} />
+        </div>
+      </div>
+
+      {/* SECOND ROW: Competitor Overview + Data Connection */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
 
-        {/* Column 1: Website Health score Circular SVG Gauge (4-cols) */}
-        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-indigo-50/15 p-5 shadow-sm rounded-3xl overflow-hidden" data-finding-id="health-score">
-          {/* Top Indicator bar */}
-          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-[#6C63FF] to-[#8b5cf6]" />
-          <div className={highlightClass('health-score')}>
-            <HealthScoreCard score={data?.health?.score} trendWeek={data?.health?.trendWeek} loading={data === null} />
-          </div>
-        </div>
-
-        {/* Column 2: Competitor Leaderboard (4-cols) */}
-        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
+        {/* Column 1: Competitor Leaderboard (6-cols) */}
+        <div className="lg:col-span-6 relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
           {/* Top Indicator bar */}
           <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
           <div>
@@ -445,8 +447,8 @@ export default function CommandCenter() {
           </div>
         </div>
 
-        {/* Column 3: Ingestion/Connection Health (4-cols) */}
-        <div className="lg:col-span-4 relative card border border-slate-200 bg-gradient-to-br from-white to-emerald-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
+        {/* Column 2: Ingestion/Connection Health (6-cols) */}
+        <div className="lg:col-span-6 relative card border border-slate-200 bg-gradient-to-br from-white to-emerald-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
           {/* Top Indicator bar */}
           <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-emerald-400 to-teal-400" />
           <div>
@@ -697,8 +699,9 @@ export default function CommandCenter() {
           )}
 
           {selectedAgent === 'geo' && (
-            <div className="mb-4 animate-fade-in">
+            <div className="mb-4 animate-fade-in flex flex-col gap-4">
               <GeoIntelligenceCard geoIntelligence={data?.geoIntelligence} meta={data?.geoIntelligenceMeta} loading={data === null} />
+              <GeoScorecard onOpenReport={setActiveDraft} />
             </div>
           )}
 

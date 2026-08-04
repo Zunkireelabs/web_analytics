@@ -70,8 +70,8 @@ export function registerReadOnlyTools(server, siteId) {
   }, withErrorHandling('get_gsc_breakdown_daily_series', async ({ start, end, dim }) => jsonResult(await getGscBreakdownDailySeries(siteId, start, end, dim))));
 
   server.registerTool('get_ga4_breakdown_daily_series', {
-    description: 'Real per-day GA4 sessions/users by device or country over a date range — one row per (day, dim_value), unaggregated. Distinct from get_device_breakdown/get_country_breakdown, which sum the whole range into a top-N list.',
-    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['device', 'country']) },
+    description: 'Real per-day GA4 sessions/users by device, country, browser, or source/medium over a date range — one row per (day, dim_value), unaggregated. Distinct from get_device_breakdown/get_country_breakdown, which sum the whole range into a top-N list.',
+    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['device', 'country', 'browser', 'source_medium']) },
   }, withErrorHandling('get_ga4_breakdown_daily_series', async ({ start, end, dim }) => jsonResult(await getGa4BreakdownDailySeries(siteId, start, end, dim))));
 
   server.registerTool('get_gsc_breakdown_daily_top_n', {

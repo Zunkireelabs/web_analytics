@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -58,6 +58,32 @@ export function startCron() {
           console.log(`[cron] weekly doc report finished — ${written.length} site(s) written`);
         } catch (err) {
           console.error('[cron] weekly doc report error:', err.message);
+        }
+
+        // GEO Audit — weekly AI visibility check, same cadence as
+        // the weekly doc report. Runs the geo-audit generator for
+        // every connected site and stores the result.
+        console.log(`[cron] weekly GEO audit started ${new Date().toISOString()}`);
+        try {
+          const results = await runGeoAuditIfDueForAllSites();
+          const completed = results.filter(Boolean);
+          console.log(`[cron] weekly GEO audit finished — ${completed.length} site(s) audited`);
+        } catch (err) {
+          console.error('[cron] weekly GEO audit error:', err.message);
+        }
+
+        // Growth Query Discovery — discovers real/LLM-expanded search
+        // queries in this site's category, checks content coverage, and
+        // verifies previously-drafted queries' visibility over time. Also
+        // checked on this weekly trigger but real work only once a week
+        // (see job.js's runGrowthQueryDiscoveryIfDue).
+        console.log(`[cron] weekly growth query discovery started ${new Date().toISOString()}`);
+        try {
+          const results = await runGrowthQueryDiscoveryIfDueForAllSites();
+          const analyzed = results.filter(Boolean);
+          console.log(`[cron] weekly growth query discovery finished — ${analyzed.length} site(s) analyzed`);
+        } catch (err) {
+          console.error('[cron] weekly growth query discovery error:', err.message);
         }
 
         // Real DataForSEO SERP-ranking ingest — checked on this weekly

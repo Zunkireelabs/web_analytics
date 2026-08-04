@@ -3,6 +3,7 @@ import { api, daysAgo, timeAgo } from '../api.js';
 import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagram.jsx';
 import AgentDetailPanel from '../components/orchestration/AgentDetailPanel.jsx';
 import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
+import GrowthScores from '../components/GrowthScores.jsx';
 import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
 import {
   Play,
@@ -98,6 +99,16 @@ export default function AiGrowth() {
     api.commandCenter.agenticStats().then(setAgenticStats).catch(() => {});
   }, []);
 
+  // Command Center aggregate (health/authority/aiVisibility) driving the
+  // GrowthScores row at the top of the console — same api.commandCenter.get()
+  // the Command Center page uses, so the Overall/SEO/AEO tiles reflect real,
+  // already-persisted agent runs (GEO is fetched independently inside
+  // GrowthScores itself, same as on that page).
+  const [ccData, setCcData] = useState(null);
+  useEffect(() => {
+    api.commandCenter.get().then(setCcData).catch(() => setCcData(null));
+  }, []);
+
   // Load findings already persisted from prior runs on mount — without this,
   // the feed only ever shows findings from a run triggered in this exact
   // browser tab/session, so a page load always reads "0 findings" even when
@@ -110,7 +121,7 @@ export default function AiGrowth() {
 
   // Connect to SSE stream
   useEffect(() => {
-    const es = new EventSource('/api/agents/live');
+    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
     es.onmessage = (raw) => {
       let event;
       try { event = JSON.parse(raw.data); } catch { return; }
@@ -171,6 +182,8 @@ export default function AiGrowth() {
     try {
       await api.commandCenter.refresh(REFRESH_START, REFRESH_END);
       addLog('Server accepted the run. Awaiting agent results…', 'system');
+      const fresh = await api.commandCenter.get();
+      setCcData(fresh);
     } catch (e) {
       setRefreshError(e.message || 'Run failed');
       addLog(`Error executing parallel pipeline: ${e.message || 'Run failed'}`, 'error');
@@ -255,6 +268,13 @@ export default function AiGrowth() {
               )}
             </button>
           </div>
+        </div>
+
+        {/* GrowthScores: Overall / SEO / AEO / GEO — same real-score row as
+            the Command Center, so the runner console leads with current
+            performance before diving into the live agent stream. */}
+        <div className="mb-6">
+          <GrowthScores data={ccData} loading={ccData === null} />
         </div>
 
         {/* Signal Path strip — the fixed pipeline shape, always visible so

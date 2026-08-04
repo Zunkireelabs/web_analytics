@@ -41,13 +41,19 @@ import { runDueVerifications } from './agents/lib/fix-verification.js';
 // DAILY_AGENT_IDS either way, since even its fastest opt-in cadence is
 // weekly, never daily. content-gap runs weekly (via executive-report's
 // requires, see executive-report.js's WEEKLY_ONLY_AGENT_ID — real
-// content-completeness gaps don't meaningfully shift day to day). A new
-// agent added to RECOMMENDATION_AGENT_IDS (agents/lib/insights.js) lands
-// here in DAILY_AGENT_IDS automatically unless it's added to
-// THROTTLED_AGENT_IDS below or given its own WEEKLY_ONLY_AGENT_ID-style
-// exclusion — pick the cadence deliberately, don't leave it to default.
+// content-completeness gaps don't meaningfully shift day to day).
+// growth-queries also runs weekly, on its own dedicated gate
+// (runGrowthQueryDiscoveryIfDue below, same weekly-gate shape as
+// runGeoAuditIfDue) — real GSC query movement and page coverage don't shift
+// meaningfully day to day either, and its own LLM/page-fetch cost multiplies
+// with frequency the same way competitor/authority checks do. A new agent
+// added to RECOMMENDATION_AGENT_IDS (agents/lib/insights.js) lands here in
+// DAILY_AGENT_IDS automatically unless it's added to THROTTLED_AGENT_IDS
+// below or given its own WEEKLY_ONLY_AGENT_ID-style exclusion — pick the
+// cadence deliberately, don't leave it to default.
 const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
-const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && id !== 'content-gap');
+const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
+const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
 // Records the shared Google OAuth connection's health from organic pipeline
 // outcomes (not just the on-demand "Test connection" check), so Integration
@@ -465,6 +471,63 @@ const aiRecommendationCadence = () => (process.env.AI_RECOMMENDATION_CADENCE ===
 export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation', { cadence: aiRecommendationCadence() });
 export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation', { cadence: aiRecommendationCadence() });
 
+// Growth Query Discovery — real GSC query movement and page coverage don't
+// meaningfully shift day to day, and its own LLM/page-fetch cost multiplies
+// with frequency the same way competitor/authority checks do, so weekly
+// (checked on the same weekly cron tick as everything else in this block,
+// real work only once a week) matches the underlying signal.
+export const runGrowthQueryDiscoveryIfDue = (site) => runAgentIfDue(site, 'growth-queries', { cadence: 'week' });
+export const runGrowthQueryDiscoveryIfDueForAllSites = () => runAgentIfDueForAllSites('growth-queries', { cadence: 'week' });
+
+// GEO Audit — runs weekly, same cadence as the weekly doc report.
+// Uses the geo-audit generator to produce an AI visibility score,
+// per-page findings, and prioritized fix list mapped to generators.
+// Idempotent per week: skips if already run for the current week's
+// start date (Monday in the site's timezone).
+export async function runGeoAuditIfDue(site) {
+  const { start } = previousWeek(site.timezone);
+  const { rows } = await query(
+    "SELECT to_char(geo_audit_last_done, 'YYYY-MM-DD') AS geo_audit_last_done FROM sites WHERE id = $1",
+    [site.id]
+  );
+  const lastStr = rows[0]?.geo_audit_last_done || null;
+  if (lastStr && lastStr >= start) {
+    console.log(`[geo-audit] site ${site.id} already run this week — skipping.`);
+    return null;
+  }
+
+  // generateDraft is the one shared persistence path — also used by the
+  // MCP generate_geo_audit tool and the manual "Run Audit" button
+  // (routes/action-center.js's generic /action-center/generate) — so
+  // cron/MCP/manual can never diverge into separate implementations, and
+  // the report this computes is actually saved as a draft instead of
+  // being discarded. Dynamic import avoids a static circular dependency
+  // with routes/action-center.js (which already imports from this file) —
+  // same convention as runPrStatusPollForAllSites above.
+  const { generateDraft } = await import('./routes/action-center.js');
+  const draft = await generateDraft(site.id, {
+    generatorId: 'geo-audit',
+    params: { start, end: daysAgoInTz(site.timezone, 0) },
+    source: 'cron',
+  });
+  await query('UPDATE sites SET geo_audit_last_done = $1 WHERE id = $2', [start, site.id]);
+  console.log(`[geo-audit] site ${site.id} weekly GEO audit complete: ${draft.summary}`);
+  return draft;
+}
+
+export async function runGeoAuditIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runGeoAuditIfDue(site));
+    } catch (err) {
+      console.error(`[job] geo-audit failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
 // Real site-wide page discovery (sitemap, and BFS crawl once added) — kept
 // weekly, same reasoning as runCompetitorCheckIfDue: a real crawl of up to
 // a few hundred pages against a live site, run inside every daily cycle,
@@ -683,6 +746,7 @@ export async function runStartupCatchup() {
       await runDailyJobForSite(site);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      await runGeoAuditIfDue(site);
       await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[catchup] error for site ${site.id} "${site.name}":`, err.message);

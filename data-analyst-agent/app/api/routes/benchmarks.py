@@ -25,19 +25,14 @@ MIN_CLIENTS_PER_GROUP = 2
 DEFAULT_TREND_MONTHS = 6
 
 
-@router.get("/benchmarks/{metric_key}")
-async def get_benchmark(
-    metric_key: str,
-    session: AsyncSession = Depends(get_session),
-    _admin: None = Depends(require_admin_key),
-) -> dict:
-    """Each active, industry-tagged client's latest real site-level value for
-    this metric, grouped by industry into p25/median/p75 — a snapshot, not a
-    trend (see the /trend endpoint below for that)."""
-    metric = await session.get(MetricCatalog, metric_key)
-    if metric is None:
-        raise HTTPException(status_code=404, detail="Unknown metric_key.")
-
+async def get_industry_percentiles(session: AsyncSession, metric_key: str) -> dict[str, dict]:
+    """{industry: {industry, client_count, p25, median, p75}} for every
+    industry with >= MIN_CLIENTS_PER_GROUP active, industry-tagged clients
+    holding a recent site-level value for this metric. Plain function (no
+    FastAPI dependency injection) extracted from get_benchmark's own body so
+    app/intelligence/opportunity_scoring.py can reuse the exact same
+    cross-client aggregate-only logic — same reuse pattern as
+    app/api/routes/breakdown.py::get_page_query_top_movers_data."""
     clients = (
         await session.execute(
             select(Client).where(Client.status == "active", Client.industry.is_not(None))
@@ -56,10 +51,29 @@ async def get_benchmark(
             by_industry.setdefault(client.industry, []).append(float(latest))
 
     return {
+        industry: _percentile_summary(industry, values) for industry, values in by_industry.items()
+        if len(values) >= MIN_CLIENTS_PER_GROUP
+    }
+
+
+@router.get("/benchmarks/{metric_key}")
+async def get_benchmark(
+    metric_key: str,
+    session: AsyncSession = Depends(get_session),
+    _admin: None = Depends(require_admin_key),
+) -> dict:
+    """Each active, industry-tagged client's latest real site-level value for
+    this metric, grouped by industry into p25/median/p75 — a snapshot, not a
+    trend (see the /trend endpoint below for that)."""
+    metric = await session.get(MetricCatalog, metric_key)
+    if metric is None:
+        raise HTTPException(status_code=404, detail="Unknown metric_key.")
+
+    percentiles = await get_industry_percentiles(session, metric_key)
+    return {
         "metric_key": metric_key, "display_name": metric.display_name, "unit": metric.unit,
         "min_clients_per_group": MIN_CLIENTS_PER_GROUP,
-        "industries": [_percentile_summary(industry, values) for industry, values in sorted(by_industry.items())
-                       if len(values) >= MIN_CLIENTS_PER_GROUP],
+        "industries": [v for _, v in sorted(percentiles.items())],
     }
 
 

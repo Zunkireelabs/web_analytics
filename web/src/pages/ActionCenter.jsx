@@ -48,10 +48,71 @@ const GENERATOR_META = {
   'redirect-fix': { label: 'Redirect Fixes', icon: '↪️', color: '#d97706' },
   'expand-content': { label: 'Content Expansion', icon: '📄', color: '#4f46e5' },
   sitemap: { label: 'Sitemap Updates', icon: '🗺️', color: '#65a30d' },
+
+  'geo-audit': { label: 'GEO Audit Reports', icon: '🌐', color: '#0ea5e9' },
+  'direct-answer': { label: 'Direct Answers', icon: '💬', color: '#0ea5e9' },
+
   'cookie-policy': { label: 'Cookie Policy', icon: '🍪', color: '#f59e0b' },
   'privacy-policy': { label: 'Privacy Policy', icon: '🔒', color: '#d97706' },
   'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
 };
+
+// Source filter (decision: redesign the existing Action Center into a
+// source-filterable universal hub rather than a new page) — every
+// recommendation already carries `bucket`/`category` from
+// server/agents/lib/recommendation-taxonomy.js (an additive-only
+// classification layered onto the existing recommendations feed; it never
+// changes which recommendations exist or how a draft is generated).
+const SOURCE_FILTERS = [
+  { value: 'all', label: 'All' },
+  { value: 'seo', label: 'SEO' },
+  { value: 'geo', label: 'GEO' },
+  { value: 'analytics', label: 'Analytics' },
+];
+const BUCKET_META = {
+  seo: { label: 'SEO', color: '#2563eb' },
+  geo: { label: 'GEO', color: '#7c3aed' },
+  analytics: { label: 'Analytics', color: '#0891b2' },
+};
+// Icon per category name — purely cosmetic, falls back to a generic dot for
+// any category not listed (e.g. a future agent's own category).
+const CATEGORY_META = {
+  'Meta Titles': { icon: '🏷️' },
+  'Content Expansion': { icon: '📄' },
+  'Landing Pages': { icon: '🚀' },
+  'Broken Links': { icon: '⛔' },
+  'Technical Fixes': { icon: '🛠️' },
+  'FAQ Opportunities': { icon: '❓' },
+  'Blog Opportunities': { icon: '📝' },
+  'Entity Pages': { icon: '🧩' },
+  'Topic Coverage': { icon: '🌐' },
+  'AI Mentions': { icon: '🤖' },
+  'Citation Opportunities': { icon: '🔗' },
+  'CTR Opportunities': { icon: '📈' },
+  'Traffic Anomalies': { icon: '⚠️' },
+  'Growth Opportunities': { icon: '🌱' },
+  'Conversion Issues': { icon: '🎯' },
+};
+
+function pagePathFor(url) {
+  try { const u = new URL(url); return u.pathname === '/' ? u.hostname : u.pathname; } catch { return null; }
+}
+
+// A specific, scannable headline instead of a generic recurring label (e.g.
+// every content-gap finding used to read as the same "Cover this topic")
+// — built entirely from fields the recommendations feed already returns
+// (item.params.query/.topic/.page), no backend change needed.
+function titleFor(item) {
+  const topic = item.params?.query || item.params?.topic;
+  if (topic && (item.generatorId === 'blog-outline' || item.generatorId === 'direct-answer')) {
+    return `${topic} — ${item.tag}`;
+  }
+  if (item.params?.page) {
+    const path = pagePathFor(item.params.page);
+    if (path) return `${item.tag} — ${path}`;
+  }
+  return item.tag;
+}
 
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
@@ -114,7 +175,8 @@ export default function ActionCenter() {
   const [executionResult, setExecutionResult] = useState(null);
   const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
-  
+  const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'geo' | 'analytics'
+
   // Sidebar category selections
   const [activeCategory, setActiveCategory] = useState(null);
   const [showAllRecommendations, setShowAllRecommendations] = useState(false);
@@ -130,13 +192,8 @@ export default function ActionCenter() {
 
   const loadRecs = () => api.actionCenter.recommendations().then((data) => {
     setRecs(data);
-    const groupedKeys = Object.keys(
-      (data?.items || []).reduce((acc, item) => {
-        (acc[item.generatorId] ||= []).push(item);
-        return acc;
-      }, {})
-    );
-    if (groupedKeys.length > 0) setActiveCategory(groupedKeys[0]);
+    const categories = [...new Set((data?.items || []).map((item) => item.category || 'Technical Fixes'))];
+    if (categories.length > 0) setActiveCategory(categories[0]);
   }).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
 
   const loadDrafts = () => api.actionCenter.drafts().then((data) => {
@@ -180,13 +237,8 @@ export default function ActionCenter() {
     try {
       const fresh = await api.actionCenter.refresh(range.start, range.end);
       setRecs(fresh);
-      const groupedKeys = Object.keys(
-        (fresh?.items || []).reduce((acc, item) => {
-          (acc[item.generatorId] ||= []).push(item);
-          return acc;
-        }, {})
-      );
-      if (groupedKeys.length > 0) setActiveCategory(groupedKeys[0]);
+      const categories = [...new Set((fresh?.items || []).map((item) => item.category || 'Technical Fixes'))];
+      if (categories.length > 0) setActiveCategory(categories[0]);
     } catch (e) {
       setError(e.message || 'Refresh failed');
     } finally {
@@ -211,6 +263,7 @@ export default function ActionCenter() {
       setGeneratingId(null);
     }
   };
+
 
   // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to 15)
   // through the existing Generate -> Submit -> Approve chain automatically,
@@ -255,8 +308,23 @@ export default function ActionCenter() {
 
   const grouped = (recs?.items || []).reduce((acc, item) => {
     (acc[item.generatorId] ||= []).push(item);
+
+  const bucketFiltered = (recs?.items || []).filter((item) => sourceFilter === 'all' || item.bucket === sourceFilter);
+  const grouped = bucketFiltered.reduce((acc, item) => {
+    (acc[item.category || 'Technical Fixes'] ||= []).push(item);
+
     return acc;
   }, {});
+
+  // Switching the source filter can only add/remove whole categories (every
+  // category maps to exactly one bucket in recommendation-taxonomy.js), so
+  // a category still present after filtering never loses/gains items — only
+  // reset the selection when the currently-active one drops out of view.
+  useEffect(() => {
+    const categories = Object.keys(grouped);
+    if (categories.length && !categories.includes(activeCategory)) setActiveCategory(categories[0]);
+    else if (!categories.length) setActiveCategory(null);
+  }, [sourceFilter, recs]);
 
   const implementedDrafts = (drafts || []).filter((d) => d.status === 'implemented')
     .sort((a, b) => new Date(b.implemented_at) - new Date(a.implemented_at));
@@ -269,7 +337,10 @@ export default function ActionCenter() {
   // Selected category items mapping
   const activeItems = activeCategory ? (grouped[activeCategory] || []) : [];
   const sortedItems = [...activeItems].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1));
-  const activeMeta = activeCategory ? GENERATOR_META[activeCategory] : null;
+  const activeBucket = activeItems[0]?.bucket;
+  const activeMeta = activeCategory
+    ? { icon: CATEGORY_META[activeCategory]?.icon || '•', color: BUCKET_META[activeBucket]?.color || '#64748b', label: activeCategory }
+    : null;
 
   // Default active selection helper
   useEffect(() => {
@@ -394,7 +465,32 @@ export default function ActionCenter() {
         {/* Left Column (5-cols) - Pipeline selection lists (SLATE BACKGROUND FOR CONTRAST) */}
         <div className="lg:col-span-5 bg-slate-50 border border-slate-200 rounded-3xl p-4.5 space-y-4 shadow-sm flex flex-col justify-start">
           
-          {/* Categories select checklist (Recommendations tab) */}
+          {/* Source filter (Recommendations tab) — SEO / GEO / Analytics,
+              purely a display filter over the same recommendations feed;
+              Generate Draft/Drafts/Approval/PR logic below is untouched. */}
+          {tab === 'recommendations' && recs && (
+            <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
+              {SOURCE_FILTERS.map((f) => {
+                const active = sourceFilter === f.value;
+                const meta = BUCKET_META[f.value];
+                return (
+                  <button
+                    key={f.value}
+                    onClick={() => setSourceFilter(f.value)}
+                    className={`text-[10px] py-1.5 px-3 font-black rounded-lg flex-1 transition-all duration-150 cursor-pointer ${
+                      active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                    style={active && meta ? { color: meta.color } : undefined}
+                  >
+                    {f.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Categories select checklist (Recommendations tab) — dynamic per
+              selected source, only categories actually present are shown. */}
           {tab === 'recommendations' && recs && Object.keys(grouped).length > 0 && (
             <div className="space-y-1.5">
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 px-1 flex items-center gap-1 mb-1">
@@ -402,19 +498,20 @@ export default function ActionCenter() {
                 <span>Categories ({Object.keys(grouped).length})</span>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
-                {Object.entries(grouped).map(([generatorId, items]) => {
-                  const meta = GENERATOR_META[generatorId] || { label: generatorId, icon: '•', color: '#64748b' };
-                  const active = activeCategory === generatorId;
+                {Object.entries(grouped).map(([category, items]) => {
+                  const bucketColor = BUCKET_META[items[0]?.bucket]?.color || '#64748b';
+                  const meta = { label: category, icon: CATEGORY_META[category]?.icon || '•', color: bucketColor };
+                  const active = activeCategory === category;
                   return (
-                    <button 
-                      key={generatorId} 
-                      onClick={() => setActiveCategory(generatorId)}
+                    <button
+                      key={category}
+                      onClick={() => setActiveCategory(category)}
                       className={`flex items-center justify-between px-3 py-2 rounded-xl text-[11px] font-bold transition-all border text-left cursor-pointer ${
-                        active 
-                          ? 'bg-white border-slate-300 text-indigo-700 shadow-sm font-black' 
+                        active
+                          ? 'bg-white border-slate-300 text-indigo-700 shadow-sm font-black'
                           : 'bg-slate-100/50 border-slate-200 text-slate-600 hover:text-slate-800'
                       }`}
-                      style={{ 
+                      style={{
                         color: active ? meta.color : '',
                         borderColor: active ? `${meta.color}5a` : ''
                       }}
@@ -500,10 +597,20 @@ export default function ActionCenter() {
                           <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 animate-pulse" style={{ background: pr.color }} />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
+
                               <span className="text-xs font-black text-slate-800 leading-snug truncate">{item.tag}</span>
                               {item.riskTier === 'safe' && (
                                 <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                                   <ShieldCheck size={8} /> Safe
+
+                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
+                              {BUCKET_META[item.bucket] && (
+                                <span
+                                  className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
+                                  style={{ color: BUCKET_META[item.bucket].color, background: `${BUCKET_META[item.bucket].color}14` }}
+                                >
+                                  {BUCKET_META[item.bucket].label}
+
                                 </span>
                               )}
                             </div>
@@ -631,6 +738,7 @@ export default function ActionCenter() {
                       )}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
+
                           <h3 className="text-sm font-black text-slate-900 leading-none">{selectedRecommendation.tag}</h3>
                           {selectedRecommendation.riskTier === 'safe' ? (
                             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
@@ -643,12 +751,29 @@ export default function ActionCenter() {
                           )}
                         </div>
                         <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
+
+                          <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
+                          {BUCKET_META[selectedRecommendation.bucket] && (
+                            <span
+                              className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
+                              style={{ color: BUCKET_META[selectedRecommendation.bucket].color, background: `${BUCKET_META[selectedRecommendation.bucket].color}14` }}
+                            >
+                              {BUCKET_META[selectedRecommendation.bucket].label}
+                            </span>
+                          )}
+                        </div>
+
                       </div>
                     </div>
 
                     <div className="p-6 space-y-4">
                       <div>
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Diagnostic Reason</div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Found By</div>
+                        <p className="text-xs font-bold text-slate-700">{selectedRecommendation.agentName || activeMeta?.label}</p>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Reason</div>
                         <p className="text-xs font-medium text-slate-650 leading-relaxed bg-slate-50 p-4.5 rounded-2xl border border-slate-150 shadow-inner">
                           {selectedRecommendation.reason}
                         </p>
@@ -665,7 +790,7 @@ export default function ActionCenter() {
 
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Priority Rank</div>
+                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Priority</div>
                           <span className={`inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full border ${
                             selectedRecommendation.priority === 'high' ? 'bg-rose-50 border-rose-100 text-rose-600' : 'bg-slate-50 border-slate-200 text-slate-600'
                           }`}>
@@ -674,7 +799,7 @@ export default function ActionCenter() {
                         </div>
                         {selectedRecommendation.expectedImpact?.label && (
                           <div>
-                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Expected Return</div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Expected Impact</div>
                             <span className="inline-flex items-center gap-1 text-[9.5px] font-black uppercase tracking-wider px-3 py-1 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                               🚀 {selectedRecommendation.expectedImpact.label} Impact
                             </span>

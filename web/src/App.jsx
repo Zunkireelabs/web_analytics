@@ -131,8 +131,8 @@ export default function App() {
         {siteId ? (
           <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
             <Routes>
-              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth. */}
-              <Route path="/" element={<Navigate to="/ai-growth" replace />} />
+              {/* No standalone marketing homepage in the authenticated app — land straight on AI Growth (the agent runner console, AiGrowth.jsx). */}
+              <Route path="/" element={<Navigate to="/ai-orchestration" replace />} />
               <Route path="/overview" element={<Overview siteId={siteId} />} />
               <Route path="/insights" element={<Insights siteId={siteId} />} />
               <Route path="/compare" element={<Compare siteId={siteId} />} />

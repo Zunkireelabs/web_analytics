@@ -4,10 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.collectors.base import Collector
 from app.collectors.derived_ratios import DerivedRatiosCollector
 from app.collectors.ga4_breakdown import Ga4BreakdownCollector
+from app.collectors.ga4_browser import Ga4BrowserCollector
 from app.collectors.ga4_channels import Ga4ChannelsCollector
 from app.collectors.ga4_daily import Ga4DailyCollector
+from app.collectors.ga4_source_medium import Ga4SourceMediumCollector
 from app.collectors.gsc_breakdown import GscBreakdownCollector
 from app.collectors.gsc_daily import GscDailyCollector
+from app.collectors.gsc_page_dimension import GscPageDimensionCollector
 from app.collectors.health_score import HealthScoreCollector
 from app.collectors.monthly_metrics import MonthlyMetricsCollector
 from app.collectors.page_query import PageQueryCollector
@@ -15,9 +18,11 @@ from app.db.models import MetricCatalog, MetricDimensionSupport
 
 # Ordered — derived_ratios must run after gsc_daily/ga4_daily each night,
 # since it reads their freshly-written metric_observations rows rather than
-# calling MCP itself. A future collector (breakdowns, authority,
-# ai-recommendation, competitor) is added here as one more entry; nothing
-# else in the ingestion pipeline changes.
+# calling MCP itself. Likewise gsc_page_dimension must run after
+# page_query, since it reads page_query_observations rows that collector
+# just wrote this run rather than calling MCP itself. A future collector
+# (breakdowns, authority, ai-recommendation, competitor) is added here as
+# one more entry; nothing else in the ingestion pipeline changes.
 COLLECTORS: list[Collector] = [
     GscDailyCollector(),
     Ga4DailyCollector(),
@@ -27,7 +32,10 @@ COLLECTORS: list[Collector] = [
     Ga4ChannelsCollector(),
     GscBreakdownCollector(),
     Ga4BreakdownCollector(),
+    Ga4BrowserCollector(),
+    Ga4SourceMediumCollector(),
     PageQueryCollector(),
+    GscPageDimensionCollector(),
 ]
 
 

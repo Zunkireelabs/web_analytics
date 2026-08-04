@@ -60,6 +60,17 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
     return jsonResult(await generateDraft(siteId, { generatorId, params, source, findingId }));
   }));
 
+  server.registerTool('generate_geo_audit', {
+    description: 'Runs the GEO audit generator for this site — produces an AI visibility score, per-page findings, and prioritized fix list mapped to generators. Uses the last 14 days of GSC data by default.',
+    inputSchema: { daysBack: z.number().int().positive().optional(), topN: z.number().int().positive().optional() },
+  }, withErrorHandling('generate_geo_audit', async ({ daysBack, topN }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    const params = {};
+    if (daysBack != null) params.daysBack = daysBack;
+    if (topN != null) params.topN = topN;
+    return jsonResult(await generateDraft(siteId, { generatorId: 'geo-audit', params, source: 'mcp' }));
+  }));
+
   server.registerTool('update_draft', {
     description: "Edits a draft's content. Only valid before approval (status draft or edited).",
     inputSchema: { id: z.number().int(), content: z.record(z.any()) },

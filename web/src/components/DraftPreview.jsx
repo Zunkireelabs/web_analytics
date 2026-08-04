@@ -1,16 +1,17 @@
-import { 
-  Check, 
-  Info, 
-  FileCode, 
-  Link2, 
-  ListOrdered, 
-  PanelTop, 
-  Globe2, 
-  Sparkles, 
+import {
+  Check,
+  Info,
+  FileCode,
+  Link2,
+  ListOrdered,
+  PanelTop,
+  Globe2,
+  Sparkles,
   HelpCircle,
   ArrowRight,
   Bookmark
 } from 'lucide-react';
+import MarkdownReport from './MarkdownReport.jsx';
 
 function Field({ label, icon: Icon, children }) {
   return (
@@ -184,6 +185,68 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
               ))}
             </div>
           </div>
+
+          {content.suggestedFaqTopics?.length > 0 && (
+            <Field label="Suggested FAQ Topics" icon={HelpCircle}>
+              <div className="flex flex-wrap gap-1.5">
+                {content.suggestedFaqTopics.map((topic, i) => (
+                  <span key={i} className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 font-extrabold tracking-tight">
+                    {topic}
+                  </span>
+                ))}
+              </div>
+            </Field>
+          )}
+
+          {content.suggestedInternalLinks?.length > 0 && (
+            <Field label="Suggested Internal Link Insertions" icon={Link2}>
+              <div className="space-y-2">
+                {content.suggestedInternalLinks.map((l, i) => (
+                  <div key={i} className="text-xs border-b border-slate-100 last:border-0 pb-2 last:pb-0 flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-slate-800 bg-indigo-50/50 rounded px-1.5">"{l.anchorText}"</span>
+                    <ArrowRight size={10} className="text-slate-400" />
+                    <span className="text-indigo-650 font-mono text-[10px] break-all">{l.targetUrl}</span>
+                  </div>
+                ))}
+              </div>
+            </Field>
+          )}
+        </div>
+      );
+
+    case 'direct-answer':
+      return (
+        <div className="space-y-4">
+          <Field label="Heading (matches the real query's phrasing)" icon={Sparkles}>
+            <span className="font-black text-slate-900">{content.heading}</span>
+          </Field>
+
+          <div className="space-y-2">
+            <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+              <Check size={12} />
+              <span>Direct Answer</span>
+            </div>
+            <div className="bg-indigo-50/50 border border-indigo-100 rounded-3xl p-5 shadow-sm">
+              <p className="text-xs text-slate-800 leading-relaxed font-semibold">{content.directAnswer}</p>
+            </div>
+          </div>
+
+          {content.supportingSections?.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+                <ListOrdered size={12} />
+                <span>Supporting Sections</span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm space-y-4">
+                {content.supportingSections.map((s, i) => (
+                  <div key={i}>
+                    <h5 className="text-xs font-black text-slate-900 leading-tight">{s.heading}</h5>
+                    <p className="text-[11px] font-medium text-slate-500 mt-1 leading-relaxed">{s.body}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {content.suggestedFaqTopics?.length > 0 && (
             <Field label="Suggested FAQ Topics" icon={HelpCircle}>
@@ -391,6 +454,44 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
               </div>
             </div>
           </div>
+        </div>
+      );
+
+    case 'geo-audit':
+      return (
+        <div className="space-y-4">
+          {content.score ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Field label="Overall AI Visibility Score" icon={Globe2}>
+                <span className="text-lg font-black text-slate-900">{content.score.overall}/100</span>
+                <span className="text-[11px] text-slate-400 font-semibold ml-2">
+                  {content.pagesAnalyzed} page{content.pagesAnalyzed === 1 ? '' : 's'} analyzed · {content.start} to {content.end}
+                </span>
+              </Field>
+              <Field label="Category Breakdown" icon={FileCode}>
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(content.score.categories).map(([cat, val]) => (
+                    <span key={cat} className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 font-extrabold tracking-tight">
+                      {cat}: {val}/100
+                    </span>
+                  ))}
+                </div>
+              </Field>
+            </div>
+          ) : (
+            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100/50 rounded-2xl p-4 leading-relaxed flex items-center gap-2">
+              <Info size={14} className="text-amber-500 shrink-0" />
+              <span>No pages could be scored in this run — not enough GSC traffic in range, or llms.txt/robots.txt couldn't be checked.</span>
+            </div>
+          )}
+
+          {content.findings?.length > 0 && (
+            <Field label={`Recommendations Mapped To Generators (${content.findings.length})`} icon={ListOrdered}>
+              Every recommendation below is also a one-click action in Action Center's Recommendations tab.
+            </Field>
+          )}
+
+          <MarkdownReport content={content.report} />
         </div>
       );
 

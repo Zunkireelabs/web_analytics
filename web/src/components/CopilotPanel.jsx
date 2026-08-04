@@ -367,7 +367,7 @@ export default function CopilotPanel({ open, onClose }) {
     setMessages((m) => [...m, { role: 'user', content: text, created_at: new Date().toISOString() }]);
     setAsking(true);
 
-    const es = new EventSource('/api/agents/live');
+    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
     esRef.current = es;
     es.onmessage = (raw) => {
       let event;

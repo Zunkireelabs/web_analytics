@@ -197,3 +197,120 @@ body {
   scrollbar-width: thin;
   scrollbar-color: rgba(108, 99, 255, 0.15) transparent;
 }
+
+/* ───────── AI Data Analyst Command Center — design system ─────────
+   Light prediction-first visual language used across the /analyst page:
+   clean white surfaces, subtle indigo accents, severity-coded action
+   chips. All tokens centralized here so the Analyst components share one
+   palette instead of re-typing hex values. */
+.analyst-root {
+  color-scheme: light;
+  --an-bg:        #f7f8fc;
+  --an-bg-2:      #eef1f6;
+  --an-panel:     rgba(255, 255, 255, 0.85);
+  --an-panel-2:   rgba(255, 255, 255, 0.95);
+  --an-line:      rgba(139, 92, 246, 0.18);
+  --an-line-2:    rgba(148, 163, 184, 0.22);
+  --an-ink:       #0f172a;
+  --an-ink-soft:  #334155;
+  --an-muted:     #64748b;
+  --an-brand:     #6C63FF;
+  --an-brand-2:   #8b5cf6;
+  --an-cyan:      #06b6d4;
+  --an-emerald:   #059669;
+  --an-amber:     #d97706;
+  --an-rose:      #dc2626;
+}
+
+.an-panel {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.96));
+  border: 1px solid var(--an-line);
+  border-radius: 20px;
+  box-shadow: 0 10px 30px -15px rgba(15, 23, 42, 0.15);
+}
+.an-panel-glow {
+  background:
+    radial-gradient(600px 240px at 15% -10%, rgba(108, 99, 255, 0.12), transparent 60%),
+    radial-gradient(500px 220px at 90% -10%, rgba(6, 182, 212, 0.08), transparent 55%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.98));
+  border: 1px solid var(--an-line);
+  border-radius: 20px;
+  box-shadow: 0 10px 30px -15px rgba(15, 23, 42, 0.15);
+}
+.an-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--an-muted);
+}
+.an-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.an-chip-emerald { color: var(--an-emerald); background: rgba(5, 150, 105, 0.1); border-color: rgba(5, 150, 105, 0.25); }
+.an-chip-amber   { color: var(--an-amber);   background: rgba(217, 119, 6, 0.1);  border-color: rgba(217, 119, 6, 0.25); }
+.an-chip-rose    { color: var(--an-rose);    background: rgba(220, 38, 38, 0.1); border-color: rgba(220, 38, 38, 0.25); }
+.an-chip-violet  { color: #4f46e5;           background: rgba(108, 99, 255, 0.12);   border-color: rgba(108, 99, 255, 0.3); }
+.an-chip-cyan    { color: #0e7490;           background: rgba(6, 182, 212, 0.1);  border-color: rgba(6, 182, 212, 0.25); }
+.an-chip-slate   { color: var(--an-muted);   background: rgba(100, 116, 139, 0.1); border-color: rgba(100, 116, 139, 0.22); }
+
+.an-grad-text {
+  background: linear-gradient(100deg, #c4b5fd, #8b5cf6 45%, #38bdf8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.an-grad-btn {
+  background: linear-gradient(135deg, #6C63FF, #8b5cf6);
+  color: #fff;
+}
+.an-grad-btn:hover { filter: brightness(1.08); }
+.an-grad-btn:disabled { opacity: 0.4; filter: none; cursor: not-allowed; }
+
+.an-input {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--an-line-2);
+  border-radius: 12px;
+  color: var(--an-ink);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+.an-input:focus { border-color: rgba(108, 99, 255, 0.5); box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.15); }
+
+.an-glow-dot {
+  box-shadow: 0 0 0 4px rgba(108, 99, 255, 0.18), 0 0 14px rgba(108, 99, 255, 0.35);
+}
+.an-glow-line {
+  box-shadow: 0 0 12px rgba(108, 99, 255, 0.3);
+}
+
+/* Subtle scanline + grid backdrop for the prediction hero */
+.an-grid-bg {
+  background-image:
+    linear-gradient(rgba(108, 99, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(108, 99, 255, 0.08) 1px, transparent 1px);
+  background-size: 34px 34px;
+}
+
+/* Forecast band breathing glow */
+@keyframes anBreathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.85; }
+}
+.an-breathe { animation: anBreathe 3.2s ease-in-out infinite; }
+
+/* Prediction timeline connectors */
+@keyframes anPulseDash { to { stroke-dashoffset: -28; } }
+.an-pulse-dash { animation: anPulseDash 2.4s linear infinite; }

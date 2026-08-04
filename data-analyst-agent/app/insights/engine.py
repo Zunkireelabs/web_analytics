@@ -145,6 +145,7 @@ async def _trend_shift_insights(session: AsyncSession, client_id: int) -> None:
             continue
         magnitude = abs(float(r.pct_change))
         severity = "high" if magnitude > 2 * threshold else "medium"
+        correlated = await _correlated_anomalies(session, client_id, r.metric_key, r.period_end)
         await _replace_insight(
             session, client_id=client_id, metric_key=r.metric_key, dimension_type=r.dimension_type,
             dimension_value=r.dimension_value, period_start=r.period_end, insight_type="trend_shift",
@@ -152,7 +153,8 @@ async def _trend_shift_insights(session: AsyncSession, client_id: int) -> None:
             evidence={"period_type": r.period_type,
                       "current_value": float(r.current_value) if r.current_value is not None else None,
                       "prior_value": float(r.prior_value) if r.prior_value is not None else None,
-                      "pct_change": float(r.pct_change)},
+                      "pct_change": float(r.pct_change),
+                      "correlated_anomalies": correlated},
         )
 
 

@@ -61,14 +61,16 @@ export async function countSiblingDraftsOnBranch(siteId, branchName, excludeId) 
   return rows[0].n;
 }
 
-// Content-only edit — only valid pre-approval. Without the status guard, this
-// would silently force ANY draft (including an already-approved or already-
+// Content-only edit — only valid pre-approval, OR while a reviewer has sent
+// it back for changes ('revision_requested' — Phase 3 approval workflow,
+// see requestDraftRevision below). Without the status guard, this would
+// silently force ANY draft (including an already-approved or already-
 // implemented one) back to 'edited', stranding stale approved_at/approved_by/
 // implemented_at values on a row that now claims to be back at square one.
 export async function updateDraft(siteId, id, { content }) {
   const { rows } = await query(
     `UPDATE drafts SET content = $1, status = 'edited', updated_at = now()
-     WHERE site_id = $2 AND id = $3 AND status IN ('draft', 'edited')
+     WHERE site_id = $2 AND id = $3 AND status IN ('draft', 'edited', 'revision_requested')
      RETURNING *`,
     [JSON.stringify(content), siteId, id]
   );
@@ -371,12 +373,39 @@ async function supersedeLegacyLlmsTxtDrafts(siteId, draft) {
 // instead of staying silently locked out by a draft that never went live.
 // Guarded like markDraftImplemented: never overwrites a real implemented
 // draft, and idempotent against an already-abandoned one.
-export async function markDraftAbandoned(siteId, id, reason) {
+// abandonedBy is optional (undefined for the automatic pr_closed_without_
+// merge/superseded call sites, which have no reviewing user) — the Phase 3
+// "Reject" action (POST /action-center/drafts/:id/reject) is the one
+// caller that passes it, for the same git-blame reason approvedBy exists.
+export async function markDraftAbandoned(siteId, id, reason, abandonedBy) {
   const { rows } = await query(
-    `UPDATE drafts SET status = 'abandoned', abandoned_at = now(), abandoned_reason = $3, updated_at = now()
+    `UPDATE drafts SET status = 'abandoned', abandoned_at = now(), abandoned_reason = $3,
+       abandoned_by = $4, updated_at = now()
      WHERE site_id = $1 AND id = $2 AND status NOT IN ('implemented', 'abandoned')
      RETURNING *`,
-    [siteId, id, reason]
+    [siteId, id, reason, abandonedBy || null]
+  );
+  return rows[0] || null;
+}
+
+// submitted_for_approval -> revision_requested (Phase 3 approval workflow).
+// Distinct from markDraftAbandoned above: the draft isn't dead, it needs
+// author changes before another review pass — updateDraft (above) accepts
+// edits from this state and flips it back to 'edited'. Appends to
+// revision_history (a JSONB array) rather than overwriting a single
+// column, so a draft that goes through multiple review rounds keeps every
+// past reviewer/reason/timestamp, not just the latest.
+export async function requestDraftRevision(siteId, id, { reviewerId, reason }) {
+  const { rows } = await query(
+    `UPDATE drafts
+     SET status = 'revision_requested', updated_at = now(),
+         revision_requested_at = now(), revision_requested_by = $3, revision_reason = $4,
+         revision_history = revision_history || jsonb_build_array(
+           jsonb_build_object('reviewer_id', $3::int, 'reason', $4::text, 'requested_at', now())
+         )
+     WHERE site_id = $1 AND id = $2 AND status = 'submitted_for_approval'
+     RETURNING *`,
+    [siteId, id, reviewerId || null, reason || null]
   );
   return rows[0] || null;
 }
