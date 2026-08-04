@@ -19,9 +19,17 @@
 -- from 'implemented' — the fix never shipped — so getDraftedFindingIds
 -- excludes it too, letting the underlying finding resurface for a fresh
 -- draft instead of staying silently locked out forever.
+-- 'revision_requested' (074, Phase 3 approval workflow) added here per
+-- this file's own convention above: a reviewer sends a submitted draft
+-- back to its author instead of approving or abandoning it outright — NOT
+-- terminal like 'abandoned', the author edits it (see updateDraft's
+-- widened source-state list) and it flows back through submitted_for_
+-- approval like normal. 'abandoned' itself is what backs the Phase 3
+-- spec's "Reject" step — a second, functionally-identical status wasn't
+-- worth introducing just to match that word.
 ALTER TABLE drafts DROP CONSTRAINT IF EXISTS drafts_status_check;
 ALTER TABLE drafts ADD CONSTRAINT drafts_status_check
-  CHECK (status IN ('draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented', 'abandoned'));
+  CHECK (status IN ('draft', 'edited', 'submitted_for_approval', 'approved', 'branch_pushed', 'merged_to_stage', 'pr_opened', 'implemented', 'abandoned', 'revision_requested'));
 
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS stage_merge_sha TEXT;
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS stage_merge_url TEXT;

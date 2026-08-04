@@ -6,6 +6,7 @@ from app.config import settings
 from app.db.dimension_lookup import dimension_values_for, iter_enabled_metric_dimensions
 from app.db.models import Client, ForecastPoint, ForecastRun, MetricCatalog, MetricObservation
 from app.db.session import SessionLocal
+from app.forecast.confidence import compute_forecast_confidence
 from app.forecast.registry import FORECASTERS
 
 HORIZON_BY_CADENCE = {
@@ -77,3 +78,13 @@ async def _forecast_one(session: AsyncSession, client_id: int, metric: MetricCat
                 forecast_run_id=run.id, target_period=p.target_period.date() if hasattr(p.target_period, "date") else p.target_period,
                 point_estimate=p.point_estimate, lower_bound=p.lower_bound, upper_bound=p.upper_bound,
             ))
+
+    # Site-level only — see app/forecast/confidence.py's docstring for why a
+    # non-site dimension_value's forecast_runs.confidence is deliberately
+    # left null rather than borrowing the site series' backtest error.
+    if result.status == "ok" and dimension_type == "site":
+        confidence_id, confidence = await compute_forecast_confidence(
+            session, client_id=client_id, forecast_run=run, series=series,
+        )
+        run.confidence_score_id = confidence_id
+        run.confidence = confidence.score

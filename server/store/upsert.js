@@ -47,7 +47,7 @@ export async function upsertGsc(siteId, { date, totals, queries, pages, devices 
   }
 }
 
-export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [] }) {
+export async function upsertGa4(siteId, { date, totals, channels, devices = [], countries = [], cities = [], languages = [], browsers = [], sourceMediums = [] }) {
   await query(
     `INSERT INTO ga4_daily
        (site_id, date, users, new_users, sessions, engaged_sessions, avg_engagement_time, conversions, bounce_rate)
@@ -74,13 +74,15 @@ export async function upsertGa4(siteId, { date, totals, channels, devices = [], 
     );
   }
 
-  // GA4 device + country + city + language breakdowns → ga4_breakdown (replace the day's rows).
+  // GA4 device + country + city + language + browser + source/medium breakdowns → ga4_breakdown (replace the day's rows).
   await query('DELETE FROM ga4_breakdown WHERE site_id = $1 AND date = $2', [siteId, date]);
   const ga4Rows = [
     ...devices.map((r) => ({ ...r, dim_type: 'device' })),
     ...countries.map((r) => ({ ...r, dim_type: 'country' })),
     ...cities.map((r) => ({ ...r, dim_type: 'city' })),
     ...languages.map((r) => ({ ...r, dim_type: 'language' })),
+    ...browsers.map((r) => ({ ...r, dim_type: 'browser' })),
+    ...sourceMediums.map((r) => ({ ...r, dim_type: 'source_medium' })),
   ];
   for (const r of ga4Rows) {
     await query(

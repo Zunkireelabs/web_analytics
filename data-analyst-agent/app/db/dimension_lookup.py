@@ -6,11 +6,19 @@ three times. The dimension_type == "site" branch reproduces the exact
 pre-dimension-aware query/behavior, so existing site-level output is
 unchanged."""
 from dataclasses import dataclass
+from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import MetricCatalog, MetricDimensionSupport, MetricObservation
+
+# Bounds reprocessing cost for a dimension whose active value set can shrink
+# over time (e.g. a page that loses its top-50 streak — see
+# app/collectors/gsc_page_dimension.py — simply stops receiving new
+# observation rows rather than having old ones deleted). A no-op for
+# device/country/channel, which get fresh rows daily regardless.
+RECENCY_DAYS = 14
 
 
 @dataclass
@@ -53,13 +61,15 @@ async def dimension_values_for(session: AsyncSession, client_id: int, metric_key
     query, reproducing the pre-dimension-aware behavior exactly."""
     if dimension_type == "site":
         return ["__site__"]
+    recent_cutoff = date.today() - timedelta(days=RECENCY_DAYS)
     rows = (
         await session.execute(
-            select(MetricObservation.dimension_value).distinct().where(
+            select(MetricObservation.dimension_value).where(
                 MetricObservation.client_id == client_id,
                 MetricObservation.metric_key == metric_key,
                 MetricObservation.dimension_type == dimension_type,
-            )
+            ).group_by(MetricObservation.dimension_value)
+            .having(func.max(MetricObservation.period_start) >= recent_cutoff)
         )
     ).scalars().all()
     return list(rows)

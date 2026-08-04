@@ -17,6 +17,39 @@ router = APIRouter()
 PAGE_QUERY_COMPARISON_DAYS = 7
 
 
+@router.get("/clients/{client_id}/metrics/{metric_key}/dimensions")
+async def get_available_dimensions(
+    metric_key: str, client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Which dimension breakdowns are actually worth offering as a drill-down
+    for this metric, for this client — catalog-enabled (MetricDimensionSupport)
+    AND with real observed values in this client's own data
+    (dimension_values_for), so a UI action like "Analyze Devices" never opens
+    onto an empty breakdown. Excludes 'site', which is the metric's own
+    default view, not a breakdown."""
+    metric = await session.get(MetricCatalog, metric_key)
+    if metric is None:
+        raise HTTPException(status_code=404, detail="Unknown metric_key.")
+
+    supported = (
+        await session.execute(
+            select(MetricDimensionSupport.dimension_type).where(
+                MetricDimensionSupport.metric_key == metric_key,
+                MetricDimensionSupport.enabled.is_(True),
+                MetricDimensionSupport.dimension_type != "site",
+            )
+        )
+    ).scalars().all()
+
+    dimensions = []
+    for dimension_type in supported:
+        values = await dimension_values_for(session, client.id, metric_key, dimension_type)
+        if values:
+            dimensions.append({"dimension_type": dimension_type, "value_count": len(values)})
+
+    return {"metric_key": metric_key, "dimensions": dimensions}
+
+
 @router.get("/dashboard/{client_id}/breakdown/{metric_key}/{dimension_type}")
 async def get_breakdown(
     metric_key: str, dimension_type: str,
@@ -121,11 +154,7 @@ async def _dimension_card(session: AsyncSession, client_id: int, metric: MetricC
     }
 
 
-@router.get("/dashboard/{client_id}/page-query/{dimension_type}")
-async def get_page_query_top_movers(
-    dimension_type: str,
-    client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
-) -> dict:
+async def get_page_query_top_movers_data(session: AsyncSession, client_id: int, dimension_type: str) -> dict:
     """Top pages/queries (by clicks) for the most recent ingested day, each
     with a live-computed change vs. the same dimension_value's row
     PAGE_QUERY_COMPARISON_DAYS earlier — computed on demand from
@@ -133,24 +162,23 @@ async def get_page_query_top_movers(
     why this deliberately skips metric_period_stats/anomalies/
     forecast_runs). Bounded to whatever was actually ingested that day
     (top-50 by clicks, per app/collectors/page_query.py) — never "every
-    real page/query"."""
-    if dimension_type not in ("page", "query"):
-        raise HTTPException(status_code=404, detail="dimension_type must be 'page' or 'query'.")
-
+    real page/query". Plain function (no FastAPI dependency injection) so
+    it's reusable from the nightly Root Cause Analysis Engine
+    (app/intelligence/root_cause.py) as well as the route below."""
     latest_date = await session.scalar(
         select(func.max(PageQueryObservation.period_start)).where(
-            PageQueryObservation.client_id == client.id, PageQueryObservation.dimension_type == dimension_type,
+            PageQueryObservation.client_id == client_id, PageQueryObservation.dimension_type == dimension_type,
         )
     )
     if latest_date is None:
-        return {"client": {"id": client.id, "name": client.name}, "dimension_type": dimension_type, "date": None, "rows": []}
+        return {"date": None, "compared_to_date": None, "rows": []}
 
     prior_date = latest_date - timedelta(days=PAGE_QUERY_COMPARISON_DAYS)
 
     current_rows = (
         await session.execute(
             select(PageQueryObservation).where(
-                PageQueryObservation.client_id == client.id, PageQueryObservation.dimension_type == dimension_type,
+                PageQueryObservation.client_id == client_id, PageQueryObservation.dimension_type == dimension_type,
                 PageQueryObservation.period_start == latest_date,
             ).order_by(PageQueryObservation.clicks.desc())
         )
@@ -159,7 +187,7 @@ async def get_page_query_top_movers(
     prior_rows = (
         await session.execute(
             select(PageQueryObservation).where(
-                PageQueryObservation.client_id == client.id, PageQueryObservation.dimension_type == dimension_type,
+                PageQueryObservation.client_id == client_id, PageQueryObservation.dimension_type == dimension_type,
                 PageQueryObservation.period_start == prior_date,
             )
         )
@@ -182,11 +210,18 @@ async def get_page_query_top_movers(
             "clicks_change": (clicks - prior_clicks) if clicks is not None and prior_clicks is not None else None,
         })
 
-    return {
-        "client": {"id": client.id, "name": client.name}, "dimension_type": dimension_type,
-        "date": latest_date.isoformat(), "compared_to_date": prior_date.isoformat(),
-        "rows": rows,
-    }
+    return {"date": latest_date.isoformat(), "compared_to_date": prior_date.isoformat(), "rows": rows}
+
+
+@router.get("/dashboard/{client_id}/page-query/{dimension_type}")
+async def get_page_query_top_movers(
+    dimension_type: str,
+    client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
+) -> dict:
+    if dimension_type not in ("page", "query"):
+        raise HTTPException(status_code=404, detail="dimension_type must be 'page' or 'query'.")
+    data = await get_page_query_top_movers_data(session, client.id, dimension_type)
+    return {"client": {"id": client.id, "name": client.name}, "dimension_type": dimension_type, **data}
 
 
 @router.get("/dashboard/{client_id}/page-query/{dimension_type}/{value:path}")

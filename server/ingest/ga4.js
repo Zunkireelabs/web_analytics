@@ -82,6 +82,8 @@ export async function fetchGa4ForDate(site, date) {
   const countries = await breakdown('country');
   const cities = await breakdown('city');
   const languages = await breakdown('language'); // e.g. "English", "French"
+  const browsers = await breakdown('browser'); // e.g. "Chrome", "Safari"
+  const sourceMediums = await breakdown('sessionSourceMedium'); // e.g. "google / organic"
 
-  return { date, totals, channels, devices, countries, cities, languages };
+  return { date, totals, channels, devices, countries, cities, languages, browsers, sourceMediums };
 }
