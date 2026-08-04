@@ -265,4 +265,25 @@ router.post('/internal/analyst/dashboard/:clientId/executive-summary', async (re
   } catch (e) { next(e); }
 });
 
+// Investigations (Phase 3) — same thin-passthrough discipline as everything
+// above. status/severity are optional query-string filters, forwarded as-is.
+router.get('/internal/analyst/clients/:clientId/investigations', async (req, res, next) => {
+  try {
+    const { status, severity } = req.query;
+    res.json(await callPython(`/clients/${req.params.clientId}/investigations`, { query: { status, severity } }));
+  } catch (e) { next(e); }
+});
+
+router.get('/internal/analyst/clients/:clientId/investigations/:investigationId', async (req, res, next) => {
+  try {
+    res.json(await callPython(`/clients/${req.params.clientId}/investigations/${req.params.investigationId}`));
+  } catch (e) { next(e); }
+});
+
+router.get('/internal/analyst/clients/:clientId/investigations/:investigationId/events', async (req, res, next) => {
+  try {
+    res.json(await callPython(`/clients/${req.params.clientId}/investigations/${req.params.investigationId}/events`));
+  } catch (e) { next(e); }
+});
+
 export default router;

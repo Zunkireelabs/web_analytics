@@ -279,11 +279,95 @@ class Recommendation(Base):
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dismissed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Nullable, set by app/investigations/engine.py the first time this
+    # recommendation is synced into an Investigation — never set at
+    # generation time itself, since Root Cause/Opportunity/Ranking (which
+    # the Investigation row summarizes) haven't run yet at that point in
+    # the nightly pipeline. See Investigation below.
+    investigation_id: Mapped[int | None] = mapped_column(ForeignKey("investigations.id", ondelete="SET NULL"), nullable=True)
 
     __table_args__ = (
         CheckConstraint("priority IN ('high','medium','low')", name="recommendations_priority_check"),
         CheckConstraint("status IN ('new','acknowledged','dismissed','resolved')", name="recommendations_status_check"),
         CheckConstraint("narration_status IN ('pending','ok','failed')", name="recommendations_narration_status_check"),
+    )
+
+
+class Investigation(Base):
+    """Phase 3 — the persistent, human-facing object the spec calls an
+    "Investigation". Deliberately keyed by (client_id, metric_key,
+    dimension_type, dimension_value, insight_type) — NOT period_start like
+    Insight — so a recurring issue is tracked as one evolving investigation
+    across nights rather than a fresh row every time the Insight Engine
+    replaces its underlying Insight; see app/investigations/engine.py for
+    the upsert/dedup logic that enforces this. Every field here is copied
+    from a row an earlier nightly stage already computed (Insight,
+    Recommendation, RootCauseAnalysisRun, OpportunityScore,
+    RecommendationRanking) — this table never invents a value.
+    status is the 9-state lifecycle from the Phase 3 spec. A brand-new
+    investigation reaches 'recommendation_generated' automatically in the
+    same nightly pass (this pipeline is a single deterministic run, not a
+    multi-day process) — everything past that requires a human action or a
+    later pipeline stage (draft generation, review)."""
+
+    __tablename__ = "investigations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    metric_key: Mapped[str] = mapped_column(ForeignKey("metrics_catalog.metric_key"), nullable=False)
+    dimension_type: Mapped[str] = mapped_column(Text, nullable=False, default="site")
+    dimension_value: Mapped[str] = mapped_column(Text, nullable=False, default="__site__")
+    insight_type: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    priority: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="detected")
+    affected_metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    forecast_outlook: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    root_cause_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric)
+    # Free text, not a user FK — same reasoning as Recommendation.resolved_by
+    # above (no per-admin identity in this service yet). Unset until a
+    # future assignment feature exists; the spec marks this optional.
+    owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_insight_id: Mapped[int | None] = mapped_column(ForeignKey("insights.id", ondelete="SET NULL"), nullable=True)
+    source_anomaly_id: Mapped[int | None] = mapped_column(ForeignKey("anomalies.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('detected','investigating','evidence_collected','recommendation_generated',"
+            "'draft_prepared','waiting_human_review','approved','completed','archived')",
+            name="investigations_status_check",
+        ),
+        CheckConstraint("severity IN ('high','medium','low')", name="investigations_severity_check"),
+        CheckConstraint("priority IS NULL OR priority IN ('high','medium','low')", name="investigations_priority_check"),
+        Index(
+            "idx_investigations_open_lookup",
+            "client_id", "metric_key", "dimension_type", "dimension_value", "insight_type",
+        ),
+        Index("idx_investigations_status", "client_id", "status"),
+    )
+
+
+class InvestigationEvent(Base):
+    """Append-only lifecycle history for Investigation.status — one row per
+    transition, per the spec's "track timestamps for every transition"."""
+
+    __tablename__ = "investigation_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    investigation_id: Mapped[int] = mapped_column(ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    to_status: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False, default="system")
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_investigation_events_lookup", "investigation_id", "created_at"),
     )
 
 
