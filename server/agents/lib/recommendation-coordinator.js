@@ -2,6 +2,7 @@ import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, 
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
+import { classify } from './recommendation-taxonomy.js';
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -58,14 +59,17 @@ export async function getRecommendations(siteId) {
   ]);
   const items = rows
     .filter((r) => r.finding_ids.some((fid) => !draftedFindingIds.has(fid)))
-    .map((r) => ({
-      id: String(r.id), findingIds: r.finding_ids,
-      source: r.detecting_agents[0], agentName: catByAgent.get(r.detecting_agents[0])?.name || r.detecting_agents[0],
-      detectingAgents: r.detecting_agents, supportingAgents: r.supporting_agents,
-      tag: r.issue, generatorId: r.recommendation_type,
-      reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
-      riskTier: r.risk_tier,
-    }));
+    .map((r) => {
+      const { bucket, category } = classify({ source: r.detecting_agents[0], generatorId: r.recommendation_type });
+      return {
+        id: String(r.id), findingIds: r.finding_ids,
+        source: r.detecting_agents[0], agentName: catByAgent.get(r.detecting_agents[0])?.name || r.detecting_agents[0],
+        detectingAgents: r.detecting_agents, supportingAgents: r.supporting_agents,
+        tag: r.issue, generatorId: r.recommendation_type, bucket, category,
+        reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
+        riskTier: r.risk_tier,
+      };
+    });
   const lastAnalyzedAt = {};
   for (const r of rows) lastAnalyzedAt[r.detecting_agents[0]] = r.last_seen_at;
   return { items, lastAnalyzedAt };
