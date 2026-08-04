@@ -3,6 +3,9 @@ import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
+import { syncFromGrounded, getRecommendations } from '../agents/lib/recommendation-coordinator.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
+import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
@@ -91,7 +94,7 @@ router.use(requireAuth);
 // below re-runs the agents fresh.
 router.get('/action-center/recommendations', async (req, res, next) => {
   try {
-    res.json(await buildRecommendations(req.siteId));
+    res.json(await getRecommendations(req.siteId));
   } catch (e) { next(e); }
 });
 
@@ -134,7 +137,9 @@ export async function refreshRecommendations(siteId, { start, end }) {
   } else {
     await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
   }
-  return buildRecommendations(siteId);
+  const grounded = await buildRecommendations(siteId);
+  await syncFromGrounded(siteId, grounded);
+  return getRecommendations(siteId);
 }
 
 router.post('/action-center/recommendations/refresh', async (req, res, next) => {
@@ -329,6 +334,113 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     rollbackSnapshot: prResult.previousContent != null ? { filePath: prResult.filePath, content: prResult.previousContent } : null,
   });
 }
+
+// Phase 4 M3 — the Execution Engine. Drives the exact same
+// generateDraft -> submitDraftForApproval -> approveAndPublishDraft chain
+// the manual per-draft UI already uses (defined just above), just without a
+// human click between each step. Never reimplements draft generation,
+// GitHub, or PR logic — same-day approvals already land in one shared batch
+// branch/PR via approveAndPublishDraft/github-ops.js, so running N of these
+// back to back already produces ONE branch/PR, not N.
+//
+// Only ever called for risk_tier='safe' recommendations (see
+// agents/lib/risk-tiers.js) — manual-tier recommendations (landing pages,
+// pricing, nav, etc.) never go through this function; they stay on the
+// existing stepped Generate/Submit/Approve UI so a human deliberately
+// reviews each step.
+async function shipRecommendation(siteId, rec, { userId, jobId }) {
+  const jobRec = await addJobRecommendation(jobId, rec.id);
+  try {
+    const draft = await generateDraft(siteId, {
+      generatorId: rec.recommendation_type, params: rec.params, source: 'execution-engine', findingId: rec.finding_ids[0],
+    });
+    await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
+    await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });
+
+    const submitted = await submitDraftForApproval(siteId, draft.id);
+    if (!submitted) throw new Error('Draft was not in a submittable state');
+    await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
+
+    const approved = await approveAndPublishDraft(siteId, draft.id, { userId });
+    if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
+    await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
+    await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
+    return { ok: true, draft: approved };
+  } catch (e) {
+    const message = e.message || 'Execution failed';
+    await updateJobRecommendationStatus(jobRec.id, 'failed', { error: message });
+    await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'failed' });
+    await appendJobLog(jobId, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") failed: ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+// "Execute Today's Safe Fixes" — picks up to `limit` open, safe-tier
+// recommendations not already claimed by another job, ships each one via
+// the chain above under ONE execution_jobs row. A failure on one item
+// doesn't stop the rest; the job's final branch/PR reflect whatever the
+// last successful item produced (they all share the same batch branch/PR).
+export async function executeSafeFixes(siteId, { userId, limit = 15 } = {}) {
+  const recs = await listOpenSafeRecommendations(siteId, limit);
+  const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
+  if (recs.length === 0) {
+    return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
+  }
+  await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution.`);
+
+  let lastSuccess = null;
+  let shipped = 0;
+  let failed = 0;
+  for (const rec of recs) {
+    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id });
+    if (result.ok) { shipped++; lastSuccess = result.draft; } else failed++;
+  }
+
+  const finishedJob = await finishExecutionJob(job.id, {
+    status: shipped > 0 ? 'completed' : 'failed',
+    branchName: lastSuccess?.branch_name, prNumber: lastSuccess?.pr_number, prUrl: lastSuccess?.pr_url,
+  });
+  return { job: finishedJob, shipped, failed };
+}
+
+// Single-recommendation version of the same chain, for the "preview it,
+// then one click" path in the UI — still creates its own (single-item)
+// execution job for the same audit trail bulk runs get.
+export async function approveAndShipRecommendation(siteId, recommendationId, { userId } = {}) {
+  const rec = await getRecommendationById(siteId, recommendationId);
+  if (!rec) { const err = new Error('Recommendation not found'); err.status = 404; throw err; }
+  if (rec.risk_tier !== 'safe') {
+    const err = new Error('Only safe-tier recommendations can be auto-approved; use Generate Draft, then the manual approval steps, for this one.');
+    err.status = 400;
+    throw err;
+  }
+  const job = await createExecutionJob(siteId, { trigger: 'single', requestedBy: userId });
+  const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id });
+  await finishExecutionJob(job.id, {
+    status: result.ok ? 'completed' : 'failed',
+    branchName: result.draft?.branch_name, prNumber: result.draft?.pr_number, prUrl: result.draft?.pr_url,
+  });
+  if (!result.ok) { const err = new Error(result.error); err.status = 422; throw err; }
+  return result.draft;
+}
+
+router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
+  try {
+    res.json(await executeSafeFixes(req.siteId, { userId: req.userId, limit: req.body?.limit }));
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
+});
+
+router.post('/action-center/recommendations/:id/approve-and-ship', async (req, res, next) => {
+  try {
+    res.json(await approveAndShipRecommendation(req.siteId, req.params.id, { userId: req.userId }));
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
+});
 
 router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
   try {
