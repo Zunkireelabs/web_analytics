@@ -110,7 +110,7 @@ export default function AiGrowth() {
 
   // Connect to SSE stream
   useEffect(() => {
-    const es = new EventSource('/api/agents/live');
+    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
     es.onmessage = (raw) => {
       let event;
       try { event = JSON.parse(raw.data); } catch { return; }

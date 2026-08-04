@@ -76,7 +76,7 @@ export default function CommandCenter() {
   // events broadcast by server/agents/runner.js for this site.
   const [liveLogs, setLiveLogs] = useState([]);
   useEffect(() => {
-    const es = new EventSource('/api/agents/live');
+    const es = new EventSource(`${import.meta.env.BASE_URL}api/agents/live`);
     es.onmessage = (raw) => {
       let event;
       try { event = JSON.parse(raw.data); } catch { return; }
