@@ -264,7 +264,6 @@ export default function ActionCenter() {
     }
   };
 
-
   // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to 15)
   // through the existing Generate -> Submit -> Approve chain automatically,
   // one execution job, one shared branch/PR. Manual-tier recommendations
@@ -306,13 +305,9 @@ export default function ActionCenter() {
     }
   };
 
-  const grouped = (recs?.items || []).reduce((acc, item) => {
-    (acc[item.generatorId] ||= []).push(item);
-
   const bucketFiltered = (recs?.items || []).filter((item) => sourceFilter === 'all' || item.bucket === sourceFilter);
   const grouped = bucketFiltered.reduce((acc, item) => {
     (acc[item.category || 'Technical Fixes'] ||= []).push(item);
-
     return acc;
   }, {});
 
@@ -597,20 +592,18 @@ export default function ActionCenter() {
                           <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 animate-pulse" style={{ background: pr.color }} />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
-
-                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{item.tag}</span>
+                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
                               {item.riskTier === 'safe' && (
                                 <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                                   <ShieldCheck size={8} /> Safe
-
-                              <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
+                                </span>
+                              )}
                               {BUCKET_META[item.bucket] && (
                                 <span
                                   className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
                                   style={{ color: BUCKET_META[item.bucket].color, background: `${BUCKET_META[item.bucket].color}14` }}
                                 >
                                   {BUCKET_META[item.bucket].label}
-
                                 </span>
                               )}
                             </div>
@@ -738,8 +731,7 @@ export default function ActionCenter() {
                       )}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
-
-                          <h3 className="text-sm font-black text-slate-900 leading-none">{selectedRecommendation.tag}</h3>
+                          <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
                           {selectedRecommendation.riskTier === 'safe' ? (
                             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                               <ShieldCheck size={9} /> Safe — auto-eligible
@@ -749,10 +741,6 @@ export default function ActionCenter() {
                               <ShieldAlert size={9} /> Manual review required
                             </span>
                           )}
-                        </div>
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
-
-                          <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
                           {BUCKET_META[selectedRecommendation.bucket] && (
                             <span
                               className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0"
@@ -762,7 +750,7 @@ export default function ActionCenter() {
                             </span>
                           )}
                         </div>
-
+                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-wider mt-1.5">Found by: {activeMeta?.label || 'Website Check'}</p>
                       </div>
                     </div>
 
