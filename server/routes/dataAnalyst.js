@@ -286,6 +286,23 @@ router.get('/internal/analyst/clients/:clientId/investigations/:investigationId/
   } catch (e) { next(e); }
 });
 
+// Investigation-level approval workflow (Phase 3) — same actor-injection
+// discipline as resolve/dismiss above: the browser never sends who it is,
+// this route looks up the authenticated staff user's email server-side.
+async function postInvestigationDecision(action, req, res, next) {
+  try {
+    const actor = await getUserById(req.userId);
+    res.json(await callPython(
+      `/clients/${req.params.clientId}/investigations/${req.params.investigationId}/${action}`,
+      { method: 'POST', body: { reviewer: actor?.email || null, reason: req.body?.reason || null } },
+    ));
+  } catch (e) { next(e); }
+}
+
+router.post('/internal/analyst/clients/:clientId/investigations/:investigationId/approve', (req, res, next) => postInvestigationDecision('approve', req, res, next));
+router.post('/internal/analyst/clients/:clientId/investigations/:investigationId/reject', (req, res, next) => postInvestigationDecision('reject', req, res, next));
+router.post('/internal/analyst/clients/:clientId/investigations/:investigationId/request-revision', (req, res, next) => postInvestigationDecision('request-revision', req, res, next));
+
 router.get('/internal/analyst/clients/:clientId/opportunities', async (req, res, next) => {
   try {
     const { status } = req.query;

@@ -857,3 +857,29 @@ class AiActivityLog(Base):
         CheckConstraint("status IN ('queued','running','completed','failed')", name="ai_activity_log_status_check"),
         Index("idx_ai_activity_log_lookup", "started_at"),
     )
+
+
+class ApprovalHistory(Base):
+    """Investigation-level approvals (Phase 3 Step 8) — for a recommendation
+    that doesn't produce a content draft (e.g. a technical fix), distinct
+    from the Node app's own drafts.approved_by/abandoned_by/revision_*
+    columns, which cover the draft/PR side of the same workflow. reviewer
+    is free text (an email, same as Recommendation.resolved_by/dismissed_by
+    above) — this service still has only one static admin key, no
+    per-admin identity to reference."""
+
+    __tablename__ = "approval_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    investigation_id: Mapped[int] = mapped_column(ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('approved','rejected','revision_requested')", name="approval_history_decision_check",
+        ),
+        Index("idx_approval_history_lookup", "investigation_id", "created_at"),
+    )

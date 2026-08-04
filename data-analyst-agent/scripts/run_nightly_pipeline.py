@@ -31,22 +31,25 @@ summarizes ALL of the above into one persistent Investigation row per
 (client, metric, dimension, insight_type) — it needs every upstream
 engine's output to already exist for tonight's recommendations. The
 Opportunity Rollup and Investigation Reasoning stages (also Phase 3) both
-run after the Investigation Engine, since they key off investigation_id;
-Reasoning runs last of the three since it also reads the Rollup's output
-(business impact/opportunity data) for its business_summary field.
+run after the Investigation Engine, since they key off investigation_id.
+The Draft Trigger stage (Phase 3 Step 7 — see app/investigations/drafts.py)
+runs after those three, since it only acts on investigations already at
+'recommendation_generated'; it's the one stage that can advance an
+Investigation to 'draft_prepared' automatically, everything past that
+requires a human review action.
 
 Every stage is wrapped in app/activity/log.track() (Phase 3 Step 9 — AI
-Command Center), grouped into 5 task_types rather than one row per
-function: 'monitoring' (ingest/stats/anomalies), 'forecasting' (forecasts +
-accuracy evaluation), 'investigating' (feature importance/insight engine/
-root cause — NOT the Investigation Engine itself, despite the name
-overlap; that one must stay grouped with the recommendation stages it
-depends on), 'generating_recommendations' (recommendation/intelligence
-engines through the Investigation Engine, Opportunity Rollup, and
-Investigation Reasoning — kept in one group specifically so the ordering
-above is never disturbed by which track() block a call sits in). Alert
-delivery is left unwrapped — it's a delivery/notification step, not
-analysis work the Command Center needs to show progress on.
+Command Center), grouped into task_types rather than one row per function:
+'monitoring' (ingest/stats/anomalies), 'forecasting' (forecasts + accuracy
+evaluation), 'investigating' (feature importance/insight engine/root cause
+— NOT the Investigation Engine itself, despite the name overlap; that one
+must stay grouped with the recommendation stages it depends on),
+'generating_recommendations' (recommendation/intelligence engines through
+the Investigation Engine, Opportunity Rollup, and Investigation Reasoning
+— kept in one group specifically so the ordering above is never disturbed
+by which track() block a call sits in), 'preparing_drafts' (the Draft
+Trigger). Alert delivery is left unwrapped — it's a delivery/notification
+step, not analysis work the Command Center needs to show progress on.
 Run via cron (see docker-compose.yml comment) as:
     docker compose exec app python -m scripts.run_nightly_pipeline
 """
@@ -64,6 +67,7 @@ from app.intelligence.impact_prediction import run_impact_prediction
 from app.intelligence.opportunity_scoring import run_opportunity_scoring
 from app.intelligence.prioritizer import run_recommendation_prioritizer
 from app.intelligence.root_cause import run_root_cause_analysis
+from app.investigations.drafts import run_draft_trigger
 from app.investigations.engine import run_investigation_engine
 from app.investigations.reasoning import run_investigation_reasoning
 from app.ml.feature_importance import run_feature_importance
@@ -93,6 +97,8 @@ async def main() -> None:
         await run_investigation_engine()
         await run_opportunity_rollup()
         await run_investigation_reasoning()
+    async with track("preparing_drafts"):
+        await run_draft_trigger()
     await deliver_predictive_alerts()
 
 

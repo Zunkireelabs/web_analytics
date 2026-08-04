@@ -69,3 +69,16 @@ async def push_predictive_alert(mcp: McpClient, alerts: list[dict]) -> dict:
     ("tool not found") rather than succeeding; callers must catch and skip
     gracefully, same as any other per-metric MCP failure."""
     return await mcp.call_tool("push_predictive_alert", {"alerts": alerts})
+
+
+async def generate_draft(mcp: McpClient, *, generator_id: str, params: dict, finding_id: str) -> dict:
+    """Runs one Action Center generator and persists the result as a new
+    draft (mcp-server/tools/ai-actions.js — the same tool the manual
+    "Generate Content Draft" button ultimately reaches via generateDraft()).
+    Idempotent per finding_id — a repeat call for the same finding returns
+    the existing draft instead of creating a duplicate. Same 'ai_actions'
+    permission requirement and McpToolError-on-missing-permission caveat as
+    push_predictive_alert above."""
+    return await mcp.call_tool("generate_draft", {
+        "generatorId": generator_id, "params": params, "source": "analyst-auto", "findingId": finding_id,
+    })
