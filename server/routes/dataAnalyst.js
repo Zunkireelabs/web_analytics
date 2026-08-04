@@ -286,4 +286,11 @@ router.get('/internal/analyst/clients/:clientId/investigations/:investigationId/
   } catch (e) { next(e); }
 });
 
+router.get('/internal/analyst/clients/:clientId/opportunities', async (req, res, next) => {
+  try {
+    const { status } = req.query;
+    res.json(await callPython(`/clients/${req.params.clientId}/opportunities`, { query: { status } }));
+  } catch (e) { next(e); }
+});
+
 export default router;

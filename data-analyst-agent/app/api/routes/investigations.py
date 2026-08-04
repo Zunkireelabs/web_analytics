@@ -25,6 +25,9 @@ def _serialize(inv: Investigation) -> dict:
         "affected_metrics": inv.affected_metrics, "summary": inv.summary, "evidence": inv.evidence,
         "forecast_outlook": inv.forecast_outlook, "root_cause_text": inv.root_cause_text,
         "confidence": _f(inv.confidence), "owner": inv.owner,
+        "executive_summary": inv.executive_summary, "technical_summary": inv.technical_summary,
+        "business_summary": inv.business_summary, "risk_assessment": inv.risk_assessment,
+        "missing_evidence": inv.missing_evidence,
         "source_insight_id": inv.source_insight_id, "source_anomaly_id": inv.source_anomaly_id,
         "created_at": inv.created_at.isoformat(), "updated_at": inv.updated_at.isoformat(),
     }

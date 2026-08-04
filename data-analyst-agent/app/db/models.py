@@ -327,6 +327,18 @@ class Investigation(Base):
     forecast_outlook: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     root_cause_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric)
+    # The five narrative fields app/investigations/reasoning.py generates
+    # proactively (once per investigation — see that module's docstring for
+    # why this isn't regenerated every night). 'likely causes'/'supporting
+    # evidence'/'forecast outlook' from the spec are deliberately NOT
+    # duplicated as separate LLM-generated columns — root_cause_text/
+    # evidence/forecast_outlook above already are those fields, reused
+    # as-is rather than re-narrated by a second LLM call.
+    executive_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    technical_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    risk_assessment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    missing_evidence: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # Free text, not a user FK — same reasoning as Recommendation.resolved_by
     # above (no per-admin identity in this service yet). Unset until a
     # future assignment feature exists; the spec marks this optional.
@@ -368,6 +380,45 @@ class InvestigationEvent(Base):
 
     __table_args__ = (
         Index("idx_investigation_events_lookup", "investigation_id", "created_at"),
+    )
+
+
+class Opportunity(Base):
+    """Phase 3 — one row per Investigation, rolling up the existing
+    OpportunityScore/ImpactProjectionRun engine output (app/opportunities/
+    rollup.py) into the spec's persistent "Opportunity" object with its own
+    lifecycle. No new scoring math: every numeric field is copied from
+    whichever upstream engine already computed it. status is derived from
+    the linked Investigation's own lifecycle rather than tracked as a truly
+    independent state machine — 'in_progress' from the original 4-value
+    plan (open/in_progress/captured/expired) is dropped since nothing in
+    this pipeline distinguishes "someone is actively working it" from
+    "still open"; the same kind of honest plan-to-implementation deviation
+    app/intelligence/prioritizer.py already documents for its own formula."""
+
+    __tablename__ = "opportunities"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    investigation_id: Mapped[int] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    opportunity_score: Mapped[float | None] = mapped_column(Numeric)
+    priority: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # {mode: 'currency'|'metric_unit', value, currency|unit} — copied
+    # straight from ImpactProjectionRun, never re-derived here.
+    forecast_gain: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    business_impact: Mapped[float | None] = mapped_column(Numeric)
+    business_impact_currency: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Numeric)
+    recommendation_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("status IN ('open','captured','expired')", name="opportunities_status_check"),
+        Index("idx_opportunities_lookup", "client_id", "status"),
     )
 
 
@@ -740,4 +791,29 @@ class IngestionRun(Base):
     __table_args__ = (
         CheckConstraint("status IN ('ok','insufficient-data','error')", name="ingestion_runs_status_check"),
         Index("idx_ingestion_runs_lookup", "client_id", "collector_id", "created_at"),
+    )
+
+
+class ForecastAccuracy(Base):
+    """AI memory, Phase 3 Step 11 (see app/forecast/accuracy.py) — one row
+    per ForecastPoint, written once its target_period has actually landed
+    (a real MetricObservation exists for that date). forecast_point_id is
+    unique: once evaluated, a point is never re-evaluated, same
+    idempotent-once contract as every other engine in this codebase."""
+
+    __tablename__ = "forecast_accuracy"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    metric_key: Mapped[str] = mapped_column(ForeignKey("metrics_catalog.metric_key"), nullable=False)
+    forecast_point_id: Mapped[int] = mapped_column(
+        ForeignKey("forecast_points.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    predicted_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    actual_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    abs_pct_error: Mapped[float | None] = mapped_column(Numeric)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_forecast_accuracy_lookup", "client_id", "metric_key", "evaluated_at"),
     )
