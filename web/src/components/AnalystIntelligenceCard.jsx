@@ -5,8 +5,8 @@ import { formatByUnit, pct, SEVERITY_META } from '../lib/analystFormat.js';
 import AnalystConfidenceBadge from './AnalystConfidenceBadge.jsx';
 
 function TrendArrow({ direction, size = 12 }) {
-  if (direction === 'up') return <TrendingUp size={size} className="text-emerald-500" />;
-  if (direction === 'down') return <TrendingDown size={size} className="text-rose-500" />;
+  if (direction === 'up') return <TrendingUp size={size} className="text-emerald-600" />;
+  if (direction === 'down') return <TrendingDown size={size} className="text-rose-600" />;
   return <Minus size={size} className="text-slate-400" />;
 }
 
@@ -41,7 +41,7 @@ export default function AnalystIntelligenceCard({ clientId, metric, severity, on
   return (
     <button
       type="button" onClick={onClick}
-      className={`card p-4 flex flex-col gap-2.5 text-left w-full transition ${selected ? 'ring-2 ring-indigo-500/40' : ''}`}
+      className={`an-panel p-4 flex flex-col gap-2.5 text-left w-full transition cursor-pointer ${selected ? 'ring-2 ring-violet-500/40' : ''}`}
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 truncate">{metric.display_name}</span>
@@ -60,27 +60,27 @@ export default function AnalystIntelligenceCard({ clientId, metric, severity, on
         <span className="text-xl font-extrabold text-slate-900 tracking-tight">{formatByUnit(metric.latest_value, metric.unit)}</span>
       </div>
 
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-2 border-t border-slate-100/70">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-2 border-t border-slate-200">
         <div>
-          <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">Expected</div>
+          <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">Expected</div>
           <div className="text-[11px] font-bold text-slate-700">
             {nextPoint ? formatByUnit(nextPoint.point_estimate, metric.unit) : '—'}
           </div>
         </div>
         <div>
-          <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">Forecast</div>
+          <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">Forecast</div>
           <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
             {horizonPctChange != null ? <>{pct(horizonPctChange)} <TrendArrow direction={horizonPctChange > 0 ? 'up' : 'down'} size={9} /></> : '—'}
           </div>
         </div>
         <div>
-          <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">Primary Driver</div>
+          <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">Primary Driver</div>
           <div className="text-[11px] font-bold text-slate-700 truncate" title={driver?.feature_metric_key}>
             {driver === null ? '…' : driver.feature_metric_key ? `${driver.feature_metric_key} (${Math.round(driver.importance_pct)}%)` : '—'}
           </div>
         </div>
         <div>
-          <div className="text-[8px] font-black uppercase tracking-wider text-slate-400">Trend</div>
+          <div className="text-[8px] font-black uppercase tracking-wider text-slate-500">Trend</div>
           <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1 capitalize">
             <TrendArrow direction={trendDirection} size={10} /> {trendDirection}
           </div>

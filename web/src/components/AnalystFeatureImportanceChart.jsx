@@ -24,32 +24,32 @@ export default function AnalystFeatureImportanceChart({ clientId, targetMetricKe
   const rows = data?.status === 'ok' ? data.features.slice(0, 6) : [];
 
   return (
-    <div className="card p-6">
+    <div className="an-panel p-6">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <BarChart2 size={14} className="text-indigo-500" />
-          <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">Feature Importance</h3>
+          <BarChart2 size={14} className="text-indigo-600" />
+          <h3 className="text-xs font-black uppercase tracking-wider text-slate-400">Feature Importance</h3>
         </div>
         {data?.status === 'ok' && (
           <AnalystConfidenceBadge status="ok" score={data.confidence} sampleSize={data.n_observations} modelVersion={data.model_type} compact />
         )}
       </div>
 
-      {state === null && <p className="text-xs text-slate-400 font-medium animate-pulse">Loading model output…</p>}
+      {state === null && <p className="text-xs text-slate-500 font-medium animate-pulse">Loading model output…</p>}
       {data?.status === 'not-yet-computed' && (
-        <p className="text-xs text-slate-400 font-medium">Feature importance runs nightly — check back after the next run.</p>
+        <p className="text-xs text-slate-500 font-medium">Feature importance runs nightly — check back after the next run.</p>
       )}
       {(data?.status === 'insufficient-data' || data?.status === 'error') && (
-        <p className="text-xs text-slate-400 font-medium">{data.error || 'Not enough overlapping history to fit a model for this metric.'}</p>
+        <p className="text-xs text-slate-500 font-medium">{data.error || 'Not enough overlapping history to fit a model for this metric.'}</p>
       )}
       {data?.status === 'ok' && rows.length > 0 && (
         <ResponsiveContainer width="100%" height={40 * rows.length + 20}>
           <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
             <XAxis type="number" domain={[0, 'dataMax']} hide />
             <YAxis type="category" dataKey="feature_metric_key" width={140}
-              tick={{ fontSize: 10, fill: '#475569', fontWeight: 700 }} axisLine={false} tickLine={false} />
-            <Tooltip formatter={(v) => `${Math.round(v * 10) / 10}%`} cursor={{ fill: '#f8fafc' }} />
-            <Bar dataKey="importance_pct" radius={[0, 8, 8, 0]} barSize={16} label={{ position: 'right', fontSize: 10, fontWeight: 700, formatter: (v) => `${Math.round(v)}%` }}>
+              tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} axisLine={false} tickLine={false} />
+            <Tooltip formatter={(v) => `${Math.round(v * 10) / 10}%`} cursor={{ fill: '#e2e8f0' }} />
+            <Bar dataKey="importance_pct" radius={[0, 8, 8, 0]} barSize={16} label={{ position: 'right', fontSize: 10, fontWeight: 700, fill: '#e2e8f0', formatter: (v) => `${Math.round(v)}%` }}>
               {rows.map((_, i) => <Cell key={i} fill={BAR_COLORS[i % BAR_COLORS.length]} />)}
             </Bar>
           </BarChart>

@@ -87,14 +87,14 @@ export default function AnalystInsightDetail({ insight, metric, clientId, onClos
   const maxValue = Math.max(...rows.map((r) => r.latest_value || 0), 1);
 
   return (
-    <div className="card p-5 border-2 border-indigo-100/70 bg-indigo-50/20">
+    <div className="an-panel p-5">
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="min-w-0">
-          <p className="text-[9px] font-black uppercase tracking-widest text-indigo-500">Zoomed in</p>
+          <p className="text-[9px] font-black uppercase tracking-widest text-indigo-600">Zoomed in</p>
           <h3 className="text-sm font-bold text-slate-900 mt-0.5 truncate">{metric.display_name} · {insight.period_start}</h3>
         </div>
         <button type="button" onClick={onClose}
-          className="shrink-0 w-11 h-11 grid place-items-center rounded-2xl text-slate-400 hover:text-slate-700 hover:bg-white/70 transition focus:outline-none cursor-pointer"
+          className="shrink-0 w-11 h-11 grid place-items-center rounded-2xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition focus:outline-none cursor-pointer"
           aria-label="Close detail view">
           <X size={16} />
         </button>
@@ -102,8 +102,8 @@ export default function AnalystInsightDetail({ insight, metric, clientId, onClos
 
       <div className="grid grid-cols-3 gap-3 mb-1">
         {tiles.map((t) => (
-          <div key={t.label} className="bg-white rounded-2xl border border-slate-150 p-3 min-w-0">
-            <div className="text-[9px] font-black uppercase tracking-wider text-slate-400 truncate">{t.label}</div>
+          <div key={t.label} className="bg-slate-100/80 rounded-2xl border border-slate-200 p-3 min-w-0">
+            <div className="text-[9px] font-black uppercase tracking-wider text-slate-500 truncate">{t.label}</div>
             <div className="text-sm font-extrabold text-slate-900 mt-1 truncate">{t.value}</div>
           </div>
         ))}
@@ -112,18 +112,18 @@ export default function AnalystInsightDetail({ insight, metric, clientId, onClos
       {hasBreakdown && rows.length > 0 && (
         <div className="mt-4">
           <div className="flex items-center gap-1.5 mb-2">
-            <BarChart2 size={12} className="text-indigo-500" />
-            <span className="text-[9px] font-black uppercase tracking-wider text-slate-500">By {insight.dimension_type}</span>
+            <BarChart2 size={12} className="text-indigo-600" />
+            <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">By {insight.dimension_type}</span>
           </div>
           <div className="space-y-1.5">
             {rows.slice(0, 8).map((row) => (
               <div key={row.dimension_value} className="flex items-center gap-2">
-                <span className="text-[10px] font-semibold text-slate-600 w-28 truncate shrink-0" title={row.dimension_value}>
+                <span className="text-[10px] font-semibold text-slate-400 w-28 truncate shrink-0" title={row.dimension_value}>
                   {row.dimension_value}
                 </span>
                 <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full ${row.dimension_value === insight.dimension_value ? 'bg-rose-500' : 'bg-indigo-400/70'}`}
+                    className={`h-full rounded-full ${row.dimension_value === insight.dimension_value ? 'bg-rose-500' : 'bg-indigo-400/60'}`}
                     style={{ width: `${Math.max(4, ((row.latest_value || 0) / maxValue) * 100)}%` }}
                   />
                 </div>

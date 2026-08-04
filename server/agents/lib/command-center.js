@@ -141,7 +141,7 @@ export async function getAgentActivityFeed(siteId, agentIds, limit = 12) {
 export async function getCommandCenterData(siteId) {
   const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory, implementedFindingIds] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence']),
+    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence', 'ai-visibility']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
     buildRecommendations(siteId),
     categoryByAgentId(),
@@ -156,6 +156,7 @@ export async function getCommandCenterData(siteId) {
   const authorityRun = execAndCompetitorRuns.find((r) => r.agent_id === 'authority') || null;
   const aiRecommendationRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-recommendation') || null;
   const countryIntelligenceRun = execAndCompetitorRuns.find((r) => r.agent_id === 'country-intelligence') || null;
+  const aiVisibilityRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-visibility') || null;
 
   const allFindings = findingRuns.flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })));
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
@@ -355,6 +356,21 @@ export async function getCommandCenterData(siteId) {
       hasRun: !!countryIntelligenceRun,
       status: countryIntelligenceRun?.status ?? null,
       lastRunAt: countryIntelligenceRun?.created_at ?? null,
+    },
+    // Deep Answer-Engine-Optimization readiness (server/agents/ai-visibility.js)
+    // — structural AI-readiness, distinct from aiRecommendation (real prompt
+    // mention rate) and geo-audit's overall (its own generator). Same
+    // null-when-not-'ok' discipline.
+    aiVisibility: aiVisibilityRun?.status === 'ok' && aiVisibilityRun.facts?.siteScore
+      ? {
+        score: aiVisibilityRun.facts.siteScore.overall,
+        categories: aiVisibilityRun.facts.siteScore.categories,
+      }
+      : null,
+    aiVisibilityMeta: {
+      hasRun: !!aiVisibilityRun,
+      status: aiVisibilityRun?.status ?? null,
+      lastRunAt: aiVisibilityRun?.created_at ?? null,
     },
     activity: shapeActivity(activityRows, catByAgent),
     recentChanges,

@@ -33,25 +33,25 @@ export default function AnalystInvestigationTimeline({ metric, insights }) {
   const events = [...insightEvents, ...anomalyEvents].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
 
   return (
-    <div className="card p-6">
+    <div className="an-panel p-6">
       <div className="flex items-center gap-2 mb-4">
-        <Clock size={14} className="text-orange-500" />
-        <h3 className="text-xs font-black uppercase tracking-wider text-slate-600">Investigation Timeline</h3>
+        <Clock size={14} className="text-amber-600" />
+        <h3 className="text-xs font-black uppercase tracking-wider text-slate-400">Investigation Timeline</h3>
       </div>
 
       {events.length === 0 ? (
-        <p className="text-xs font-medium text-slate-400">No investigation events recorded for this metric yet.</p>
+        <p className="text-xs font-medium text-slate-500">No investigation events recorded for this metric yet.</p>
       ) : (
-        <ol className="relative border-l-2 border-slate-150 ml-1.5 space-y-4">
+        <ol className="relative border-l-2 border-slate-200 ml-1.5 space-y-4">
           {events.map((e, idx) => (
             <li key={idx} className="pl-4 relative">
               <span
-                className="absolute -left-[9px] top-0.5 w-4 h-4 rounded-full border-2 border-white grid place-items-center"
+                className="absolute -left-[9px] top-0.5 w-4 h-4 rounded-full border-2 border-[#ffffff] grid place-items-center"
                 style={{ backgroundColor: e.color }}
               >
-                <e.Icon size={8} className="text-white" />
+                <e.Icon size={8} className="text-slate-900" />
               </span>
-              <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">{e.date} · {e.typeLabel}</p>
+              <p className="text-[9px] font-black uppercase tracking-wider text-slate-500">{e.date} · {e.typeLabel}</p>
               <p className="text-[11.5px] font-bold text-slate-700 mt-0.5">{e.label}</p>
             </li>
           ))}

@@ -13,7 +13,7 @@ export default function AnalystInsightCard({
   const isEarlyWarning = insight.insight_type === 'forecast_risk';
 
   return (
-    <div className="rounded-3xl border border-slate-200/60 bg-gradient-to-br from-white to-slate-50/40 p-4 transition-all duration-300 hover:shadow-md hover:border-slate-300 relative overflow-hidden flex flex-col justify-between shadow-sm">
+    <div className="rounded-3xl border border-slate-200 bg-gradient-to-br from-[#ffffff] to-slate-900/60 p-4 transition-all duration-300 hover:shadow-md hover:border-slate-300 relative overflow-hidden flex flex-col justify-between shadow-sm">
       <div className="absolute top-0 inset-x-0 h-1" style={{ background: `linear-gradient(90deg, ${type.color}, ${type.color}55)` }} />
 
       <div>
@@ -24,7 +24,7 @@ export default function AnalystInsightCard({
           </span>
           <div className="min-w-0">
             <h4 className="text-sm font-black text-slate-900 leading-snug">{finding(insight, metric)}</h4>
-            <p className="text-[10px] font-semibold text-slate-500 mt-1 leading-snug">{supportingLine(insight, metric)}</p>
+            <p className="text-[10px] font-semibold text-slate-400 mt-1 leading-snug">{supportingLine(insight, metric)}</p>
           </div>
         </div>
 
@@ -38,17 +38,17 @@ export default function AnalystInsightCard({
             {severity.label}
           </span>
           {isEarlyWarning && e.days_until_drop != null && (
-            <span className="text-[9px] font-extrabold text-violet-600 bg-violet-50 px-2.5 py-0.5 rounded-full border border-violet-100 whitespace-nowrap">
+            <span className="text-[9px] font-extrabold text-indigo-500 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-300 whitespace-nowrap">
               {e.days_until_drop <= 0 ? 'Due now' : `${e.days_until_drop}d out`}
             </span>
           )}
-          <span className="text-[9px] text-slate-400 font-mono ml-auto">{insight.period_start}</span>
+          <span className="text-[9px] text-slate-500 font-mono ml-auto">{insight.period_start}</span>
         </div>
       </div>
 
       {!expanded ? (
         <button type="button" onClick={() => setExpanded(true)}
-          className="text-[9px] font-black uppercase tracking-wider text-[#6C63FF]/80 hover:text-[#6C63FF] hover:underline mt-2 self-start min-h-[44px] flex items-center focus:outline-none cursor-pointer">
+          className="text-[9px] font-black uppercase tracking-wider text-indigo-600/80 hover:text-indigo-600 hover:underline mt-2 self-start min-h-[44px] flex items-center focus:outline-none cursor-pointer">
           Show investigation
         </button>
       ) : (
@@ -64,7 +64,7 @@ export default function AnalystInsightCard({
             onAnalyzeFurther={onAnalyzeFurther}
           />
           <button type="button" onClick={() => setExpanded(false)}
-            className="text-[9px] font-black uppercase tracking-wider text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer min-h-[44px] flex items-center self-start">
+            className="text-[9px] font-black uppercase tracking-wider text-slate-500 hover:text-slate-700 focus:outline-none cursor-pointer min-h-[44px] flex items-center self-start">
             Hide
           </button>
         </>

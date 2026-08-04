@@ -62,8 +62,8 @@ export default function AnalystOpportunityBadge({ clientId, recommendationId }) 
         <ul className="mt-1.5 space-y-1">
           {factors.map(([name, f]) => (
             <li key={name} className="text-[9px] font-semibold flex items-start gap-1.5">
-              <span className={`w-1 h-1 rounded-full mt-1.5 shrink-0 ${f.included ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-              <span className={f.included ? 'text-slate-600' : 'text-slate-400'}>
+              <span className={`w-1 h-1 rounded-full mt-1.5 shrink-0 ${f.included ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+              <span className={f.included ? 'text-slate-300' : 'text-slate-500'}>
                 {FACTOR_LABELS[name] || name}
                 {f.included ? `: ${Math.round(f.value * 100)}%` : ` — excluded (${f.reason})`}
               </span>
