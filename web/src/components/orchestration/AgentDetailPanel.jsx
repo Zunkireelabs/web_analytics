@@ -60,6 +60,13 @@ export default function AgentDetailPanel({ agent, onClose }) {
         <div className="p-5 space-y-4">
           <p className="text-sm text-slate-600 leading-relaxed">{agent.description}</p>
 
+          {agent.lastRunScore != null && (
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-3xl font-black tabular-nums" style={{ color: cat.color }}>{agent.lastRunScore}</span>
+              <span className="text-xs font-bold text-slate-400">/ 100 real computed score</span>
+            </div>
+          )}
+
           <div className="text-xs text-slate-400">
             {agent.lastRunAt
               ? <>Last run {timeAgo(agent.lastRunAt)} — <span className={agent.lastRunStatus === 'ok' ? 'text-emerald-600 font-semibold' : 'text-amber-600 font-semibold'}>{agent.lastRunStatus}</span>{agent.lastRunFindings != null && `, ${agent.lastRunFindings} findings`}</>

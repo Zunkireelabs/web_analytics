@@ -47,8 +47,16 @@ export default function AgentFlowNode({ data }) {
           style={{ background: `${cat.color}26`, color: cat.color, boxShadow: tier !== 'none' ? `0 0 14px ${cat.color}40` : 'none' }}>
           {icon}
         </span>
-        <span className="ml-auto inline-flex items-center gap-1 text-[9.5px] font-bold uppercase tracking-wide" style={{ color: statusColor }}>
-          <span className={isRunning ? 'animate-pulse' : ''}>{statusDot}</span>
+        {agent.lastRunScore != null && (
+          <span className="ml-auto text-[11px] font-black tabular-nums px-1.5 py-0.5 rounded-full" title="Real computed score"
+            style={{ color: cat.color, background: `${cat.color}1f` }}>
+            {agent.lastRunScore}
+          </span>
+        )}
+        <span className={agent.lastRunScore != null ? '' : 'ml-auto'}>
+          <span className="inline-flex items-center gap-1 text-[9.5px] font-bold uppercase tracking-wide" style={{ color: statusColor }}>
+            <span className={isRunning ? 'animate-pulse' : ''}>{statusDot}</span>
+          </span>
         </span>
       </div>
       <p className="text-[13px] font-bold text-slate-800 leading-snug">{agent.name}</p>

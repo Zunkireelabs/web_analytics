@@ -66,13 +66,13 @@ const GENERATOR_META = {
 const SOURCE_FILTERS = [
   { value: 'all', label: 'All' },
   { value: 'seo', label: 'SEO' },
+  { value: 'aeo', label: 'AEO' },
   { value: 'geo', label: 'GEO' },
-  { value: 'analytics', label: 'Analytics' },
 ];
 const BUCKET_META = {
   seo: { label: 'SEO', color: '#2563eb' },
+  aeo: { label: 'AEO', color: '#10b981' },
   geo: { label: 'GEO', color: '#7c3aed' },
-  analytics: { label: 'Analytics', color: '#0891b2' },
 };
 // Icon per category name — purely cosmetic, falls back to a generic dot for
 // any category not listed (e.g. a future agent's own category).
@@ -92,6 +92,8 @@ const CATEGORY_META = {
   'Traffic Anomalies': { icon: '⚠️' },
   'Growth Opportunities': { icon: '🌱' },
   'Conversion Issues': { icon: '🎯' },
+  'GEO Signals': { icon: '📡' },
+  'AI Crawler Access': { icon: '🕷️' },
 };
 
 function pagePathFor(url) {
@@ -175,7 +177,7 @@ export default function ActionCenter() {
   const [executionResult, setExecutionResult] = useState(null);
   const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
-  const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'geo' | 'analytics'
+  const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'aeo' | 'geo'
 
   // Sidebar category selections
   const [activeCategory, setActiveCategory] = useState(null);
