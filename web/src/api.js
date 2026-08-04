@@ -1,6 +1,6 @@
 // Thin fetch wrapper. Sends cookies (session) and throws on non-2xx.
 async function req(path, opts = {}) {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     ...opts,

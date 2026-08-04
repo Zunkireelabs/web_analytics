@@ -4,8 +4,11 @@ import tailwind from '@tailwindcss/vite';
 
 // Dev: Vite serves the dashboard on :5173 and proxies /api to the Express server.
 // Build: emits static files into web/dist, which the Express server serves in prod.
+const APP_BASE = process.env.APP_BASE || '/';
+
 export default defineConfig({
   root: 'web',
+  base: APP_BASE,
   plugins: [react(), tailwind()],
   server: {
     port: 5173,

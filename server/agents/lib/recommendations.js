@@ -3,6 +3,7 @@ import { getQueriesForPage } from '../../store/read.js';
 import { getDraftedFindingIds, listDrafts } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
+import { classify } from './recommendation-taxonomy.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -66,11 +67,13 @@ export async function buildRecommendations(siteId) {
         params.query = await lookupQuery(run.start, run.end, params.page);
         if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
+      const { bucket, category } = classify({ source: run.agentId, generatorId: action.generatorId });
       items.push({
         id: f.id, source: run.agentId,
         agentName: run.agentId === 'geo-audit' ? 'GEO Audit' : (catByAgent.get(run.agentId)?.name || run.agentId),
         tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
+        bucket, category,
       });
     }
   }

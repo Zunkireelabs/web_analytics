@@ -541,7 +541,7 @@ const GENERATOR_EFFORT = {
   'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low',
-  'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High',
+  'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';

@@ -61,6 +61,29 @@ export function renderBlogOutlineBody(content) {
   return `${front}\n${parts.join('\n\n')}\n`;
 }
 
+// The direct-answer paragraph goes immediately after the heading — no
+// filler sections before it — since the whole point of this content type is
+// the AI-citation "answer-first" pattern: a real assistant (or a human
+// skimming) gets the complete answer without scrolling past preamble.
+export function renderDirectAnswerBody(content) {
+  const front = frontMatter([
+    ['title', content.title || content.heading || content.query],
+    ['description', content.directAnswer?.slice(0, 155)],
+    ['date', new Date().toISOString().slice(0, 10)],
+  ]);
+  const parts = [`# ${content.heading || content.query}`, content.directAnswer || ''];
+  for (const s of content.supportingSections || []) {
+    if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
+  }
+  if (content.suggestedFaqTopics?.length) {
+    parts.push(`## FAQ topics to cover\n\n${content.suggestedFaqTopics.map((t) => `- ${t}`).join('\n')}`);
+  }
+  if (content.suggestedInternalLinks?.length) {
+    parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
+  }
+  return `${front}\n${parts.join('\n\n')}\n`;
+}
+
 // Deliberately NOT a structural clone of the source page (draft.content only
 // has the source's extracted plain text, not its raw template source — see
 // generators/translation.js) — a minimal new page with the real translated

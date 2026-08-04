@@ -1,13 +1,13 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderCompliancePageBody } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody } from './lib/newpage-render.js';
 
 export const meta = {
   id: 'frontend',
   name: 'Frontend/Content Implementer',
-  description: 'Places long-form draft content (landing pages, blog outlines, translated pages, trust/compliance pages) into the site\'s real templates as a pull request.',
-  handles: ['landing-page', 'blog-outline', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service'],
+  description: 'Places long-form draft content (landing pages, blog outlines, direct-answer sections, translated pages, trust/compliance pages) into the site\'s real templates as a pull request.',
+  handles: ['landing-page', 'blog-outline', 'direct-answer', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service'],
 };
 
 const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
@@ -37,6 +37,14 @@ async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     return { ok: true, filePath, body: renderBlogOutlineBody(content) };
+  }
+
+  if (actionType === 'direct-answer') {
+    const filePath = resolveNewContentTarget(site, 'direct-answer', content.title || content.heading || content.query);
+    if (!filePath) {
+      return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
+    }
+    return { ok: true, filePath, body: renderDirectAnswerBody(content) };
   }
 
   if (actionType === 'translation') {

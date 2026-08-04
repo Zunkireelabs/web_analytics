@@ -17,7 +17,11 @@ import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 // gets scheduled. categoryByAgentId() (agents/lib/command-center.js) already
 // picks up its category/name automatically from meta — no change needed
 // there.
+
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance'];
+
 export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'trust-compliance', 'geo-signals'];
+
 
 // Findings from these agents are inherently upside-framed (growth,
 // striking-distance, localization, AI-recommendation visibility a
