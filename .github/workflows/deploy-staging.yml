@@ -186,18 +186,42 @@ jobs:
             # *.zunkireelabs.com is already wildcarded to this VPS, so no DNS
             # change is needed for a new MCP_DOMAIN value.
             MCP_DOMAIN=${{ vars.STAGING_MCP_DOMAIN }}
+
+            # ── Data Analyst Agent (Analyst page's "AI Focus" tab) ───────────
+            # Sibling container's name on the shared "hosting" Docker network —
+            # not a secret, just an internal hostname (same pattern as
+            # production's DATA_ANALYST_AGENT_INTERNAL_URL). Without this the
+            # Node app falls back to its http://127.0.0.1:8000 default, finds
+            # nothing listening inside its own container, and every
+            # /internal/analyst/dashboard/:id call 500s.
+            DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-stage:8000
+            DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
             ENVEOF
 
+            # ── Data Analyst Agent's own .env (data-analyst-agent/) ──────────
+            # Staging points this service straight at the same shared Neon
+            # database as the main app (see data-analyst-agent/docker-compose.dev.yml)
+            # rather than standing up a dedicated Postgres like production does.
+            cat > data-analyst-agent/.env << 'DAAENVEOF'
+            DATABASE_URL=${{ secrets.STAGING_DATA_ANALYST_DATABASE_URL }}
+            TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}
+            MCP_BASE_URL=https://${{ vars.STAGING_MCP_DOMAIN }}/api/mcp
+            ADMIN_API_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            DAAENVEOF
+
             docker compose -f docker-compose.dev.yml build
+            docker compose -f data-analyst-agent/docker-compose.dev.yml build
 
             echo "Applying database migrations..."
             docker compose -f docker-compose.dev.yml run --rm analytics node server/migrations/run.js
 
             docker compose -f docker-compose.dev.yml up -d
+            docker compose -f data-analyst-agent/docker-compose.dev.yml up -d
 
             echo "Waiting for containers to be healthy..."
             sleep 10
-            for CONTAINER in analytics-app-stage analytics-mcp-stage; do
+            for CONTAINER in analytics-app-stage analytics-mcp-stage data-analyst-agent-stage; do
               HEALTHY=0
               for i in $(seq 1 12); do
                 STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
