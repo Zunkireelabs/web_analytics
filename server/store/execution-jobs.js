@@ -48,6 +48,23 @@ export async function finishExecutionJob(executionJobId, { status, branchName, p
   return rows[0];
 }
 
+// Live "today" counters for the Action Center header — shipped/failed
+// counted per execution_job_recommendations row (final status, not
+// transient queued/drafted/submitted states), scoped to this site and
+// today in the DB server's local date.
+export async function getTodayExecutionStats(siteId) {
+  const { rows } = await query(
+    `SELECT
+       count(*) FILTER (WHERE ejr.status = 'approved') AS shipped,
+       count(*) FILTER (WHERE ejr.status = 'failed') AS failed
+     FROM execution_job_recommendations ejr
+     JOIN execution_jobs ej ON ej.id = ejr.execution_job_id
+     WHERE ej.site_id = $1 AND ejr.updated_at >= date_trunc('day', now())`,
+    [siteId]
+  );
+  return { shipped: Number(rows[0].shipped), failed: Number(rows[0].failed) };
+}
+
 export async function getExecutionJob(siteId, id) {
   const { rows } = await query('SELECT * FROM execution_jobs WHERE site_id = $1 AND id = $2', [siteId, id]);
   if (!rows[0]) return null;

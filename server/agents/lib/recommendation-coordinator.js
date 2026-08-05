@@ -57,8 +57,16 @@ export async function getRecommendations(siteId) {
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
   ]);
+  // A single draft's generator params already cover the whole merged
+  // recommendation (mergeIntoRecommendation refreshes `params` to the
+  // latest evidence across all finding_ids), so shipping it resolves the
+  // recommendation entirely — hide as soon as ANY finding_id is drafted,
+  // not only once every one of them individually has a draft row. Without
+  // this, shipRecommendation only ever drafts finding_ids[0]
+  // (routes/action-center.js), so a recommendation merged from multiple
+  // findings would never disappear from Recs after being shipped.
   const items = rows
-    .filter((r) => r.finding_ids.some((fid) => !draftedFindingIds.has(fid)))
+    .filter((r) => r.finding_ids.every((fid) => !draftedFindingIds.has(fid)))
     .map((r) => {
       const { bucket, category } = classify({ source: r.detecting_agents[0], generatorId: r.recommendation_type });
       return {

@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Save,
   Undo,
+  RotateCcw,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
@@ -29,6 +30,7 @@ const ACTION_LABELS = {
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report', 'direct-answer': 'Direct Answer',
 
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
+  'duplicate-id-fix': 'Duplicate ID Fix Plan',
 };
 
 const GENERATOR_COLORS = {
@@ -54,6 +56,7 @@ const GENERATOR_COLORS = {
   'cookie-policy': '#f59e0b',
   'privacy-policy': '#d97706',
   'terms-of-service': '#b45309',
+  'duplicate-id-fix': '#f97316',
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
@@ -285,6 +288,10 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     try {
       const result = await api.actionCenter.rollback(draft.id);
       setRollbackPr({ prNumber: result.prNumber, prUrl: result.prUrl });
+      // The backend just marked this draft rolled_back_at, which reopens its
+      // finding in Recommendations (getDraftedFindingIds) — refetch so the
+      // caller's onSaved reloads Recs, not just Drafts.
+      api.actionCenter.draft(draft.id).then(onSaved).catch(() => {});
     } catch (e) {
       setError(e.message || 'Rollback failed');
     } finally {
@@ -333,6 +340,24 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       onDeleted(draft.id);
     } catch (e) {
       setError(e.message || 'Delete failed');
+    }
+  };
+
+  // Abandons this draft (keeps it around for the audit trail, unlike
+  // Discard which deletes the row outright) and — because getDraftedFindingIds
+  // excludes 'abandoned' drafts — its finding immediately reopens back in
+  // Recommendations for another attempt.
+  const sendBackToRecommendation = async () => {
+    if (!confirm('Send this back to Recommendations? This draft will be abandoned and the finding will reopen in Recs.')) return;
+    setTransitioning(true);
+    setError(null);
+    try {
+      await api.actionCenter.reject(draft.id, 'sent_back_to_recommendations');
+      onDeleted(draft.id);
+    } catch (e) {
+      setError(e.message || 'Failed to send back to Recommendations');
+    } finally {
+      setTransitioning(false);
     }
   };
 
@@ -428,6 +453,13 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
           <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center gap-2">
             <AlertTriangle size={14} className="text-rose-500 shrink-0" />
             <span><span className="font-extrabold">This PR has conflicts:</span> its branch has diverged from the target branch and can no longer auto-merge on GitHub. Resolve the conflict there before merging.</span>
+          </div>
+        )}
+
+        {draft.rolled_back_at && !rollbackPr && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-amber-50 text-xs text-amber-800 leading-relaxed flex items-center gap-2">
+            <Undo size={14} className="text-amber-500 shrink-0" />
+            <span><span className="font-extrabold">Rolled back:</span> a revert PR was opened for this draft. Its finding has reopened in Recommendations for another attempt.</span>
           </div>
         )}
 
@@ -578,12 +610,22 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
         {/* Modal Footer Controls */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-6 py-4 border-t border-slate-100 bg-slate-50/50 rounded-b-3xl">
           {draft.status !== 'implemented' ? (
-            <button
-              onClick={remove}
-              className="text-[11px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-rose-50/40 transition"
-            >
-              <Trash2 size={12} /> Discard Draft
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={sendBackToRecommendation}
+                disabled={transitioning}
+                title="Abandon this draft and reopen its finding in Recommendations"
+                className="text-[11px] font-black uppercase tracking-wider text-amber-600 hover:text-amber-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-amber-50/60 transition disabled:opacity-60"
+              >
+                <RotateCcw size={12} /> Send Back to Recommendation
+              </button>
+              <button
+                onClick={remove}
+                className="text-[11px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-700 flex items-center gap-1 px-2.5 py-2 rounded-lg hover:bg-rose-50/40 transition"
+              >
+                <Trash2 size={12} /> Discard Draft
+              </button>
+            </div>
           ) : <span />}
 
           <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
@@ -713,7 +755,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
                       Live on staging.
                     </span>
-                    {draft.rollback_snapshot && !draft.sibling_count && (
+                    {draft.rollback_snapshot && !draft.sibling_count && !draft.rolled_back_at && (
                       <button
                         onClick={rollback}
                         disabled={transitioning}
@@ -746,7 +788,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     rollback_snapshot (captured at merge time) is still valid — the
                     merge that snapshot reverts happened regardless of whether this
                     draft was additionally marked implemented afterward. */}
-                {draft.status === 'implemented' && draft.rollback_snapshot && !draft.sibling_count && (
+                {draft.status === 'implemented' && draft.rollback_snapshot && !draft.sibling_count && !draft.rolled_back_at && (
                   <button
                     onClick={rollback}
                     disabled={transitioning}

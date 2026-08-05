@@ -114,6 +114,7 @@ function FindingCard({ finding, generating, onGenerate }) {
   const meta = CATEGORY_META[finding.category] || CATEGORY_META.seo;
   const Icon = meta.icon;
   const canFix = Boolean(finding.recommendedAction?.generatorId);
+  const unavailableReason = finding.recommendedAction?.unavailableReason || 'No automated fix built for this issue type yet.';
   const pagePath = pagePathFor(finding.evidence?.page);
 
   return (
@@ -129,7 +130,7 @@ function FindingCard({ finding, generating, onGenerate }) {
       </div>
       <p className="text-sm font-black text-slate-900 leading-snug mb-1.5">{finding.recommendedAction?.label || meta.label}</p>
       <p className="text-[11.5px] font-medium text-slate-500 leading-relaxed mb-3">{finding.whyItMatters}</p>
-      {pagePath && <p className="text-[10px] font-mono text-indigo-500 bg-indigo-50/50 rounded-lg px-2 py-1 mb-3 truncate">{pagePath}</p>}
+      {pagePath && <p className="text-[10px] font-mono text-indigo-500 bg-indigo-50/50 rounded-lg px-2 py-1 mb-3 truncate">{pagePath === '/' ? 'Homepage' : pagePath}</p>}
       <div className="flex items-center gap-4 mb-4">
         {finding.expectedImpact?.label && (
           <div><div className="text-[9px] font-black uppercase tracking-wider text-slate-400">Impact</div><div className="text-xs font-black text-slate-800">{finding.expectedImpact.label}</div></div>
@@ -138,12 +139,17 @@ function FindingCard({ finding, generating, onGenerate }) {
           <div><div className="text-[9px] font-black uppercase tracking-wider text-slate-400">Confidence</div><div className="text-xs font-black text-slate-800 capitalize">{finding.confidence}</div></div>
         )}
       </div>
-      <button type="button" onClick={() => onGenerate(finding)} disabled={!canFix || generating}
-        title={!canFix ? 'No automated fix available for this finding yet' : undefined}
-        className="w-full text-[10px] font-black uppercase tracking-wider py-3 rounded-2xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-        {generating ? 'Generating…' : 'Generate Fix'}
-      </button>
+      {canFix ? (
+        <button type="button" onClick={() => onGenerate(finding)} disabled={generating}
+          className="w-full text-[10px] font-black uppercase tracking-wider py-3 rounded-2xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+          style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+          {generating ? 'Generating…' : 'Generate Fix'}
+        </button>
+      ) : (
+        <div className="w-full text-center text-[10px] font-bold text-slate-400 bg-slate-50 border border-dashed border-slate-200 rounded-2xl py-3 px-3">
+          {unavailableReason}
+        </div>
+      )}
     </div>
   );
 }

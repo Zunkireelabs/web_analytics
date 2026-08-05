@@ -495,6 +495,33 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
         </div>
       );
 
+    case 'duplicate-id-fix':
+      return (
+        <div className="space-y-4">
+          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100/50 rounded-2xl p-4 leading-relaxed flex items-start gap-2">
+            <Info size={14} className="text-amber-500 shrink-0 mt-0.5" />
+            <span>{content.instructions}</span>
+          </div>
+          {(content.fixPlan || []).map((f) => (
+            <Field key={f.id} label={`id="${f.id}" — used ${f.count} times`} icon={FileCode}>
+              <div className="space-y-2">
+                {f.occurrences.map((occ, i) => (
+                  <div key={i} className={`rounded-xl border p-3 ${occ.keep ? 'bg-emerald-50/40 border-emerald-100' : 'bg-rose-50/40 border-rose-100'}`}>
+                    <div className="flex items-center justify-between gap-2 text-[10px] font-black uppercase tracking-wider mb-1.5">
+                      <span className={occ.keep ? 'text-emerald-600' : 'text-rose-600'}>
+                        {occ.keep ? 'Keep as-is' : `Rename to id="${occ.suggestedId}"`}
+                      </span>
+                      <span className="text-slate-400 normal-case font-mono">&lt;{occ.tag?.toLowerCase()}&gt;</span>
+                    </div>
+                    <code className="text-[11px] font-mono text-slate-600 break-all">{occ.snippet}</code>
+                  </div>
+                ))}
+              </div>
+            </Field>
+          ))}
+        </div>
+      );
+
     default:
       return (
         <div className="rounded-2xl bg-slate-950 border border-slate-800 p-4">

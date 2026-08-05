@@ -238,6 +238,7 @@ export const api = {
     saveDraft: (id, content) => req(`/action-center/drafts/${id}`, { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id) => req(`/action-center/drafts/${id}`, { method: 'DELETE' }),
     submitDraft: (id) => req(`/action-center/drafts/${id}/submit`, { method: 'POST' }),
+    reject: (id, reason) => req(`/action-center/drafts/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
     approveDraft: (id, renderMode) => req(`/action-center/drafts/${id}/approve`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
     implementDraft: (id) => req(`/action-center/drafts/${id}/implemented`, { method: 'POST' }),
     pushBranch: (id, renderMode) => req(`/action-center/drafts/${id}/push-branch`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
@@ -248,6 +249,9 @@ export const api = {
     executeSafeFixes: (limit) => req('/action-center/execute-safe-fixes', { method: 'POST', body: JSON.stringify({ limit }) }),
     approveAndShip: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/approve-and-ship`, { method: 'POST' }),
     getExecutionJob: (id) => req(`/action-center/execution-jobs/${id}`),
+
+    todayExecutionStats: () => req('/action-center/execution-stats/today'),
+
   },
 
   siteAudit: {
