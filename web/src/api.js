@@ -182,6 +182,9 @@ export const api = {
     updateGapStatus: (siteId, gapId, status) =>
       req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
     profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),
+    // Supplementary narrative (server/agents/keyword-narrative.js) — separate
+    // from api.analyst.executiveSummary's Python pipeline.
+    narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
   },
 
   // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —

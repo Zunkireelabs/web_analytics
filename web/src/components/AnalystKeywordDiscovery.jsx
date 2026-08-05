@@ -118,6 +118,8 @@ export default function AnalystKeywordDiscovery({ clientId }) {
         </div>
       </div>
 
+      <NarrativePanel clientId={clientId} />
+
       {activeTab === 'clusters' && <ClustersTab state={clustersState} />}
       {activeTab === 'gaps' && <GapsTab state={gapsState} onUpdateStatus={updateGapStatus} />}
       {activeTab === 'profile' && <ProfileTab state={profileState} />}
@@ -136,6 +138,56 @@ export default function AnalystKeywordDiscovery({ clientId }) {
           {toast.message}
         </div>
       )}
+    </div>
+  );
+}
+
+// Supplementary AI narrative (server/agents/keyword-narrative.js) — separate
+// from AnalystExecutiveSummary's Python pipeline, styled as a subtler inline
+// card (not the hero gradient) since it's a secondary panel on this page.
+function NarrativePanel({ clientId }) {
+  const [state, setState] = useState(null); // null=loading | {data|null, error?}
+
+  useEffect(() => {
+    setState(null);
+    api.keywords.narrative(clientId)
+      .then((data) => setState({ data }))
+      .catch((e) => setState({ data: null, error: e.message || 'Failed to load keyword narrative.' }));
+  }, [clientId]);
+
+  if (state === null) {
+    return <AnalystSkeletonLoader variant="card" />;
+  }
+
+  if (state.error) {
+    return (
+      <p className="text-xs font-semibold text-rose-600 p-2.5 rounded-xl bg-rose-50 border border-rose-500/25 mb-4">
+        {state.error}
+      </p>
+    );
+  }
+
+  if (!state.data) {
+    return (
+      <div className="rounded-2xl bg-slate-100/40 border border-slate-200 p-4 mb-4 text-center">
+        <p className="text-[11px] font-medium text-slate-500">
+          Keyword analysis runs every 14 days. First report coming soon.
+        </p>
+      </div>
+    );
+  }
+
+  const days = Math.floor((Date.now() - new Date(state.data.created_at)) / 86400000);
+  const updatedLabel = days <= 0 ? 'Last updated today' : `Last updated ${days} day${days === 1 ? '' : 's'} ago`;
+
+  return (
+    <div className="rounded-2xl bg-slate-50 border border-indigo-200/40 p-4 mb-4">
+      <div className="flex items-center gap-2 mb-2 text-indigo-500">
+        <Sparkles size={13} />
+        <span className="text-[10px] font-black uppercase tracking-wider">AI Narrative</span>
+      </div>
+      <p className="text-xs font-medium text-slate-700 leading-relaxed whitespace-pre-line">{state.data.narrative}</p>
+      <p className="text-[9.5px] font-medium text-slate-400 mt-3 pt-2 border-t border-slate-200">{updatedLabel}</p>
     </div>
   );
 }

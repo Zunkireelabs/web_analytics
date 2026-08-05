@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requirePlatformRole } from './login.js';
 import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
+  getLatestKeywordNarrative,
 } from '../store/data-analyst.js';
 
 // Keyword Discovery — clusters/gaps/site-profile produced by agents/clustering.py
@@ -53,6 +54,15 @@ router.put('/internal/keywords/:siteId/gaps/:gapId', async (req, res, next) => {
 router.get('/internal/keywords/:siteId/profile', async (req, res, next) => {
   try {
     res.json(await getSiteProfile(req.params.siteId));
+  } catch (e) { next(e); }
+});
+
+// Supplementary narrative — server/agents/keyword-narrative.js, separate
+// from the Python executive-summary pipeline. Returns the latest row or
+// null if the 14-day job hasn't run yet for this site.
+router.get('/internal/keywords/:siteId/narrative', async (req, res, next) => {
+  try {
+    res.json(await getLatestKeywordNarrative(req.params.siteId));
   } catch (e) { next(e); }
 });
 

@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
+import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -249,5 +250,30 @@ export function startCron() {
       { timezone: tz }
     );
     console.log(`[cron] keyword clustering scheduled "${clustering}" (${tz})`);
+  }
+
+  // Keyword Narrative — server/agents/keyword-narrative.js, a supplementary
+  // narrative synthesizing keyword gaps/clusters/site profile/AI-visibility
+  // score. Separate from the Python executive-summary pipeline. Same 14-day
+  // cadence as clustering (reads clustering's own output), offset 2 hours
+  // later so a fresh clustering run has already landed for the day.
+  const keywordNarrative = process.env.KEYWORD_NARRATIVE_CRON_SCHEDULE || '0 5 */14 * *';
+  if (!cron.validate(keywordNarrative)) {
+    console.error(`[cron] invalid KEYWORD_NARRATIVE_CRON_SCHEDULE "${keywordNarrative}" — keyword narrative NOT scheduled.`);
+  } else {
+    cron.schedule(
+      keywordNarrative,
+      async () => {
+        console.log(`[cron] keyword narrative started ${new Date().toISOString()}`);
+        try {
+          const results = await runKeywordNarrativeForAllSites();
+          console.log(`[cron] keyword narrative finished (${results.filter((r) => r.status === 'ok').length}/${results.length} ok)`);
+        } catch (err) {
+          console.error('[cron] keyword narrative error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+    console.log(`[cron] keyword narrative scheduled "${keywordNarrative}" (${tz})`);
   }
 }

@@ -97,3 +97,25 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
 }
+
+// Supplementary keyword/AEO narrative — see server/agents/keyword-narrative.js
+// and migration 083_keyword_narratives.sql. Append-only per run, same
+// "latest row wins" pattern as getKeywordClusters above.
+export async function saveKeywordNarrative(siteId, narrative) {
+  await query(
+    'INSERT INTO keyword_narratives (site_id, narrative) VALUES ($1, $2)',
+    [siteId, narrative]
+  );
+}
+
+export async function getLatestKeywordNarrative(siteId) {
+  const { rows } = await query(
+    `SELECT narrative, created_at
+       FROM keyword_narratives
+      WHERE site_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
