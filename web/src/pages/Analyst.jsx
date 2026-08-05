@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { api } from '../api.js';
 import AnalystHeaderOS from '../components/AnalystHeaderOS.jsx';
 import AnalystPredictiveHero from '../components/AnalystPredictiveHero.jsx';
@@ -24,7 +24,7 @@ import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
 import {
-  LineChart, ListChecks, Sparkles, AlertTriangle, ArrowUp, ArrowDown, Eye, EyeOff, Activity, Layers, Radar, ShieldCheck, Search,
+  LineChart, ListChecks, Sparkles, AlertTriangle, ArrowUp, ArrowDown, Eye, EyeOff, Activity, Layers, Radar, ShieldCheck, Search, X,
 } from 'lucide-react';
 
 const PRESET_ORDER_MAP = {
@@ -138,6 +138,41 @@ function AnalystBody({ clientId, onSummary }) {
     return DEFAULT_SECTIONS;
   });
 
+  const [aiLayoutEnabled, setAiLayoutEnabled] = useState(() => {
+    const stored = localStorage.getItem('analyst_ai_layout');
+    return stored === null ? true : stored === 'true';
+  });
+  const [aiLayoutBanner, setAiLayoutBanner] = useState(null); // { reason } | null
+  const aiLayoutRanRef = useRef(false);
+
+  // Runs at most once per page load. Never overrides a manual section
+  // reorder (analyst_section_order in localStorage means the user already
+  // customized their layout) and fails silently — a bad/slow/absent
+  // response just leaves the existing (default or localStorage) order in place.
+  useEffect(() => {
+    if (aiLayoutRanRef.current) return;
+    if (!aiLayoutEnabled) return;
+    if (localStorage.getItem('analyst_section_order')) return;
+    aiLayoutRanRef.current = true;
+    api.keywords.layout(clientId)
+      .then(({ layout, reason }) => {
+        if (!Array.isArray(layout) || layout.length === 0) return;
+        setSectionList((prev) => {
+          const reordered = layout.map((id) => prev.find((s) => s.id === id)).filter(Boolean);
+          const missing = prev.filter((s) => !reordered.some((r) => r.id === s.id));
+          return [...reordered, ...missing];
+        });
+        if (reason) setAiLayoutBanner({ reason });
+      })
+      .catch(() => { /* silently fall back to existing order */ });
+  }, [clientId, aiLayoutEnabled]);
+
+  const handleToggleAILayout = () => {
+    const next = !aiLayoutEnabled;
+    setAiLayoutEnabled(next);
+    localStorage.setItem('analyst_ai_layout', String(next));
+  };
+
   const load = () => {
     setIsRefreshing(true);
     api.analyst.dashboard(clientId)
@@ -192,6 +227,7 @@ function AnalystBody({ clientId, onSummary }) {
     setPreset('executive');
     setTheme('velvet');
     setDensity('standard');
+    setAiLayoutBanner(null);
     localStorage.removeItem('analyst_section_order');
     localStorage.removeItem('analyst_preset');
     localStorage.removeItem('analyst_theme');
@@ -425,6 +461,32 @@ function AnalystBody({ clientId, onSummary }) {
 
   return (
     <div className="space-y-5">
+      {aiLayoutBanner && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-700">
+          <div className="flex items-center gap-2 min-w-0">
+            <Sparkles size={13} className="shrink-0" />
+            <p className="text-[11px] font-semibold truncate">AI arranged this view: {aiLayoutBanner.reason}</p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              type="button"
+              onClick={() => { setSectionList(DEFAULT_SECTIONS); setAiLayoutBanner(null); }}
+              className="text-[10px] font-bold underline hover:text-indigo-900 transition cursor-pointer"
+            >
+              Reset to default
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiLayoutBanner(null)}
+              className="p-1 rounded-md hover:bg-indigo-100 transition cursor-pointer"
+              title="Dismiss"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className={densitySpacing}>
         {sectionList
           .filter((sec) => sec.visible)
@@ -478,6 +540,8 @@ function AnalystBody({ clientId, onSummary }) {
         activeDensity={density}
         onSelectDensity={handleSelectDensity}
         onResetLayout={handleResetLayout}
+        aiLayoutEnabled={aiLayoutEnabled}
+        onToggleAILayout={handleToggleAILayout}
       />
 
       <AnalystKeyboardShortcutsModal

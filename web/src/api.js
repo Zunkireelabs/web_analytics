@@ -185,6 +185,9 @@ export const api = {
     // Supplementary narrative (server/agents/keyword-narrative.js) — separate
     // from api.analyst.executiveSummary's Python pipeline.
     narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
+    // AI-suggested section order (server/routes/keywords.js's GET .../layout) —
+    // consumed by Analyst.jsx's loadAILayout, separate from api.keywords.narrative.
+    layout: (siteId) => req(`/internal/keywords/${siteId}/layout`),
   },
 
   // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —

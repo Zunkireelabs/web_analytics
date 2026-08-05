@@ -119,3 +119,45 @@ export async function getLatestKeywordNarrative(siteId) {
   );
   return rows[0] || null;
 }
+
+// Latest forecast_runs status per metric — used only to flag "any forecast
+// issues" for the layout suggester (server/routes/keywords.js), not to read
+// forecast values (see getForecasts above for that).
+export async function getLatestForecastStatuses(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (metric_key) metric_key, status
+       FROM forecast_runs
+      WHERE client_id = $1
+      ORDER BY metric_key, generated_at DESC`,
+    [siteId]
+  );
+  return rows;
+}
+
+// AI layout suggestions — see server/routes/keywords.js's GET .../layout and
+// migration 084_layout_suggestions.sql. Append-only per run, same "latest
+// row wins" pattern as getKeywordClusters/getLatestKeywordNarrative above.
+// layout_json stores { layout: [...9 ids], signature: { anomalyCount, gapCount } }
+// so the route can decide whether to reuse this row or regenerate, without
+// needing extra columns.
+export async function getLatestLayoutSuggestion(siteId) {
+  const { rows } = await query(
+    `SELECT layout_json, reason, generated_at
+       FROM layout_suggestions
+      WHERE site_id = $1
+      ORDER BY generated_at DESC
+      LIMIT 1`,
+    [siteId]
+  );
+  return rows[0] || null;
+}
+
+export async function saveLayoutSuggestion(siteId, layoutJson, reason) {
+  const { rows } = await query(
+    `INSERT INTO layout_suggestions (site_id, layout_json, reason)
+     VALUES ($1, $2, $3)
+     RETURNING layout_json, reason, generated_at`,
+    [siteId, JSON.stringify(layoutJson), reason]
+  );
+  return rows[0];
+}
