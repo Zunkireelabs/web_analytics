@@ -136,6 +136,13 @@ export async function run({ siteId, start, end }) {
           domain: trackerFacts.domain,
           cookiesObserved: trackerFacts.cookiesObserved,
           trackersDetected: trackerFacts.trackersDetected,
+          // The real existing page the homepage already links to (broken
+          // link case only — r.href). Lets the frontend implementer target
+          // that real file via url_file_map.pages instead of always
+          // creating a new, unlinked page (resolveNewContentTarget) — a
+          // 'missing' link has no existing page to target, so this stays
+          // null and net-new creation remains the only option there.
+          page: r.href || null,
         },
         effort: effortForGenerator(check.key),
       },
