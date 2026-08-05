@@ -71,7 +71,7 @@ def upgrade() -> None:
     op.create_index("idx_investigation_events_lookup", "investigation_events", ["investigation_id", "created_at"])
 
     op.add_column(
-        "recommendations",
+        "analyst_recommendations",
         sa.Column(
             "investigation_id", sa.BigInteger, sa.ForeignKey("investigations.id", ondelete="SET NULL"),
             nullable=True,
@@ -80,7 +80,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("recommendations", "investigation_id")
+    op.drop_column("analyst_recommendations", "investigation_id")
     op.drop_index("idx_investigation_events_lookup", table_name="investigation_events")
     op.drop_table("investigation_events")
     op.drop_index("idx_investigations_status", table_name="investigations")

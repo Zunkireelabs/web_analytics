@@ -4,6 +4,7 @@ import { refreshCommandCenter } from '../../server/routes/command-center.js';
 import { refreshRecommendations, generateDraft, markDraftImplementedIfEligible } from '../../server/routes/action-center.js';
 import { updateDraft, deleteDraft, submitDraftForApproval } from '../../server/store/drafts.js';
 import { deliverToAllChannels } from '../../server/notifications/channels/index.js';
+import { updateKeywordGapStatus } from '../../server/store/data-analyst.js';
 import { dateStr, jsonResult, requireLevel, withErrorHandling } from './shared.js';
 
 // "AI Actions" tier tools — spend LLM/API budget and write to this app's own
@@ -123,5 +124,15 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
     const events = alerts.map((a) => ({ type: 'predictive-risk', severity: a.severity, title: a.title, body: a.body, findingIds: [] }));
     await deliverToAllChannels(siteId, events);
     return jsonResult({ delivered: events.length });
+  }));
+
+  server.registerTool('update_keyword_gap_status', {
+    description: 'Staff review action on a keyword gap: approve it (queues it as a real content opportunity) or reject it (not worth pursuing).',
+    inputSchema: { gapId: z.number().int(), status: z.enum(['approved', 'rejected']) },
+  }, withErrorHandling('update_keyword_gap_status', async ({ gapId, status }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    const gap = await updateKeywordGapStatus(siteId, gapId, status);
+    if (!gap) return { isError: true, content: [{ type: 'text', text: 'Keyword gap not found.' }] };
+    return jsonResult(gap);
   }));
 }

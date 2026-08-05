@@ -244,8 +244,8 @@ class Insight(Base):
     )
 
 
-class Recommendation(Base):
-    __tablename__ = "recommendations"
+class AnalystRecommendations(Base):
+    __tablename__ = "analyst_recommendations"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
@@ -648,7 +648,7 @@ class EffortEstimation(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
-    recommendation_id: Mapped[int] = mapped_column(ForeignKey("recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("analyst_recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(Text)
@@ -690,7 +690,7 @@ class ImpactPrediction(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
-    recommendation_id: Mapped[int] = mapped_column(ForeignKey("recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("analyst_recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(Text)
@@ -730,7 +730,7 @@ class OpportunityScore(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
-    recommendation_id: Mapped[int] = mapped_column(ForeignKey("recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("analyst_recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     opportunity_score: Mapped[float | None] = mapped_column(Numeric)
@@ -760,7 +760,7 @@ class RecommendationRanking(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
-    recommendation_id: Mapped[int] = mapped_column(ForeignKey("recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("analyst_recommendations.id", ondelete="CASCADE"), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     priority_score: Mapped[float | None] = mapped_column(Numeric)

@@ -170,6 +170,20 @@ export const api = {
       req(`/internal/analyst/clients/${clientId}/business-values`, { method: 'PUT', body: JSON.stringify(body) }),
   },
 
+  // Keyword Discovery (server/routes/keywords.js) — clusters/gaps/site-profile
+  // produced by agents/clustering.py. gaps' status is pending_review/approved/
+  // rejected end-to-end (gaps() returns it, updateGapStatus() takes it back),
+  // matching server/store/data-analyst.js's own public vocabulary exactly.
+  keywords: {
+    clusters: (siteId, clusterType) =>
+      req(`/internal/keywords/${siteId}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
+    gaps: (siteId, status) =>
+      req(`/internal/keywords/${siteId}/gaps${status ? `?status=${status}` : ''}`),
+    updateGapStatus: (siteId, gapId, status) =>
+      req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+    profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),
+  },
+
   // Platform-wide user directory (PLATFORM-ADMIN-DESIGN.md §E, §K Phase 4) —
   // any tenant, any role including platform tiers. Distinct from `team`
   // below, which is scoped to the caller's own tenant.

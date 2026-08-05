@@ -24,7 +24,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, Insight, MetricCatalog, Recommendation
+from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations
 from app.db.session import SessionLocal
 from app.mcp_client.client import McpAuthError, McpClient, McpToolError
 from app.mcp_client.tools import push_predictive_alert
@@ -59,9 +59,9 @@ async def deliver_predictive_alerts() -> None:
 async def _active_alerts(session: AsyncSession, client_id: int) -> list[dict]:
     rows = (
         await session.execute(
-            select(Insight, Recommendation, MetricCatalog)
+            select(Insight, AnalystRecommendations, MetricCatalog)
             .join(MetricCatalog, MetricCatalog.metric_key == Insight.metric_key)
-            .outerjoin(Recommendation, Recommendation.insight_id == Insight.id)
+            .outerjoin(AnalystRecommendations, AnalystRecommendations.insight_id == Insight.id)
             .where(
                 Insight.client_id == client_id, Insight.insight_type == "forecast_risk",
                 Insight.severity.in_(ALERT_SEVERITIES),

@@ -19,20 +19,23 @@ import AnalystInvestigationTimeline from '../components/AnalystInvestigationTime
 import AnalystDiagnosticsPanel from '../components/AnalystDiagnosticsPanel.jsx';
 import AnalystFeatureImportanceChart from '../components/AnalystFeatureImportanceChart.jsx';
 import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer.jsx';
+import AnalystKeywordDiscovery from '../components/AnalystKeywordDiscovery.jsx';
 import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
 import {
-  LineChart, ListChecks, Sparkles, AlertTriangle, ArrowUp, ArrowDown, Eye, EyeOff, Activity, Layers, Radar, ShieldCheck,
+  LineChart, ListChecks, Sparkles, AlertTriangle, ArrowUp, ArrowDown, Eye, EyeOff, Activity, Layers, Radar, ShieldCheck, Search,
 } from 'lucide-react';
 
 const PRESET_ORDER_MAP = {
   // Prediction-first command center flow: read the future, see the fixes,
-  // then dive into the evidence.
-  executive: ['hero', 'fixes', 'summary', 'priorities', 'studio', 'workspace', 'diagnostics', 'correlations'],
-  investigation: ['workspace', 'fixes', 'hero', 'studio', 'summary', 'priorities', 'diagnostics', 'correlations'],
-  growth: ['hero', 'studio', 'diagnostics', 'priorities', 'fixes', 'summary', 'workspace', 'correlations'],
-  copilot: ['hero', 'summary', 'diagnostics', 'workspace', 'fixes', 'priorities', 'studio', 'correlations'],
+  // then dive into the evidence. Keyword Discovery is a standalone research
+  // tool (not part of the predictive/investigation flow), so it's appended
+  // last in every preset rather than reordered per-preset.
+  executive: ['hero', 'fixes', 'summary', 'priorities', 'studio', 'workspace', 'diagnostics', 'correlations', 'keyword-discovery'],
+  investigation: ['workspace', 'fixes', 'hero', 'studio', 'summary', 'priorities', 'diagnostics', 'correlations', 'keyword-discovery'],
+  growth: ['hero', 'studio', 'diagnostics', 'priorities', 'fixes', 'summary', 'workspace', 'correlations', 'keyword-discovery'],
+  copilot: ['hero', 'summary', 'diagnostics', 'workspace', 'fixes', 'priorities', 'studio', 'correlations', 'keyword-discovery'],
 };
 
 const DEFAULT_SECTIONS = [
@@ -44,6 +47,7 @@ const DEFAULT_SECTIONS = [
   { id: 'workspace', title: 'Investigation Workspace', subtitle: 'Predicted risks and anomalies sorted by severity', icon: Activity, iconColor: '#ef4444', visible: true },
   { id: 'diagnostics', title: 'Diagnostic Tools & Metric Navigator', subtitle: 'Select a metric to investigate trend, forecast & drivers', icon: LineChart, iconColor: '#6366f1', visible: true },
   { id: 'correlations', title: 'Correlation & Driver Explorer', subtitle: 'Cross-metric mathematical relationship explorer', icon: Layers, iconColor: '#10b981', visible: true },
+  { id: 'keyword-discovery', title: 'Keyword Discovery', subtitle: 'Semantic clusters, coverage gaps & site profile', icon: Search, iconColor: '#6366f1', visible: true },
 ];
 
 function SectionShell({ sec, idx, sectionList, handleMoveSection, handleToggleSection, children }) {
@@ -410,6 +414,8 @@ function AnalystBody({ clientId, onSummary }) {
         );
       case 'correlations':
         return <AnalystCorrelationExplorer clientId={clientId} />;
+      case 'keyword-discovery':
+        return <AnalystKeywordDiscovery clientId={clientId} />;
       default:
         return null;
     }

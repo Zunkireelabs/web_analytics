@@ -38,7 +38,7 @@ data' — never defaulted to a 0 or 1 stand-in value."""
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, EffortEstimation, OpportunityScore, Recommendation, RecommendationRanking
+from app.db.models import Client, EffortEstimation, OpportunityScore, AnalystRecommendations, RecommendationRanking
 from app.db.session import SessionLocal
 from app.scoring.confidence import compute_confidence
 
@@ -58,8 +58,8 @@ async def run_recommendation_prioritizer() -> None:
             # Prioritizer's ranking is status-sensitive.
             recommendations = (
                 await session.execute(
-                    select(Recommendation).where(
-                        Recommendation.client_id == client.id, Recommendation.status.notin_(["resolved", "dismissed"]),
+                    select(AnalystRecommendations).where(
+                        AnalystRecommendations.client_id == client.id, AnalystRecommendations.status.notin_(["resolved", "dismissed"]),
                     )
                 )
             ).scalars().all()
@@ -72,7 +72,7 @@ async def run_recommendation_prioritizer() -> None:
             }
             to_score = [r for r in recommendations if r.id not in already_ranked]
 
-            scored: list[tuple[Recommendation, float, float, int]] = []
+            scored: list[tuple[AnalystRecommendations, float, float, int]] = []
             for rec in to_score:
                 result = await _priority_inputs(session, rec)
                 if result is None:
@@ -106,7 +106,7 @@ async def run_recommendation_prioritizer() -> None:
             await session.commit()
 
 
-async def _priority_inputs(session: AsyncSession, rec: Recommendation) -> tuple[float, float, int] | None:
+async def _priority_inputs(session: AsyncSession, rec: AnalystRecommendations) -> tuple[float, float, int] | None:
     opportunity = (
         await session.execute(select(OpportunityScore).where(OpportunityScore.recommendation_id == rec.id))
     ).scalar_one_or_none()

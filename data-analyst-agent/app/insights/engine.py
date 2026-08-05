@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Anomaly, Client, Insight, MetricCatalog, MetricObservation, MetricPeriodStats, Recommendation
+from app.db.models import Anomaly, Client, Insight, MetricCatalog, MetricObservation, MetricPeriodStats, AnalystRecommendations
 from app.db.session import SessionLocal
 
 TREND_SHIFT_THRESHOLD_PCT = {"wow": 15.0, "mom": 20.0}
@@ -47,7 +47,7 @@ async def _replace_insight(session: AsyncSession, *, client_id, metric_key, dime
 
     if existing is not None:
         rec = (
-            await session.execute(select(Recommendation).where(Recommendation.insight_id == existing.id))
+            await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == existing.id))
         ).scalar_one_or_none()
         if rec is not None and rec.status == "resolved":
             # Same (client, metric, dimension, period, insight_type) identity as

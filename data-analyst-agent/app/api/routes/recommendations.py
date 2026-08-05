@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_active_client
-from app.db.models import Client, Insight, MetricCatalog, Recommendation
+from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations
 from app.db.session import get_session
 from app.insights.recommendations import generate_dashboard_executive_summary, generate_executive_summary
 
@@ -30,7 +30,7 @@ async def resolve_recommendation(
     """Staff-driven "mark solved". client_id is in the path (not just the
     id) so a wrong/stale recommendation_id can never resolve another
     client's alert — same tenant-isolation discipline as dashboard.py."""
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 
@@ -54,7 +54,7 @@ async def dismiss_recommendation(
 ) -> dict:
     """Staff-driven "not worth acting on", distinct from resolve — same
     tenant-isolation discipline as resolve_recommendation above."""
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 
@@ -78,7 +78,7 @@ async def summarize_recommendation(
     """On-demand "Create Executive Summary" — stateless, regenerated on
     every call (never persisted), same discipline as /ask. Same
     tenant-isolation guard as resolve/dismiss above."""
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 
