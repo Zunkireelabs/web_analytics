@@ -5,14 +5,14 @@ import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
+import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
@@ -465,6 +465,23 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   }
 });
 
+// Per-item detail for a bulk/single execution job — what executeSafeFixes'
+// and approveAndShipRecommendation's summary counts don't show: which
+// recommendations failed and why (execution_job_recommendations.error).
+router.get('/action-center/execution-jobs/:id', async (req, res, next) => {
+  try {
+    const job = await getExecutionJob(req.siteId, req.params.id);
+    if (!job) return res.status(404).json({ error: 'Execution job not found' });
+    res.json(job);
+  } catch (e) { next(e); }
+});
+
+router.get('/action-center/execution-stats/today', async (req, res, next) => {
+  try {
+    res.json(await getTodayExecutionStats(req.siteId));
+  } catch (e) { next(e); }
+});
+
 router.post('/action-center/recommendations/:id/approve-and-ship', async (req, res, next) => {
   try {
     res.json(await approveAndShipRecommendation(req.siteId, req.params.id, { userId: req.userId }));
@@ -740,6 +757,11 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
 
     const opened = await openRollbackPr(site, draft, pushed.branchName);
     if (!opened.ok) return res.status(422).json({ error: opened.error, reason: opened.reason });
+
+    // Rollback PR opened — reopen this draft's finding in Recommendations
+    // right away rather than waiting for the PR to merge (see
+    // markDraftRolledBack's own comment for why status itself is untouched).
+    await markDraftRolledBack(req.siteId, draft.id);
 
     res.json({ ok: true, prNumber: opened.prNumber, prUrl: opened.prUrl, branchName: pushed.branchName });
   } catch (e) { next(e); }

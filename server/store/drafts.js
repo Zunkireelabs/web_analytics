@@ -450,10 +450,23 @@ export async function getImplementedFindingIds(siteId) {
 // again so a fresh draft can be generated.
 export async function getDraftedFindingIds(siteId) {
   const { rows } = await query(
-    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned'",
+    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned' AND rolled_back_at IS NULL",
     [siteId]
   );
   return new Set(rows.map((r) => r.finding_id));
+}
+
+// Marks a draft as rolled back without touching its real status column —
+// unlike markDraftAbandoned, this must work on 'implemented'/'merged_to_stage'
+// drafts too (that's exactly when rollback is available), and 'implemented'
+// staying 'implemented' is correct: it genuinely did go live. rolled_back_at
+// is what getDraftedFindingIds above checks to reopen the finding again.
+export async function markDraftRolledBack(siteId, id) {
+  const { rows } = await query(
+    'UPDATE drafts SET rolled_back_at = now(), updated_at = now() WHERE site_id = $1 AND id = $2 RETURNING *',
+    [siteId, id]
+  );
+  return rows[0] || null;
 }
 
 // Most recent NON-ABANDONED draft for a finding — used to make

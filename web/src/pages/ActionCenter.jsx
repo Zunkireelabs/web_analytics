@@ -26,7 +26,8 @@ import {
   Zap,
   GitPullRequest,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  XCircle
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -175,6 +176,8 @@ export default function ActionCenter() {
   const [error, setError] = useState(null);
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
+  const [executionJobDetail, setExecutionJobDetail] = useState(null);
+  const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'aeo' | 'geo'
@@ -203,7 +206,10 @@ export default function ActionCenter() {
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
   }).catch(() => setDrafts([]));
 
-  useEffect(() => { loadRecs(); loadDrafts(); }, []);
+  const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed }
+  const loadTodayStats = () => api.actionCenter.todayExecutionStats().then(setTodayStats).catch(() => {});
+
+  useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, []);
   useEffect(() => { if (tab === 'drafts' || tab === 'implemented') loadDrafts(); }, [tab]);
 
   // Deep link from a notification's "where the agent decided how to fix
@@ -275,15 +281,46 @@ export default function ActionCenter() {
     setExecutingSafeFixes(true);
     setError(null);
     setExecutionResult(null);
+    setExecutionJobDetail(null);
     try {
       const result = await api.actionCenter.executeSafeFixes(15);
       setExecutionResult(result);
       loadRecs();
       loadDrafts();
+      loadTodayStats();
     } catch (e) {
       setError(e.message || 'Execute Safe Fixes failed');
     } finally {
       setExecutingSafeFixes(false);
+    }
+  };
+
+  // Lazily loads the per-item breakdown (which recs failed and why) for the
+  // most recent execute-safe-fixes run — the summary banner only has counts.
+  const toggleExecutionFailures = async () => {
+    if (executionJobDetail) { setExecutionJobDetail(null); return; }
+    const jobId = executionResult?.job?.id;
+    if (!jobId) return;
+    setLoadingExecutionJobDetail(true);
+    try {
+      setExecutionJobDetail(await api.actionCenter.getExecutionJob(jobId));
+    } catch (e) {
+      setError(e.message || 'Failed to load execution job detail');
+    } finally {
+      setLoadingExecutionJobDetail(false);
+    }
+  };
+
+  // A failed item only has a draft to open when the chain got as far as
+  // generateDraft before failing (e.g. an apply-time placeholder-field
+  // rejection) — items that failed inside generateDraft itself (e.g. "model
+  // did not return valid JSON") never got a draft row, so draft_id is null
+  // and there's nothing to open; that finding is already back in Recs untouched.
+  const openFailedDraft = async (draftId) => {
+    try {
+      setActiveDraft(await api.actionCenter.draft(draftId));
+    } catch (e) {
+      setError(e.message || 'Could not load draft');
     }
   };
 
@@ -300,6 +337,7 @@ export default function ActionCenter() {
       setSelectedRecommendation(null);
       loadRecs();
       loadDrafts();
+      loadTodayStats();
     } catch (e) {
       setError(`${item.tag}: ${e.message || 'Approve & Ship failed'}`);
     } finally {
@@ -369,22 +407,61 @@ export default function ActionCenter() {
       )}
 
       {executionResult && (
-        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
-            <span>
-              Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
+              <span>
+                Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+              </span>
             </span>
-          </span>
-          <span className="flex items-center gap-2 shrink-0">
-            {executionResult.job?.pr_url && (
-              <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
-                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
-                <GitPullRequest size={11} /> View PR
-              </a>
-            )}
-            <button onClick={() => setExecutionResult(null)} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
-          </span>
+            <span className="flex items-center gap-2 shrink-0">
+              {executionResult.failed > 0 && executionResult.job?.id && (
+                <button
+                  onClick={toggleExecutionFailures}
+                  disabled={loadingExecutionJobDetail}
+                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-rose-600 hover:border-rose-350 transition disabled:opacity-60 cursor-pointer"
+                >
+                  {loadingExecutionJobDetail ? 'Loading…' : (
+                    <>{executionJobDetail ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />} {executionResult.failed} failed</>
+                  )}
+                </button>
+              )}
+              {executionResult.job?.pr_url && (
+                <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
+                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
+                  <GitPullRequest size={11} /> View PR
+                </a>
+              )}
+              <button onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
+            </span>
+          </div>
+
+          {executionJobDetail && (
+            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5">
+              {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => {
+                const Row = it.draft_id ? 'button' : 'div';
+                return (
+                  <Row
+                    key={it.id}
+                    type={it.draft_id ? 'button' : undefined}
+                    onClick={it.draft_id ? () => openFailedDraft(it.draft_id) : undefined}
+                    className={`w-full flex items-start gap-2 text-[11px] font-medium text-rose-700 bg-white/60 rounded-lg px-3 py-2 text-left ${it.draft_id ? 'hover:bg-white hover:border-rose-200 border border-transparent transition cursor-pointer' : ''}`}
+                  >
+                    <XCircle size={12} className="text-rose-500 shrink-0 mt-0.5" />
+                    <span>
+                      <span className="font-black">{it.recommendation_type}</span>
+                      {it.page ? <span className="text-rose-500"> — {it.page}</span> : null}
+                      <span className="block text-rose-500 font-normal mt-0.5">{it.error || 'No error message recorded'}</span>
+                      {it.draft_id && (
+                        <span className="block text-[9px] font-black uppercase tracking-wider text-rose-400 mt-1">Click to open draft →</span>
+                      )}
+                    </span>
+                  </Row>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -485,6 +562,25 @@ export default function ActionCenter() {
                 <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
                 {executingSafeFixes ? '…' : Math.min(15, safeEligibleCount)}
               </button>
+
+              {/* Live "today" counters — distinct from the Zap button's live
+                  eligible-count above it: that's "how many could ship right
+                  now," this is "how many actually did today," pulled from
+                  execution_job_recommendations (server/store/execution-jobs.js). */}
+              {todayStats && (todayStats.shipped > 0 || todayStats.failed > 0) && (
+                <div className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider shrink-0" title="Shipped / failed today, across all Execute Safe Fixes and Approve & Ship runs">
+                  {todayStats.shipped > 0 && (
+                    <span className="flex items-center gap-1 bg-emerald-50 border border-emerald-100 text-emerald-700 px-2 py-1.5 rounded-xl shadow-sm">
+                      <CheckCircle2 size={10} className="text-emerald-550" /> {todayStats.shipped} today
+                    </span>
+                  )}
+                  {todayStats.failed > 0 && (
+                    <span className="flex items-center gap-1 bg-rose-50 border border-rose-100 text-rose-700 px-2 py-1.5 rounded-xl shadow-sm">
+                      <XCircle size={10} className="text-rose-550" /> {todayStats.failed} today
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -904,8 +1000,8 @@ export default function ActionCenter() {
           key={activeDraft.id}
           draft={activeDraft}
           onClose={() => setActiveDraft(null)}
-          onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); }}
-          onDeleted={() => { setActiveDraft(null); loadDrafts(); }}
+          onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); if (updated.rolled_back_at) loadRecs(); }}
+          onDeleted={() => { setActiveDraft(null); loadDrafts(); loadRecs(); }}
         />
       )}
     </div>
