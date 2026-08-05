@@ -14,6 +14,8 @@ export default function AnalystCustomizerDrawer({
   activeDensity,
   onSelectDensity,
   onResetLayout,
+  aiLayoutEnabled,
+  onToggleAILayout,
 }) {
   if (!isOpen) return null;
 
@@ -86,6 +88,28 @@ export default function AnalystCustomizerDrawer({
                 );
               })}
             </div>
+          </div>
+
+          {/* AI-Arranged Layout */}
+          <div className="space-y-2">
+            <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+              <Sparkles size={13} className="text-violet-500" /> AI-Arranged Layout
+            </h4>
+            <button
+              type="button"
+              onClick={onToggleAILayout}
+              className={`w-full flex items-center justify-between p-3 rounded-2xl text-left border transition ${
+                aiLayoutEnabled
+                  ? 'bg-indigo-100 border-violet-500 text-slate-900'
+                  : 'bg-slate-100 border-slate-800 text-slate-400'
+              }`}
+            >
+              <div>
+                <span className="text-xs font-bold block">{aiLayoutEnabled ? 'On' : 'Off'}</span>
+                <p className="text-[10px] text-slate-400 mt-0.5">Claude reorders sections based on today&apos;s site activity</p>
+              </div>
+              {aiLayoutEnabled && <Check size={14} className="text-indigo-600 shrink-0" />}
+            </button>
           </div>
 
           {/* Theme Palette */}

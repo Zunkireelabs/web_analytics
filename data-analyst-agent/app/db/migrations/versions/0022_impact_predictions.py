@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("id", sa.BigInteger, primary_key=True, autoincrement=True),
         sa.Column("client_id", sa.Integer, sa.ForeignKey("clients.id", ondelete="CASCADE"), nullable=False),
         sa.Column(
-            "recommendation_id", sa.BigInteger, sa.ForeignKey("recommendations.id", ondelete="CASCADE"),
+            "recommendation_id", sa.BigInteger, sa.ForeignKey("analyst_recommendations.id", ondelete="CASCADE"),
             nullable=False, unique=True,
         ),
         sa.Column("status", sa.Text, nullable=False),

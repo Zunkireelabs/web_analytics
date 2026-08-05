@@ -180,11 +180,11 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
-            <SidebarSection id="growth" label="Growth Tools" tint="text-slate-400 hover:text-slate-600"
+            <SidebarSection id="growth" label="Growth Tools" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
               links={GROWTH_TOOLS_NAV} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
 
             {isInternal && (
-              <SidebarSection id="internal" label="Internal Console" tint="text-slate-400 hover:text-slate-600"
+              <SidebarSection id="internal" label="Internal Console" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
                 links={INTERNAL_NAV} isActive={isActive} open={!collapsed.internal} onToggle={toggleSection} />
             )}
 
@@ -235,7 +235,7 @@ function SidebarSection({ id, label, tint, links, isActive, open, onToggle }) {
         className={`w-full flex items-center justify-between gap-2 px-3 pt-6 pb-2 text-[9px] font-black uppercase tracking-widest transition-colors cursor-pointer ${tint}`}
       >
         <span>{label}</span>
-        <ChevronDown size={12} strokeWidth={2.5} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
+        <ChevronDown size={12} strokeWidth={2.5} className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && links.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
     </div>

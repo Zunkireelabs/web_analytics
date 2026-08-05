@@ -30,7 +30,7 @@ _COLUMNS = (
     ("anomalies", "created_at"),
     ("forecast_runs", "generated_at"),
     ("insights", "generated_at"),
-    ("recommendations", "generated_at"),
+    ("analyst_recommendations", "generated_at"),
     ("ingestion_runs", "created_at"),
 )
 

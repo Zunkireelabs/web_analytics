@@ -19,10 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("recommendations", sa.Column("dismissed_at", sa.TIMESTAMP(timezone=True), nullable=True))
-    op.add_column("recommendations", sa.Column("dismissed_by", sa.Text, nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("dismissed_at", sa.TIMESTAMP(timezone=True), nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("dismissed_by", sa.Text, nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("recommendations", "dismissed_by")
-    op.drop_column("recommendations", "dismissed_at")
+    op.drop_column("analyst_recommendations", "dismissed_by")
+    op.drop_column("analyst_recommendations", "dismissed_at")

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_active_client
 from app.db.models import (
     Anomaly, Client, ForecastPoint, ForecastRun, IngestionRun, Insight,
-    MetricCatalog, MetricObservation, MetricPeriodStats, Recommendation,
+    MetricCatalog, MetricObservation, MetricPeriodStats, AnalystRecommendations,
 )
 from app.db.session import get_session
 
@@ -36,7 +36,7 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
     ).scalars().all()
     insights = []
     for i in insights_rows:
-        rec = (await session.execute(select(Recommendation).where(Recommendation.insight_id == i.id))).scalar_one_or_none()
+        rec = (await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == i.id))).scalar_one_or_none()
         if rec is not None and rec.status in ("resolved", "dismissed"):
             continue  # staff already marked this occurrence solved or not worth acting on
         insights.append({

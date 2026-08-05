@@ -6,7 +6,7 @@ since it needs investigation_id to exist on the current Recommendation."""
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, ImpactProjectionRun, Investigation, Opportunity, OpportunityScore, Recommendation
+from app.db.models import Client, ImpactProjectionRun, Investigation, Opportunity, OpportunityScore, AnalystRecommendations
 from app.db.session import SessionLocal
 
 
@@ -40,9 +40,9 @@ async def _upsert_opportunity(session: AsyncSession, *, client_id: int, investig
     # case that ever changes.
     rec = (
         await session.execute(
-            select(Recommendation)
-            .where(Recommendation.investigation_id == investigation.id)
-            .order_by(Recommendation.generated_at.desc())
+            select(AnalystRecommendations)
+            .where(AnalystRecommendations.investigation_id == investigation.id)
+            .order_by(AnalystRecommendations.generated_at.desc())
         )
     ).scalars().first()
 
@@ -85,7 +85,7 @@ async def _upsert_opportunity(session: AsyncSession, *, client_id: int, investig
 
     recommendation_count = (
         await session.scalar(
-            select(func.count()).select_from(Recommendation).where(Recommendation.investigation_id == investigation.id)
+            select(func.count()).select_from(AnalystRecommendations).where(AnalystRecommendations.investigation_id == investigation.id)
         )
     ) or 0
 

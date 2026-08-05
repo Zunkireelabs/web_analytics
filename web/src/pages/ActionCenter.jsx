@@ -67,13 +67,13 @@ const GENERATOR_META = {
 const SOURCE_FILTERS = [
   { value: 'all', label: 'All' },
   { value: 'seo', label: 'SEO' },
+  { value: 'aeo', label: 'AEO' },
   { value: 'geo', label: 'GEO' },
-  { value: 'analytics', label: 'Analytics' },
 ];
 const BUCKET_META = {
   seo: { label: 'SEO', color: '#2563eb' },
+  aeo: { label: 'AEO', color: '#10b981' },
   geo: { label: 'GEO', color: '#7c3aed' },
-  analytics: { label: 'Analytics', color: '#0891b2' },
 };
 // Icon per category name — purely cosmetic, falls back to a generic dot for
 // any category not listed (e.g. a future agent's own category).
@@ -93,6 +93,8 @@ const CATEGORY_META = {
   'Traffic Anomalies': { icon: '⚠️' },
   'Growth Opportunities': { icon: '🌱' },
   'Conversion Issues': { icon: '🎯' },
+  'GEO Signals': { icon: '📡' },
+  'AI Crawler Access': { icon: '🕷️' },
 };
 
 function pagePathFor(url) {
@@ -178,7 +180,7 @@ export default function ActionCenter() {
   const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
-  const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'geo' | 'analytics'
+  const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'aeo' | 'geo'
 
   // Sidebar category selections
   const [activeCategory, setActiveCategory] = useState(null);
@@ -435,10 +437,10 @@ export default function ActionCenter() {
       )}
 
       {/* QUICK COMMAND METRIC HEADER PANEL */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-        
-        {/* Tab switch panel (Left, 4-cols) */}
-        <div className="lg:col-span-4 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+
+        {/* Tab switch panel (Left, 5-cols — matches the 5-col left column below so edges line up) */}
+        <div className="lg:col-span-5 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
           {[
             { key: 'recommendations', label: 'Recs', count: recs?.items.length },
             { key: 'drafts', label: 'Drafts', count: nonImplementedDrafts?.length },
@@ -458,8 +460,8 @@ export default function ActionCenter() {
           ))}
         </div>
 
-        {/* Date controllers & refresh pipeline (Right, 8-cols) */}
-        <div className="lg:col-span-8 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+        {/* Date controllers & refresh pipeline (Right, 7-cols — matches the 7-col right column below so edges line up) */}
+        <div className="lg:col-span-7 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
           
           {/* Quick stats indicators with distinct colored chips */}
           <div className="flex items-center gap-2.5 text-[10.5px] font-black uppercase tracking-wider shrink-0">
@@ -488,16 +490,6 @@ export default function ActionCenter() {
             >
               {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
-            <button
-              onClick={executeSafeFixes}
-              disabled={executingSafeFixes || safeEligibleCount === 0}
-              title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
-              className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/10 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
-              style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
-            >
-              <Zap size={12} className={executingSafeFixes ? 'animate-pulse' : ''} />
-              {executingSafeFixes ? 'Executing…' : `Execute Today's Safe Fixes (${Math.min(15, safeEligibleCount)})`}
-            </button>
           </div>
         </div>
       </div>
@@ -512,23 +504,35 @@ export default function ActionCenter() {
               purely a display filter over the same recommendations feed;
               Generate Draft/Drafts/Approval/PR logic below is untouched. */}
           {tab === 'recommendations' && recs && (
-            <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
-              {SOURCE_FILTERS.map((f) => {
-                const active = sourceFilter === f.value;
-                const meta = BUCKET_META[f.value];
-                return (
-                  <button
-                    key={f.value}
-                    onClick={() => setSourceFilter(f.value)}
-                    className={`text-[10px] py-1.5 px-3 font-black rounded-lg flex-1 transition-all duration-150 cursor-pointer ${
-                      active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                    }`}
-                    style={active && meta ? { color: meta.color } : undefined}
-                  >
-                    {f.label}
-                  </button>
-                );
-              })}
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
+                {SOURCE_FILTERS.map((f) => {
+                  const active = sourceFilter === f.value;
+                  const meta = BUCKET_META[f.value];
+                  return (
+                    <button
+                      key={f.value}
+                      onClick={() => setSourceFilter(f.value)}
+                      className={`text-[10px] py-1.5 px-2.5 font-black rounded-lg transition-all duration-150 cursor-pointer ${
+                        active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                      style={active && meta ? { color: meta.color } : undefined}
+                    >
+                      {f.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={executeSafeFixes}
+                disabled={executingSafeFixes || safeEligibleCount === 0}
+                title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
+                className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer ml-auto shrink-0"
+                style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
+              >
+                <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
+                {executingSafeFixes ? '…' : Math.min(15, safeEligibleCount)}
+              </button>
             </div>
           )}
 

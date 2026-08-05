@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db.models import Anomaly, ForecastPoint, ForecastRun, Insight, MetricObservation, MetricPeriodStats, Recommendation
+from app.db.models import Anomaly, ForecastPoint, ForecastRun, Insight, MetricObservation, MetricPeriodStats, AnalystRecommendations
 
 
 def _parse(d: str) -> date:
@@ -122,7 +122,7 @@ async def get_cached_insights(session: AsyncSession, client_id: int, metric_key:
     results = []
     for insight in insights:
         rec = (
-            await session.execute(select(Recommendation).where(Recommendation.insight_id == insight.id))
+            await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == insight.id))
         ).scalar_one_or_none()
         results.append({
             "metric_key": insight.metric_key, "insight_type": insight.insight_type, "severity": insight.severity,

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_active_client
 from app.db.models import (
     Client, EffortEstimation, FeatureImportanceRun, FeatureImportanceScore, ImpactPrediction, Insight, MetricCatalog,
-    OpportunityScore, Recommendation, RecommendationRanking, RootCauseAnalysisNode, RootCauseAnalysisRun,
+    OpportunityScore, AnalystRecommendations, RecommendationRanking, RootCauseAnalysisNode, RootCauseAnalysisRun,
 )
 from app.db.session import get_session
 from app.ml.correlation import compute_correlation_matrix
@@ -132,7 +132,7 @@ async def get_correlations(client: Client = Depends(get_active_client), session:
 async def get_effort_estimation(
     recommendation_id: int, client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
 ) -> dict:
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 
@@ -159,7 +159,7 @@ async def get_effort_estimation(
 async def get_time_to_impact(
     recommendation_id: int, client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
 ) -> dict:
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 
@@ -186,7 +186,7 @@ async def get_time_to_impact(
 async def get_opportunity_score(
     recommendation_id: int, client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session),
 ) -> dict:
-    rec = await session.get(Recommendation, recommendation_id)
+    rec = await session.get(AnalystRecommendations, recommendation_id)
     if rec is None or rec.client_id != client.id:
         raise HTTPException(status_code=404, detail="Recommendation not found.")
 

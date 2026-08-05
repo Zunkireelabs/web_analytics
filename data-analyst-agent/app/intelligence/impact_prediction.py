@@ -14,7 +14,7 @@ the recommended fix, not the underlying insight."""
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, ImpactPrediction, Insight, Recommendation
+from app.db.models import Client, ImpactPrediction, Insight, AnalystRecommendations
 from app.db.session import SessionLocal
 from app.intelligence.category_rules import category_for_metric
 from app.scoring.confidence import compute_confidence
@@ -41,7 +41,7 @@ async def run_impact_prediction() -> None:
     for client in clients:
         async with SessionLocal() as session:
             recommendations = (
-                await session.execute(select(Recommendation).where(Recommendation.client_id == client.id))
+                await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.client_id == client.id))
             ).scalars().all()
             already_predicted = {
                 r[0] for r in (
@@ -57,7 +57,7 @@ async def run_impact_prediction() -> None:
             await session.commit()
 
 
-async def _predict(session: AsyncSession, client_id: int, rec: Recommendation) -> None:
+async def _predict(session: AsyncSession, client_id: int, rec: AnalystRecommendations) -> None:
     insight = await session.get(Insight, rec.insight_id)
     if insight is None:
         session.add(ImpactPrediction(
