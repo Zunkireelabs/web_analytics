@@ -82,7 +82,11 @@ DEFAULT_DISTANCE_THRESHOLD = 0.35  # cosine distance; lower = tighter/more clust
 MIN_CLUSTER_SIZE = 2  # a single keyword isn't a "cluster" — excluded from output, not lost (still in gsc_breakdown).
 MIN_IMPRESSIONS = 1  # drop true-zero-impression rows before clustering; they're noise, not opportunities.
 GAP_SCORE_POSITION_THRESHOLD = 20
+
+GAP_SCORE_IMPRESSIONS_THRESHOLD = 50  # gap_score fires when position > 20 AND impressions > 50.
+
 GAP_SCORE_IMPRESSIONS_THRESHOLD = 30  # gap_score fires when position > 20 OR impressions > 30.
+
 TOP_N_FOR_PROFILE = 50
 TOP_N_PER_CLUSTER_FOR_NAMING = 8  # keywords shown to the LLM per cluster when naming — bounds prompt size on large clusters.
 
@@ -90,12 +94,15 @@ VALID_SITE_TYPES = {"service", "product", "ecommerce", "education"}
 VALID_CLUSTER_TYPES = {"service", "product", "general"}
 VALID_PRIORITIES = {"high", "medium", "low"}
 
+
+
 # Step 4 — external keyword research
 RESEARCH_KEYWORDS_PER_TOPIC = 20
 VALID_SEARCH_INTENTS = {"informational", "commercial", "transactional"}
 VALID_DIFFICULTIES = {"low", "medium", "high"}
 EXTERNAL_RESEARCH_RANKING_THRESHOLD = 20  # avg_position < this = already ranking well, skip; >= or missing = gap.
 DIFFICULTY_TO_PRIORITY = {"low": "high", "medium": "medium", "high": "low"}  # easier keyword = higher priority to chase
+
 
 # Same "daily" tier server/llm.js's own MODEL_DEFAULTS use for frequent,
 # lower-stakes calls — this script's calls are exactly that (structured
@@ -303,7 +310,12 @@ def score_cluster(group):
     )
     is_gap = (
         avg_position is not None
+
+        and avg_position > GAP_SCORE_POSITION_THRESHOLD
+        and avg_impressions > GAP_SCORE_IMPRESSIONS_THRESHOLD
+
         and (avg_position > GAP_SCORE_POSITION_THRESHOLD or avg_impressions > GAP_SCORE_IMPRESSIONS_THRESHOLD)
+
     )
     gap_score = avg_impressions if is_gap else 0.0
     return {"avg_impressions": avg_impressions, "avg_position": avg_position, "gap_score": gap_score}
@@ -326,6 +338,8 @@ def build_cluster_rows(groups, naming):
             **score_cluster(g),
         })
     return rows
+
+
 
 
 def filter_noise_clusters(provider, client, industry, site_type, cluster_rows):
@@ -368,6 +382,7 @@ def filter_noise_clusters(provider, client, industry, site_type, cluster_rows):
         else:
             kept.append(c)
     return kept
+
 
 
 def save_clusters(conn, site_id, clusters):
@@ -442,6 +457,7 @@ def save_gaps(conn, site_id, gaps):
 
 
 # ---------------------------------------------------------------------------
+
 # Step 4: external keyword research (runs after Steps 1-3 above; independent
 # of them — reads site_profiles fresh from the DB rather than reusing the
 # in-memory profile from Step 1, and never touches keyword_clusters or the
@@ -578,6 +594,7 @@ def run_external_keyword_research(conn, provider, llm_client, site_id, since):
 
 
 # ---------------------------------------------------------------------------
+
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -595,8 +612,11 @@ def run_for_site(conn, provider, llm_client, embed_model, site_id, days, distanc
     groups = cluster_keywords(keywords, embed_model, distance_threshold)
     naming = name_and_type_clusters(provider, llm_client, groups)
     cluster_rows = build_cluster_rows(groups, naming)
+
+
     if profile:
         cluster_rows = filter_noise_clusters(provider, llm_client, profile["industry"], profile["site_type"], cluster_rows)
+
     save_clusters(conn, site_id, cluster_rows)  # every row tagged this site_id — no cross-site writes possible
 
     gaps = []
@@ -609,7 +629,10 @@ def run_for_site(conn, provider, llm_client, embed_model, site_id, days, distanc
         f"{len(cluster_rows)} cluster(s) saved, {len(gaps)} gap(s) flagged for review"
     )
 
+
+
     run_external_keyword_research(conn, provider, llm_client, site_id, since)
+
 
 
 def main():

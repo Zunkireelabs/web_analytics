@@ -1,0 +1,27 @@
+services:
+  # Staging variant of ./docker-compose.yml. No dedicated `db` service here —
+  # unlike production, staging points DATABASE_URL straight at the main
+  # Node app's own shared Neon database (same pattern already used for local
+  # dev, see .env.example) instead of standing up a second Postgres. Keeps
+  # staging cheap to run; revisit if/when staging needs real per-environment
+  # isolation for this service.
+  app:
+    container_name: data-analyst-agent-stage
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  hosting:
+    external: true
