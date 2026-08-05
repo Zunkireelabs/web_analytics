@@ -57,9 +57,19 @@ async function resolveTargetAndBody(site, draft) {
   }
 
   if (COMPLIANCE_ACTION_TYPES.has(actionType)) {
-    const filePath = resolveNewContentTarget(site, actionType, content.metaTitle || content.headline);
+    // A real, already-linked page (trust-compliance.js's 'broken' finding —
+    // homepage links to it, but it doesn't render real content) should be
+    // overwritten in place via the normal pages[] mapping, not shadowed by
+    // a second, unlinked page at a slugified path. Only fall back to
+    // resolveNewContentTarget when there's no existing page to target (the
+    // 'missing' finding — homepage has no link to a page at all yet) or the
+    // site hasn't mapped that URL in url_file_map.pages.
+    const page = content.page || draft.input?.page;
+    const existingFile = page ? resolveFile(site, page) : null;
+    const filePath = existingFile || resolveNewContentTarget(site, actionType, content.metaTitle || content.headline);
     if (!filePath) {
-      return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via \`npm run connect-repo\` before this can be applied.` };
+      const pageHint = page ? ` (real target "${page}" isn't in url_file_map.pages either)` : '';
+      return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured${pageHint} — add one via \`npm run connect-repo\` before this can be applied.` };
     }
     return { ok: true, filePath, body: renderCompliancePageBody(content) };
   }
