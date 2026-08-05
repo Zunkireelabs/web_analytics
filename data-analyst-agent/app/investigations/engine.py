@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Client, Insight, Investigation, InvestigationEvent, OpportunityScore,
-    Recommendation, RecommendationRanking, RootCauseAnalysisRun,
+    AnalystRecommendations, RecommendationRanking, RootCauseAnalysisRun,
 )
 from app.db.session import SessionLocal
 
@@ -58,7 +58,7 @@ async def run_investigation_engine() -> None:
 
 async def _sync_investigations(session: AsyncSession, client_id: int) -> None:
     recs = (
-        await session.execute(select(Recommendation).where(Recommendation.client_id == client_id))
+        await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.client_id == client_id))
     ).scalars().all()
 
     for rec in recs:
@@ -78,7 +78,7 @@ async def _sync_investigations(session: AsyncSession, client_id: int) -> None:
 
 
 async def _upsert_investigation(
-    session: AsyncSession, *, client_id: int, insight: Insight, rec: Recommendation,
+    session: AsyncSession, *, client_id: int, insight: Insight, rec: AnalystRecommendations,
 ) -> None:
     existing = (
         await session.execute(
@@ -139,7 +139,7 @@ async def _upsert_investigation(
     _maybe_close(session, investigation, rec)
 
 
-def _maybe_close(session: AsyncSession, investigation: Investigation, rec: Recommendation) -> None:
+def _maybe_close(session: AsyncSession, investigation: Investigation, rec: AnalystRecommendations) -> None:
     target = RECOMMENDATION_TERMINAL_MAP.get(rec.status)
     if target is None or investigation.status == target:
         return
@@ -147,7 +147,7 @@ def _maybe_close(session: AsyncSession, investigation: Investigation, rec: Recom
     investigation.status = target
 
 
-async def _pick_confidence(session: AsyncSession, rec: Recommendation) -> float | None:
+async def _pick_confidence(session: AsyncSession, rec: AnalystRecommendations) -> float | None:
     """Prefer the Prioritizer's confidence (the most downstream, most
     complete signal — it only exists once Opportunity Scoring and Effort
     Estimation both ran), falling back to Opportunity Scoring's own, then

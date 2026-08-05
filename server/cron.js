@@ -1,5 +1,13 @@
 import cron from 'node-cron';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
+import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
+
+const execFileAsync = promisify(execFile);
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -216,4 +224,56 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
+
+  // Keyword Clustering — standalone Python agent (agents/clustering.py), not
+  // a job.js function like the jobs above, so it's spawned as a subprocess
+  // instead of imported. Runs every 14 days per its own docstring's
+  // suggested cadence; day-of-month */14 lands on the 1st/15th/29th, close
+  // enough to "every 14 days" for a re-profiling job. Override with
+  // CLUSTERING_CRON_SCHEDULE; override the interpreter with PYTHON_BIN.
+  const clustering = process.env.CLUSTERING_CRON_SCHEDULE || '0 3 */14 * *';
+  if (!cron.validate(clustering)) {
+    console.error(`[cron] invalid CLUSTERING_CRON_SCHEDULE "${clustering}" — keyword clustering NOT scheduled.`);
+  } else {
+    cron.schedule(
+      clustering,
+      async () => {
+        console.log(`[cron] keyword clustering started ${new Date().toISOString()}`);
+        try {
+          const { stdout } = await execFileAsync(process.env.PYTHON_BIN || 'python3', ['agents/clustering.py'], { cwd: repoRoot });
+          if (stdout.trim()) console.log(stdout.trim());
+          console.log('[cron] keyword clustering finished');
+        } catch (err) {
+          console.error('[cron] keyword clustering error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+    console.log(`[cron] keyword clustering scheduled "${clustering}" (${tz})`);
+  }
+
+  // Keyword Narrative — server/agents/keyword-narrative.js, a supplementary
+  // narrative synthesizing keyword gaps/clusters/site profile/AI-visibility
+  // score. Separate from the Python executive-summary pipeline. Same 14-day
+  // cadence as clustering (reads clustering's own output), offset 2 hours
+  // later so a fresh clustering run has already landed for the day.
+  const keywordNarrative = process.env.KEYWORD_NARRATIVE_CRON_SCHEDULE || '0 5 */14 * *';
+  if (!cron.validate(keywordNarrative)) {
+    console.error(`[cron] invalid KEYWORD_NARRATIVE_CRON_SCHEDULE "${keywordNarrative}" — keyword narrative NOT scheduled.`);
+  } else {
+    cron.schedule(
+      keywordNarrative,
+      async () => {
+        console.log(`[cron] keyword narrative started ${new Date().toISOString()}`);
+        try {
+          const results = await runKeywordNarrativeForAllSites();
+          console.log(`[cron] keyword narrative finished (${results.filter((r) => r.status === 'ok').length}/${results.length} ok)`);
+        } catch (err) {
+          console.error('[cron] keyword narrative error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+    console.log(`[cron] keyword narrative scheduled "${keywordNarrative}" (${tz})`);
+  }
 }

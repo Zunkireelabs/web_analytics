@@ -5,7 +5,7 @@ import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
+import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
@@ -463,6 +463,17 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
     if (e.status) return res.status(e.status).json({ error: e.message });
     next(e);
   }
+});
+
+// Per-item detail for a bulk/single execution job — what executeSafeFixes'
+// and approveAndShipRecommendation's summary counts don't show: which
+// recommendations failed and why (execution_job_recommendations.error).
+router.get('/action-center/execution-jobs/:id', async (req, res, next) => {
+  try {
+    const job = await getExecutionJob(req.siteId, req.params.id);
+    if (!job) return res.status(404).json({ error: 'Execution job not found' });
+    res.json(job);
+  } catch (e) { next(e); }
 });
 
 router.post('/action-center/recommendations/:id/approve-and-ship', async (req, res, next) => {

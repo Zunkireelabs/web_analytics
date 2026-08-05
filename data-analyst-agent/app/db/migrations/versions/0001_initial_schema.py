@@ -176,7 +176,7 @@ def upgrade() -> None:
     op.create_index("idx_insights_lookup", "insights", ["client_id", "metric_key", "generated_at"])
 
     op.create_table(
-        "recommendations",
+        "analyst_recommendations",
         sa.Column("id", sa.BigInteger, primary_key=True, autoincrement=True),
         sa.Column("client_id", sa.Integer, sa.ForeignKey("clients.id", ondelete="CASCADE"), nullable=False),
         sa.Column("insight_id", sa.BigInteger, sa.ForeignKey("insights.id", ondelete="CASCADE"), nullable=False),
@@ -278,7 +278,7 @@ def _seed_metrics_catalog() -> None:
 
 def downgrade() -> None:
     op.drop_table("ingestion_runs")
-    op.drop_table("recommendations")
+    op.drop_table("analyst_recommendations")
     op.drop_table("insights")
     op.drop_table("forecast_points")
     op.drop_table("forecast_runs")

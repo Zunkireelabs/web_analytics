@@ -17,6 +17,7 @@ import { buildRecommendations } from '../../server/agents/lib/recommendations.js
 import { getAuthorityScoreSeries } from '../../server/store/authority.js';
 import { getMonthlyMentionRate } from '../../server/store/ai-recommendation.js';
 import { getOwnStructuralScoreSeries } from '../../server/store/competitor-profiles.js';
+import { getForecasts, getAnomalyAlerts, getSiteProfile, getKeywordClusters, getKeywordGaps } from '../../server/store/data-analyst.js';
 import { dateStr, jsonResult, withErrorHandling } from './shared.js';
 
 // Read-only analytics/reporting/agent-status/Action-Center-read MCP tools.
@@ -195,4 +196,29 @@ export function registerReadOnlyTools(server, siteId) {
     description: "Real snapshots of this site's own competitor-structural-readiness score between two dates, oldest first, one value per real run (deduped across the competitor rows written in that run).",
     inputSchema: { start: dateStr, end: dateStr },
   }, withErrorHandling('get_competitor_structural_score_series', async ({ start, end }) => jsonResult(await getOwnStructuralScoreSeries(siteId, start, end))));
+
+  server.registerTool('get_forecasts', {
+    description: "Real forecast predictions for this site from the Data Analyst Agent's nightly forecast engine (forecast_runs/forecast_points) — latest 'ok' run per metric, never computed live. Optionally filtered to one metric and/or bounded to a forecast horizon in days.",
+    inputSchema: { metric: z.string().optional(), days: z.number().int().min(1).max(365).optional() },
+  }, withErrorHandling('get_forecasts', async ({ metric, days }) => jsonResult(await getForecasts(siteId, metric, days))));
+
+  server.registerTool('get_anomaly_alerts', {
+    description: "Real detected anomalies for this site from the Data Analyst Agent's nightly anomaly detection (z-score/IQR), newest first.",
+    inputSchema: { limit: z.number().int().min(1).max(100).default(20) },
+  }, withErrorHandling('get_anomaly_alerts', async ({ limit }) => jsonResult(await getAnomalyAlerts(siteId, limit))));
+
+  server.registerTool('get_site_profile', {
+    description: "Claude's current understanding of this site — industry, main topics, site type — inferred from its own real top search queries. Empty until the clustering pipeline has run at least once for this site.",
+    inputSchema: {},
+  }, withErrorHandling('get_site_profile', async () => jsonResult(await getSiteProfile(siteId))));
+
+  server.registerTool('get_keyword_clusters', {
+    description: "Real topic clusters grouping this site's own semantically-similar search queries, from the latest clustering run, newest first. Optionally filtered to one cluster type.",
+    inputSchema: { clusterType: z.enum(['service', 'product', 'general']).optional() },
+  }, withErrorHandling('get_keyword_clusters', async ({ clusterType }) => jsonResult(await getKeywordClusters(siteId, clusterType))));
+
+  server.registerTool('get_keyword_gaps', {
+    description: 'Real keyword topics with zero current coverage, identified from this site\'s own profile and existing clusters — a human-review queue, never auto-applied. Optionally filtered by review status.',
+    inputSchema: { status: z.enum(['pending_review', 'approved', 'rejected']).optional() },
+  }, withErrorHandling('get_keyword_gaps', async ({ status }) => jsonResult(await getKeywordGaps(siteId, status))));
 }

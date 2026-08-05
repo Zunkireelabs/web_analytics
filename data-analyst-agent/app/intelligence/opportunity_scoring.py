@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.routes.benchmarks import get_industry_percentiles
 from app.db.models import (
     Client, EffortEstimation, Insight, MetricObservation, OpportunityScore,
-    Recommendation, RootCauseAnalysisRun,
+    AnalystRecommendations, RootCauseAnalysisRun,
 )
 from app.db.session import SessionLocal
 from app.insights.recommendations import LOWER_IS_BETTER_METRICS, impact_inputs_from_insight
@@ -58,7 +58,7 @@ async def run_opportunity_scoring() -> None:
     for client in clients:
         async with SessionLocal() as session:
             recommendations = (
-                await session.execute(select(Recommendation).where(Recommendation.client_id == client.id))
+                await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.client_id == client.id))
             ).scalars().all()
             already_scored = {
                 r[0] for r in (
@@ -74,7 +74,7 @@ async def run_opportunity_scoring() -> None:
             await session.commit()
 
 
-async def _score(session: AsyncSession, client: Client, rec: Recommendation) -> None:
+async def _score(session: AsyncSession, client: Client, rec: AnalystRecommendations) -> None:
     insight = await session.get(Insight, rec.insight_id)
     if insight is None:
         session.add(OpportunityScore(

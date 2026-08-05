@@ -26,7 +26,8 @@ import {
   Zap,
   GitPullRequest,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  XCircle
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -175,6 +176,8 @@ export default function ActionCenter() {
   const [error, setError] = useState(null);
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
+  const [executionJobDetail, setExecutionJobDetail] = useState(null);
+  const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'aeo' | 'geo'
@@ -275,6 +278,7 @@ export default function ActionCenter() {
     setExecutingSafeFixes(true);
     setError(null);
     setExecutionResult(null);
+    setExecutionJobDetail(null);
     try {
       const result = await api.actionCenter.executeSafeFixes(15);
       setExecutionResult(result);
@@ -284,6 +288,22 @@ export default function ActionCenter() {
       setError(e.message || 'Execute Safe Fixes failed');
     } finally {
       setExecutingSafeFixes(false);
+    }
+  };
+
+  // Lazily loads the per-item breakdown (which recs failed and why) for the
+  // most recent execute-safe-fixes run — the summary banner only has counts.
+  const toggleExecutionFailures = async () => {
+    if (executionJobDetail) { setExecutionJobDetail(null); return; }
+    const jobId = executionResult?.job?.id;
+    if (!jobId) return;
+    setLoadingExecutionJobDetail(true);
+    try {
+      setExecutionJobDetail(await api.actionCenter.getExecutionJob(jobId));
+    } catch (e) {
+      setError(e.message || 'Failed to load execution job detail');
+    } finally {
+      setLoadingExecutionJobDetail(false);
     }
   };
 
@@ -369,30 +389,58 @@ export default function ActionCenter() {
       )}
 
       {executionResult && (
-        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
-            <span>
-              Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
+              <span>
+                Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+              </span>
             </span>
-          </span>
-          <span className="flex items-center gap-2 shrink-0">
-            {executionResult.job?.pr_url && (
-              <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
-                className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
-                <GitPullRequest size={11} /> View PR
-              </a>
-            )}
-            <button onClick={() => setExecutionResult(null)} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
-          </span>
+            <span className="flex items-center gap-2 shrink-0">
+              {executionResult.failed > 0 && executionResult.job?.id && (
+                <button
+                  onClick={toggleExecutionFailures}
+                  disabled={loadingExecutionJobDetail}
+                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-rose-600 hover:border-rose-350 transition disabled:opacity-60 cursor-pointer"
+                >
+                  {loadingExecutionJobDetail ? 'Loading…' : (
+                    <>{executionJobDetail ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />} {executionResult.failed} failed</>
+                  )}
+                </button>
+              )}
+              {executionResult.job?.pr_url && (
+                <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
+                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
+                  <GitPullRequest size={11} /> View PR
+                </a>
+              )}
+              <button onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
+            </span>
+          </div>
+
+          {executionJobDetail && (
+            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5">
+              {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => (
+                <div key={it.id} className="flex items-start gap-2 text-[11px] font-medium text-rose-700 bg-white/60 rounded-lg px-3 py-2">
+                  <XCircle size={12} className="text-rose-500 shrink-0 mt-0.5" />
+                  <span>
+                    <span className="font-black">{it.recommendation_type}</span>
+                    {it.page ? <span className="text-rose-500"> — {it.page}</span> : null}
+                    <span className="block text-rose-500 font-normal mt-0.5">{it.error || 'No error message recorded'}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* QUICK COMMAND METRIC HEADER PANEL */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-        
-        {/* Tab switch panel (Left, 4-cols) */}
-        <div className="lg:col-span-4 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+
+        {/* Tab switch panel (Left, 5-cols — matches the 5-col left column below so edges line up) */}
+        <div className="lg:col-span-5 bg-slate-100/90 p-1.5 rounded-2xl border border-slate-200/80 flex shadow-sm items-center justify-between">
           {[
             { key: 'recommendations', label: 'Recs', count: recs?.items.length },
             { key: 'drafts', label: 'Drafts', count: nonImplementedDrafts?.length },
@@ -412,8 +460,8 @@ export default function ActionCenter() {
           ))}
         </div>
 
-        {/* Date controllers & refresh pipeline (Right, 8-cols) */}
-        <div className="lg:col-span-8 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+        {/* Date controllers & refresh pipeline (Right, 7-cols — matches the 7-col right column below so edges line up) */}
+        <div className="lg:col-span-7 bg-white border border-slate-205 rounded-2xl p-2.5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
           
           {/* Quick stats indicators with distinct colored chips */}
           <div className="flex items-center gap-2.5 text-[10.5px] font-black uppercase tracking-wider shrink-0">
@@ -442,16 +490,6 @@ export default function ActionCenter() {
             >
               {refreshing ? 'Refreshing…' : 'Refresh'}
             </button>
-            <button
-              onClick={executeSafeFixes}
-              disabled={executingSafeFixes || safeEligibleCount === 0}
-              title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
-              className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/10 disabled:opacity-50 disabled:hover:scale-100 cursor-pointer"
-              style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
-            >
-              <Zap size={12} className={executingSafeFixes ? 'animate-pulse' : ''} />
-              {executingSafeFixes ? 'Executing…' : `Execute Today's Safe Fixes (${Math.min(15, safeEligibleCount)})`}
-            </button>
           </div>
         </div>
       </div>
@@ -466,23 +504,35 @@ export default function ActionCenter() {
               purely a display filter over the same recommendations feed;
               Generate Draft/Drafts/Approval/PR logic below is untouched. */}
           {tab === 'recommendations' && recs && (
-            <div className="flex items-center gap-1.5 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
-              {SOURCE_FILTERS.map((f) => {
-                const active = sourceFilter === f.value;
-                const meta = BUCKET_META[f.value];
-                return (
-                  <button
-                    key={f.value}
-                    onClick={() => setSourceFilter(f.value)}
-                    className={`text-[10px] py-1.5 px-3 font-black rounded-lg flex-1 transition-all duration-150 cursor-pointer ${
-                      active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                    }`}
-                    style={active && meta ? { color: meta.color } : undefined}
-                  >
-                    {f.label}
-                  </button>
-                );
-              })}
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200/80">
+                {SOURCE_FILTERS.map((f) => {
+                  const active = sourceFilter === f.value;
+                  const meta = BUCKET_META[f.value];
+                  return (
+                    <button
+                      key={f.value}
+                      onClick={() => setSourceFilter(f.value)}
+                      className={`text-[10px] py-1.5 px-2.5 font-black rounded-lg transition-all duration-150 cursor-pointer ${
+                        active ? 'bg-white shadow border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                      style={active && meta ? { color: meta.color } : undefined}
+                    >
+                      {f.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={executeSafeFixes}
+                disabled={executingSafeFixes || safeEligibleCount === 0}
+                title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
+                className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer ml-auto shrink-0"
+                style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
+              >
+                <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
+                {executingSafeFixes ? '…' : Math.min(15, safeEligibleCount)}
+              </button>
             </div>
           )}
 

@@ -17,22 +17,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("recommendations", sa.Column("root_cause_text", sa.Text, nullable=True))
-    op.add_column("recommendations", sa.Column("resolved_at", sa.TIMESTAMP(timezone=True), nullable=True))
-    op.add_column("recommendations", sa.Column("resolved_by", sa.Text, nullable=True))
-    op.drop_constraint("recommendations_status_check", "recommendations", type_="check")
+    op.add_column("analyst_recommendations", sa.Column("root_cause_text", sa.Text, nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("resolved_at", sa.TIMESTAMP(timezone=True), nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("resolved_by", sa.Text, nullable=True))
+    op.drop_constraint("recommendations_status_check", "analyst_recommendations", type_="check")
     op.create_check_constraint(
-        "recommendations_status_check", "recommendations",
+        "recommendations_status_check", "analyst_recommendations",
         "status IN ('new','acknowledged','dismissed','resolved')",
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint("recommendations_status_check", "recommendations", type_="check")
+    op.drop_constraint("recommendations_status_check", "analyst_recommendations", type_="check")
     op.create_check_constraint(
-        "recommendations_status_check", "recommendations",
+        "recommendations_status_check", "analyst_recommendations",
         "status IN ('new','acknowledged','dismissed')",
     )
-    op.drop_column("recommendations", "resolved_by")
-    op.drop_column("recommendations", "resolved_at")
-    op.drop_column("recommendations", "root_cause_text")
+    op.drop_column("analyst_recommendations", "resolved_by")
+    op.drop_column("analyst_recommendations", "resolved_at")
+    op.drop_column("analyst_recommendations", "root_cause_text")

@@ -12,7 +12,7 @@ target metric/dimension, not its narration text."""
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, EffortEstimation, Insight, Recommendation
+from app.db.models import Client, EffortEstimation, Insight, AnalystRecommendations
 from app.db.session import SessionLocal
 from app.intelligence.affected_pages import resolve_affected_page_count
 from app.intelligence.category_rules import BASE_EFFORT_BY_CATEGORY, EFFORT_LABELS, category_for_metric
@@ -32,7 +32,7 @@ async def run_effort_estimation() -> None:
     for client in clients:
         async with SessionLocal() as session:
             recommendations = (
-                await session.execute(select(Recommendation).where(Recommendation.client_id == client.id))
+                await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.client_id == client.id))
             ).scalars().all()
             already_estimated = {
                 r[0] for r in (
@@ -48,7 +48,7 @@ async def run_effort_estimation() -> None:
             await session.commit()
 
 
-async def _estimate(session: AsyncSession, client_id: int, rec: Recommendation) -> None:
+async def _estimate(session: AsyncSession, client_id: int, rec: AnalystRecommendations) -> None:
     insight = await session.get(Insight, rec.insight_id)
     if insight is None:
         session.add(EffortEstimation(

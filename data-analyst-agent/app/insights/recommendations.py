@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.narrator import call_llm
 from app.api.routes.dashboard import get_latest_forecast
-from app.db.models import Client, Insight, MetricCatalog, Recommendation, RootCauseAnalysisNode, RootCauseAnalysisRun
+from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations, RootCauseAnalysisNode, RootCauseAnalysisRun
 from app.db.session import SessionLocal
 from app.scoring.impact_projection import project_impact
 
@@ -79,7 +79,7 @@ async def run_recommendation_engine() -> None:
             }
             existing_by_insight = {
                 r.insight_id: r for r in
-                (await session.execute(select(Recommendation).where(Recommendation.client_id == client.id))).scalars().all()
+                (await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.client_id == client.id))).scalars().all()
             }
 
             for insight in insights:
@@ -107,7 +107,7 @@ async def run_recommendation_engine() -> None:
                 if text is None:
                     continue
                 root_cause, tailored_recommendation, error = await _generate_llm(insight, metric)
-                session.add(Recommendation(
+                session.add(AnalystRecommendations(
                     client_id=client.id, insight_id=insight.id,
                     priority=SEVERITY_TO_PRIORITY.get(insight.severity, "low"),
                     recommendation_text=tailored_recommendation or text,
@@ -169,7 +169,7 @@ EXECUTIVE_SUMMARY_TOOL = {
 
 
 async def generate_executive_summary(
-    insight: Insight, metric: MetricCatalog | None, recommendation: Recommendation,
+    insight: Insight, metric: MetricCatalog | None, recommendation: AnalystRecommendations,
 ) -> str:
     """On-demand (not part of the nightly run) — unlike _generate_llm above,
     a failure here must surface to the caller rather than being swallowed,
@@ -257,7 +257,7 @@ async def generate_dashboard_executive_summary(session: AsyncSession, *, client_
 
     chosen, chosen_rec = None, None
     for insight in sorted(insights, key=lambda i: SEVERITY_RANK.get(i.severity, 3)):
-        rec = (await session.execute(select(Recommendation).where(Recommendation.insight_id == insight.id))).scalar_one_or_none()
+        rec = (await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == insight.id))).scalar_one_or_none()
         if rec is not None and rec.status in ("resolved", "dismissed"):
             continue  # staff already marked this occurrence solved or not worth acting on — same filter as get_dashboard
         chosen, chosen_rec = insight, rec

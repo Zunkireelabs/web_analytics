@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, Insight, MetricCatalog, Recommendation
+from app.db.models import Client, Insight, MetricCatalog, AnalystRecommendations
 from app.db.session import get_session
 from app.security.auth import require_admin_key
 
@@ -34,7 +34,7 @@ async def get_alerts(
         ).scalars().all()
         for insight in insights:
             rec = (
-                await session.execute(select(Recommendation).where(Recommendation.insight_id == insight.id))
+                await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == insight.id))
             ).scalar_one_or_none()
             if rec is not None and rec.status in ("resolved", "dismissed"):
                 continue

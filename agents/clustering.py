@@ -82,13 +82,27 @@ DEFAULT_DISTANCE_THRESHOLD = 0.35  # cosine distance; lower = tighter/more clust
 MIN_CLUSTER_SIZE = 2  # a single keyword isn't a "cluster" — excluded from output, not lost (still in gsc_breakdown).
 MIN_IMPRESSIONS = 1  # drop true-zero-impression rows before clustering; they're noise, not opportunities.
 GAP_SCORE_POSITION_THRESHOLD = 20
+
 GAP_SCORE_IMPRESSIONS_THRESHOLD = 50  # gap_score fires when position > 20 AND impressions > 50.
+
+GAP_SCORE_IMPRESSIONS_THRESHOLD = 30  # gap_score fires when position > 20 OR impressions > 30.
+
 TOP_N_FOR_PROFILE = 50
 TOP_N_PER_CLUSTER_FOR_NAMING = 8  # keywords shown to the LLM per cluster when naming — bounds prompt size on large clusters.
 
 VALID_SITE_TYPES = {"service", "product", "ecommerce", "education"}
 VALID_CLUSTER_TYPES = {"service", "product", "general"}
 VALID_PRIORITIES = {"high", "medium", "low"}
+
+
+
+# Step 4 — external keyword research
+RESEARCH_KEYWORDS_PER_TOPIC = 20
+VALID_SEARCH_INTENTS = {"informational", "commercial", "transactional"}
+VALID_DIFFICULTIES = {"low", "medium", "high"}
+EXTERNAL_RESEARCH_RANKING_THRESHOLD = 20  # avg_position < this = already ranking well, skip; >= or missing = gap.
+DIFFICULTY_TO_PRIORITY = {"low": "high", "medium": "medium", "high": "low"}  # easier keyword = higher priority to chase
+
 
 # Same "daily" tier server/llm.js's own MODEL_DEFAULTS use for frequent,
 # lower-stakes calls — this script's calls are exactly that (structured
@@ -296,8 +310,12 @@ def score_cluster(group):
     )
     is_gap = (
         avg_position is not None
+
         and avg_position > GAP_SCORE_POSITION_THRESHOLD
         and avg_impressions > GAP_SCORE_IMPRESSIONS_THRESHOLD
+
+        and (avg_position > GAP_SCORE_POSITION_THRESHOLD or avg_impressions > GAP_SCORE_IMPRESSIONS_THRESHOLD)
+
     )
     gap_score = avg_impressions if is_gap else 0.0
     return {"avg_impressions": avg_impressions, "avg_position": avg_position, "gap_score": gap_score}
@@ -320,6 +338,51 @@ def build_cluster_rows(groups, naming):
             **score_cluster(g),
         })
     return rows
+
+
+
+
+def filter_noise_clusters(provider, client, industry, site_type, cluster_rows):
+    """Flags already-built clusters that are clearly unrelated to the site's
+    real industry/site_type (e.g. stray GSC traffic like an unrelated court
+    system or age-inquiry query landing in the data) via a single LLM call
+    over the cluster names + their real keywords. Cluster membership/naming
+    above is never touched here — this only decides whether a whole
+    already-built cluster gets saved at all. Fails open (returns cluster_rows
+    unchanged) on any LLM/parse failure, same discipline as the rest of this
+    script — a classification failure must never silently drop real data."""
+    if not cluster_rows:
+        return cluster_rows
+    summaries = [
+        {
+            "cluster_name": c["cluster_name"],
+            "keywords": [k["keyword"] for k in c["keywords_json"][:TOP_N_PER_CLUSTER_FOR_NAMING]],
+        }
+        for c in cluster_rows
+    ]
+    system = (
+        "You are an SEO analyst reviewing already-clustered real search queries for a website. "
+        f'The site\'s real industry is "{industry}" and its site_type is "{site_type}". Given the '
+        "clusters below, identify which ones are clearly UNRELATED to the site's main industry — "
+        "stray/irrelevant search traffic, not real topics this site is actually about. Do not flag "
+        "a cluster just because it is a minor or adjacent topic; only flag ones with no real "
+        'relation to the given industry. Respond with ONLY a JSON object: {"noise_clusters": '
+        '["cluster_name", ...]}.'
+    )
+    user = f"Clusters:\n{json.dumps(summaries)}"
+    parsed = _parse_json_response(call_llm(provider, client, system, user, max_tokens=800))
+    if not parsed or not isinstance(parsed.get("noise_clusters"), list):
+        return cluster_rows
+
+    noise_names = set(parsed["noise_clusters"])
+    kept = []
+    for c in cluster_rows:
+        if c["cluster_name"] in noise_names:
+            print(f"  skipped_noise_cluster: {c['cluster_name']}")
+        else:
+            kept.append(c)
+    return kept
+
 
 
 def save_clusters(conn, site_id, clusters):
@@ -394,6 +457,144 @@ def save_gaps(conn, site_id, gaps):
 
 
 # ---------------------------------------------------------------------------
+
+# Step 4: external keyword research (runs after Steps 1-3 above; independent
+# of them — reads site_profiles fresh from the DB rather than reusing the
+# in-memory profile from Step 1, and never touches keyword_clusters or the
+# gap rows Step 3 already saved).
+# ---------------------------------------------------------------------------
+
+def fetch_site_profile(conn, site_id):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT industry, main_topics_json, site_type FROM site_profiles WHERE site_id = %s",
+            (site_id,),
+        )
+        row = cur.fetchone()
+    if not row or not row.get("industry"):
+        return None
+    main_topics = row.get("main_topics_json")
+    return {
+        "industry": row["industry"],
+        "main_topics": main_topics if isinstance(main_topics, list) else [],
+        "site_type": row.get("site_type"),
+    }
+
+
+def research_topic_keywords(provider, client, site_type, industry, topic):
+    """Asks the LLM for real keywords people search for this one main_topic
+    — external research, independent of Step 2's clustering of this site's
+    own existing GSC data. Returns [] and logs a warning on any parse/shape
+    failure, never raising, so one bad topic never stops the others."""
+    system = (
+        "You are a keyword research expert. Given a company's site type, industry, and one topic it "
+        "offers, return the real keywords people actually search on Google when looking for this. "
+        "Focus on: problem-based searches (e.g. 'how to automate bookings'), solution-based searches "
+        "(e.g. 'AI booking engine software'), comparison searches (e.g. 'best booking software for "
+        "clinics'), and location searches if relevant (e.g. 'booking software nepal'). Return only "
+        'JSON, no other text: {"keywords": [{"keyword": "...", "search_intent": '
+        '"informational"|"commercial"|"transactional", "estimated_difficulty": "low"|"medium"|"high"}, '
+        f'...]}}, exactly {RESEARCH_KEYWORDS_PER_TOPIC} items.'
+    )
+    user = f"Company site_type: {site_type or 'unknown'}\nIndustry: {industry}\nTopic: {topic}"
+    parsed = _parse_json_response(call_llm(provider, client, system, user, max_tokens=1800))
+    if not parsed or not isinstance(parsed.get("keywords"), list):
+        print(f"  [warn] external research: bad/unparseable response for topic '{topic}', skipping", file=sys.stderr)
+        return []
+
+    results = []
+    for k in parsed["keywords"]:
+        if not isinstance(k, dict):
+            continue
+        keyword, intent, difficulty = k.get("keyword"), k.get("search_intent"), k.get("estimated_difficulty")
+        if not keyword or intent not in VALID_SEARCH_INTENTS or difficulty not in VALID_DIFFICULTIES:
+            continue
+        results.append({"keyword": keyword, "search_intent": intent, "estimated_difficulty": difficulty})
+    return results
+
+
+def fetch_gsc_positions(conn, site_id, since, keywords):
+    """Batch-checks a topic's researched keywords against this site's own
+    real gsc_breakdown data (case-insensitive, since LLM-generated keywords
+    may not match GSC's own casing exactly). Returns {lowercased keyword:
+    avg_position} only for keywords with real impression data — a keyword
+    absent from the returned dict has no coverage at all."""
+    if not keywords:
+        return {}
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT lower(dim_value) AS keyword,
+                   SUM(position * impressions) / SUM(impressions) AS avg_position
+            FROM gsc_breakdown
+            WHERE site_id = %s AND dim_type = 'query' AND date >= %s
+                AND lower(dim_value) = ANY(%s) AND impressions IS NOT NULL AND position IS NOT NULL
+            GROUP BY lower(dim_value)
+            HAVING SUM(impressions) > 0
+            """,
+            (site_id, since, [k.lower() for k in keywords]),
+        )
+        return {r["keyword"]: float(r["avg_position"]) for r in cur.fetchall()}
+
+
+def existing_gap_topics(conn, site_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT lower(topic) FROM keyword_gaps WHERE site_id = %s", (site_id,))
+        return {row[0] for row in cur.fetchall()}
+
+
+def save_external_gaps(conn, site_id, gaps):
+    with conn.cursor() as cur:
+        for g in gaps:
+            cur.execute(
+                """
+                INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
+                VALUES (%s, %s, %s, %s, 'pending_review', 'claude_research')
+                """,
+                (site_id, g["topic"], g["reason"], g["priority"]),
+            )
+    conn.commit()
+
+
+def run_external_keyword_research(conn, provider, llm_client, site_id, since):
+    profile = fetch_site_profile(conn, site_id)
+    if not profile or not profile["main_topics"]:
+        print(f"site {site_id}: no site_profile main_topics available, skipping external keyword research")
+        return
+
+    existing_topics = existing_gap_topics(conn, site_id)  # updated in-loop too, so cross-topic dupes in this same run are also caught
+    keywords_researched = 0
+    new_gaps = []
+
+    for topic in profile["main_topics"]:
+        results = research_topic_keywords(provider, llm_client, profile["site_type"], profile["industry"], topic)
+        keywords_researched += len(results)
+        if not results:
+            continue
+
+        positions = fetch_gsc_positions(conn, site_id, since, [r["keyword"] for r in results])
+        for r in results:
+            keyword_lower = r["keyword"].lower()
+            position = positions.get(keyword_lower)
+            if position is not None and position < EXTERNAL_RESEARCH_RANKING_THRESHOLD:
+                continue  # already ranking well — not a gap
+            if keyword_lower in existing_topics:
+                continue  # already flagged (Step 3 or an earlier topic this run) — never duplicate
+            new_gaps.append({
+                "topic": r["keyword"],
+                "reason": "People search this but you rank poorly/not at all",
+                "priority": DIFFICULTY_TO_PRIORITY[r["estimated_difficulty"]],
+            })
+            existing_topics.add(keyword_lower)
+
+    if new_gaps:
+        save_external_gaps(conn, site_id, new_gaps)
+
+    print(f"External research complete: {keywords_researched} keywords researched, {len(new_gaps)} new gaps found")
+
+
+# ---------------------------------------------------------------------------
+
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -411,6 +612,11 @@ def run_for_site(conn, provider, llm_client, embed_model, site_id, days, distanc
     groups = cluster_keywords(keywords, embed_model, distance_threshold)
     naming = name_and_type_clusters(provider, llm_client, groups)
     cluster_rows = build_cluster_rows(groups, naming)
+
+
+    if profile:
+        cluster_rows = filter_noise_clusters(provider, llm_client, profile["industry"], profile["site_type"], cluster_rows)
+
     save_clusters(conn, site_id, cluster_rows)  # every row tagged this site_id — no cross-site writes possible
 
     gaps = []
@@ -422,6 +628,11 @@ def run_for_site(conn, provider, llm_client, embed_model, site_id, days, distanc
         f"site {site_id}: profile={'ok' if profile else 'failed'}, "
         f"{len(cluster_rows)} cluster(s) saved, {len(gaps)} gap(s) flagged for review"
     )
+
+
+
+    run_external_keyword_research(conn, provider, llm_client, site_id, since)
+
 
 
 def main():

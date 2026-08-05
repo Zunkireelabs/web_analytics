@@ -25,22 +25,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("recommendations", sa.Column("narration_status", sa.Text, nullable=False, server_default="pending"))
-    op.add_column("recommendations", sa.Column("narration_error", sa.Text, nullable=True))
-    op.add_column("recommendations", sa.Column("narration_attempted_at", sa.TIMESTAMP(timezone=True), nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("narration_status", sa.Text, nullable=False, server_default="pending"))
+    op.add_column("analyst_recommendations", sa.Column("narration_error", sa.Text, nullable=True))
+    op.add_column("analyst_recommendations", sa.Column("narration_attempted_at", sa.TIMESTAMP(timezone=True), nullable=True))
     op.create_check_constraint(
-        "recommendations_narration_status_check", "recommendations",
+        "recommendations_narration_status_check", "analyst_recommendations",
         "narration_status IN ('pending','ok','failed')",
     )
     # Backfill from the only signal that already exists: a populated
     # root_cause_text means some prior LLM attempt succeeded.
     op.execute(
-        "UPDATE recommendations SET narration_status = CASE WHEN root_cause_text IS NOT NULL THEN 'ok' ELSE 'failed' END"
+        "UPDATE analyst_recommendations SET narration_status = CASE WHEN root_cause_text IS NOT NULL THEN 'ok' ELSE 'failed' END"
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint("recommendations_narration_status_check", "recommendations", type_="check")
-    op.drop_column("recommendations", "narration_attempted_at")
-    op.drop_column("recommendations", "narration_error")
-    op.drop_column("recommendations", "narration_status")
+    op.drop_constraint("recommendations_narration_status_check", "analyst_recommendations", type_="check")
+    op.drop_column("analyst_recommendations", "narration_attempted_at")
+    op.drop_column("analyst_recommendations", "narration_error")
+    op.drop_column("analyst_recommendations", "narration_status")
