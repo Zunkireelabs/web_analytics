@@ -1,6 +1,6 @@
 import { analyzePageUrl, checkLlmsReadiness, checkWebMcpPresence, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { getQueriesForPage } from '../store/read.js';
-import { scorePageCategories, scoreLlmsReadiness, combineScores } from './lib/visibility-score.js';
+import { scorePageCategories, scoreLlmsReadiness, combineScores, geoSignalsScore } from './lib/visibility-score.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
@@ -157,7 +157,7 @@ export async function run({ siteId, start, end, pageCache }) {
     const base = { page: f.page, impressions: f.impressions, topQuery: f.topQuery, schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [] };
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
-    const scored = llmsScore != null ? combineScores(categories, llmsScore) : { overall: null, categories };
+    const scored = llmsScore != null ? combineScores(categories, llmsScore, geoSignalsScore(f.result.analysis)) : { overall: null, categories };
     return { ...base, score: scored, recommendations: recommendationsFor(scored.categories), fetchError: null };
   });
 
