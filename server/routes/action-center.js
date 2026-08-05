@@ -5,11 +5,7 @@ import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
-
-import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob } from '../store/execution-jobs.js';
-
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
@@ -496,13 +492,11 @@ router.get('/action-center/execution-jobs/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-
 router.get('/action-center/execution-stats/today', async (req, res, next) => {
   try {
     res.json(await getTodayExecutionStats(req.siteId));
   } catch (e) { next(e); }
 });
-
 
 router.post('/action-center/recommendations/:id/approve-and-ship', async (req, res, next) => {
   try {

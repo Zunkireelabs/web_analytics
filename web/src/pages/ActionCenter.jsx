@@ -313,7 +313,6 @@ export default function ActionCenter() {
     }
   };
 
-
   // A failed item only has a draft to open when the chain got as far as
   // generateDraft before failing (e.g. an apply-time placeholder-field
   // rejection) — items that failed inside generateDraft itself (e.g. "model
@@ -326,7 +325,6 @@ export default function ActionCenter() {
       setError(e.message || 'Could not load draft');
     }
   };
-
 
   // Single-item version of the same chain — for a safe-tier recommendation
   // the user wants to ship right now instead of waiting for the next bulk
@@ -418,7 +416,6 @@ export default function ActionCenter() {
               <span>
                 Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
               </span>
-
             </span>
             <span className="flex items-center gap-2 shrink-0">
               {executionResult.failed > 0 && executionResult.job?.id && (
@@ -440,34 +437,10 @@ export default function ActionCenter() {
               )}
               <button onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
             </span>
-
-            </span>
-            <span className="flex items-center gap-2 shrink-0">
-              {executionResult.failed > 0 && executionResult.job?.id && (
-                <button
-                  onClick={toggleExecutionFailures}
-                  disabled={loadingExecutionJobDetail}
-                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-rose-600 hover:border-rose-350 transition disabled:opacity-60 cursor-pointer"
-                >
-                  {loadingExecutionJobDetail ? 'Loading…' : (
-                    <>{executionJobDetail ? <ChevronUp size={10} strokeWidth={2.5} /> : <ChevronDown size={10} strokeWidth={2.5} />} {executionResult.failed} failed</>
-                  )}
-                </button>
-              )}
-              {executionResult.job?.pr_url && (
-                <a href={executionResult.job.pr_url} target="_blank" rel="noreferrer"
-                  className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-700 hover:border-emerald-350 transition">
-                  <GitPullRequest size={11} /> View PR
-                </a>
-              )}
-              <button onClick={() => { setExecutionResult(null); setExecutionJobDetail(null); }} className="text-emerald-400 hover:text-emerald-600 text-sm leading-none cursor-pointer">×</button>
-            </span>
-
           </div>
 
           {executionJobDetail && (
             <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5">
-
               {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => {
                 const Row = it.draft_id ? 'button' : 'div';
                 return (
@@ -489,18 +462,6 @@ export default function ActionCenter() {
                   </Row>
                 );
               })}
-
-              {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => (
-                <div key={it.id} className="flex items-start gap-2 text-[11px] font-medium text-rose-700 bg-white/60 rounded-lg px-3 py-2">
-                  <XCircle size={12} className="text-rose-500 shrink-0 mt-0.5" />
-                  <span>
-                    <span className="font-black">{it.recommendation_type}</span>
-                    {it.page ? <span className="text-rose-500"> — {it.page}</span> : null}
-                    <span className="block text-rose-500 font-normal mt-0.5">{it.error || 'No error message recorded'}</span>
-                  </span>
-                </div>
-              ))}
-
             </div>
           )}
         </div>
