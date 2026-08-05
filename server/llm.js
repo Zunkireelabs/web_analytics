@@ -18,6 +18,13 @@ export function pickProvider() {
 const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 500;
 
+// Both SDKs default to a multi-minute timeout, so a connection that stalls
+// without erroring (rather than cleanly failing) can hold a caller open for
+// a very long time — e.g. Run Full Analysis awaiting ~19 parallel agents,
+// several of which make LLM calls. Exported so agentic-orchestrator.js's
+// own `new OpenAI(...)` client gets the same ceiling.
+export const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60_000;
+
 export function isRetryable(err) {
   const status = err?.status ?? err?.response?.status;
   if (status === 429 || status >= 500) return true;
@@ -62,7 +69,7 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
 
   if (provider === 'openai') {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
     const res = await withRetry(() => openai.chat.completions.create({
       model: resolvedModel,
       max_tokens: maxTokens,
@@ -74,7 +81,7 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
     return res.choices[0]?.message?.content?.trim() || '';
   }
 
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
   const msg = await withRetry(() => anthropic.messages.create({
     model: resolvedModel,
     max_tokens: maxTokens,
