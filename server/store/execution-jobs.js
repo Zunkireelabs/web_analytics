@@ -52,7 +52,11 @@ export async function getExecutionJob(siteId, id) {
   const { rows } = await query('SELECT * FROM execution_jobs WHERE site_id = $1 AND id = $2', [siteId, id]);
   if (!rows[0]) return null;
   const items = await query(
-    'SELECT * FROM execution_job_recommendations WHERE execution_job_id = $1 ORDER BY id', [id]
+    `SELECT ejr.*, r.recommendation_type, r.issue, r.page
+     FROM execution_job_recommendations ejr
+     JOIN recommendations r ON r.id = ejr.recommendation_id
+     WHERE ejr.execution_job_id = $1 ORDER BY ejr.id`,
+    [id]
   );
   return { ...rows[0], items: items.rows };
 }
