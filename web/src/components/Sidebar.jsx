@@ -180,7 +180,7 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
           <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto custom-scrollbar">
             {NAV.map((n) => <SidebarLink key={n.to} {...n} active={isActive(n.to)} />)}
 
-            <SidebarSection id="growth" label="Growth Tools" tint="text-slate-400 hover:text-slate-600"
+            <SidebarSection id="growth" label="Growth Tools" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
               links={GROWTH_TOOLS_NAV} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
 
             {isInternal && (

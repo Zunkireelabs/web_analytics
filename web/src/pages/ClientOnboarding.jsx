@@ -1,51 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
-
-import ClientBusinessValuesPanel from '../components/ClientBusinessValuesPanel.jsx';
-
-import DesignDriftPanel from '../components/DesignDriftPanel.jsx';
-
+import Modal from '../components/Modal.jsx';
+import ClientDrawer from '../components/ClientDrawer.jsx';
 import {
-  Building,
-  Globe,
-  Clock,
-  CheckCircle2,
-  AlertTriangle,
-  GitBranch,
-  Key,
-  Mail,
-  Lock,
-  Plus,
-  FolderPlus,
-  RefreshCw,
-  FileSpreadsheet,
-  ShieldCheck,
-  Settings,
-  ChevronRight,
-  Sliders,
-  PauseCircle,
-  PlayCircle,
-  Trash2,
-  AlertOctagon,
-  HelpCircle,
-  DollarSign
+  Building, Globe, Clock, GitBranch, Mail, Lock, Plus, Search, Filter,
+  ChevronRight, Users as UsersIcon, Activity,
 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
-
-// The ceiling on what this client's OAuth "Connect" flow (server/routes/
-// oauth-consent.js) can ever grant — 'admin' is deliberately not an option
-// here, same reasoning as its absence from mcp-server/oauth-provider.js's
-// computeEffectivePermissionLevel: OAuth tokens must never reach the tier
-// that can mint/revoke other tokens unattended. Kept in sync by hand with
-// mcp-server/permissions.js, same as McpTokensCard.jsx's TIERS already is.
-const OAUTH_POLICY_OPTIONS = [
-  { value: 'read_only', label: 'Read Only' },
-  { value: 'ai_actions', label: 'AI Actions' },
-  { value: 'automation', label: 'Automation' },
-];
 
 function Field({ label, hint, icon: Icon, ...props }) {
   return (
@@ -61,197 +25,6 @@ function Field({ label, hint, icon: Icon, ...props }) {
       </div>
       {hint && <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">{hint}</span>}
     </label>
-  );
-}
-
-function BaselineResult({ result }) {
-  const { analysis, healthScore, discovery, ingestion } = result;
-  return (
-    <div className="mt-4 rounded-2xl bg-gradient-to-r from-emerald-500/[0.04] to-emerald-500/[0.01] border border-emerald-500/20 p-5 space-y-4 animate-fade-in relative overflow-hidden">
-      <div className="absolute left-0 inset-y-0 w-1 bg-emerald-500" />
-      <div className="flex items-center gap-2">
-        <span className="w-6 h-6 rounded-lg bg-emerald-500/10 text-emerald-600 grid place-items-center">
-          <ShieldCheck size={14} />
-        </span>
-        <p className="text-xs font-black text-emerald-800 uppercase tracking-wider">Baseline Diagnostic Recorded</p>
-      </div>
-
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-        {[
-          { label: 'Website Health Score', val: `${healthScore ?? '—'}/100`, highlight: true },
-          { label: 'Agents Activated', val: analysis?.ranAgentIds?.length ?? 0 },
-          { label: 'Findings Logged', val: analysis?.findingsCount ?? 0 },
-          { label: 'Sitemap Discoveries', val: discovery?.sitemapCount ?? 0 },
-          { label: 'Crawled Pages', val: discovery?.crawlCount ?? 0 },
-          { label: 'Ingested History', val: ingestion?.reportDate ? 'Through ' + ingestion.reportDate : '—' }
-        ].map((stat, i) => (
-          <div key={i} className="bg-white border border-slate-200/50 rounded-xl p-3 flex flex-col justify-between">
-            <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 leading-none">{stat.label}</span>
-            <span className={`text-sm font-black mt-2 font-mono ${stat.highlight ? 'text-emerald-600' : 'text-slate-800'}`}>{stat.val}</span>
-          </div>
-        ))}
-      </div>
-      
-      <p className="text-[10px] text-emerald-700/80 font-medium leading-relaxed">
-        Note: initial baseline captures represents day-0 audit state. Sparse metric graphs are expected for fresh properties and will accumulate delta records immediately upon the next agent cycle.
-      </p>
-    </div>
-  );
-}
-
-function ConnectStep({ client, onConnected }) {
-  const [gscProperty, setGscProperty] = useState('');
-  const [ga4PropertyId, setGa4PropertyId] = useState('');
-  const [reportEmailTo, setReportEmailTo] = useState('');
-  const [state, setState] = useState('idle'); // idle | running | done | error
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setState('running');
-    setError(null);
-    try {
-      const res = await api.clients.connect(client.id, { gscProperty, ga4PropertyId, reportEmailTo: reportEmailTo || undefined });
-      setResult(res);
-      setState('done');
-      onConnected?.();
-    } catch (err) {
-      setError(err.message || 'Connection failed.');
-      setState('error');
-      onConnected?.();
-    }
-  };
-
-  if (state === 'done' && result) {
-    return <BaselineResult result={result} />;
-  }
-
-  return (
-    <form onSubmit={submit} className="space-y-4 mt-3">
-      <div className="rounded-2xl bg-amber-500/[0.04] border border-amber-500/15 p-4 text-[11px] text-amber-800 font-semibold leading-relaxed flex gap-3">
-        <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
-        <div>
-          Grant Google Access: Add the platform service account as a user on GSC and GA4 for <strong>{client.name}</strong> before connecting. The connection will perform real data ingestion and validation immediately.
-        </div>
-      </div>
-      <Field label="GSC Property" value={gscProperty} onChange={(e) => setGscProperty(e.target.value)}
-        placeholder="sc-domain:example.com" hint="Exact property ID from Search Console Settings Dashboard." required icon={Globe} />
-      <Field label="GA4 Property ID" value={ga4PropertyId} onChange={(e) => setGa4PropertyId(e.target.value)}
-        placeholder="123456789" hint="Numeric GA4 property reference ID." required icon={Sliders} />
-      <Field label="Report Email Destination (Optional)" type="email" value={reportEmailTo} onChange={(e) => setReportEmailTo(e.target.value)}
-        placeholder="client@example.com" icon={Mail} />
-      
-      {state === 'error' && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-          {error}
-        </div>
-      )}
-      
-      <button type="submit" disabled={state === 'running'}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-        {state === 'running' ? 'Connecting and fetching real GSC/GA4 baseline…' : 'Connect & Fetch Baseline'}
-      </button>
-    </form>
-  );
-}
-
-const inputMonoCls = 'w-full text-base sm:text-xs font-mono border border-slate-200/80 bg-slate-50/50 rounded-xl px-3.5 py-2.5 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 text-slate-800 placeholder:text-slate-400';
-
-const EXAMPLE_URL_FILE_MAP = `{
-  "pages": {
-    "/services/example/": { "file": "src/services/example.njk" }
-  },
-  "patterns": [
-    { "match": "^/blog/([^/]+)/$", "file": "src/blog/$1.md" }
-  ],
-  "siteRoot": { "llmsTxt": "llms.txt", "robotsTxt": "robots.txt" },
-  "newContentTargets": {
-    "blog-outline": { "dir": "src/blog", "extension": ".md" }
-  }
-}`;
-
-function RepoConnectStep({ client, onConnected }) {
-  const [repoOwner, setRepoOwner] = useState('');
-  const [repoName, setRepoName] = useState('');
-  const [repoDefaultBranch, setRepoDefaultBranch] = useState('main');
-  const [techStack, setTechStack] = useState('');
-  const [githubPatEnvVar, setGithubPatEnvVar] = useState('GITHUB_PAT');
-  const [urlFileMapText, setUrlFileMapText] = useState('');
-  const [state, setState] = useState('idle');
-  const [error, setError] = useState(null);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setState('running');
-    setError(null);
-    let urlFileMap;
-    if (urlFileMapText.trim()) {
-      try {
-        urlFileMap = JSON.parse(urlFileMapText);
-      } catch {
-        setError('url_file_map is not valid JSON — check for formatting errors.');
-        setState('error');
-        return;
-      }
-    }
-    try {
-      await api.clients.connectRepo(client.id, { repoOwner, repoName, repoDefaultBranch, techStack: techStack || undefined, githubPatEnvVar, urlFileMap });
-      setState('done');
-      onConnected?.();
-    } catch (err) {
-      setError(err.message || 'Could not save repo config.');
-      setState('error');
-    }
-  };
-
-  if (state === 'done') {
-    return (
-      <div className="mt-3 rounded-2xl bg-gradient-to-r from-emerald-500/[0.04] to-emerald-500/[0.01] border border-emerald-500/20 p-4.5 flex items-center gap-3">
-        <CheckCircle2 size={16} className="text-emerald-500" />
-        <p className="text-xs font-bold text-emerald-800">GitHub repository connected successfully. Ready to deploy live PRs.</p>
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={submit} className="space-y-4 mt-3">
-      <div className="rounded-2xl bg-indigo-500/[0.03] border border-indigo-500/10 p-4 text-[11px] text-indigo-900 font-semibold leading-relaxed flex gap-3">
-        <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />
-        <div>
-          Git Setup: The Action Center relies on a hand-authored <code>url_file_map</code> to translate website routes to real file paths in your repository.
-        </div>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Repo Owner" value={repoOwner} onChange={(e) => setRepoOwner(e.target.value)} placeholder="acme-inc" required icon={Building} />
-        <Field label="Repo Name" value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="acme-website" required icon={FolderPlus} />
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Default Branch" value={repoDefaultBranch} onChange={(e) => setRepoDefaultBranch(e.target.value)} placeholder="main" icon={GitBranch} />
-        <Field label="Tech Stack" value={techStack} onChange={(e) => setTechStack(e.target.value)} placeholder="e.g. astro, nextjs, nunjucks" icon={Settings} />
-      </div>
-      <Field label="GitHub PAT Env Var Name" value={githubPatEnvVar} onChange={(e) => setGithubPatEnvVar(e.target.value)}
-        placeholder="GITHUB_PAT" hint="Server-side environment variable key naming the GitHub access token." icon={Key} />
-      
-      <label className="block">
-        <span className={labelCls}>url_file_map (JSON, optional)</span>
-        <textarea className={inputMonoCls} rows={8} value={urlFileMapText} onChange={(e) => setUrlFileMapText(e.target.value)}
-          placeholder={EXAMPLE_URL_FILE_MAP} />
-      </label>
-      
-      {state === 'error' && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-          {error}
-        </div>
-      )}
-      
-      <button type="submit" disabled={state === 'running'}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
-        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-        {state === 'running' ? 'Connecting Repository…' : 'Save Repo Configuration'}
-      </button>
-    </form>
   );
 }
 
@@ -294,12 +67,10 @@ function NewClientForm({ onCreated }) {
         <Field label="Admin Account Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 8 characters" required minLength={8} icon={Lock} />
       </div>
       {state === 'error' && (
-        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-          {error}
-        </div>
+        <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>
       )}
       <button type="submit" disabled={state === 'running'}
-        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
+        className="w-full text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20"
         style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
         {state === 'running' ? 'Creating site profile…' : 'Create Client Site'}
       </button>
@@ -308,53 +79,63 @@ function NewClientForm({ onCreated }) {
 }
 
 const STATUS_PILLS = {
-  connected: { label: 'Active baseline', color: '#059669', bg: '#ecfdf5', border: '#a7f3d0' },
-  baselinePending: { label: 'Baseline pending', color: '#d97706', bg: '#fffbeb', border: '#fef3c7' },
-  pending: { label: 'Awaiting integrations', color: '#d97706', bg: '#fffbeb', border: '#fef3c7' },
+  connected: { label: 'Active baseline', className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
+  baselinePending: { label: 'Baseline pending', className: 'bg-amber-50 text-amber-700 border-amber-100' },
+  pending: { label: 'Awaiting integrations', className: 'bg-amber-50 text-amber-700 border-amber-100' },
+};
+const LIFECYCLE_PILLS = {
+  suspended: { label: 'Suspended', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+  soft_deleted: { label: 'Soft-deleted', className: 'bg-rose-50 text-rose-700 border-rose-200' },
 };
 
-// Tenant lifecycle status (PLATFORM-ADMIN-DESIGN.md §D) — distinct from the
-// onboarding-progress pills above. Only shown when status !== 'active', so
-// the common case (every tenant, today) doesn't clutter the row with a
-// redundant "Active" pill next to the onboarding pill.
-const LIFECYCLE_PILLS = {
-  suspended: { label: 'Suspended', color: '#d97706', bg: '#fffbeb', border: '#fde68a' },
-  soft_deleted: { label: 'Soft-deleted', color: '#dc2626', bg: '#fef2f2', border: '#fecaca' },
-};
+const FILTERS = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'connected', label: 'Active baseline' },
+  { value: 'baselinePending', label: 'Baseline pending' },
+  { value: 'pending', label: 'Awaiting integrations' },
+  { value: 'suspended', label: 'Suspended' },
+  { value: 'soft_deleted', label: 'Soft-deleted' },
+];
+
+function onboardingStatus(c) {
+  return !c.connected ? 'pending' : c.baselined ? 'connected' : 'baselinePending';
+}
+
+function KpiCard({ label, value, icon: Icon }) {
+  return (
+    <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl p-4 flex items-center gap-3">
+      <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-100 grid place-items-center text-[#6C63FF] shrink-0">
+        <Icon size={15} />
+      </div>
+      <div className="min-w-0">
+        <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 truncate">{label}</p>
+        <p className="text-lg font-black text-slate-900 leading-tight">{value}</p>
+      </div>
+    </div>
+  );
+}
 
 export default function ClientOnboarding() {
   const [clients, setClients] = useState(null); // null = loading
-  const [showNewForm, setShowNewForm] = useState(false);
-  const [connectingClient, setConnectingClient] = useState(null);
-  const [connectingRepoClient, setConnectingRepoClient] = useState(null);
-  const [retryState, setRetryState] = useState({}); // {[clientId]: 'running'|'done'|'error'}
-  const [retryResult, setRetryResult] = useState({}); // {[clientId]: result | {error}}
-  const [oauthPolicySaving, setOauthPolicySaving] = useState({}); // {[clientId]: true}
-  const [oauthPolicyError, setOauthPolicyError] = useState({}); // {[clientId]: message}
-  const [faqCapSaving, setFaqCapSaving] = useState({}); // {[clientId]: true}
-  const [faqCapError, setFaqCapError] = useState({}); // {[clientId]: message}
-  const [faqBaselineBusy, setFaqBaselineBusy] = useState({}); // {[clientId]: true}
-  const [faqBaselineError, setFaqBaselineError] = useState({}); // {[clientId]: message}
-
-  // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3/3.5).
-  const [lifecycleBusy, setLifecycleBusy] = useState({}); // {[clientId]: true}
-  const [lifecycleError, setLifecycleError] = useState({}); // {[clientId]: message}
-  const [hardDeleteOpen, setHardDeleteOpen] = useState({}); // {[clientId]: true}
-
-  const [businessValuesOpen, setBusinessValuesOpen] = useState({}); // {[clientId]: true}
-
-  const [designDriftOpen, setDesignDriftOpen] = useState({}); // {[clientId]: true}
-
-  const [hardDeleteName, setHardDeleteName] = useState({}); // {[clientId]: string}
-
   const [requests, setRequests] = useState(null); // null = loading
+  const [users, setUsers] = useState([]); // for deriving each client's Owner
+
   const [reviewState, setReviewState] = useState({}); // {[requestId]: 'approving'|'rejecting'|'error'}
-  const [reviewError, setReviewError] = useState({}); // {[requestId]: message}
+  const [reviewError, setReviewError] = useState({});
+
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sort, setSort] = useState({ key: 'name', dir: 'asc' });
+
+  const [selectedClientId, setSelectedClientId] = useState(null);
+  const [drawerInitialTab, setDrawerInitialTab] = useState('general');
 
   const load = () => api.clients.list().then(setClients).catch(() => setClients([]));
   const loadRequests = () => api.clients.signupRequests.list().then(setRequests).catch(() => setRequests([]));
+  const loadUsers = () => api.adminUsers.list().then(setUsers).catch(() => setUsers([]));
 
-  useEffect(() => { load(); loadRequests(); }, []);
+  useEffect(() => { load(); loadRequests(); loadUsers(); }, []);
 
   const approveRequest = async (request) => {
     setReviewState((s) => ({ ...s, [request.id]: 'approving' }));
@@ -381,533 +162,240 @@ export default function ClientOnboarding() {
     }
   };
 
-  const retryBaseline = async (client) => {
-    setRetryState((s) => ({ ...s, [client.id]: 'running' }));
-    try {
-      const res = await api.clients.retryBaseline(client.id);
-      setRetryResult((r) => ({ ...r, [client.id]: res }));
-      setRetryState((s) => ({ ...s, [client.id]: 'done' }));
-      load();
-    } catch (err) {
-      setRetryResult((r) => ({ ...r, [client.id]: { error: err.message || 'Retry failed.' } }));
-      setRetryState((s) => ({ ...s, [client.id]: 'error' }));
-    }
-  };
-
-  // The trusted ceiling for this client's OAuth "Connect" flow
-  // (sites.oauth_max_permission_level, migration 061) — staff-only, same
-  // gating as every other control on this page. Optimistic local update so
-  // the dropdown doesn't visually snap back while the request is in flight;
-  // reverts via a full reload if the save actually fails.
-  const updateOauthPolicy = async (client, oauthMaxPermissionLevel) => {
-    const previous = client.oauthMaxPermissionLevel;
-    setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, oauthMaxPermissionLevel } : c)));
-    setOauthPolicySaving((s) => ({ ...s, [client.id]: true }));
-    setOauthPolicyError((e) => ({ ...e, [client.id]: null }));
-    try {
-      await api.clients.setOauthPolicy(client.id, oauthMaxPermissionLevel);
-    } catch (err) {
-      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, oauthMaxPermissionLevel: previous } : c)));
-      setOauthPolicyError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
-    } finally {
-      setOauthPolicySaving((s) => ({ ...s, [client.id]: false }));
-    }
-  };
-
-  // Sitewide ceiling on how many pages may get a visible on-page FAQ block
-  // (sites.visible_faq_cap, migration 071) — keeps visible FAQs selective
-  // rather than appearing on every eligible page. Same optimistic-update
-  // pattern as updateOauthPolicy above.
-  const updateVisibleFaqCap = async (client, visibleFaqCap) => {
-    const previous = client.visibleFaqCap;
-    setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqCap } : c)));
-    setFaqCapSaving((s) => ({ ...s, [client.id]: true }));
-    setFaqCapError((e) => ({ ...e, [client.id]: null }));
-    try {
-      await api.clients.setVisibleFaqCap(client.id, visibleFaqCap);
-    } catch (err) {
-      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqCap: previous } : c)));
-      setFaqCapError((e) => ({ ...e, [client.id]: err.message || 'Could not save.' }));
-    } finally {
-      setFaqCapSaving((s) => ({ ...s, [client.id]: false }));
-    }
-  };
-
-  // Re-scans this client's real pages for organic (never-touched-by-us)
-  // visible FAQs and stores the count as sites.visible_faq_baseline
-  // (migration 074) — the cap above is only a true sitewide ceiling once
-  // this baseline is added to the tool's own injected count. Staff re-runs
-  // this after adding/removing an FAQ outside the tool, since it's not kept
-  // live automatically (server/routes/clients.js).
-  const recalculateFaqBaseline = async (client) => {
-    setFaqBaselineBusy((s) => ({ ...s, [client.id]: true }));
-    setFaqBaselineError((e) => ({ ...e, [client.id]: null }));
-    try {
-      const result = await api.clients.recalculateFaqBaseline(client.id);
-      setClients((cs) => (cs || []).map((c) => (c.id === client.id ? { ...c, visibleFaqBaseline: result.visibleFaqBaseline } : c)));
-    } catch (err) {
-      setFaqBaselineError((e) => ({ ...e, [client.id]: err.message || 'Could not recalculate.' }));
-    } finally {
-      setFaqBaselineBusy((s) => ({ ...s, [client.id]: false }));
-    }
-  };
-
-  const runLifecycleAction = async (client, action, onSuccess) => {
-    setLifecycleBusy((s) => ({ ...s, [client.id]: true }));
-    setLifecycleError((e) => ({ ...e, [client.id]: null }));
-    try {
-      await action();
-      await load();
-      onSuccess?.();
-    } catch (err) {
-      setLifecycleError((e) => ({ ...e, [client.id]: err.message || 'Action failed.' }));
-    } finally {
-      setLifecycleBusy((s) => ({ ...s, [client.id]: false }));
-    }
-  };
-
-  const suspend = (client) => {
-    if (!confirm(`Suspend ${client.name}? This immediately blocks all access to their dashboard, MCP tokens, and OAuth grants.`)) return;
-    runLifecycleAction(client, () => api.clients.suspend(client.id));
-  };
-
-  const reactivate = (client) => runLifecycleAction(client, () => api.clients.reactivate(client.id));
-
-  const softDelete = (client) => {
-    if (!confirm(`Soft-delete ${client.name}? Data is retained and this is reversible via Reactivate.`)) return;
-    runLifecycleAction(client, () => api.clients.softDelete(client.id));
-  };
-
-  const hardDelete = (client) => {
-    runLifecycleAction(client, () => api.clients.hardDelete(client.id, hardDeleteName[client.id] || ''), () => {
-      setHardDeleteOpen((o) => ({ ...o, [client.id]: false }));
-      setHardDeleteName((n) => ({ ...n, [client.id]: '' }));
-    });
-  };
-
   const onCreated = (site) => {
     setShowNewForm(false);
-    setConnectingClient({ id: site.id, name: site.name });
     load();
+    loadUsers();
+    setSelectedClientId(site.id);
+    setDrawerInitialTab('integrations');
+  };
+
+  const ownerFor = (clientId) => {
+    const siteUsers = users.filter((u) => u.site_id === clientId);
+    return siteUsers.find((u) => u.role === 'tenant_admin') || siteUsers[0] || null;
+  };
+
+  const filtered = useMemo(() => {
+    if (!clients) return [];
+    const q = search.trim().toLowerCase();
+    let rows = clients.filter((c) => {
+      if (q && !(c.name.toLowerCase().includes(q) || (c.websiteDomain || '').toLowerCase().includes(q))) return false;
+      if (statusFilter === 'all') return true;
+      if (statusFilter === 'suspended' || statusFilter === 'soft_deleted') return c.status === statusFilter;
+      return onboardingStatus(c) === statusFilter;
+    });
+    rows = [...rows].sort((a, b) => {
+      let av, bv;
+      if (sort.key === 'name') { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+      else if (sort.key === 'status') { av = onboardingStatus(a); bv = onboardingStatus(b); }
+      else if (sort.key === 'oauth') { av = a.oauthMaxPermissionLevel || ''; bv = b.oauthMaxPermissionLevel || ''; }
+      else { av = a.name.toLowerCase(); bv = b.name.toLowerCase(); }
+      if (av < bv) return sort.dir === 'asc' ? -1 : 1;
+      if (av > bv) return sort.dir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return rows;
+  }, [clients, search, statusFilter, sort]);
+
+  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+
+  const kpis = useMemo(() => {
+    const list = clients || [];
+    return {
+      total: list.length,
+      pendingRegistrations: (requests || []).length,
+      reposConnected: list.filter((c) => c.repoConnected).length,
+      awaitingIntegrations: list.filter((c) => !c.connected).length,
+      activeBaselines: list.filter((c) => c.baselined).length,
+    };
+  }, [clients, requests]);
+
+  const selectedClient = clients?.find((c) => c.id === selectedClientId) || null;
+
+  const openDrawer = (client, initialTab = 'general') => {
+    setSelectedClientId(client.id);
+    setDrawerInitialTab(initialTab);
   };
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      
-      {/* Decorative ambiance background */}
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden no-print">
         <div className="absolute top-0 right-1/3 w-[550px] h-[550px] rounded-full blur-[140px] bg-indigo-500/5 opacity-30 pulse-glow" />
       </div>
 
-      <PageHeader 
-        title="Client Registry" 
+      <PageHeader
+        title="Clients"
         icon="🏢"
-        subtitle="Manage client credentials, Stage GSC/GA4 property linkings, and run day-0 baseline snapshots."
+        subtitle="Manage client workspaces, integrations and AI configuration."
         right={
-          <button 
-            type="button" 
-            onClick={() => setShowNewForm((s) => !s)}
-            className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20 flex items-center gap-1.5"
-            style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-          >
-            {showNewForm ? 'Cancel' : (
-              <>
-                <Plus size={12} strokeWidth={2.5} />
-                <span>New Client</span>
-              </>
-            )}
-          </button>
-        } 
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100/80 px-2.5 py-2">
+              <Search size={12} className="text-slate-400 shrink-0" />
+              <input
+                value={search} onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search clients…"
+                className="bg-transparent text-xs font-semibold text-slate-700 placeholder:text-slate-400 focus:outline-none w-36"
+              />
+            </div>
+            <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100/80 px-2.5 py-2">
+              <Filter size={12} className="text-slate-400 shrink-0" />
+              <select
+                value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+                className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-none"
+              >
+                {FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+            </div>
+            <button type="button" onClick={() => setShowNewForm(true)}
+              className="text-[10px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-500/10 hover:shadow-indigo-500/20 flex items-center gap-1.5"
+              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+              <Plus size={12} strokeWidth={2.5} />
+              <span>New Client</span>
+            </button>
+          </div>
+        }
       />
 
-      {/* Grid containing forms and details */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        
-        {/* Left Side (lg-7) - Creation, Connect forms & Requests */}
-        <div className="lg:col-span-7 space-y-6">
-          
-          {/* Public Signup Requests */}
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3 flex-wrap border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Pending Registrations</h3>
-                <p className="text-[10px] text-slate-450 font-semibold mt-0.5">Prospect requests generated from website access form</p>
-              </div>
-              {requests && requests.length > 0 && (
-                <span className="text-[9px] font-black uppercase tracking-wider bg-indigo-50 border border-indigo-100/50 text-indigo-600 px-2.5 py-0.5 rounded-full">
-                  {requests.length} pending
-                </span>
-              )}
-            </div>
+      {/* Top summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <KpiCard label="Registered Clients" value={kpis.total} icon={Building} />
+        <KpiCard label="Pending Registrations" value={kpis.pendingRegistrations} icon={UsersIcon} />
+        <KpiCard label="Connected Repositories" value={kpis.reposConnected} icon={GitBranch} />
+        <KpiCard label="Awaiting Integrations" value={kpis.awaitingIntegrations} icon={Clock} />
+        <KpiCard label="Active Baselines" value={kpis.activeBaselines} icon={Activity} />
+      </div>
 
-            {requests === null ? (
-              <div className="p-8 text-center text-xs text-slate-400 animate-pulse">Checking database logs…</div>
-            ) : requests.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-400 italic">No pending signup requests found.</div>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {requests.map((r) => {
-                  const state = reviewState[r.id];
-                  const busy = state === 'approving' || state === 'rejecting';
-                  return (
-                    <div key={r.id} className="py-3.5 flex flex-col gap-2">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-black text-slate-800 leading-snug">{r.companyName}</p>
-                          <p className="text-[10px] text-slate-400 font-semibold mt-0.5 truncate">
-                            {r.contactEmail} {r.websiteDomain && `· ${r.websiteDomain}`} · requested {timeAgo(r.createdAt)}
-                          </p>
-                          {r.message && (
-                            <p className="text-[10.5px] font-medium text-slate-500 bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 mt-2 leading-relaxed italic">
-                              "{r.message}"
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 shrink-0">
-                          <button type="button" onClick={() => approveRequest(r)} disabled={busy}
-                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition disabled:opacity-60 active:scale-95">
-                            {state === 'approving' ? 'Approve…' : 'Approve'}
-                          </button>
-                          <button type="button" onClick={() => rejectRequest(r)} disabled={busy}
-                            className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-60 active:scale-95">
-                            {state === 'rejecting' ? 'Reject…' : 'Reject'}
-                          </button>
-                        </div>
-                      </div>
-                      {reviewError[r.id] && <p className="text-[10px] font-semibold text-rose-600 leading-relaxed mt-1">{reviewError[r.id]}</p>}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Form Step 1: Create Client */}
-          {showNewForm && (
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4 animate-fade-in">
-              <div className="border-b border-slate-100 pb-3">
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Step 1 — Create client</h3>
-                <p className="text-[10px] text-slate-450 font-semibold mt-0.5">Creates target login profile and initial workspace configurations</p>
-              </div>
-              <NewClientForm onCreated={onCreated} />
-            </div>
+      {/* Pending registrations — compact queue */}
+      <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl p-5">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Pending Registrations</h3>
+          {requests && requests.length > 0 && (
+            <span className="text-[9px] font-black uppercase tracking-wider bg-indigo-50 border border-indigo-100/50 text-indigo-600 px-2.5 py-0.5 rounded-full">
+              {requests.length} pending
+            </span>
           )}
-
-          {/* Form Step 2: Connect client integrations */}
-          {connectingClient && (
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4 animate-fade-in">
-              <div className="border-b border-slate-100 pb-3 flex justify-between items-center gap-3">
-                <div>
-                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Step 2 — Connect Integrations</h3>
-                  <p className="text-[10px] text-slate-450 font-semibold mt-0.5">Authorize GA4 and GSC access endpoints for <strong>{connectingClient.name}</strong></p>
-                </div>
-                <button type="button" onClick={() => setConnectingClient(null)} className="text-[10px] font-bold text-slate-400 hover:text-slate-600 uppercase tracking-widest">
-                  Skip / Close
-                </button>
-              </div>
-              <ConnectStep client={connectingClient} onConnected={load} />
-            </div>
-          )}
-
-          {/* Form Step 3: Connect repository connection */}
-          {connectingRepoClient && (
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4 animate-fade-in">
-              <div className="border-b border-slate-100 pb-3 flex justify-between items-center gap-3">
-                <div>
-                  <h3 className="text-xs font-black uppercase tracking-widest text-[#6C63FF]">Step 3 (Optional) — Git Integration</h3>
-                  <p className="text-[10px] text-slate-450 font-semibold mt-0.5">Configure GitHub webhook triggers and repositories for <strong>{connectingRepoClient.name}</strong></p>
-                </div>
-                <button type="button" onClick={() => setConnectingRepoClient(null)} className="text-[10px] font-bold text-slate-400 hover:text-slate-600 uppercase tracking-widest">
-                  Close
-                </button>
-              </div>
-              <RepoConnectStep client={connectingRepoClient} onConnected={load} />
-            </div>
-          )}
-
         </div>
 
-        {/* Right Side (lg-5) - Clients List */}
-        <div className="lg:col-span-5 space-y-4">
-          
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Registered Accounts</h3>
-                <p className="text-[10px] text-slate-450 font-semibold mt-0.5">Direct sites monitored by automated specialist agents</p>
-              </div>
-              {clients && clients.length > 0 && (
-                <span className="text-[9px] font-mono font-bold bg-slate-100 text-slate-500 border border-slate-200/50 px-2 py-0.5 rounded">
-                  {clients.length} total
-                </span>
-              )}
-            </div>
+        {requests === null ? (
+          <p className="text-xs text-slate-400 font-semibold py-2">Loading…</p>
+        ) : requests.length === 0 ? (
+          <p className="text-xs text-slate-400 font-semibold py-2">No pending registrations.</p>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {requests.map((r) => {
+              const state = reviewState[r.id];
+              const busy = state === 'approving' || state === 'rejecting';
+              return (
+                <div key={r.id} className="py-2.5 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-bold text-slate-800 truncate">{r.companyName}</p>
+                    <p className="text-[10px] text-slate-400 font-semibold truncate">
+                      {r.contactEmail} {r.websiteDomain && `· ${r.websiteDomain}`} · requested {timeAgo(r.createdAt)}
+                    </p>
+                    {reviewError[r.id] && <p className="text-[10px] font-semibold text-rose-600 mt-0.5">{reviewError[r.id]}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button type="button" onClick={() => approveRequest(r)} disabled={busy}
+                      className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition disabled:opacity-60">
+                      {state === 'approving' ? 'Approve…' : 'Approve'}
+                    </button>
+                    <button type="button" onClick={() => rejectRequest(r)} disabled={busy}
+                      className="text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 transition disabled:opacity-60">
+                      {state === 'rejecting' ? 'Reject…' : 'Reject'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
-            {clients === null ? (
-              <div className="p-8 text-center text-xs text-slate-400 animate-pulse">Accessing directory nodes…</div>
-            ) : clients.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-400 italic">No registered client sites on record.</div>
-            ) : (
-              <div className="divide-y divide-slate-100/70">
-                {clients.map((c) => {
-                  const s = !c.connected ? STATUS_PILLS.pending : c.baselined ? STATUS_PILLS.connected : STATUS_PILLS.baselinePending;
-                  const rState = retryState[c.id];
-                  const rResult = retryResult[c.id];
+      {/* Main content — data table */}
+      <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md shadow-sm rounded-2xl overflow-hidden">
+        {clients === null ? (
+          <p className="text-xs text-slate-400 font-semibold p-6">Loading…</p>
+        ) : filtered.length === 0 ? (
+          <p className="text-xs text-slate-400 font-semibold p-6">
+            {clients.length === 0 ? 'No registered client sites on record.' : 'No clients match your search/filter.'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  {[
+                    { key: 'name', label: 'Client' },
+                    { key: 'status', label: 'Status' },
+                    { key: null, label: 'Repository' },
+                    { key: 'oauth', label: 'OAuth' },
+                    { key: null, label: '' },
+                  ].map((col) => (
+                    <th key={col.label || 'actions'}
+                      onClick={col.key ? () => toggleSort(col.key) : undefined}
+                      className={`px-4 py-3 text-[9px] font-black uppercase tracking-widest text-slate-400 ${col.key ? 'cursor-pointer select-none hover:text-slate-600' : ''}`}>
+                      {col.label}{col.key && sort.key === col.key ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((c) => {
+                  const s = STATUS_PILLS[onboardingStatus(c)];
+                  const oauthLabel = { read_only: 'Read Only', ai_actions: 'AI Actions', automation: 'Automation' }[c.oauthMaxPermissionLevel] || 'Read Only';
                   return (
-                    <div key={c.id} className="py-4 space-y-3">
-                      <div className="flex items-center gap-3 justify-between">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-black text-slate-900 leading-snug truncate">{c.name}</p>
-                          <p className="text-[9.5px] font-mono text-slate-400 mt-1 truncate">
-                            {c.websiteDomain || 'no domain configured'}
-                          </p>
-                          {c.onboardedAt && (
-                            <span className="block text-[8px] font-bold text-slate-400 uppercase tracking-wide mt-1">
-                              Created {timeAgo(c.onboardedAt)}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="shrink-0 flex flex-col items-end gap-1.5">
+                    <tr key={c.id} onClick={() => openDrawer(c)}
+                      className="border-b border-slate-50 last:border-b-0 hover:bg-slate-50/70 transition cursor-pointer" style={{ height: '60px' }}>
+                      <td className="px-4 py-2">
+                        <p className="text-xs font-bold text-slate-800 truncate">{c.name}</p>
+                        <p className="text-[10px] font-mono text-slate-400 truncate">{c.websiteDomain || 'no domain configured'}</p>
+                      </td>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           {LIFECYCLE_PILLS[c.status] && (
-                            <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border leading-none"
-                              style={{ color: LIFECYCLE_PILLS[c.status].color, backgroundColor: LIFECYCLE_PILLS[c.status].bg, borderColor: LIFECYCLE_PILLS[c.status].border }}>
+                            <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border ${LIFECYCLE_PILLS[c.status].className}`}>
                               {LIFECYCLE_PILLS[c.status].label}
                             </span>
                           )}
-                          <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border leading-none"
-                            style={{ color: s.color, backgroundColor: s.bg, borderColor: s.border }}>
-                            {s.label}
+                          <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border ${s.className}`}>{s.label}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2">
+                        {c.repoConnected ? (
+                          <span className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border border-slate-200 text-slate-500 bg-slate-50 flex items-center gap-1 w-fit">
+                            <GitBranch size={9} /> Connected
                           </span>
-                          {c.repoConnected && (
-                            <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border border-slate-200 text-slate-500 bg-slate-50 leading-none">
-                              Git link
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Row actions */}
-                      <div className="flex items-center gap-2.5 flex-wrap pt-2 border-t border-slate-100/50">
-                        {!c.connected && (
-                          <button type="button" onClick={() => setConnectingClient({ id: c.id, name: c.name })}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition active:scale-95">
-                            Connect API
-                          </button>
+                        ) : (
+                          <span className="text-[10px] font-semibold text-slate-300">Not connected</span>
                         )}
-                        {c.connected && !c.baselined && (
-                          <button type="button" onClick={() => retryBaseline(c)} disabled={rState === 'running'}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
-                            <RefreshCw size={9} className={rState === 'running' ? 'animate-spin' : ''} />
-                            <span>Retry Ingest</span>
-                          </button>
-                        )}
-                        <button type="button" onClick={() => setConnectingRepoClient({ id: c.id, name: c.name })}
-                          className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-500 border border-slate-200/50 transition active:scale-95 flex items-center gap-1">
-                          <GitBranch size={9} />
-                          <span>{c.repoConnected ? 'Edit Repo' : 'Link Repo'}</span>
-                        </button>
-                      </div>
-
-                      {/* Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K
-                          Phase 3/3.5). The company's own site never reaches
-                          this row with an active suspend/delete path — the
-                          server rejects COMPANY_SITE_ID unconditionally
-                          regardless of what this UI shows, this is just
-                          normal staff console UX on top of that guard. */}
-                      <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-slate-100/50">
-                        {c.status === 'active' && (
-                          <button type="button" onClick={() => suspend(c)} disabled={!!lifecycleBusy[c.id]}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
-                            <PauseCircle size={9} />
-                            <span>Suspend</span>
-                          </button>
-                        )}
-                        {(c.status === 'suspended' || c.status === 'soft_deleted') && (
-                          <button type="button" onClick={() => reactivate(c)} disabled={!!lifecycleBusy[c.id]}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
-                            <PlayCircle size={9} />
-                            <span>Reactivate</span>
-                          </button>
-                        )}
-                        {c.status === 'suspended' && (
-                          <button type="button" onClick={() => softDelete(c)} disabled={!!lifecycleBusy[c.id]}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100 transition disabled:opacity-60 active:scale-95 flex items-center gap-1">
-                            <Trash2 size={9} />
-                            <span>Soft Delete</span>
-                          </button>
-                        )}
-                        {c.status === 'soft_deleted' && !hardDeleteOpen[c.id] && (
-                          <button type="button" onClick={() => setHardDeleteOpen((o) => ({ ...o, [c.id]: true }))}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white transition active:scale-95 flex items-center gap-1">
-                            <AlertOctagon size={9} />
-                            <span>Hard Delete…</span>
-                          </button>
-                        )}
-                      </div>
-
-                      {lifecycleError[c.id] && (
-                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
-                          {lifecycleError[c.id]}
-                        </div>
-                      )}
-
-                      {c.status === 'soft_deleted' && hardDeleteOpen[c.id] && (
-                        <div className="rounded-2xl bg-rose-500/[0.04] border border-rose-500/20 p-4 space-y-3">
-                          <p className="text-[11px] font-bold text-rose-800 leading-relaxed">
-                            This permanently and irreversibly deletes <strong>{c.name}</strong> and all its data.
-                            Type the tenant's exact name to confirm.
-                          </p>
-                          <input
-                            className={inputCls}
-                            value={hardDeleteName[c.id] || ''}
-                            onChange={(e) => setHardDeleteName((n) => ({ ...n, [c.id]: e.target.value }))}
-                            placeholder={c.name}
-                          />
-                          <div className="flex gap-2">
-                            <button type="button" onClick={() => hardDelete(c)}
-                              disabled={!!lifecycleBusy[c.id] || (hardDeleteName[c.id] || '').trim() !== c.name}
-                              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white transition disabled:opacity-40">
-                              {lifecycleBusy[c.id] ? 'Deleting…' : 'Permanently Delete'}
-                            </button>
-                            <button type="button"
-                              onClick={() => { setHardDeleteOpen((o) => ({ ...o, [c.id]: false })); setHardDeleteName((n) => ({ ...n, [c.id]: '' })); }}
-                              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 transition">
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* OAuth "Connect" ceiling — the max permission_level this
-                          client's OAuth grants (server/routes/oauth-consent.js)
-                          can ever reach. 'admin' deliberately isn't an option;
-                          see OAUTH_POLICY_OPTIONS above. */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <ShieldCheck size={11} className="text-slate-400 shrink-0" />
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">OAuth ceiling</span>
-                        <select
-                          value={c.oauthMaxPermissionLevel || 'read_only'}
-                          disabled={!!oauthPolicySaving[c.id]}
-                          onChange={(e) => updateOauthPolicy(c, e.target.value)}
-                          className="text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1 bg-white disabled:opacity-60"
-                        >
-                          {OAUTH_POLICY_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>{opt.label}</option>
-                          ))}
-                        </select>
-                      </div>
-                      {oauthPolicyError[c.id] && (
-                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
-                          {oauthPolicyError[c.id]}
-                        </div>
-                      )}
-
-                      {/* Sitewide visible-FAQ cap — how many pages may get a
-                          visible on-page FAQ before render-inspector.js
-                          starts auto-publishing schema-only. */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <HelpCircle size={11} className="text-slate-400 shrink-0" />
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Visible FAQ cap</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={c.visibleFaqCap ?? 5}
-                          disabled={!!faqCapSaving[c.id]}
-                          onChange={(e) => {
-                            const n = Number(e.target.value);
-                            if (Number.isInteger(n) && n >= 0) updateVisibleFaqCap(c, n);
-                          }}
-                          className="w-16 text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1 bg-white disabled:opacity-60"
-                        />
-                      </div>
-                      {faqCapError[c.id] && (
-                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
-                          {faqCapError[c.id]}
-                        </div>
-                      )}
-
-
-                      {/* Real $ inputs for the Analyst dashboard's Expected
-                          Business Impact projections (data-analyst-agent's
-                          ClientBusinessValue) — without at least one of
-                          these, that card permanently reads "not configured". */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <DollarSign size={11} className="text-slate-400 shrink-0" />
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Business values</span>
-                        <button
-                          type="button"
-                          onClick={() => setBusinessValuesOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
-                          className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition"
-                        >
-                          {businessValuesOpen[c.id] ? 'Hide' : 'Configure…'}
-                        </button>
-                      </div>
-                      {businessValuesOpen[c.id] && <ClientBusinessValuesPanel clientId={c.id} />}
-
-                      {/* Checks whether a stored FAQ/expand-content/internal-links
-                          component template still matches the site's real live
-                          design (implementers/lib/design-drift.js) — surfaces
-                          after a draft fails to apply with reason
-                          'template-stale' in Action Center, or after a known
-                          site redesign. */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <AlertTriangle size={11} className="text-slate-400 shrink-0" />
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Design drift check</span>
-                        <button
-                          type="button"
-                          onClick={() => setDesignDriftOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
-                          className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition"
-                        >
-                          {designDriftOpen[c.id] ? 'Hide' : 'Check…'}
-                        </button>
-                      </div>
-                      {designDriftOpen[c.id] && <DesignDriftPanel clientId={c.id} />}
-
-
-                      {/* Organic (pre-existing, never-touched-by-us) visible
-                          FAQ pages — added to the tool's own injected count
-                          before comparing against the cap above, so the cap
-                          is a true sitewide ceiling (migration 074). Not
-                          kept live automatically — re-run after FAQs change
-                          outside this tool. */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <RefreshCw size={11} className="text-slate-400 shrink-0" />
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Existing FAQ pages</span>
-                        <span className="text-[10px] font-bold text-slate-700">{c.visibleFaqBaseline ?? 0}</span>
-                        <button
-                          type="button"
-                          disabled={!!faqBaselineBusy[c.id]}
-                          onClick={() => recalculateFaqBaseline(c)}
-                          className="text-[10px] font-bold text-blue-600 hover:text-blue-800 disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {faqBaselineBusy[c.id] ? 'Recalculating…' : 'Recalculate'}
-                        </button>
-                      </div>
-                      {faqBaselineError[c.id] && (
-                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
-                          {faqBaselineError[c.id]}
-                        </div>
-                      )}
-
-                      {/* Diagnostic baselining results */}
-                      {rState === 'done' && rResult && !rResult.error && <BaselineResult result={rResult} />}
-                      {rState === 'error' && rResult?.error && (
-                        <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 leading-relaxed">
-                          {rResult.error}
-                        </div>
-                      )}
-                    </div>
+                      </td>
+                      <td className="px-4 py-2">
+                        <span className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">{oauthLabel}</span>
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <ChevronRight size={14} className="text-slate-300 inline-block" />
+                      </td>
+                    </tr>
                   );
                 })}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
-
-        </div>
-
+        )}
       </div>
+
+      <Modal isOpen={showNewForm} onClose={() => setShowNewForm(false)} title="New Client" subtitle="Creates target login profile and initial workspace configuration." icon={Plus} maxWidth="max-w-xl">
+        <NewClientForm onCreated={onCreated} />
+      </Modal>
+
+      <ClientDrawer
+        client={selectedClient}
+        owner={selectedClient ? ownerFor(selectedClient.id) : null}
+        isOpen={!!selectedClient}
+        onClose={() => setSelectedClientId(null)}
+        onReload={() => { load(); loadUsers(); }}
+        initialTab={drawerInitialTab}
+      />
     </div>
   );
 }
