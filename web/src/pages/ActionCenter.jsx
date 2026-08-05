@@ -56,6 +56,8 @@ const GENERATOR_META = {
   'cookie-policy': { label: 'Cookie Policy', icon: '🍪', color: '#f59e0b' },
   'privacy-policy': { label: 'Privacy Policy', icon: '🔒', color: '#d97706' },
   'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
+
+  'duplicate-id-fix': { label: 'Duplicate ID Fix Plans', icon: '🆔', color: '#f97316' },
 };
 
 // Source filter (decision: redesign the existing Action Center into a

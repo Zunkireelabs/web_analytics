@@ -30,6 +30,7 @@ const ACTION_LABELS = {
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report', 'direct-answer': 'Direct Answer',
 
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
+  'duplicate-id-fix': 'Duplicate ID Fix Plan',
 };
 
 const GENERATOR_COLORS = {
@@ -55,6 +56,7 @@ const GENERATOR_COLORS = {
   'cookie-policy': '#f59e0b',
   'privacy-policy': '#d97706',
   'terms-of-service': '#b45309',
+  'duplicate-id-fix': '#f97316',
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every

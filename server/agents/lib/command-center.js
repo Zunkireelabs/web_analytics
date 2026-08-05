@@ -59,6 +59,12 @@ export async function categoryByAgentId() {
   if (categoryByAgentIdCache) return categoryByAgentIdCache;
   const agents = await listAgentMeta();
   categoryByAgentIdCache = new Map(agents.map((meta) => [meta.id, { category: meta.category || 'seo', name: meta.name || meta.id }]));
+  // geo-audit is a generator (server/generators/geo-audit.js), not a
+  // registered orchestrator agent, so listAgentMeta() above never sees it —
+  // added by hand so its findings (now also persisted to agent_runs, see
+  // routes/action-center.js's generateDraft) get a real name/category here
+  // instead of falling back to 'seo'.
+  categoryByAgentIdCache.set('geo-audit', { category: 'geo', name: 'GEO Audit' });
   return categoryByAgentIdCache;
 }
 
@@ -95,9 +101,13 @@ function shapeFinding(f, meta, groundedById) {
     // "Fix" button, but `label` survives — losing it meant a perfectly
     // real, human-written headline (e.g. "Fix heading structure: exactly
     // one H1...") silently fell back to a generic "<Category> issue" title.
+    // `unavailableReason` lets the frontend explain *why* there's no button
+    // instead of just rendering a dead/disabled one with no context.
     recommendedAction = grounded
       ? { ...recommendedAction, params: grounded.params }
-      : { ...recommendedAction, generatorId: null, params: null };
+      : { ...recommendedAction, generatorId: null, params: null, unavailableReason: 'Not enough real data yet (e.g. a matching search query) to ground a draft for this page.' };
+  } else if (recommendedAction) {
+    recommendedAction = { ...recommendedAction, unavailableReason: 'No automated fix built for this issue type yet.' };
   }
   return {
     id: f.id, agentId: f.agentId, agentName: meta?.name, category: meta?.category || 'seo',
@@ -140,8 +150,14 @@ export async function getAgentActivityFeed(siteId, agentIds, limit = 12) {
 // that, same split as Action Center's recommendations vs recommendations/refresh.
 export async function getCommandCenterData(siteId) {
   const [findingRuns, execAndCompetitorRuns, activityRows, recommendations, catByAgent, watchlistRows, competitorRows, authorityHistory, mentionRateHistory, implementedFindingIds] = await Promise.all([
-    getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence', 'ai-visibility']),
+    // geo-audit isn't in RECOMMENDATION_AGENT_IDS (it's a generator, run via
+    // job.js's weekly cron or a manual Action Center click, not the daily
+    // orchestrator — see recommendation-coordinator.js's own shim for why),
+    // but its findings should still count toward this page's health score/
+    // critical-issues the same as every other agent's now that it has a
+    // matching agent_runs row (routes/action-center.js's generateDraft).
+    getLatestFindings(siteId, [...RECOMMENDATION_AGENT_IDS, 'geo-audit']),
+    getLatestAgentRuns(siteId, ['executive-report', 'competitor-intelligence', 'authority', 'ai-recommendation', 'country-intelligence', 'ai-visibility', 'geo-audit']),
     getRecentActivity(siteId, [...RECOMMENDATION_AGENT_IDS, 'executive-report'], 12),
     buildRecommendations(siteId),
     categoryByAgentId(),
@@ -157,6 +173,7 @@ export async function getCommandCenterData(siteId) {
   const aiRecommendationRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-recommendation') || null;
   const countryIntelligenceRun = execAndCompetitorRuns.find((r) => r.agent_id === 'country-intelligence') || null;
   const aiVisibilityRun = execAndCompetitorRuns.find((r) => r.agent_id === 'ai-visibility') || null;
+  const geoAuditRun = execAndCompetitorRuns.find((r) => r.agent_id === 'geo-audit') || null;
 
   const allFindings = findingRuns.flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })));
   const sortedFindings = [...allFindings].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
@@ -371,6 +388,23 @@ export async function getCommandCenterData(siteId) {
       hasRun: !!aiVisibilityRun,
       status: aiVisibilityRun?.status ?? null,
       lastRunAt: aiVisibilityRun?.created_at ?? null,
+    },
+    // GEO (Generative Engine Optimization) readiness score — server/generators/
+    // geo-audit.js, run weekly via job.js's runGeoAuditIfDue or manually from
+    // Action Center; both persist through generateDraft, which now also
+    // writes this agent_runs snapshot. Named geoAudit, not geo, to stay
+    // distinct from geoIntelligence above (country/market data — an
+    // unrelated "GEO" meaning).
+    geoAudit: geoAuditRun?.status === 'ok' && geoAuditRun.facts?.siteScore
+      ? {
+        score: geoAuditRun.facts.siteScore.overall,
+        categories: geoAuditRun.facts.siteScore.categories,
+      }
+      : null,
+    geoAuditMeta: {
+      hasRun: !!geoAuditRun,
+      status: geoAuditRun?.status ?? null,
+      lastRunAt: geoAuditRun?.created_at ?? null,
     },
     activity: shapeActivity(activityRows, catByAgent),
     recentChanges,

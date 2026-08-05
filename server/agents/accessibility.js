@@ -75,7 +75,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // stem from one shared header/footer/nav component reused across the
   // whole site, so they're reported as "N of M checked pages" aggregates
   // rather than assumed sitewide the way missing-html-lang is above.
-  function aggregatedFinding(field, idPrefix, describe) {
+  function aggregatedFinding(field, idPrefix, describe, recommendedAction = null) {
     const affected = reachable.filter((r) => r.analysis[field] > 0);
     return aggregateSystemicFinding({
       id: `accessibility:${idPrefix}`,
@@ -84,7 +84,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getPage: (r) => r.page,
       getImpressions: (r) => r.impressions,
       whyItMatters: (n, c) => describe(n, c),
-      recommendedAction: null,
+      recommendedAction,
     });
   }
 
@@ -92,8 +92,19 @@ export async function run({ siteId, start, end, pageCache, params }) {
     (n, c) => `${n} of ${c} checked pages have a form input with no associated label (nor aria-label) — screen-reader users can't tell what to enter.`);
   const interactiveFinding = aggregatedFinding('emptyInteractiveElements', 'empty-interactive',
     (n, c) => `${n} of ${c} checked pages have a button/link with no accessible text (no visible text, aria-label, or title) — screen readers announce them as blank.`);
+  // Unlike the other three aggregatedFinding calls above, this one has a
+  // real generatorId to hand off to — page-content.js's analysis now
+  // carries the actual duplicate id values/occurrences (not just a count),
+  // so the representative (highest-impression) affected page's own data is
+  // enough to build a real, reviewable duplicate-id-fix.js draft.
   const duplicateIdFinding = aggregatedFinding('duplicateIdCount', 'duplicate-id',
-    (n, c) => `${n} of ${c} checked pages have an id attribute used more than once — breaks aria-labelledby/for references pointing at them.`);
+    (n, c) => `${n} of ${c} checked pages have an id attribute used more than once — breaks aria-labelledby/for references pointing at them.`,
+    (representative) => ({
+      label: 'Fix duplicate element IDs',
+      generatorId: 'duplicate-id-fix',
+      params: { page: representative.page, duplicateIds: representative.analysis.duplicateIds },
+      effort: effortForGenerator('duplicate-id-fix'),
+    }));
   const headingSkipFinding = aggregatedFinding('headingLevelSkips', 'heading-skip',
     (n, c) => `${n} of ${c} checked pages have a heading structure that skips a level (e.g. H1 straight to H3, no H2) — screen-reader users navigating by heading level lose the section structure.`);
 

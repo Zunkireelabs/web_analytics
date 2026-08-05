@@ -230,12 +230,22 @@ export function analyzePage(html, pageUrl) {
   const hasAccessibleName = (el) => $(el).text().trim().length > 0 || !!$(el).attr('aria-label') || !!$(el).attr('title') || $(el).find('img[alt]').filter((_, img) => ($(img).attr('alt') || '').trim()).length > 0;
   const emptyInteractiveElements = $('button, a[href]').filter((_, el) => !hasAccessibleName(el)).length;
 
-  const idCounts = new Map();
+  const idOccurrences = new Map(); // id -> [{tag, snippet}]
   $('[id]').each((_, el) => {
     const id = $(el).attr('id');
-    if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+    if (!id) return;
+    if (!idOccurrences.has(id)) idOccurrences.set(id, []);
+    // outerHTML truncated to a short opening-tag-ish snippet — enough for a
+    // human reviewer (or duplicate-id-fix.js below) to recognize which real
+    // element this is without dumping an entire component's markup into
+    // agent_runs/draft content.
+    const snippet = ($.html(el) || '').slice(0, 160);
+    idOccurrences.get(id).push({ tag: el.tagName || el.name || 'element', snippet });
   });
-  const duplicateIdCount = [...idCounts.values()].filter((n) => n > 1).length;
+  const duplicateIds = [...idOccurrences.entries()]
+    .filter(([, occurrences]) => occurrences.length > 1)
+    .map(([id, occurrences]) => ({ id, count: occurrences.length, occurrences: occurrences.slice(0, 5) }));
+  const duplicateIdCount = duplicateIds.length;
 
   // A heading sequence skipping a level (e.g. h1 straight to h3, no h2) is a
   // real, commonly-flagged a11y structure issue — screen-reader users
@@ -287,6 +297,7 @@ export function analyzePage(html, pageUrl) {
     formInputsMissingLabel, // accessibility.js
     emptyInteractiveElements, // accessibility.js
     duplicateIdCount, // accessibility.js
+    duplicateIds, // accessibility.js: [{id, count, occurrences:[{tag,snippet}]}] — real detail behind duplicateIdCount, feeds duplicate-id-fix.js's draft
     headingLevelSkips, // accessibility.js
     viewportContent, // mobile-usability.js: raw <meta name="viewport"> content, null if absent
     hasViewportMeta, // mobile-usability.js

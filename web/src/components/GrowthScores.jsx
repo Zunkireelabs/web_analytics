@@ -1,12 +1,12 @@
-import { useEffect, useState, useCallback } from 'react';
-import { api, timeAgo } from '../api.js';
+import { timeAgo } from '../api.js';
 
 // Compact top-of-page score tiles for AI Growth: Overall (Website Health),
 // SEO (Authority Score), AEO (AI-visibility readiness), GEO (geo-audit).
 // Each value is a real, independently-computed 0-100 number — the same
-// no-fabrication discipline as the rest of the product. GEO is fetched here
-// (it lives in the geo-audit draft's content.score); the rest arrive via
-// the Command Center data payload.
+// no-fabrication discipline as the rest of the product. All four now arrive
+// via the Command Center data payload (data.geoAudit — see command-center.js);
+// GEO used to do its own separate draft fetch here, bypassing the shared
+// agent_runs snapshot every other tile reads.
 function scoreTone(score) {
   if (score >= 70) return { label: 'Strong', color: 'text-emerald-600', ring: 'stroke-emerald-500' };
   if (score >= 40) return { label: 'Needs work', color: 'text-amber-600', ring: 'stroke-amber-500' };
@@ -70,19 +70,9 @@ function ScoreTile({ label, icon, iconBg, score, sublabel, meta, loading, accent
 }
 
 export default function GrowthScores({ data, loading }) {
-  const [geoAudits, setGeoAudits] = useState(null);
-
-  const loadGeo = useCallback(
-    () => api.actionCenter.drafts({ actionType: 'geo-audit' }).then(setGeoAudits).catch(() => setGeoAudits([])),
-    []
-  );
-
-  useEffect(() => { loadGeo(); }, [loadGeo]);
-
-  const geoLoading = geoAudits === null;
-  const geoLatest = geoAudits?.[0] || null;
-  const geoSublabel = geoLatest ? `Updated ${timeAgo(geoLatest.created_at)}` : 'No audit run yet';
-  const geoScore = geoLatest?.content?.score?.overall ?? null;
+  const geoScore = data?.geoAudit?.score ?? null;
+  const geoMeta = data?.geoAuditMeta;
+  const geoSublabel = geoMeta?.lastRunAt ? `Updated ${timeAgo(geoMeta.lastRunAt)}` : 'No audit run yet';
 
   const healthScore = data?.health?.score ?? null;
   const healthTrend = data?.health?.trendWeek;
@@ -132,10 +122,10 @@ export default function GrowthScores({ data, loading }) {
         icon={<span className="text-sm">🌐</span>}
         iconBg="#f0f9ff"
         accent="#0ea5e9"
-        score={geoLoading || loading ? null : geoScore}
+        score={loading ? null : geoScore}
         sublabel={geoSublabel}
-        meta={geoLoading ? { hasRun: true } : undefined}
-        loading={geoLoading || loading}
+        meta={geoMeta}
+        loading={loading}
       />
     </div>
   );

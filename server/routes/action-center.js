@@ -8,6 +8,7 @@ import { listOpenSafeRecommendations, getRecommendationById, setRecommendationEx
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
+import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import {
@@ -186,6 +187,21 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
   });
+
+  // geo-audit is a generator, not an orchestrator-run agent (recommendation-
+  // coordinator.js's own latestGeoAuditRun shim reads its findings straight
+  // out of this draft for exactly that reason), so its score never reached
+  // agent_runs — command-center.js had nothing to read, unlike authority/
+  // ai-visibility. Persist a matching snapshot here, the one shared path
+  // cron (job.js's runGeoAuditIfDue), MCP, and this manual route all go
+  // through, so all three ways of running it stay in sync automatically.
+  if (generatorId === 'geo-audit' && content?.score) {
+    await saveAgentRun({
+      siteId, agentId: 'geo-audit', agentVersion: 1, input: params || {},
+      status: 'ok', facts: { siteScore: content.score, findings: content.findings },
+      narrative: null, error: null, tookMs: null,
+    }).catch((err) => console.error('[action-center] failed to save geo-audit agent_runs snapshot:', err.message));
+  }
 
   // Stamps growth_query_status.drafted_at so server/agents/growth-queries.js's
   // Phase 5 verification rotation picks this query up — best-effort only,
