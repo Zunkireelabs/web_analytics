@@ -19,7 +19,7 @@ async function req(path, opts = {}) {
     // fields a specific error response includes (e.g. render-mode-uncertain's
     // confidence/suggestedMode) available to callers that need them, without
     // changing behavior for the ones that don't.
-    throw Object.assign(new Error(body.error || `HTTP ${res.status}`), body);
+    throw Object.assign(new Error(body.error || `HTTP ${res.status}`), body, { status: res.status });
   }
   return res.json();
 }

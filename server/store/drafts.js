@@ -448,9 +448,22 @@ export async function getImplementedFindingIds(siteId) {
 // Recommendations too. Deleting a draft, or it becoming 'abandoned' (the fix
 // never shipped — see markDraftAbandoned), naturally un-hides its finding
 // again so a fresh draft can be generated.
+//
+// Also excludes a draft with an unresolved apply_error (a push-branch/PR
+// attempt that failed and hasn't succeeded since — recordApplyFailure sets
+// this, every successful state transition clears it back to NULL). Without
+// this, a draft stuck on a real deployment failure hides its finding from
+// Recommendations forever with no way back to it short of already knowing
+// to check the Drafts tab — confirmed as a real report: a site owner whose
+// Cookie Policy draft failed to push yesterday had no "Generate" button to
+// click today, since the finding had silently vanished from Recommendations.
+// getDraftByFindingId (used by the idempotent /generate route) still finds
+// this same stuck draft by finding_id regardless, so re-surfacing the
+// finding here just gives the user a real way back into it — never creates
+// a duplicate draft row.
 export async function getDraftedFindingIds(siteId) {
   const { rows } = await query(
-    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned' AND rolled_back_at IS NULL",
+    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND finding_id IS NOT NULL AND status != 'abandoned' AND rolled_back_at IS NULL AND apply_error IS NULL",
     [siteId]
   );
   return new Set(rows.map((r) => r.finding_id));

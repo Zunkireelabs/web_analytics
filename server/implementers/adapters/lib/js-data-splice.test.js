@@ -7,6 +7,7 @@ import {
   scanBalanced, findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray,
   insertNewArrayField, assertValidContent, dedupeAndValidateFaqItems,
   parseExistingFaqItems, parseManagedFaqItems, diffFaqItems,
+  findScalarFieldRange, spliceScalarField,
 } from './js-data-splice.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +99,56 @@ describe('findArrayFieldRange', () => {
   test('returns null when the field does not exist yet (real comparison entry)', () => {
     const objRange = findObjectRange(comparisons, 'id', 'zunkiree-vs-algolia', 'js-export-array');
     assert.equal(findArrayFieldRange(comparisons, objRange, 'faqs', 'js-export-array'), null);
+  });
+});
+
+describe('findScalarFieldRange / spliceScalarField', () => {
+  test('finds and replaces a real location\'s title, leaving everything else untouched', () => {
+    const objRange = findObjectRange(locations, 'id', 'kathmandu', 'js-export-array');
+    const range = findScalarFieldRange(locations, objRange, 'title', 'js-export-array');
+    assert.ok(range);
+    assert.equal(locations.slice(range.valueStart, range.valueEnd), '"AI Development Company in Kathmandu | Zunkiree Labs"');
+
+    const updated = spliceScalarField(locations, objRange, 'title', 'New Kathmandu Title', 'js-export-array');
+    assert.match(updated, /title: "New Kathmandu Title"/);
+    // the sibling description field (and every other entry) must survive untouched
+    assert.match(updated, /description: "Zunkiree Labs is Kathmandu's leading AI development company/);
+    const otherObjRange = findObjectRange(updated, 'id', 'pokhara', 'js-export-array');
+    assert.ok(otherObjRange, 'pokhara entry must still be findable after editing kathmandu');
+  });
+
+  test('does not false-match "title" inside an unrelated field name (no accidental "subtitle" collision)', () => {
+    // Regression guard for the lookbehind added specifically for this: a
+    // naive `title\s*:` regex would match inside a hypothetical
+    // `subtitle: "..."` field. None of the real fixtures have one, so this
+    // constructs a minimal case directly.
+    const content = 'export default [\n  { id: "x", subtitle: "not the title field", title: "the real one" }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    const range = findScalarFieldRange(content, objRange, 'title', 'js-export-array');
+    assert.equal(content.slice(range.valueStart, range.valueEnd), '"the real one"');
+  });
+
+  test('ignores a nested object\'s same-named field (real comparisons.js: top-level description vs competitor.description)', () => {
+    const objRange = findObjectRange(comparisons, 'id', 'zunkiree-vs-algolia', 'js-export-array');
+    const range = findScalarFieldRange(comparisons, objRange, 'description', 'js-export-array');
+    assert.ok(range);
+    assert.equal(
+      comparisons.slice(range.valueStart, range.valueEnd),
+      '"Compare Zunkiree Search and Algolia for your search needs. See how AI-native search differs from traditional search-as-a-service."'
+    );
+  });
+
+  test('returns null (no guess) when the field genuinely does not exist — real glossary.js has term/shortDef, not title/description', () => {
+    const objRange = findObjectRange(glossary, 'id', 'agentic-commerce', 'js-export-array');
+    assert.equal(findScalarFieldRange(glossary, objRange, 'title', 'js-export-array'), null);
+    assert.equal(spliceScalarField(glossary, objRange, 'title', 'anything', 'js-export-array'), null);
+  });
+
+  test('json-array format: quoted keys, no lookbehind needed', () => {
+    const content = '[\n  { "id": "x", "title": "old" }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'json-array');
+    const updated = spliceScalarField(content, objRange, 'title', 'new & "quoted"', 'json-array');
+    assert.equal(JSON.parse(updated)[0].title, 'new & "quoted"');
   });
 });
 

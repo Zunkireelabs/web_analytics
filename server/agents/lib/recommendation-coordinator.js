@@ -17,6 +17,38 @@ import { classify } from './recommendation-taxonomy.js';
 // multiple agents' findings about the same page + recommendation_type into
 // one persisted row instead of one-per-agent.
 
+// Site-level generators: exactly one real instance exists for the whole
+// site, never one per page, unlike meta-title/schema/expand-content/etc.
+// trust-compliance.js's cookie/privacy/terms checks in particular give
+// their `missing` variant no real page at all (params.page stays null) but
+// their `broken` variant a real one (the dead link's own target) — the SAME
+// underlying issue naming a different `page` value depending on which
+// status this run happened to observe. Left keyed on the real page value,
+// that produces two permanently-separate recommendation rows for one
+// document (confirmed as a real report: "Draft Terms of Service" and
+// "Draft Terms of Service — /terms/" both showing at once) since a status
+// flip between two runs never revisits the earlier row. Normalizing the key
+// to '' collapses both into one row regardless of which status produced it.
+const SITE_LEVEL_GENERATOR_IDS = new Set([
+  'cookie-policy', 'privacy-policy', 'terms-of-service',
+  'llms-txt', 'security-headers', 'html-lang', 'sitemap', 'robots-fix',
+]);
+
+// The real key for a recommendation row — (siteId, page, generatorId) isn't
+// always enough on its own: analytics-install's GA4 and Facebook Pixel
+// findings share the same generatorId AND the same page (the homepage), so
+// without a discriminator here they'd collide into one row and one of the
+// two providers would silently disappear from Recommendations forever
+// (mergeIntoRecommendation only merges finding_ids in, it never surfaces
+// both as separate cards). Encoding `provider` into the key is enough to
+// keep them distinct; it's never rendered (getRecommendations doesn't
+// return the `page` column to callers), so it's safe to repurpose here.
+export function recommendationPageKey(item) {
+  if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
+  if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
+  return item.params?.page || '';
+}
+
 // grounded = buildRecommendations()'s { items, lastAnalyzedAt } output.
 // Upserts one recommendations row per (siteId, page, generatorId): a new
 // key inserts, an existing open key merges in the new finding/agent.
@@ -29,7 +61,7 @@ import { classify } from './recommendation-taxonomy.js';
 export async function syncFromGrounded(siteId, grounded) {
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
-    const page = item.params?.page || '';
+    const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
     if (existing) {
       if (existing.finding_ids.includes(item.id)) continue; // already merged this exact finding, nothing new

@@ -78,6 +78,82 @@ describe('data-array-content computeChange — real zunkireelabs-web fixtures vi
   });
 });
 
+// The `fields` config shape (meta-title, not faq) — this is what unblocks
+// pages like /locations/kathmandu/ whose title/description live as plain
+// data fields on an Eleventy pagination entry rather than in a per-page
+// template file (the config gap that produced "No url_file_map entry
+// matches..." for every non-faq generator on these pages until this config
+// shape existed).
+const tenantAWithMetaTitle = {
+  id: 1,
+  url_file_map: {
+    patterns: [
+      {
+        match: '^/locations/([^/]+)$',
+        adapters: {
+          faq: { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', itemsField: 'faqs' },
+          'meta-title': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', fields: { title: 'title', metaDescription: 'description' } },
+        },
+      },
+    ],
+  },
+};
+
+describe('data-array-content computeChange — fields config (meta-title scalar writes)', () => {
+  test('writes selected title + meta description into the real location entry, real fixture', async () => {
+    const r = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'meta-title',
+      content: {
+        page: 'https://zunkireelabs.com/locations/kathmandu/',
+        selectedTitle: 'AI Development in Kathmandu — Zunkiree Labs',
+        metaDescription: 'A tightened, on-length meta description for the Kathmandu location page.',
+      },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/locations.js');
+    assert.match(r.newContent, /title: "AI Development in Kathmandu — Zunkiree Labs"/);
+    assert.match(r.newContent, /description: "A tightened, on-length meta description for the Kathmandu location page\."/);
+    // sibling entries and unrelated fields on the same entry must be untouched
+    assert.match(r.newContent, /id: "pokhara"/);
+    assert.match(r.newContent, /phone: "\+977-9849839728"/);
+  });
+
+  test('title-only draft (no metaDescription yet) writes only the title field', async () => {
+    const r = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/', selectedTitle: 'New Pokhara Title' },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /title: "New Pokhara Title"/);
+  });
+
+  test('no title selected yet -> honest draft-not-ready, not a crash', async () => {
+    const r = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/' },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'draft-not-ready');
+  });
+
+  test('a page with no meta-title adapter configured (e.g. glossary) still falls through to the honest no-file-mapping failure', async () => {
+    const tenantGlossaryOnlyFaq = {
+      id: 3,
+      url_file_map: {
+        patterns: [
+          { match: '^/glossary/([^/]+)$', adapters: { faq: { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/glossary.js', idField: 'id', itemsField: 'faqs' } } },
+        ],
+      },
+    };
+    const r = await computeChange(tenantGlossaryOnlyFaq, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/glossary/agentic-commerce/', selectedTitle: 'x' },
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+});
+
 describe('data-array-content computeChange — json-array format, synthetic fixture', () => {
   const jsonFixture = JSON.stringify([
     { id: 'widget-a', name: 'Widget A', faqs: [{ question: 'Hand-authored', answer: 'Kept as-is' }] },
