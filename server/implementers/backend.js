@@ -537,7 +537,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // content splice, not just the content — nothing here skips review, it
   // only removes the separate manual "push an empty marker first" step
   // that used to have to happen before a draft could even reach preview.
-  const ensured = ensureMarkers(file.content, markerMap);
+  const ensured = ensureMarkers(file.content, markerMap, filePath);
 
   const spliced = spliceMarkers(ensured.content, markerMap, built.values);
   if (!spliced.ok) {

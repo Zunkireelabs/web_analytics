@@ -108,6 +108,20 @@ export function isNoEofInsertField(field) {
   return NO_EOF_INSERT_FIELDS.has(field);
 }
 
+// The one case where EOF genuinely IS inside the rendered body: a pure
+// content file with no component wrapper at all — this codebase's own
+// newContentTargets convention (blog-outline, direct-answer; see
+// frontend.js) uses plain `.md`/`.mdx` files whose entire body is handed to
+// a markdown renderer as the article. There's no markup "after the last
+// line" the way a .jsx/.tsx/.astro component has — the last line of the
+// file IS the end of the rendered article. So for these extensions only,
+// the EOF fallback below is safe and NO_EOF_INSERT_FIELDS's guard doesn't
+// apply. Anything else (component templates, unknown extensions) keeps the
+// conservative "fail honestly" behavior.
+function isPlainMarkdownFile(filePath) {
+  return /\.mdx?$/i.test(filePath || '');
+}
+
 // Auto-creates a head-scoped field's own empty marker, nested inside the
 // site's already-placed <!-- SEOAI:HEAD:START/END --> region — never at
 // EOF. Returns null when that region doesn't exist yet (an onboarding step
@@ -194,7 +208,7 @@ function insertBlockMarker(fileContent, markerName) {
 // that can't be safely placed (see insertLineMarker) is simply skipped,
 // leaving spliceMarkers()'s existing "marker not found" failure as the
 // honest fallback for that one field.
-export function ensureMarkers(fileContent, markerMap) {
+export function ensureMarkers(fileContent, markerMap, filePath) {
   let content = fileContent;
   const inserted = [];
   for (const [field, markerName] of Object.entries(markerMap)) {
@@ -209,7 +223,7 @@ export function ensureMarkers(fileContent, markerMap) {
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
-    if (NO_EOF_INSERT_FIELDS.has(field)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
+    if (NO_EOF_INSERT_FIELDS.has(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
     content = insertBlockMarker(content, markerName);
     inserted.push(markerName);
   }

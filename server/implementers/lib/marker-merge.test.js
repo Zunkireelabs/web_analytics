@@ -91,6 +91,30 @@ describe('body-scoped fields (expand-content)', () => {
     assert.equal(spliced.ok, true);
     assert.match(spliced.newContent, /<h2>New section<\/h2>/);
   });
+
+  // A plain .md/.mdx content file has no component wrapper — the whole file
+  // body IS the rendered article, so EOF is genuinely inside the render
+  // tree here (unlike the .jsx regression case above). ensureMarkers should
+  // auto-place the marker when given the file's path.
+  test('ensureMarkers DOES fall back to EOF insert for expandedContent on a plain .md file', () => {
+    const file = '---\ntitle: "Example"\n---\nSome article body.\n';
+    const markerMap = { expandedContent: 'EXPANDEDCONTENT' };
+    const { content, inserted } = ensureMarkers(file, markerMap, 'src/blog/example.md');
+    assert.deepEqual(inserted, ['EXPANDEDCONTENT']);
+    assert.match(content, /SEOAI:EXPANDEDCONTENT:START.*SEOAI:EXPANDEDCONTENT:END/s);
+
+    const spliced = spliceMarkers(content, markerMap, { expandedContent: '<h2>New section</h2>' });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /<h2>New section<\/h2>/);
+  });
+
+  test('ensureMarkers still does NOT fall back to EOF insert for expandedContent on a .jsx file even with a filePath given', () => {
+    const file = 'export default function Page() {\n  return <div>existing content</div>;\n}\n';
+    const markerMap = { expandedContent: 'EXPANDEDCONTENT' };
+    const { content, inserted } = ensureMarkers(file, markerMap, 'src/pages/example.jsx');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file);
+  });
 });
 
 describe('buildMergeValues — canonical/open-graph/expand-content', () => {
