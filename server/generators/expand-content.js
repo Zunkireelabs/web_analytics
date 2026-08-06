@@ -62,7 +62,7 @@ const FOCUS_SYSTEMS = {
 };
 
 // params: { page: string, query?: string, focus?: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, query, focus } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
 
@@ -88,7 +88,7 @@ export async function generate({ params }) {
 
   let sections;
   try {
-    sections = await callLLMForJson(system, user, { maxTokens: 900 });
+    sections = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(sections)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400 });

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { getLessons } from './lessons.js';
 
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
@@ -53,10 +54,33 @@ export const MODEL_DEFAULTS = {
   anthropic: { daily: 'claude-haiku-4-5', monthly: 'claude-opus-4-8' },
 };
 
+// Prepends any recorded fix_lessons (migration 086) for this generator as a
+// "known issues" block on the system prompt — so a mistake class already
+// corrected once (by a person or a prior fix) doesn't have to be
+// re-explained every time it resurfaces on a new page/site. Silently
+// no-ops (falls back to the plain system prompt) if the lookup itself
+// fails — a lessons-table outage must never break drafting.
+async function withLessons(system, generatorId, siteId) {
+  if (!generatorId) return system;
+  let lessons;
+  try {
+    lessons = await getLessons(generatorId, siteId);
+  } catch (err) {
+    console.warn(`[llm] fix_lessons lookup failed for "${generatorId}", continuing without it: ${err.message}`);
+    return system;
+  }
+  if (!lessons.length) return system;
+  const block = lessons.map((l) => `- ${l.title}: ${l.lesson}`).join('\n');
+  return `${system}\n\nKnown issues from past fixes — do not repeat these:\n${block}`;
+}
+
 // Calls the chosen LLM with a system + user prompt and returns plain text.
 // `model` overrides the resolved default outright; `tier` picks which
 // REPORT_MODEL_* env var / built-in default to fall back to otherwise.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily' } = {}) {
+// `generatorId` (+ optional `siteId`) opts into the fix_lessons prompt
+// injection above — pass the calling generator's own meta.id.
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId } = {}) {
+  system = await withLessons(system, generatorId, siteId);
   const provider = pickProvider();
   const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
   const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];

@@ -8,7 +8,7 @@ export const meta = {
 };
 
 // params: { market?: string, city?: string, topic?: string, context?: string (real supporting data, e.g. session growth) }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { market, city, topic, context } = params;
   const target = city ? `${city}${market ? `, ${market}` : ''}` : (market || topic);
   if (!target) throw Object.assign(new Error('market, city, or topic is required'), { status: 400 });
@@ -21,7 +21,7 @@ export async function generate({ params }) {
   const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`;
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 900 });
+    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }

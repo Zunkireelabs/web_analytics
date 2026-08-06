@@ -32,7 +32,7 @@ const PAGE_PURPOSE_GUIDANCE = {
 };
 
 // params: { page?: string, query?: string, topic?: string, schemaType?: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, query, topic, schemaType } = params;
   const subject = query || topic;
   if (!subject) throw Object.assign(new Error('query or topic is required'), { status: 400 });
@@ -55,7 +55,7 @@ export async function generate({ params }) {
   const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}`;
   let items;
   try {
-    items = await callLLMForJson(system, user, { maxTokens: 900 });
+    items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });

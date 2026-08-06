@@ -69,7 +69,7 @@ export async function generate({ siteId, params }) {
   const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 900 });
+    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Direct-answer generation failed: model did not return valid JSON'), { status: 400 });
   }

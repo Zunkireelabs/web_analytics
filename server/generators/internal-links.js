@@ -51,7 +51,7 @@ export async function generate({ siteId, params }) {
   const user = `Source page text: ${fetched.analysis.bodyText.slice(0, 2500)}\n\nCandidate target URLs:\n${candidates.join('\n')}`;
   let suggestions;
   try {
-    suggestions = await callLLMForJson(system, user, { maxTokens: 600 });
+    suggestions = await callLLMForJson(system, user, { maxTokens: 600, generatorId: meta.id, siteId });
     if (!Array.isArray(suggestions)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Internal links generation failed: model did not return valid JSON'), { status: 400 });

@@ -9,7 +9,7 @@ export const meta = {
 };
 
 // params: { page?: string, query: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, query } = params;
   if (!query) throw Object.assign(new Error('query is required'), { status: 400 });
 
@@ -33,7 +33,7 @@ export async function generate({ params }) {
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 400 });
+    parsed = await callLLMForJson(system, user, { maxTokens: 400, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Meta title generation failed: model did not return valid JSON'), { status: 400 });
   }

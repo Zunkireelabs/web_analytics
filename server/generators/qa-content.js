@@ -16,7 +16,7 @@ const SYSTEM = 'You are a content strategist. Given a page\'s real body text and
   'present in the excerpt. Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
 
 // params: { page: string, query?: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, query } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
 
@@ -26,7 +26,7 @@ export async function generate({ params }) {
   const user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
   let items;
   try {
-    items = await callLLMForJson(SYSTEM, user, { maxTokens: 700 });
+    items = await callLLMForJson(SYSTEM, user, { maxTokens: 700, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Q&A content generation failed: model did not return valid JSON'), { status: 400 });
