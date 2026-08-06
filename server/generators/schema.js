@@ -27,29 +27,6 @@ const PLACEHOLDER_NOTE = '[NEEDS INPUT — not found on the page]';
 // paths like "review.datePublished".
 const DATE_FIELD_RE = /(?:^|\.)(datePublished|dateModified|dateCreated)$/i;
 
-// Types whose entire meaning depends on facts a generic content page (no
-// real reviews/products/events on it) essentially never has — unlike a
-// plain Article (headline/body/date, always derivable from any real page),
-// drafting one of these when its DEFINING facts are unverifiable produces a
-// technically-valid but practically unusable, unapprovable JSON-LD block.
-// inferSchemaType() (page-content.js) deliberately trusts ANY existing
-// @type already on the page, even a stale/boilerplate one with no real
-// data behind it — so without this guard, a page that's genuinely just an
-// article (but happens to carry a leftover/misconfigured "Review" type)
-// would keep getting offered the same unusable Review draft on every
-// audit run forever. Listed here as the field path(s) that must resolve to
-// real content for the type to mean anything; if ALL of them come back as
-// placeholders, the type inference itself was wrong for this page, not
-// just one optional field — fall back to Article instead.
-const RISKY_TYPE_CORE_FIELDS = {
-  Review: ['author.name', 'reviewer.name', 'reviewRating.ratingValue'],
-  AggregateRating: ['ratingValue', 'reviewCount'],
-  Product: ['offers.price'],
-  Recipe: ['recipeIngredient'],
-  Event: ['startDate', 'location.name'],
-  JobPosting: ['datePosted', 'hiringOrganization.name'],
-};
-
 // Recursive placeholder scan — pure, shared by the two generation attempts
 // below (initial type, and the Article fallback if that type turns out
 // unusable). Placeholders land inside nested objects (e.g. author.name,
@@ -71,12 +48,22 @@ export function resolvePlaceholders(jsonLd) {
   return placeholderFields;
 }
 
-// True when `schemaType` is a risky type AND every one of its defining
-// facts came back unresolved — the type inference itself was wrong for
-// this page, not just one optional field left blank.
+// General, type-agnostic rule — no per-type "which fields matter" list to
+// keep in sync (a hardcoded list can only ever cover the types someone
+// thought to name, and silently misses every other type the same bug can
+// hit). Grounded in a fact true for every type, not a guess about any one
+// of them: a schema draft with ANY unresolved placeholder already can't
+// auto-publish (marker-merge.js's buildMergeValues blocks it outright,
+// whatever the type), so there is no upside to keeping a "better-fitting
+// but broken" non-Article type over Article — the one type that's reliably
+// fully groundable from real page title/body text alone, since every real
+// page has both. inferSchemaType() (page-content.js) deliberately trusts
+// ANY existing @type already on the page, even a stale/boilerplate one with
+// no real data behind it, so without this fallback a page carrying a
+// leftover/misconfigured type would keep getting offered the same unusable
+// draft on every future audit run, for whichever type it happened to be.
 export function needsArticleFallback(schemaType, placeholderFields) {
-  const coreFields = RISKY_TYPE_CORE_FIELDS[schemaType];
-  return !!coreFields && schemaType !== 'Article' && coreFields.every((f) => placeholderFields.includes(f));
+  return schemaType !== 'Article' && placeholderFields.length > 0;
 }
 
 async function draftJsonLd(schemaType, title, bodyText) {
