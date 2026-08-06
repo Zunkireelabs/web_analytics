@@ -92,12 +92,20 @@ export function findRootArrayBounds(content, format) {
   return { start, end };
 }
 
-// JSON requires quoted keys; js-export-array's real files (checked
-// directly against zunkireelabs-web's) use unquoted keys. Matching the
-// right shape per format avoids either under- or over-matching.
+// JSON requires quoted keys always. js-export-array's real files mostly use
+// unquoted keys (title, id, services — valid bare JS identifiers) but quote
+// a key that isn't one (e.g. "aeo-seo", "ai-customer-experience" — hyphens
+// aren't legal in an unquoted property name), confirmed directly against
+// zunkireelabs-web's own locations.js nested `services` object — so
+// js-export-array must accept either form, not just the unquoted one.
+// Wrapped in a non-capturing group so every caller's own prefix (e.g.
+// findScalarFieldRange's negative lookbehind guard) applies to the whole
+// alternation as one unit, not just the first branch.
 function keyRegexSource(field, format) {
   const escaped = escapeRegExp(field);
-  return format === 'json-array' ? `"${escaped}"\\s*:` : `${escaped}\\s*:`;
+  return format === 'json-array'
+    ? `"${escaped}"\\s*:`
+    : `(?:"${escaped}"|'${escaped}'|${escaped})\\s*:`;
 }
 
 // Every top-level `{ ... }` object directly inside the file's root array —
@@ -187,6 +195,57 @@ export function findArrayFieldRange(content, objRange, fieldName, format = 'js-e
   const end = scanBalanced(content, start, '[', ']');
   if (end === -1) return null;
   return { start, end };
+}
+
+// Returns the byte offset of `key: {` ONLY if it appears as a direct
+// property of the object at `objRange` — the object-valued counterpart to
+// findTopLevelArrayKeyStart above (which does the same for `key: [`). Same
+// depth-tracking scan, just targeting `{`/`}` instead of `[`/`]`.
+function findTopLevelObjectKeyStart(content, objRange, fieldName, format) {
+  const keyRe = new RegExp(`${keyRegexSource(fieldName, format)}\\s*\\{`, 'g');
+  keyRe.lastIndex = objRange.start + 1;
+  let m;
+  while ((m = keyRe.exec(content)) && m.index < objRange.end) {
+    let depth = 0;
+    let i = objRange.start + 1;
+    while (i < m.index) {
+      const c = content[i];
+      if (c === '"' || c === "'" || c === '`') {
+        const quote = c;
+        i++;
+        while (i < content.length && content[i] !== quote) { if (content[i] === '\\') i++; i++; }
+        i++;
+        continue;
+      }
+      if (c === '/' && content[i + 1] === '/') { const nl = content.indexOf('\n', i); i = nl === -1 ? content.length : nl + 1; continue; }
+      if (c === '/' && content[i + 1] === '*') { const e = content.indexOf('*/', i + 2); i = e === -1 ? content.length : e + 2; continue; }
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') depth--;
+      i++;
+    }
+    if (depth === 0) return m.index;
+    keyRe.lastIndex = m.index + 1;
+  }
+  return -1;
+}
+
+// The { start, end } (inclusive of the braces themselves, same convention
+// as findObjectRange) of an EXISTING `fieldName: { ... }` object directly
+// inside the given object — null if absent. This is what makes a nested
+// lookup possible (e.g. a location's own `services.<serviceId>` sub-object
+// in zunkireelabs-web's locations.js — a plain KEYED object, not an array
+// of {id, ...} entries, so findObjectRange's id-field matching doesn't
+// apply here; the "id" IS the property name). Calling this twice —
+// (objRange, 'services') then (that result, the specific service id) — is
+// how adapters/data-array-content.js resolves a two-level nested target
+// without a third, bespoke lookup function.
+export function findObjectFieldRange(content, objRange, fieldName, format = 'js-export-array') {
+  const keyStart = findTopLevelObjectKeyStart(content, objRange, fieldName, format);
+  if (keyStart === -1) return null;
+  const braceIdx = content.indexOf('{', keyStart);
+  const end = scanBalanced(content, braceIdx + 1, '{', '}');
+  if (end === -1) return null;
+  return { start: braceIdx, end };
 }
 
 // Locates the value range of an EXISTING top-level `fieldName: "..."` /

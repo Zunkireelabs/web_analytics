@@ -4,7 +4,7 @@ import { resolveAdapter } from '../lib/url-file-map.js';
 import {
   findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray, insertNewArrayField,
   assertValidContent, dedupeAndValidateFaqItems, diffFaqItems, parseManagedFaqItems,
-  findScalarFieldRange, spliceScalarField,
+  findScalarFieldRange, spliceScalarField, findObjectFieldRange,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
 
@@ -47,6 +47,22 @@ import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer
 // refuses a template literal or missing field rather than guessing), never
 // touches the object's other fields, and carries none of the FAQ-specific
 // validation/diffing this array path needs.
+//
+// `nestedField` is an OPTIONAL addition to either of the two shapes above —
+// for a URL that maps to a sub-object nested one level deeper than the
+// normal id-matched parent object, e.g. zunkireelabs-web's own
+// /locations/<location>/<service>/ pages: the location is matched by
+// idField as usual, but the real per-service content lives at
+// `services.<serviceId>` on that location object — a plain KEYED object
+// (the service id IS the property name), not another id-matched array
+// entry. { id: 'data-array-content', format, dataFile, idField, nestedField:
+// 'services', fields: {...} } (or itemsField instead of fields). When set,
+// the id used to match idField comes from the URL's SECOND-TO-LAST path
+// segment instead of the last one, and the last segment becomes the nested
+// object's own key (see nestedIdsFromPageUrl/resolveNestedObjectRange
+// below) — honestly fails (no-insertion-marker) rather than guessing when
+// that nested key doesn't exist, which is the real, correct outcome for a
+// parent with no unique content for that specific sub-section yet.
 export const meta = {
   id: 'data-array-content',
   description: 'Config-driven writer for array-of-objects content files (Eleventy data arrays, JSON collections) — file path/id field/items field/format all come from the tenant\'s own url_file_map config.',
@@ -63,6 +79,37 @@ function idFromPageUrl(pageUrl) {
   try { path = new URL(pageUrl).pathname; } catch { return null; }
   const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
   return segments.length ? segments[segments.length - 1] : null;
+}
+
+// Two-level counterpart to idFromPageUrl, used ONLY when config.nestedField
+// is set (e.g. zunkireelabs-web's /locations/<location>/<service>/ pages —
+// a location matched by idField as usual, then its own `services.<service>`
+// sub-object, a plain KEYED object rather than another id-matched array —
+// see findObjectFieldRange). Real, confirmed shape: outer id is the
+// second-to-last path segment, inner id is the last. Requires at least two
+// path segments; anything shorter honestly returns nulls rather than
+// guessing which single segment means what.
+function nestedIdsFromPageUrl(pageUrl) {
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { return { id: null, nestedId: null }; }
+  const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
+  if (segments.length < 2) return { id: null, nestedId: null };
+  return { id: segments[segments.length - 2], nestedId: segments[segments.length - 1] };
+}
+
+// Narrows an already-found parent objRange down to its own
+// `nestedField.nestedId` sub-object (e.g. a location's `services.aeo-seo`)
+// — two findObjectFieldRange calls, since nestedField itself is a keyed
+// object property (not an array), same as the id-keyed sub-object inside
+// it. Returns null (honest "no match", never a guess) if either level is
+// absent — correctly the case for a location with no unique content for
+// that service at all (e.g. zunkireelabs-web's non-headquarters locations
+// without a `services` object), not a bug to route around.
+function resolveNestedObjectRange(content, objRange, config, nestedId) {
+  if (!config.nestedField) return objRange;
+  const nestedFieldRange = findObjectFieldRange(content, objRange, config.nestedField, config.format || 'js-export-array');
+  if (!nestedFieldRange) return null;
+  return findObjectFieldRange(content, nestedFieldRange, nestedId, config.format || 'js-export-array');
 }
 
 // The meta-title draft value keys this adapter knows how to write, and
@@ -93,8 +140,8 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
   }
 
   const idField = config.idField || 'id';
-  const id = idFromPageUrl(page);
-  if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page || '(no page)'}".` };
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
   const file = await fetchFile(site, config.dataFile, beforeRef);
   if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
@@ -103,6 +150,12 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
   let objRange = findObjectRange(file.content, idField, id, format);
   if (!objRange) {
     return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+  }
+  if (config.nestedField) {
+    objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
+    if (!objRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+    }
   }
 
   let content = file.content;
@@ -163,12 +216,18 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
     }
   } else {
     const idField = config.idField || 'id';
-    const id = idFromPageUrl(page);
-    if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page || '(no page)'}".` };
+    const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+    if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
 
     objRange = findObjectRange(file.content, idField, id, format);
     if (!objRange) {
       return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+    }
+    if (config.nestedField) {
+      objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
+      if (!objRange) {
+        return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+      }
     }
     arrayRange = findArrayFieldRange(file.content, objRange, config.itemsField, format);
   }
