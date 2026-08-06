@@ -3,7 +3,7 @@ import { listAgentMeta } from '../registry.js';
 import { runAgent } from '../runner.js';
 import { createPageCache } from './fetch-cache.js';
 import { summarizeAgentRuns } from '../orchestrator.js';
-import { withRetry, isRetryable } from '../../llm.js';
+import { withRetry, isRetryable, LLM_TIMEOUT_MS } from '../../llm.js';
 import { normalizeCompetitorDomain } from './competitor-analysis.js';
 import { saveAgenticOrchestrationRun } from '../../store/agentic-orchestration-runs.js';
 
@@ -322,7 +322,7 @@ export async function runAgenticLoop({
   const startedAt = Date.now();
   const mode = staleness != null ? 'selection' : 'question';
   const tools = await buildAgentTools(mode);
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
   const pageCache = createPageCache();
   const usage = { promptTokens: 0, completionTokens: 0 };
   const budget = mode === 'selection' ? estimateSelectionBudget(staleness) : estimateQuestionBudget(question);

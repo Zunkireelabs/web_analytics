@@ -1,10 +1,25 @@
+// Ceiling only, not a target duration — Run Full Analysis legitimately awaits
+// ~19 parallel agents server-side, some LLM-heavy. Without this, a stalled
+// request leaves the calling page's "Running…" state stuck forever with no
+// way for the user to tell a hang from real, still-in-progress work.
+const REQUEST_TIMEOUT_MS = 5 * 60_000;
+
 // Thin fetch wrapper. Sends cookies (session) and throws on non-2xx.
 async function req(path, opts = {}) {
-  const res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  let res;
+  try {
+    res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ...opts,
+    });
+  } catch (e) {
+    if (e.name === 'TimeoutError') {
+      throw new Error('Request timed out — it may still be running on the server.');
+    }
+    throw e;
+  }
   if (res.status === 401) {
     // Lets App.jsx react to a session going invalid on ANY data call, not
     // just the ones that explicitly check for it — without this, mid-session
