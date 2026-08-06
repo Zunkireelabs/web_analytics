@@ -87,6 +87,27 @@ export function isHeadScopedField(field) {
   return HEAD_SCOPED_FIELDS.has(field);
 }
 
+// Fields whose real render location can't be assumed to be "wherever the
+// file happens to end" the way flat HTML/Markdown body content can. A
+// component-based page (React/Next/Astro/.jsx/.tsx) has real markup after
+// its last line of source — outside the rendered component tree entirely —
+// so the default BLOCK convention's EOF auto-insert (insertBlockMarker
+// below) would "succeed" (marker created, PR merges, build passes) while
+// producing a marker that never renders on the live page. Same hazard
+// HEAD_SCOPED_FIELDS already guards against for <head> tags; this is the
+// body-content equivalent. These fields are therefore never auto-inserted
+// at EOF — only ever spliced into a marker a human has already placed
+// somewhere genuinely inside the page's real rendered body. If that marker
+// doesn't exist yet, this fails honestly (no draft applied) rather than
+// drafting content that will never actually be visible.
+const NO_EOF_INSERT_FIELDS = new Set(['expandedContent']);
+
+// Exposed so callers can give a more specific "marker not found" error for
+// a body-scoped field — same spirit as isHeadScopedField above.
+export function isNoEofInsertField(field) {
+  return NO_EOF_INSERT_FIELDS.has(field);
+}
+
 // Auto-creates a head-scoped field's own empty marker, nested inside the
 // site's already-placed <!-- SEOAI:HEAD:START/END --> region — never at
 // EOF. Returns null when that region doesn't exist yet (an onboarding step
@@ -188,6 +209,7 @@ export function ensureMarkers(fileContent, markerMap) {
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
+    if (NO_EOF_INSERT_FIELDS.has(field)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
     content = insertBlockMarker(content, markerName);
     inserted.push(markerName);
   }
@@ -316,12 +338,30 @@ const DEFAULT_EXPAND_TEMPLATE = {
   row: '  <h2>{{HEADING}}</h2>\n  <p>{{BODY}}</p>',
 };
 
+// Converts the light markdown expand-content's prompts sometimes produce
+// (bold/italic emphasis, and — pre-generator-fix — inline links) into real
+// HTML instead of leaking literal `**`/`[text](url)` syntax as visible text
+// (escapeHtml alone just escapes <>&", it never parses markdown). A link is
+// only ever rendered as a real <a> when its href is an actual http(s) URL;
+// anything else (a bare "#", empty, or missing href) is deliberately
+// downgraded to its plain text — expand-content.js's own prompt no longer
+// asks for placeholder citation links, but this is the last line of defense
+// against ever publishing a dead anchor to a live site.
+function markdownToHtml(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+}
+
 // Each section is a real, LLM-grounded heading+body pair (generators/
-// expand-content.js), escaped since it's untrusted LLM output same as
-// internal-links' anchor text above.
+// expand-content.js). Heading stays plain-escaped (never expected to carry
+// markdown); body runs through markdownToHtml since it's free-form prose.
 function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
   const rows = sections.map((s) => fillTemplate(template.row, {
-    HEADING: escapeHtml(s.heading), BODY: escapeHtml(s.body),
+    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body),
   }));
   return renderFromTemplate(template, rows);
 }

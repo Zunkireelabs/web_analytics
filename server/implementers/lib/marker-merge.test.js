@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, buildMergeValues } from './marker-merge.js';
+import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues } from './marker-merge.js';
 
 describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {
@@ -48,6 +48,46 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' });
     assert.deepEqual(inserted, ['FAQ']);
     assert.match(content, /<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->/);
+  });
+});
+
+describe('body-scoped fields (expand-content)', () => {
+  test('isNoEofInsertField identifies expandedContent only', () => {
+    assert.equal(isNoEofInsertField('expandedContent'), true);
+    assert.equal(isNoEofInsertField('faq'), false);
+    assert.equal(isNoEofInsertField('canonical'), false);
+  });
+
+  // Regression test: a component-based page (.jsx/.tsx/.astro) has real
+  // markup after its last source line that is outside the rendered
+  // component tree entirely. Before this guard, ensureMarkers would append
+  // an empty EXPANDEDCONTENT marker at EOF, spliceMarkers would "succeed",
+  // the PR would merge — and the new sections would never actually render
+  // on the live page.
+  test('ensureMarkers does NOT fall back to EOF insert for expandedContent', () => {
+    const file = 'export default function Page() {\n  return <div>existing content</div>;\n}\n';
+    const { content, inserted } = ensureMarkers(file, { expandedContent: 'EXPANDEDCONTENT' });
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file); // untouched
+    assert.doesNotMatch(content, /SEOAI:EXPANDEDCONTENT/);
+  });
+
+  test('spliceMarkers honestly fails when no human-placed expandedContent marker exists', () => {
+    const file = 'export default function Page() {\n  return <div>existing content</div>;\n}\n';
+    const markerMap = { expandedContent: 'EXPANDEDCONTENT' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    const spliced = spliceMarkers(ensured, markerMap, { expandedContent: '<h2>New section</h2>' });
+    assert.equal(spliced.ok, false);
+    assert.deepEqual(spliced.missingMarkers, ['EXPANDEDCONTENT']);
+  });
+
+  test('full round trip: human-placed marker inside real body -> splice succeeds', () => {
+    const file = 'export default function Page() {\n  return <div>existing content\n<!-- SEOAI:EXPANDEDCONTENT:START --><!-- SEOAI:EXPANDEDCONTENT:END -->\n</div>;\n}\n';
+    const markerMap = { expandedContent: 'EXPANDEDCONTENT' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    const spliced = spliceMarkers(ensured, markerMap, { expandedContent: '<h2>New section</h2>' });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /<h2>New section<\/h2>/);
   });
 });
 
@@ -99,6 +139,24 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
   test('expand-content fails honestly with no sections', () => {
     const result = buildMergeValues('expand-content', { sections: [] });
     assert.equal(result.ok, false);
+  });
+
+  test('expand-content never publishes a dead "#" link — downgrades it to plain text', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'See [Authoritative Source](#) for details.' }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.expandedContent, /href="#"/);
+    assert.match(result.values.expandedContent, /<p>See Authoritative Source for details\.<\/p>/);
+  });
+
+  test('expand-content renders a real http(s) link as a clickable anchor, and bold as <strong>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'Per [OpenAI docs](https://openai.com/docs), this is **important**.' }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<a href="https:\/\/openai\.com\/docs">OpenAI docs<\/a>/);
+    assert.match(result.values.expandedContent, /<strong>important<\/strong>/);
   });
 
 
