@@ -18,6 +18,15 @@ export const meta = {
 const SCHEMA_TYPE_RE = /^[A-Za-z][A-Za-z0-9]*$/;
 const PLACEHOLDER_NOTE = '[NEEDS INPUT — not found on the page]';
 
+// Unlike price/rating/other facts (which stay blocked as genuinely
+// unverifiable — guessing those would be fabrication), a missing
+// datePublished/dateModified is safe to default to today: it's the actual,
+// true date this schema is being published, not a guess about the page's
+// real history. Same convention as sitemap.js/newpage-render.js's own
+// date defaults. Matched by trailing field name so it also catches nested
+// paths like "review.datePublished".
+const DATE_FIELD_RE = /(?:^|\.)(datePublished|dateModified|dateCreated)$/i;
+
 // params: { page: string, schemaType: string }
 export async function generate({ params }) {
   const { page, schemaType } = params;
@@ -48,14 +57,19 @@ export async function generate({ params }) {
 
   // Recursive — placeholders often land inside nested objects (e.g.
   // address.addressRegion, contactPoint.email), not just top-level fields.
+  // Date fields get auto-filled in place (today's date) rather than added
+  // to placeholderFields, so a missing date alone no longer blocks bulk
+  // publish — see DATE_FIELD_RE above.
+  const today = new Date().toISOString().slice(0, 10);
   const placeholderFields = [];
-  (function scan(node, path) {
+  (function scan(node, path, parent, key) {
     if (node && typeof node === 'object') {
-      for (const [k, v] of Object.entries(node)) scan(v, path ? `${path}.${k}` : k);
+      for (const [k, v] of Object.entries(node)) scan(v, path ? `${path}.${k}` : k, node, k);
     } else if (node === PLACEHOLDER_NOTE) {
-      placeholderFields.push(path);
+      if (DATE_FIELD_RE.test(path)) parent[key] = today;
+      else placeholderFields.push(path);
     }
-  })(jsonLd, '');
+  })(jsonLd, '', null, null);
 
   const content = { page, schemaType, jsonLd, placeholderFields };
   return {

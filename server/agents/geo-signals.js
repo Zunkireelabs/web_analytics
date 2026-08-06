@@ -53,6 +53,13 @@ const GEO_SIGNAL_RULES = [
     params: (page, query, schemaTypes) => ({ page, schemaType: 'Review' }),
     effort: 'Low',
   },
+  {
+    test: (analysis) => analysis.questionHeadingCount === 0,
+    label: 'Add question-style headings (e.g. "What is...?", "How does...?") with grounded answers — improves featured-snippet and AI-citation eligibility.',
+    generatorId: 'qa-content',
+    params: (page, query, schemaTypes) => ({ page, query }),
+    effort: 'Low',
+  },
 ];
 
 function recommendationsFor(analysis, page, query, schemaTypes) {
@@ -116,14 +123,19 @@ export async function run({ siteId, start, end, pageCache }) {
     }));
   });
 
-  const siteFinding = llmsReadiness && (!llmsReadiness.hasLlmsTxt || llmsReadiness.robotsAllowsAiCrawlers === false)
+  const llmsMissing = llmsReadiness && !llmsReadiness.hasLlmsTxt;
+  const llmsBlockedByRobots = llmsReadiness && llmsReadiness.robotsAllowsAiCrawlers === false;
+  const llmsMalformed = llmsReadiness && llmsReadiness.hasLlmsTxt && !llmsReadiness.hasValidLlmsTxtStructure;
+  const siteFinding = (llmsMissing || llmsBlockedByRobots || llmsMalformed)
     ? makeFinding({
         id: 'geo-signals:site:llms-txt',
-        evidence: { hasLlmsTxt: llmsReadiness.hasLlmsTxt, robotsAllowsAiCrawlers: llmsReadiness.robotsAllowsAiCrawlers },
-        whyItMatters: `Site-wide: ${!llmsReadiness.hasLlmsTxt ? 'no llms.txt file found' : 'robots.txt blocks one or more AI answer-engine crawlers'}. This affects AI-citation readiness across all analyzed pages.`,
+        evidence: { hasLlmsTxt: llmsReadiness.hasLlmsTxt, hasValidLlmsTxtStructure: llmsReadiness.hasValidLlmsTxtStructure, robotsAllowsAiCrawlers: llmsReadiness.robotsAllowsAiCrawlers },
+        whyItMatters: `Site-wide: ${llmsMissing ? 'no llms.txt file found' : llmsMalformed ? 'llms.txt exists but is missing the required "# Title" heading and/or markdown links' : 'robots.txt blocks one or more AI answer-engine crawlers'}. This affects AI-citation readiness across all analyzed pages.`,
         priority: 'medium',
         recommendedAction: {
-          label: 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).',
+          label: llmsMalformed && !llmsMissing && !llmsBlockedByRobots
+            ? 'Fix llms.txt to follow the convention: a top-level "# Site Name" heading, a short description, and markdown links to key pages.'
+            : 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).',
           generatorId: 'llms-txt',
           params: { priorityPages: prioritized.slice(0, 8).map((p) => p.page), start, end },
           effort: effortForGenerator('llms-txt'),

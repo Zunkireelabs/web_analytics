@@ -81,14 +81,27 @@ async function generatePromptCandidates({ companyName, homepageTitle, homepageDe
   }
 }
 
+// Plain .includes() false-positives on a short/generic name or domain (e.g.
+// company "Go" inside "Google", or domain "ai.com" inside "trainai.com").
+// Requires a non-alphanumeric character (or the string's own start/end) on
+// both sides of the match — true for a real word boundary (space, start/end
+// of text) AND for punctuation a domain/multi-word name legitimately sits
+// next to in real prose (a period, slash, comma, parenthesis), so this
+// doesn't just harden the short-name case, it stays correct for the normal
+// case too.
+function includesWholeMatch(text, needle) {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(text);
+}
+
 // Deterministic ground truth for "was this company mentioned" — a real
 // case-insensitive match of the company's real name or real domain against
 // the actual raw response text. Never trusted from the extraction LLM
 // call's own self-report of a checkable fact.
 function detectMention(rawResponse, companyName, domain) {
   const text = rawResponse.toLowerCase();
-  if (companyName && text.includes(companyName.toLowerCase())) return true;
-  if (domain && text.includes(domain.toLowerCase())) return true;
+  if (companyName && includesWholeMatch(text, companyName.toLowerCase())) return true;
+  if (domain && includesWholeMatch(text, domain.toLowerCase())) return true;
   return false;
 }
 

@@ -1,7 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField } from './lib/marker-merge.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
@@ -16,7 +16,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'sitemap'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -26,7 +26,7 @@ export const meta = {
 // shape as faq's; internal-links renders its suggestion list to a
 // deterministic <ul> first (see marker-merge.js's renderLinksHtml) — neither
 // needs a different mechanism, just its own marker name and value-builder.
-const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content']);
+const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install']);
 
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
@@ -40,6 +40,8 @@ const MARKER_FIELD_BY_ACTION_TYPE = {
   canonical: 'canonical',
   'open-graph': 'openGraph',
   'expand-content': 'expandedContent',
+  'qa-content': 'qaContent',
+  'analytics-install': 'analyticsScript',
 };
 
 function markerConfigExample(actionType) {
@@ -546,11 +548,15 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     // missing after ensureMarkers ran, that region doesn't exist yet — tell
     // the operator exactly what one-time step to do, not just which marker
     // name is missing.
-    const missingFields = Object.entries(markerMap).filter(([, markerName]) => spliced.missingMarkers.includes(markerName)).map(([field]) => field);
-    const headHint = missingFields.some(isHeadScopedField)
+    const missingEntries = Object.entries(markerMap).filter(([, markerName]) => spliced.missingMarkers.includes(markerName));
+    const headHint = missingEntries.some(([field]) => isHeadScopedField(field))
       ? ` This field must be placed inside a <!-- SEOAI:HEAD:START -->...<!-- SEOAI:HEAD:END --> region within <head> — add that region to ${filePath} first (a one-time step per template), then this field's own marker is created automatically.`
       : '';
-    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.${headHint}` };
+    const bodyScopedMarker = missingEntries.find(([field]) => isNoEofInsertField(field))?.[1];
+    const bodyHint = bodyScopedMarker
+      ? ` This field renders as real page-body content, so its marker can't be safely auto-placed at end-of-file (that position is outside the rendered component tree on most React/Next/Astro templates) — add <!-- SEOAI:${bodyScopedMarker}:START --><!-- SEOAI:${bodyScopedMarker}:END --> by hand at the real spot in ${filePath} where this content should appear, then re-apply.`
+      : '';
+    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.${headHint}${bodyHint}` };
   }
 
   return {

@@ -77,7 +77,7 @@ const LINE_CONVENTION_FIELDS = new Set(['title']);
 // applied) rather than drafting a tag that will never take effect. A future
 // head-metadata generator just adds its field name here — no per-generator
 // placement code.
-const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph']);
+const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', 'analyticsScript']);
 const HEAD_MARKER_NAME = 'HEAD';
 
 // Exposed so callers (backend.js's computeMarkerMerge) can give a more
@@ -85,6 +85,27 @@ const HEAD_MARKER_NAME = 'HEAD';
 // the missing HEAD region itself, not just the field's own marker name.
 export function isHeadScopedField(field) {
   return HEAD_SCOPED_FIELDS.has(field);
+}
+
+// Fields whose real render location can't be assumed to be "wherever the
+// file happens to end" the way flat HTML/Markdown body content can. A
+// component-based page (React/Next/Astro/.jsx/.tsx) has real markup after
+// its last line of source — outside the rendered component tree entirely —
+// so the default BLOCK convention's EOF auto-insert (insertBlockMarker
+// below) would "succeed" (marker created, PR merges, build passes) while
+// producing a marker that never renders on the live page. Same hazard
+// HEAD_SCOPED_FIELDS already guards against for <head> tags; this is the
+// body-content equivalent. These fields are therefore never auto-inserted
+// at EOF — only ever spliced into a marker a human has already placed
+// somewhere genuinely inside the page's real rendered body. If that marker
+// doesn't exist yet, this fails honestly (no draft applied) rather than
+// drafting content that will never actually be visible.
+const NO_EOF_INSERT_FIELDS = new Set(['expandedContent', 'qaContent']);
+
+// Exposed so callers can give a more specific "marker not found" error for
+// a body-scoped field — same spirit as isHeadScopedField above.
+export function isNoEofInsertField(field) {
+  return NO_EOF_INSERT_FIELDS.has(field);
 }
 
 // Auto-creates a head-scoped field's own empty marker, nested inside the
@@ -188,6 +209,7 @@ export function ensureMarkers(fileContent, markerMap) {
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
+    if (NO_EOF_INSERT_FIELDS.has(field)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
     content = insertBlockMarker(content, markerName);
     inserted.push(markerName);
   }
@@ -296,6 +318,31 @@ function renderFaqHtml(items, template = DEFAULT_FAQ_TEMPLATE) {
 
 }
 
+// Deliberately NOT DEFAULT_FAQ_TEMPLATE's <dl>/<dt>/<dd> shape, even though
+// this reuses the same accordion styling intent — a <dt> is not a heading
+// tag, so content rendered that way would never satisfy the real
+// "question-style heading" check (page-content.js's questionHeadingCount:
+// h1/h2/h3 whose text ends in "?") that this generator exists to fix,
+// regardless of how it looks. <details>/<summary> is a native, always-
+// reasonably-styled disclosure widget (unlike the retired qa-subheadings
+// bug's bare <h2> dumped in body text — see ai-visibility.js's retirement
+// note), so it never ships looking broken even with zero site-specific CSS,
+// while still nesting a real <h3> so the check the audit runs actually
+// passes. A site can still capture componentTemplates.qaContent later for
+// exact visual parity with its own accordion, same as faq/expand-content
+// support — this default just never requires that onboarding step first.
+const DEFAULT_QA_TEMPLATE = {
+  wrapper: '<div class="qa-content">\n{{ROWS}}\n</div>',
+  row: '  <details>\n    <summary><h3>{{QUESTION}}</h3></summary>\n    <p>{{ANSWER}}</p>\n  </details>',
+};
+
+function renderQaHtml(items, template = DEFAULT_QA_TEMPLATE) {
+  const rows = items.map((qa) => fillTemplate(template.row, {
+    QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
+  }));
+  return renderFromTemplate(template, rows);
+}
+
 const DEFAULT_LINKS_TEMPLATE = {
   wrapper: '<ul class="related-links">\n{{ROWS}}\n</ul>',
   row: '  <li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
@@ -316,12 +363,30 @@ const DEFAULT_EXPAND_TEMPLATE = {
   row: '  <h2>{{HEADING}}</h2>\n  <p>{{BODY}}</p>',
 };
 
+// Converts the light markdown expand-content's prompts sometimes produce
+// (bold/italic emphasis, and — pre-generator-fix — inline links) into real
+// HTML instead of leaking literal `**`/`[text](url)` syntax as visible text
+// (escapeHtml alone just escapes <>&", it never parses markdown). A link is
+// only ever rendered as a real <a> when its href is an actual http(s) URL;
+// anything else (a bare "#", empty, or missing href) is deliberately
+// downgraded to its plain text — expand-content.js's own prompt no longer
+// asks for placeholder citation links, but this is the last line of defense
+// against ever publishing a dead anchor to a live site.
+function markdownToHtml(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+}
+
 // Each section is a real, LLM-grounded heading+body pair (generators/
-// expand-content.js), escaped since it's untrusted LLM output same as
-// internal-links' anchor text above.
+// expand-content.js). Heading stays plain-escaped (never expected to carry
+// markdown); body runs through markdownToHtml since it's free-form prose.
 function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
   const rows = sections.map((s) => fillTemplate(template.row, {
-    HEADING: escapeHtml(s.heading), BODY: escapeHtml(s.body),
+    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body),
   }));
   return renderFromTemplate(template, rows);
 }
@@ -346,8 +411,11 @@ function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
 //
 // `componentTemplates` is the calling site's
 // url_file_map.siteRoot.componentTemplates ({faq,expandContent,
-// internalLinks}, each optional) — falls back per-type to the DEFAULT_*
-// templates above when a site hasn't configured its own yet.
+// internalLinks,qaContent}, each optional) — falls back per-type to the
+// DEFAULT_* templates above when a site hasn't configured its own yet.
+// qaContent's own DEFAULT_QA_TEMPLATE is the only one designed to be safe
+// to leave unconfigured indefinitely (see its comment) — the others are
+// safe-but-generic fallbacks a site is expected to eventually replace.
 export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}) {
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
@@ -394,6 +462,9 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'open-graph') {
     if (mode === 'schema-only') return { ok: false, error: '"open-graph" has no schema-only representation.' };
     if (!content.ogTitle) return { ok: false, error: 'This Open Graph draft has no title.' };
+    if (content.placeholderFields?.length) {
+      return { ok: false, error: `This Open Graph draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the page had no real title/description to draft from. Fill them in manually (edit the draft) before this can be applied.` };
+    }
     const tags = `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">\n<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`;
     return { ok: true, values: { openGraph: tags } };
   }
@@ -402,6 +473,21 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
     if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
     return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, componentTemplates.expandContent || DEFAULT_EXPAND_TEMPLATE) } };
+  }
+
+  if (actionType === 'qa-content') {
+    if (mode === 'schema-only') return { ok: false, error: '"qa-content" has no schema-only representation.' };
+    if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
+    return { ok: true, values: { qaContent: renderQaHtml(content.items, componentTemplates.qaContent || DEFAULT_QA_TEMPLATE) } };
+  }
+
+  if (actionType === 'analytics-install') {
+    if (mode === 'schema-only') return { ok: false, error: '"analytics-install" has no schema-only representation.' };
+    if (!content.script) return { ok: false, error: 'This analytics-install draft has no script.' };
+    if (content.placeholderFields?.length) {
+      return { ok: false, error: `This analytics-install draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the site's real tracking ID wasn't given. Fill it in manually (edit the draft) before this can be applied.` };
+    }
+    return { ok: true, values: { analyticsScript: content.script } };
   }
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };

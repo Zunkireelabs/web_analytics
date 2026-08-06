@@ -56,10 +56,10 @@ function buildPageFindings(page, score, priority) {
   }
   if (cats.citationReadiness < 60) {
     findings.push({
-      label: 'Add question-style subheadings (e.g. "What is...", "How does...") for direct-answer extraction.',
-      generatorId: 'expand-content',
-      params: { page: page.page, query: page.topQuery || '', focus: 'qa-subheadings' },
-      effort: 'Medium',
+      label: 'Add question-style headings (e.g. "What is...?", "How does...?") with grounded answers — improves featured-snippet and AI-citation eligibility.',
+      generatorId: 'qa-content',
+      params: { page: page.page, query: page.topQuery || '' },
+      effort: 'Low',
     });
   }
 

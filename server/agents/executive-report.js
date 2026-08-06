@@ -15,7 +15,17 @@ export const meta = {
   // both wasteful and impolite. Its findings still surface everywhere
   // Command Center/Action Center read RECOMMENDATION_AGENT_IDS — this
   // narrative just doesn't force a fresh competitor check every week.
-  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability'],
+  //
+  // Every other DAILY_AGENT_IDS/WEEKLY_ONLY_AGENT_IDS entry (job.js) belongs
+  // here — this list was caught silently drifting behind that set once
+  // already (sitemap/trust-compliance/geo-signals/growth-queries were each
+  // added to job.js's real scheduling on 2026-07-27/08-03/08-04/08-04 but
+  // never added here), so the weekly narrative quietly stopped covering 4
+  // real agents' findings even though they kept running and surfacing
+  // everywhere else (Command Center/Action Center/Copilot). If you add a
+  // new agent to RECOMMENDATION_AGENT_IDS, add it here too unless it's
+  // monthly-cadence like competitor-intelligence.
+  requires: ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'technical-seo', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'trust-compliance', 'geo-signals', 'growth-queries'],
 };
 
 // content-gap runs weekly-only (server/job.js's DAILY_AGENT_IDS deliberately
@@ -24,8 +34,11 @@ export const meta = {
 // re-crawling every candidate page daily). This weekly report is its ONLY
 // chance to persist a real agent_runs row. Every other sub-agent here
 // already persists its own row daily via job.js's runDailyAgentAnalysisForSite,
-// so persisting all 12 here would just create redundant daily-duplicate rows
-// for those 11 — only content-gap gets the explicit write.
+// so persisting all 16 here would just create redundant daily-duplicate rows
+// for those 14 — only content-gap gets the explicit write. (growth-queries is
+// also weekly-only, but unlike content-gap it has its own dedicated weekly
+// gate — job.js's runGrowthQueryDiscoveryIfDueForAllSites, persist:true — so
+// it doesn't need this same special-case treatment.)
 const WEEKLY_ONLY_AGENT_ID = 'content-gap';
 
 // Thin config over the shared orchestrator (orchestrator.js) — this agent no

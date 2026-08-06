@@ -37,9 +37,13 @@ function citationReadinessScore(analysis) {
   return 0;
 }
 
-function llmsReadinessScore({ hasLlmsTxt, hasRobotsTxt, robotsAllowsAiCrawlers }) {
+function llmsReadinessScore({ hasLlmsTxt, hasValidLlmsTxtStructure, hasRobotsTxt, robotsAllowsAiCrawlers }) {
   let score = 0;
-  if (hasLlmsTxt) score += 50;
+  // Full credit only for a file that both exists and follows the llms.txt
+  // convention (# Title + markdown links) — a malformed file still gets
+  // partial credit since it's better than nothing, but shouldn't score the
+  // same as a correctly structured one.
+  if (hasLlmsTxt) score += hasValidLlmsTxtStructure ? 50 : 25;
   // No robots.txt at all is treated as "not blocking" (default-allow), same
   // as robotsAllowsAiCrawlers === true — only an explicit disallow costs points.
   if (!hasRobotsTxt || robotsAllowsAiCrawlers !== false) score += 50;

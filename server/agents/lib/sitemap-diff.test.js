@@ -54,6 +54,24 @@ describe('computeMissingUrls', () => {
     assert.deepEqual(computeMissingUrls(inventory, sitemap), []);
   });
 
+  test('a trailing-slash difference between inventory and sitemap is not reported as missing', () => {
+    const inventory = ['https://example.com/about'];
+    const sitemap = [{ loc: 'https://example.com/about/' }];
+    assert.deepEqual(computeMissingUrls(inventory, sitemap), []);
+  });
+
+  test('an http/https difference between inventory and sitemap is not reported as missing', () => {
+    const inventory = ['http://example.com/about/'];
+    const sitemap = [{ loc: 'https://example.com/about/' }];
+    assert.deepEqual(computeMissingUrls(inventory, sitemap), []);
+  });
+
+  test('a real different page is still correctly reported as missing (normalization is not over-broad)', () => {
+    const inventory = ['https://example.com/about/', 'https://example.com/pricing/'];
+    const sitemap = [{ loc: 'https://example.com/about' }];
+    assert.deepEqual(computeMissingUrls(inventory, sitemap), ['https://example.com/pricing/']);
+  });
+
   test('two sites with overlapping page sets never leak into each other (tenant isolation)', () => {
     const siteAInventory = ['/tenant-a/page-1/', '/tenant-a/page-2/'];
     const siteASitemap = [{ loc: '/tenant-a/page-1/' }];

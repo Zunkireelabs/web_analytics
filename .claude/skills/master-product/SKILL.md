@@ -905,10 +905,17 @@ which diffs agent findings run-over-run to surface new opportunities.
 
 **`insufficient-data` remains a deliberate design choice**, unchanged from
 the previous snapshot: `ai-visibility` (no citation-tracking/SERP-AI-Overview
-provider) and `authority`/`competitor-intelligence` when `DATAFORSEO_LOGIN`/
-`PASSWORD` are unset all say so plainly rather than fabricating a number —
-real DataForSEO-backed data for competitor intelligence is still pending
-manager budget approval as of this writing.
+provider) always says so plainly rather than fabricating a number. `authority`
+and `competitor-intelligence` are more nuanced when `DATAFORSEO_LOGIN`/
+`PASSWORD` are unset — neither one jumps straight to `insufficient-data`:
+`authority` falls back to a real, single-signal Common Crawl estimate
+(`status: 'ok'`, explicitly labeled coarser in both `facts.note` and its
+narrative — only actually returns `insufficient-data` if even Common Crawl
+has nothing), and `competitor-intelligence` falls back to LLM-only competitor
+discovery (`status: 'ok'`, each competitor tagged `discoverySource: 'llm'` —
+honestly labeled as ungrounded-in-SERP-data, but not `insufficient-data`
+either). Real DataForSEO-backed data for competitor intelligence is still
+pending manager budget approval as of this writing.
 
 **Env vars this system adds** (on top of the Part 1 core vars in §16):
 `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`, `COMPETITOR_LOCATION_CODE`,

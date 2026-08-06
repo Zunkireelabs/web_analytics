@@ -26,13 +26,30 @@ function verifySignature(rawBody, signatureHeader) {
   return timingSafeEqual(expectedBuf, actualBuf);
 }
 
+// Looks up the drafts waiting on this PR and runs checkDraftPrStatus for
+// each. Deliberately NOT awaited by the route handler below — see its
+// comment for why the response can't wait on this.
+async function processPrClosed(repository, pr) {
+  const site = await getSiteByRepo(repository.owner?.login, repository.name);
+  if (!site) return;
+
+  const drafts = await listDraftsAwaitingPrCheck(site.id, pr.number);
+  for (const draft of drafts) {
+    try {
+      await checkDraftPrStatus(site.id, draft.id);
+    } catch (err) {
+      console.error(`[webhooks] check-pr-status failed for draft ${draft.id} (PR #${pr.number}):`, err.message);
+    }
+  }
+}
+
 // Replaces the manual "Check PR Status" click: when a batch branch's PR
 // merges (or gets closed without merging) on GitHub, this fires instead of
 // a human having to notice and go click it per draft. Reuses
 // checkDraftPrStatus's exact logic (re-reads the PR from GitHub itself
 // rather than trusting the payload as the only source of truth) so the
 // automated and manual paths can never disagree about what "merged" means.
-router.post('/webhooks/github', async (req, res) => {
+router.post('/webhooks/github', (req, res) => {
   if (!verifySignature(req.rawBody, req.headers['x-hub-signature-256'])) {
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -46,19 +63,22 @@ router.post('/webhooks/github', async (req, res) => {
   const { action, pull_request: pr, repository } = req.body || {};
   if (action !== 'closed' || !pr || !repository) return res.status(204).end();
 
-  const site = await getSiteByRepo(repository.owner?.login, repository.name);
-  if (!site) return res.status(204).end();
+  // Ack the delivery immediately, then process in the background.
+  // checkDraftPrStatus's success path (finalizeImplemented) can trigger
+  // job.js's runSiteDiscoveryIfDue, a real site crawl that legitimately
+  // takes far longer than GitHub's ~10s webhook delivery timeout — awaiting
+  // it here meant every real merge event failed delivery outright (GitHub
+  // marks it a failed delivery and gives up), silently falling back to the
+  // hourly cron poll (job.js's runPrStatusPollForAllSites) for a status
+  // update that should have been near-instant. Nothing downstream needs the
+  // HTTP response to reflect the outcome — the manual "Check PR Status"
+  // button and the cron poll already treat this as fire-and-forget work on
+  // its own schedule.
+  res.status(202).json({ ok: true, accepted: true });
 
-  const drafts = await listDraftsAwaitingPrCheck(site.id, pr.number);
-  for (const draft of drafts) {
-    try {
-      await checkDraftPrStatus(site.id, draft.id);
-    } catch (err) {
-      console.error(`[webhooks] check-pr-status failed for draft ${draft.id} (PR #${pr.number}):`, err.message);
-    }
-  }
-
-  res.status(200).json({ ok: true, checked: drafts.length });
+  processPrClosed(repository, pr).catch((err) => {
+    console.error(`[webhooks] processing PR #${pr.number} closed event failed:`, err.message);
+  });
 });
 
 export default router;

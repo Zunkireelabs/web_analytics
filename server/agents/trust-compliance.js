@@ -57,7 +57,13 @@ function normalizePath(url) {
 // client-side JS: the href already pointing at the homepage path itself,
 // the response redirecting back to the homepage, or the fetched page
 // rendering the exact same <title> as the homepage.
-async function resolveLinkStatus(href, homepageUrl, homepageTitle) {
+// body().text(), whitespace-collapsed — same normalization duplicate-content.js
+// uses before its own real exact-match hash comparison.
+function normalizedBodyText(html) {
+  return cheerio.load(html)('body').text().replace(/\s+/g, ' ').trim();
+}
+
+async function resolveLinkStatus(href, homepageUrl, homepageTitle, homepageBodyText) {
   let absoluteUrl;
   try { absoluteUrl = new URL(href, homepageUrl).toString(); } catch { return { ok: false, reason: 'link has no usable URL' }; }
   if (normalizePath(absoluteUrl) === normalizePath(homepageUrl)) {
@@ -68,8 +74,16 @@ async function resolveLinkStatus(href, homepageUrl, homepageTitle) {
   if (result.url && normalizePath(result.url) === normalizePath(homepageUrl)) {
     return { ok: false, reason: 'the link redirects back to the homepage', href: absoluteUrl };
   }
-  const linkedTitle = cheerio.load(result.html)('title').first().text().trim();
-  if (homepageTitle && linkedTitle === homepageTitle) {
+  const $linked = cheerio.load(result.html);
+  const linkedTitle = $linked('title').first().text().trim();
+  // Title match ALONE isn't enough — a real, distinct page can legitimately
+  // reuse the site's generic sitewide <title> tag (a common authoring
+  // mistake, not a fake route). A genuine client-side-router/CMS fallback
+  // re-serves the exact same rendered page, so its real body text is
+  // identical too — requiring both together is what actually distinguishes
+  // "this is really the homepage again" from "this page just has a lazy title".
+  const linkedBodyText = normalizedBodyText(result.html);
+  if (homepageTitle && linkedTitle === homepageTitle && homepageBodyText && linkedBodyText === homepageBodyText) {
     return { ok: false, reason: 'the link target renders the same page as the homepage (likely a dead/fallback route)', href: absoluteUrl };
   }
   return { ok: true, href: absoluteUrl };
@@ -99,11 +113,12 @@ export async function run({ siteId, start, end }) {
     href: $(el).attr('href') || '', text: $(el).text().trim(),
   })).get();
   const homepageTitle = $('title').first().text().trim();
+  const homepageBodyText = normalizedBodyText(htmlResult.html);
 
   const checkResults = await Promise.all(PAGE_CHECKS.map(async (check) => {
     const match = links.find((l) => check.hrefPattern.test(l.href) || check.textPattern.test(l.text));
     if (!match) return { check, status: 'missing' };
-    const linkStatus = await resolveLinkStatus(match.href, homepageUrl, homepageTitle);
+    const linkStatus = await resolveLinkStatus(match.href, homepageUrl, homepageTitle, homepageBodyText);
     return linkStatus.ok
       ? { check, status: 'ok' }
       : { check, status: 'broken', reason: linkStatus.reason, href: linkStatus.href };
@@ -149,6 +164,33 @@ export async function run({ siteId, start, end }) {
       expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
     });
   });
+
+  // Analytics/Pixel install checks — real detections from site-trackers.js,
+  // just never surfaced as their own finding before (only as evidence
+  // context on the cookie/privacy/terms findings above). Unlike most
+  // page-weight/infra findings in this codebase, this one IS draftable: the
+  // analytics-install generator can produce the real install script — it
+  // just can't invent the site's own GA4 measurement ID / Pixel ID, so the
+  // draft ships with a placeholder blocking auto-publish until a human fills
+  // in the real ID (see generators/analytics-install.js).
+  const TRACKER_CHECKS = [
+    { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
+    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
+  ];
+  const trackerFindings = TRACKER_CHECKS.filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
+    id: `trust-compliance:${t.id}:missing`,
+    evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
+    whyItMatters: t.whyItMatters,
+    priority: 'medium',
+    recommendedAction: {
+      label: `Draft ${t.label} install script`,
+      generatorId: 'analytics-install',
+      params: { provider: t.provider, page: homepageUrl },
+      effort: effortForGenerator('analytics-install'),
+    },
+    expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
+  }));
+  findings.push(...trackerFindings);
 
   const facts = {
     homepageUrl,

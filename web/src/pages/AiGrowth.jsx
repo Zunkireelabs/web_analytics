@@ -180,13 +180,28 @@ export default function AiGrowth() {
     addLog('Requesting a fresh agent run from the server…', 'system');
 
     try {
+      // api.commandCenter.refresh already blocks until the real backend run
+      // (orchestrator/agentic loop) has fully finished and persisted — by
+      // the time this await resolves, the SSE `done` events for every
+      // agent that ran have already arrived (see the es.onmessage handler
+      // above). So this log line describes what already happened, not what's
+      // still pending — "awaiting results" here was leftover phrasing from
+      // before the backend became fully synchronous, and was actively
+      // misleading (reads as still-in-progress right as the run completes).
       await api.commandCenter.refresh(REFRESH_START, REFRESH_END);
-      addLog('Server accepted the run. Awaiting agent results…', 'system');
+      addLog('Run complete. Fetching latest results…', 'system');
       const fresh = await api.commandCenter.get();
       setCcData(fresh);
+      addLog('Done — results updated.', 'system');
     } catch (e) {
       setRefreshError(e.message || 'Run failed');
       addLog(`Error executing parallel pipeline: ${e.message || 'Run failed'}`, 'error');
+    } finally {
+      // Previously only reset on the catch path — a successful run left
+      // `refreshing`/`isThinking` stuck true forever (the "RUNNING…" button
+      // label and "Agent Intelligence Active" status never cleared even
+      // though the backend had already finished), since nothing on the
+      // success path above ever set them back to false.
       setIsThinking(false);
       setRefreshing(false);
     }

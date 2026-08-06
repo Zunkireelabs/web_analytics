@@ -110,7 +110,7 @@ describe('buildGeoAuditReport', () => {
     assert.ok(content.findings.length > 0);
     for (const f of content.findings) {
       assert.ok(['high', 'medium', 'low'].includes(f.priority));
-      assert.ok(['schema', 'faq', 'expand-content'].includes(f.recommendedAction.generatorId));
+      assert.ok(['schema', 'faq', 'expand-content', 'qa-content'].includes(f.recommendedAction.generatorId));
       assert.equal(typeof f.recommendedAction.label, 'string');
       assert.ok(f.recommendedAction.params.page);
       assert.equal(typeof f.whyItMatters, 'string');
