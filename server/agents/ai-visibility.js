@@ -165,7 +165,7 @@ export async function run({ siteId, start, end, pageCache }) {
   const siteScore = scoredPages.length
     ? {
       overall: Math.round(scoredPages.reduce((s, p) => s + p.score.overall, 0) / scoredPages.length),
-      categories: ['schema', 'structuredContent', 'faq', 'entities', 'citationReadiness', 'llmsReadiness'].reduce((acc, cat) => {
+      categories: ['schema', 'structuredContent', 'faq', 'entities', 'citationReadiness', 'llmsReadiness', 'geoSignals'].reduce((acc, cat) => {
         acc[cat] = Math.round(scoredPages.reduce((s, p) => s + p.score.categories[cat], 0) / scoredPages.length);
         return acc;
       }, {}),

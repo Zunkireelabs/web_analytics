@@ -18,7 +18,13 @@ export const meta = {
 function isBrandedQuery(query, siteName) {
   if (!siteName) return false;
   const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  return normalize(query).includes(normalize(siteName));
+  const normalizedName = normalize(siteName);
+  if (!normalizedName) return false;
+  // Padded-space containment on the already-tokenized string, not a bare
+  // substring check — a bare .includes() false-negatives real cannibalization
+  // for a short/generic brand name (e.g. site "Go" would suppress every
+  // legitimate "golang" query as if it were a branded self-match).
+  return ` ${normalize(query)} `.includes(` ${normalizedName} `);
 }
 
 export async function run({ siteId, start, end }) {

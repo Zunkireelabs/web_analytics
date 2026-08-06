@@ -21,12 +21,26 @@ export function fingerprintSet(items) {
   return createHash('sha256').update(JSON.stringify(sorted)).digest('hex').slice(0, 16);
 }
 
+// Same real page compared under a trailing-slash or http/https difference
+// (both harmless, both common — a sitemap generator and the real crawl that
+// built page_inventory don't always agree on either) must never register as
+// "missing from the sitemap". Falls back to the raw string unchanged on
+// anything that isn't a real absolute URL (e.g. a bare path in a unit test)
+// rather than throwing, so this stays a strict tightening, never a new way
+// to under- or over-match.
+function normalizeForCompare(url) {
+  try {
+    const u = new URL(url);
+    return `${u.hostname.toLowerCase()}${u.pathname.replace(/\/+$/, '') || '/'}${u.search}`;
+  } catch { return url; }
+}
+
 // Which known pages (this site's own page_inventory) aren't in the live
 // sitemap yet — pure diff, no DB/HTTP access; callers supply already-fetched
 // data so this can never see another site's rows.
 export function computeMissingUrls(inventoryPages, sitemapEntries) {
-  const sitemapUrlSet = new Set(sitemapEntries.map((e) => e.loc));
-  return [...new Set(inventoryPages)].filter((page) => !sitemapUrlSet.has(page)).sort();
+  const sitemapUrlSet = new Set(sitemapEntries.map((e) => normalizeForCompare(e.loc)));
+  return [...new Set(inventoryPages)].filter((page) => !sitemapUrlSet.has(normalizeForCompare(page))).sort();
 }
 
 // One aggregated, fingerprinted finding for a site's missing sitemap URLs —

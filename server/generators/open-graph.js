@@ -29,8 +29,17 @@ export async function generate({ params }) {
   const ogTitle = title || PLACEHOLDER_NOTE;
   const ogDescription = metaDescription || (bodyText ? bodyText.slice(0, EXCERPT_LEN) : PLACEHOLDER_NOTE);
 
+  // Same placeholderFields contract as schema.js's PLACEHOLDER_NOTE fields —
+  // marker-merge.js's buildMergeValues blocks publishing while any are
+  // present, so a page with no real title/description can never ship the
+  // literal placeholder string as a live og:title/og:description on the
+  // "safe" tier's zero-review auto-publish path.
+  const placeholderFields = [];
+  if (ogTitle === PLACEHOLDER_NOTE) placeholderFields.push('ogTitle');
+  if (ogDescription === PLACEHOLDER_NOTE) placeholderFields.push('ogDescription');
+
   return {
-    content: { page, ogTitle, ogDescription },
+    content: { page, ogTitle, ogDescription, placeholderFields },
     summary: `Open Graph tags for ${page}`,
   };
 }

@@ -116,6 +116,16 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.doesNotMatch(result.values.openGraph, /<script>/);
   });
 
+  test('open-graph blocks publishing when the placeholder (no real title/description found) is unresolved', () => {
+    const result = buildMergeValues('open-graph', {
+      ogTitle: '[NEEDS INPUT — not verifiable from real site data]',
+      ogDescription: 'Real desc',
+      placeholderFields: ['ogTitle'],
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /ogTitle/);
+  });
+
   test('expand-content falls back to plain, zero-CSS-assumption tags when the site has no configured template', () => {
     const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] });
     assert.equal(result.ok, true);

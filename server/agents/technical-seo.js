@@ -8,6 +8,7 @@ import { listOrphanedPages } from '../store/page-inventory.js';
 import { recordIntegrationCheck } from '../store/upsert.js';
 import { listSitemaps } from '../ingest/gsc-technical.js';
 import { discoverFromSitemaps, parseRobotsDisallowRules, originForSite } from './lib/site-discovery.js';
+import { hostnameOf } from './lib/site-domain.js';
 import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
 
@@ -392,8 +393,18 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // migration that never updated the generator) that GSC's own per-sitemap
   // error/warning counts above don't necessarily catch (a malformed-but-
   // wrong-domain URL can still be individually well-formed).
-  const crossDomainUrls = siteHostname
-    ? sitemapUrls.filter((u) => { try { return new URL(u).hostname !== siteHostname; } catch { return false; } })
+  // hostnameOf() strips a leading "www." on both sides before comparing —
+  // without it, a URL-prefix GSC property registered as (or a sitemap
+  // consistently using) the other www/non-www variant of the SAME real
+  // domain false-flags every single sitemap URL as "cross-domain". This
+  // deliberately does NOT extend to other subdomains (e.g. blog.site.com)
+  // beyond www — site-domain.js's own doc comment explains why: a
+  // sc-domain: GSC property can legitimately span an entirely different
+  // product living on another subdomain, so treating subdomains as
+  // automatically "same site" would defeat that real leak-detection case.
+  const normalizedSiteHostname = siteHostname ? hostnameOf(`https://${siteHostname}`) : null;
+  const crossDomainUrls = normalizedSiteHostname
+    ? sitemapUrls.filter((u) => { const h = hostnameOf(u); return h != null && h !== normalizedSiteHostname; })
     : [];
   const crossDomainSitemapFindings = crossDomainUrls.length ? [makeFinding({
     id: 'technical-seo:sitemap-cross-domain',

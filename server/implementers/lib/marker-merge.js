@@ -434,6 +434,9 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'open-graph') {
     if (mode === 'schema-only') return { ok: false, error: '"open-graph" has no schema-only representation.' };
     if (!content.ogTitle) return { ok: false, error: 'This Open Graph draft has no title.' };
+    if (content.placeholderFields?.length) {
+      return { ok: false, error: `This Open Graph draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the page had no real title/description to draft from. Fill them in manually (edit the draft) before this can be applied.` };
+    }
     const tags = `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">\n<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`;
     return { ok: true, values: { openGraph: tags } };
   }

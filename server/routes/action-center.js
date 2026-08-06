@@ -405,6 +405,22 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });
 
+    // meta-title's own generator always returns 3 candidate titles (never
+    // one), by design, for a human to pick from in the manual UI — but this
+    // is the unattended auto-chain, so there's no human here to click "Use
+    // this" (DraftModal.jsx). Without a selection, buildMergeValues
+    // (marker-merge.js) refuses to publish at all ("No title selected yet"),
+    // which meant meta-title could never actually auto-ship despite being
+    // listed in SAFE_GENERATOR_IDS. Deterministically taking the first
+    // candidate is safe here specifically because all 3 are already equally
+    // real, grounded LLM output (same query, same page text) — this is an
+    // arbitrary pick among validated options, not a fabricated fact, so it
+    // doesn't cross the same line as guessing a price or rating.
+    if (rec.recommendation_type === 'meta-title' && !draft.content?.selectedTitle && draft.content?.titles?.[0]) {
+      const updated = await updateDraft(siteId, draft.id, { content: { ...draft.content, selectedTitle: draft.content.titles[0] } });
+      if (updated) draft.content = updated.content;
+    }
+
     const submitted = await submitDraftForApproval(siteId, draft.id);
     if (!submitted) throw new Error('Draft was not in a submittable state');
     await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
