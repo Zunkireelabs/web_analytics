@@ -802,7 +802,7 @@ router.post('/action-center/drafts/:id/rollback', async (req, res, next) => {
 router.delete('/action-center/drafts/:id', async (req, res, next) => {
   try {
     const ok = await deleteDraft(req.siteId, req.params.id);
-    if (!ok) return res.status(404).json({ error: 'Draft not found' });
+    if (!ok) return res.status(404).json({ error: 'Draft not found, or already implemented (an implemented draft is the audit record of a real shipped change and can\'t be discarded)' });
     res.json({ ok: true });
   } catch (e) { next(e); }
 });

@@ -77,8 +77,20 @@ export async function updateDraft(siteId, id, { content }) {
   return rows[0] || null;
 }
 
+// Guarded like every other draft-mutating function above — an 'implemented'
+// draft is the only record that a real, live production change came from
+// this app at all (the file change itself lives on in the merged GitHub PR
+// regardless, but THIS row is the only link back to which draft/finding
+// produced it). Deleting it destroys that audit trail for no operational
+// benefit: an implemented draft is terminal and isn't blocking anything a
+// discard would unblock. DraftModal.jsx already hides the Discard button
+// once a draft is implemented, but that's UI-only — this is the real
+// boundary, enforced for every caller (API route, MCP tool, script alike).
 export async function deleteDraft(siteId, id) {
-  const { rowCount } = await query('DELETE FROM drafts WHERE site_id = $1 AND id = $2', [siteId, id]);
+  const { rowCount } = await query(
+    `DELETE FROM drafts WHERE site_id = $1 AND id = $2 AND status != 'implemented'`,
+    [siteId, id]
+  );
   return rowCount > 0;
 }
 

@@ -1,4 +1,24 @@
 import { getSearchConsole } from '../auth/google.js';
+import { knownDomain } from '../agents/lib/site-domain.js';
+
+// A `sc-domain:` GSC property is domain-level — it returns EVERY subdomain
+// Search Console has verified data for, which can include an entirely
+// different, unrelated project (e.g. a client's app) hosted on a subdomain
+// of the same root domain (confirmed as a real report: a court-portal
+// client project on supreme-court.<domain> was showing up in this site's
+// own SEO recommendations). A URL-prefix property (starting with
+// "https://") is already scoped to one exact host and doesn't need this,
+// but applying it there too is harmless — it can only ever match a subset
+// of what that property already returns. Filtering at the Search Console
+// API request itself (rather than after the fact, per-agent) means no
+// consumer — this ingestion, any current agent, or any future one — can
+// ever see a foreign subdomain's data, without each one having to
+// remember to filter it out individually.
+export function pageFilterGroups(domain) {
+  if (!domain) return undefined; // no website_domain configured yet — same "pass through unfiltered" convention as filterOwnDomainPages
+  const escaped = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(www\\.)?${escaped}([/?]|$)` }] }];
+}
 
 // Fetch GSC Search Analytics for a single date, using `site`'s own Google
 // credentials if it has a dedicated file (secrets/clients/<site.id>/), else
@@ -8,6 +28,7 @@ import { getSearchConsole } from '../auth/google.js';
 export async function fetchGscForDate(site, date) {
   const gscProperty = site.gsc_property;
   const sc = await getSearchConsole(site);
+  const dimensionFilterGroups = pageFilterGroups(knownDomain(site));
 
   const queryApi = async (dimensions, rowLimit) => {
     const res = await sc.searchanalytics.query({
@@ -18,6 +39,7 @@ export async function fetchGscForDate(site, date) {
         dimensions,
         rowLimit,
         dataState: 'final',
+        ...(dimensionFilterGroups ? { dimensionFilterGroups } : {}),
       },
     });
     return res.data.rows || [];
