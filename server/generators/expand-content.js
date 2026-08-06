@@ -36,14 +36,7 @@ const SYSTEM_COMPARISON = 'You are a content strategist. Given a page\'s real bo
   'Do NOT invent specific competitor names or features not in the page text — use placeholders with guidance. ' +
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
 
-const SYSTEM_CITATIONS = 'You are a content strategist. Given a page\'s real body text, draft an external citations/references section. ' +
-  'You do NOT have a real URL for any source, so NEVER write a markdown link like [text](#) or [text](url) and NEVER invent a ' +
-  'placeholder href — a dead "#" link published to a live site is worse than no link. Instead name the kind of authoritative ' +
-  'source relevant to the page topic in plain prose (e.g. "peer-reviewed NLP research" or "the vendor\'s own documentation"), ' +
-  'with a note that an editor should add the real source URL manually. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
-
-// Used instead of SYSTEM_CITATIONS when real search results are available
+// Used when real search results are available for the external-citations focus
 // (see CITATION_SEARCH_ENABLED below) — grounded in an actual candidate list
 // the same way generators/internal-links.js grounds anchor suggestions in
 // real on-site URLs, so the model is citing real pages, not inventing them.
@@ -58,7 +51,6 @@ const FOCUS_SYSTEMS = {
   'author-byline': SYSTEM_AUTHOR,
   'freshness-date': SYSTEM_FRESHNESS,
   'comparison-content': SYSTEM_COMPARISON,
-  'external-citations': SYSTEM_CITATIONS,
 };
 
 // params: { page: string, query?: string, focus?: string }
@@ -72,18 +64,28 @@ export async function generate({ siteId, params }) {
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
 
-  if (focus === 'external-citations' && CITATION_SEARCH_ENABLED && cseConfigured()) {
-    try {
-      const sources = await searchSources(query || fetched.analysis.title, 3);
-      if (sources.length) {
-        system = SYSTEM_CITATIONS_GROUNDED;
-        user += `\n\nReal source candidates (cite ONLY from this list, using these exact URLs):\n` +
-          sources.map((s) => `- ${s.title}: ${s.url}`).join('\n');
-      }
-    } catch {
-      // Search failed (quota/network) — fall back to the safe, link-free
-      // SYSTEM_CITATIONS prompt already selected above rather than error.
+  // external-citations has no ungrounded mode: a citation is either backed
+  // by a real, verified URL, or it doesn't get drafted at all — writing
+  // "an editor should add the real source URL" as body prose (the previous
+  // behavior) isn't a safe placeholder like schema.js's [NEEDS INPUT]
+  // marker, it's indistinguishable published body text, and it shipped
+  // straight to a live page. Fail honestly instead of drafting filler.
+  if (focus === 'external-citations') {
+    if (!CITATION_SEARCH_ENABLED || !cseConfigured()) {
+      throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + Google CSE) — refusing to draft an ungrounded citations section.'), { status: 400 });
     }
+    let sources;
+    try {
+      sources = await searchSources(query || fetched.analysis.title, 3);
+    } catch (err) {
+      throw Object.assign(new Error(`Citation search failed: ${err.message}`), { status: 502 });
+    }
+    if (!sources.length) {
+      throw Object.assign(new Error('No real source candidates found for this page/query — refusing to draft an ungrounded citations section.'), { status: 400 });
+    }
+    system = SYSTEM_CITATIONS_GROUNDED;
+    user += `\n\nReal source candidates (cite ONLY from this list, using these exact URLs):\n` +
+      sources.map((s) => `- ${s.title}: ${s.url}`).join('\n');
   }
 
   let sections;
