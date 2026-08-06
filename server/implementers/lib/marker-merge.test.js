@@ -6,6 +6,7 @@ describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {
     assert.equal(isHeadScopedField('canonical'), true);
     assert.equal(isHeadScopedField('openGraph'), true);
+    assert.equal(isHeadScopedField('analyticsScript'), true);
     assert.equal(isHeadScopedField('faq'), false);
     assert.equal(isHeadScopedField('title'), false);
   });
@@ -52,8 +53,9 @@ describe('head-scoped fields (canonical, open-graph)', () => {
 });
 
 describe('body-scoped fields (expand-content)', () => {
-  test('isNoEofInsertField identifies expandedContent only', () => {
+  test('isNoEofInsertField identifies expandedContent and qaContent only', () => {
     assert.equal(isNoEofInsertField('expandedContent'), true);
+    assert.equal(isNoEofInsertField('qaContent'), true);
     assert.equal(isNoEofInsertField('faq'), false);
     assert.equal(isNoEofInsertField('canonical'), false);
   });
@@ -126,6 +128,24 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.error, /ogTitle/);
   });
 
+  test('analytics-install produces the real script verbatim once a real tracking ID is resolved', () => {
+    const result = buildMergeValues('analytics-install', {
+      script: '<script>gtag("config", "G-REAL123");</script>',
+      placeholderFields: [],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.values.analyticsScript, '<script>gtag("config", "G-REAL123");</script>');
+  });
+
+  test('analytics-install blocks publishing when the real tracking ID is still a placeholder', () => {
+    const result = buildMergeValues('analytics-install', {
+      script: '<!-- placeholder -->',
+      placeholderFields: ['trackingId'],
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /trackingId/);
+  });
+
   test('expand-content falls back to plain, zero-CSS-assumption tags when the site has no configured template', () => {
     const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] });
     assert.equal(result.ok, true);
@@ -169,6 +189,50 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<strong>important<\/strong>/);
   });
 
+
+  test('qa-content falls back to a native <details>/<summary> with a real <h3> question — no site-specific CSS required to look correct', () => {
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<summary><h3>What is this\?<\/h3><\/summary>/);
+    assert.match(result.values.qaContent, /<p>A real answer\.<\/p>/);
+  });
+
+  test('qa-content uses the site\'s own configured qaContent template when given one, not the fallback', () => {
+    const componentTemplates = {
+      qaContent: {
+        wrapper: '<section class="site-qa">\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-question">{{QUESTION}}</h3><p class="site-answer">{{ANSWER}}</p>',
+      },
+    };
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<h3 class="site-question">What is this\?<\/h3>/);
+    assert.doesNotMatch(result.values.qaContent, /<details>/);
+  });
+
+  test('qa-content escapes untrusted question/answer text', () => {
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: '<script>x</script>?', answer: '<script>y</script>' }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.qaContent, /<script>/);
+  });
+
+  test('qa-content fails honestly with no items', () => {
+    const result = buildMergeValues('qa-content', { items: [] });
+    assert.equal(result.ok, false);
+  });
+
+  test('qa-content has no schema-only representation', () => {
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }],
+    }, 'schema-only');
+    assert.equal(result.ok, false);
+  });
 
   test('internal-links falls back to a bare, unstyled <ul> when the site has no configured template', () => {
     const result = buildMergeValues('internal-links', {

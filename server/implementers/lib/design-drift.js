@@ -16,11 +16,17 @@ import { callLLM } from '../../llm.js';
 // component to drift, and net-new content (blog-outline/landing-page/
 // translation, frontend.js) is placed straight into the site's own live
 // layout template rather than a stored markup snapshot, so it's always
-// current by construction.
+// current by construction. qa-content is deliberately excluded even though
+// it has a componentTemplates entry: its DEFAULT_QA_TEMPLATE (marker-merge.js)
+// uses a native <details>/<summary> element with no site-specific classes at
+// all when unconfigured, so there's nothing that can go stale until a site
+// actually opts into a custom qaContent template — see checkTemplateFreshness's
+// own early-return for a template with zero literal classes.
 export const COMPONENT_TEMPLATE_KEY = {
   faq: 'faq',
   'expand-content': 'expandContent',
   'internal-links': 'internalLinks',
+  'qa-content': 'qaContent',
 };
 
 async function fetchText(url) {
@@ -142,6 +148,7 @@ const REQUIRED_PLACEHOLDERS = {
   faq: { wrapper: ['{{ROWS}}'], row: ['{{QUESTION}}', '{{ANSWER}}'] },
   'expand-content': { wrapper: ['{{ROWS}}'], row: ['{{HEADING}}', '{{BODY}}'] },
   'internal-links': { wrapper: ['{{ROWS}}'], row: ['{{URL}}', '{{ANCHOR_TEXT}}'] },
+  'qa-content': { wrapper: ['{{ROWS}}'], row: ['{{QUESTION}}', '{{ANSWER}}'] },
 };
 
 function validatePlaceholders(actionType, template) {

@@ -30,6 +30,7 @@ const BY_SOURCE_AND_GENERATOR = {
   'ai-visibility:expand-content': { bucket: 'aeo', category: 'Topic Coverage' },
   'geo-signals:schema': { bucket: 'geo', category: 'Citation Opportunities' },
   'geo-signals:expand-content': { bucket: 'geo', category: 'GEO Signals' },
+  'geo-signals:qa-content': { bucket: 'geo', category: 'GEO Signals' },
   'geo-signals:llms-txt': { bucket: 'geo', category: 'AI Crawler Access' },
   'content-gap:blog-outline': { bucket: 'aeo', category: 'Entity Pages' },
   'content-gap:faq': { bucket: 'aeo', category: 'FAQ Opportunities' },
@@ -62,6 +63,7 @@ const BY_GENERATOR = {
   'blog-outline': { bucket: 'aeo', category: 'Blog Opportunities' },
   'direct-answer': { bucket: 'geo', category: 'Blog Opportunities' },
   schema: { bucket: 'aeo', category: 'Citation Opportunities' },
+  'qa-content': { bucket: 'geo', category: 'GEO Signals' },
 };
 
 // Everything else not explicitly named in the product's SEO/AEO/GEO

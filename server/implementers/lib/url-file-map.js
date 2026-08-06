@@ -74,6 +74,7 @@ const DEFAULT_SLOT_BY_ACTION_TYPE = {
   'schema': 'head',
   'internal-links': 'related-content',
   'llms-txt': 'site-root',
+  'analytics-install': 'head',
 };
 
 // Single source of truth for "where does this (page, action type) land."

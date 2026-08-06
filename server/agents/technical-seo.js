@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
-import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus } from './lib/page-content.js';
+import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus, MAX_INLINE_STYLE_COUNT, MAX_HTML_SIZE_BYTES } from './lib/page-content.js';
 import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
@@ -17,7 +17,12 @@ export const meta = {
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 4,
+  version: 5,
+  // v5 adds two more page-weight checks off the same per-page fetch already
+  // done for the technical audit: excessive inline style="" attributes and
+  // raw HTML document size over 100KB. Both informational — same reasoning
+  // as v4's compression/HTTPS checks, fixing either is a CSS/template/CMS
+  // change, not draftable content.
   // v4 adds two real, previously-uncovered checks confirmed via a
   // cross-check against the sibling audit tool: per-page response
   // compression (Content-Encoding: gzip/br/deflate) and site-level
@@ -226,6 +231,40 @@ export async function run({ siteId, start, end, pageCache, params }) {
     recommendedAction: null, // a server/CDN config change, not draftable content — same reasoning as security-headers.js's per-header findings
   });
   const compressionFindings = compressionFinding ? [compressionFinding] : [];
+
+  // Inline style="" bloat and raw HTML document size — both real page-weight
+  // signals off the same fetch already done for the technical audit above
+  // (analyzePage, see page-content.js), never a second fetch. Same
+  // "systemic, not per-page-authoring-choice" framing and null
+  // recommendedAction as compression above: fixing either means touching the
+  // site's own CSS/template/CMS, not something a content generator can
+  // honestly draft.
+  const analyzedCheckedCount = pageResults.filter((r) => r.analysis).length;
+  const inlineStyleCandidates = pageResults.filter((r) => r.analysis && r.analysis.inlineStyleCount > MAX_INLINE_STYLE_COUNT);
+  const inlineStylesFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:inline-styles',
+    affected: inlineStyleCandidates,
+    checkedCount: analyzedCheckedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    extraEvidence: (affected) => ({ inlineStyleCounts: affected.map((r) => ({ page: r.page, count: r.analysis.inlineStyleCount })) }),
+    whyItMatters: (n, c) => `${n} of ${c} checked pages have over ${MAX_INLINE_STYLE_COUNT} inline style="" attributes — this bloats the HTML and blocks reusing shared CSS, making the page slower to parse and harder to maintain.`,
+    recommendedAction: null,
+  });
+  const inlineStylesFindings = inlineStylesFinding ? [inlineStylesFinding] : [];
+
+  const largeHtmlCandidates = pageResults.filter((r) => r.analysis && r.analysis.htmlByteSize > MAX_HTML_SIZE_BYTES);
+  const largeHtmlFinding = aggregateSystemicFinding({
+    id: 'technical-seo:site:large-html',
+    affected: largeHtmlCandidates,
+    checkedCount: analyzedCheckedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    extraEvidence: (affected) => ({ htmlSizesKb: affected.map((r) => ({ page: r.page, sizeKb: Math.round(r.analysis.htmlByteSize / 1024) })) }),
+    whyItMatters: (n, c) => `${n} of ${c} checked pages serve an HTML document over ${Math.round(MAX_HTML_SIZE_BYTES / 1024)}KB — heavier documents take longer to download and parse before anything on the page can render.`,
+    recommendedAction: null,
+  });
+  const largeHtmlFindings = largeHtmlFinding ? [largeHtmlFinding] : [];
 
   // Site-level SSL/HTTPS enablement — checked once per run against the
   // site's own hostname, not per-page (a certificate/redirect rule is a
@@ -444,6 +483,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
     ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
+    ...inlineStylesFindings, ...largeHtmlFindings,
   ];
 
   const facts = {
@@ -454,6 +494,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
       verdict: r.indexStatus.ok ? r.indexStatus.verdict : null,
       cwvCategory: r.coreWebVitals.ok ? r.coreWebVitals.category : null,
       compressed: r.compression.ok ? r.compression.compressed : null,
+      inlineStyleCount: r.analysis ? r.analysis.inlineStyleCount : null,
+      htmlByteSize: r.analysis ? r.analysis.htmlByteSize : null,
     })),
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,

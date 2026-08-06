@@ -165,6 +165,33 @@ export async function run({ siteId, start, end }) {
     });
   });
 
+  // Analytics/Pixel install checks — real detections from site-trackers.js,
+  // just never surfaced as their own finding before (only as evidence
+  // context on the cookie/privacy/terms findings above). Unlike most
+  // page-weight/infra findings in this codebase, this one IS draftable: the
+  // analytics-install generator can produce the real install script — it
+  // just can't invent the site's own GA4 measurement ID / Pixel ID, so the
+  // draft ships with a placeholder blocking auto-publish until a human fills
+  // in the real ID (see generators/analytics-install.js).
+  const TRACKER_CHECKS = [
+    { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
+    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
+  ];
+  const trackerFindings = TRACKER_CHECKS.filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
+    id: `trust-compliance:${t.id}:missing`,
+    evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
+    whyItMatters: t.whyItMatters,
+    priority: 'medium',
+    recommendedAction: {
+      label: `Draft ${t.label} install script`,
+      generatorId: 'analytics-install',
+      params: { provider: t.provider, page: homepageUrl },
+      effort: effortForGenerator('analytics-install'),
+    },
+    expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
+  }));
+  findings.push(...trackerFindings);
+
   const facts = {
     homepageUrl,
     checked: checkResults.map((r) => ({ key: r.check.key, status: r.status, reason: r.reason || null })),

@@ -10,10 +10,14 @@
 // moved to safe — it drafts an outline for review, doesn't publish net-new
 // pages on its own). cookie-policy/privacy-policy/terms-of-service default
 // to manual (not in the spec's explicit safe list, legal-content risk).
+// analytics-install deliberately stays out of the safe set: its draft is
+// blocked on a real tracking ID a human has to supply (see
+// generators/analytics-install.js), so it can never be a genuine zero-review
+// auto-publish candidate the way the rest of this list is.
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
-  'open-graph', 'expand-content', 'blog-outline',
+  'open-graph', 'expand-content', 'qa-content', 'blog-outline',
 ]);
 
 export function riskTierForGenerator(generatorId) {

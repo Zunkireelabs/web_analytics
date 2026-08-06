@@ -77,7 +77,7 @@ const LINE_CONVENTION_FIELDS = new Set(['title']);
 // applied) rather than drafting a tag that will never take effect. A future
 // head-metadata generator just adds its field name here — no per-generator
 // placement code.
-const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph']);
+const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', 'analyticsScript']);
 const HEAD_MARKER_NAME = 'HEAD';
 
 // Exposed so callers (backend.js's computeMarkerMerge) can give a more
@@ -100,7 +100,7 @@ export function isHeadScopedField(field) {
 // somewhere genuinely inside the page's real rendered body. If that marker
 // doesn't exist yet, this fails honestly (no draft applied) rather than
 // drafting content that will never actually be visible.
-const NO_EOF_INSERT_FIELDS = new Set(['expandedContent']);
+const NO_EOF_INSERT_FIELDS = new Set(['expandedContent', 'qaContent']);
 
 // Exposed so callers can give a more specific "marker not found" error for
 // a body-scoped field — same spirit as isHeadScopedField above.
@@ -318,6 +318,31 @@ function renderFaqHtml(items, template = DEFAULT_FAQ_TEMPLATE) {
 
 }
 
+// Deliberately NOT DEFAULT_FAQ_TEMPLATE's <dl>/<dt>/<dd> shape, even though
+// this reuses the same accordion styling intent — a <dt> is not a heading
+// tag, so content rendered that way would never satisfy the real
+// "question-style heading" check (page-content.js's questionHeadingCount:
+// h1/h2/h3 whose text ends in "?") that this generator exists to fix,
+// regardless of how it looks. <details>/<summary> is a native, always-
+// reasonably-styled disclosure widget (unlike the retired qa-subheadings
+// bug's bare <h2> dumped in body text — see ai-visibility.js's retirement
+// note), so it never ships looking broken even with zero site-specific CSS,
+// while still nesting a real <h3> so the check the audit runs actually
+// passes. A site can still capture componentTemplates.qaContent later for
+// exact visual parity with its own accordion, same as faq/expand-content
+// support — this default just never requires that onboarding step first.
+const DEFAULT_QA_TEMPLATE = {
+  wrapper: '<div class="qa-content">\n{{ROWS}}\n</div>',
+  row: '  <details>\n    <summary><h3>{{QUESTION}}</h3></summary>\n    <p>{{ANSWER}}</p>\n  </details>',
+};
+
+function renderQaHtml(items, template = DEFAULT_QA_TEMPLATE) {
+  const rows = items.map((qa) => fillTemplate(template.row, {
+    QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
+  }));
+  return renderFromTemplate(template, rows);
+}
+
 const DEFAULT_LINKS_TEMPLATE = {
   wrapper: '<ul class="related-links">\n{{ROWS}}\n</ul>',
   row: '  <li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
@@ -386,8 +411,11 @@ function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
 //
 // `componentTemplates` is the calling site's
 // url_file_map.siteRoot.componentTemplates ({faq,expandContent,
-// internalLinks}, each optional) — falls back per-type to the DEFAULT_*
-// templates above when a site hasn't configured its own yet.
+// internalLinks,qaContent}, each optional) — falls back per-type to the
+// DEFAULT_* templates above when a site hasn't configured its own yet.
+// qaContent's own DEFAULT_QA_TEMPLATE is the only one designed to be safe
+// to leave unconfigured indefinitely (see its comment) — the others are
+// safe-but-generic fallbacks a site is expected to eventually replace.
 export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}) {
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
@@ -445,6 +473,21 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
     if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
     return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, componentTemplates.expandContent || DEFAULT_EXPAND_TEMPLATE) } };
+  }
+
+  if (actionType === 'qa-content') {
+    if (mode === 'schema-only') return { ok: false, error: '"qa-content" has no schema-only representation.' };
+    if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
+    return { ok: true, values: { qaContent: renderQaHtml(content.items, componentTemplates.qaContent || DEFAULT_QA_TEMPLATE) } };
+  }
+
+  if (actionType === 'analytics-install') {
+    if (mode === 'schema-only') return { ok: false, error: '"analytics-install" has no schema-only representation.' };
+    if (!content.script) return { ok: false, error: 'This analytics-install draft has no script.' };
+    if (content.placeholderFields?.length) {
+      return { ok: false, error: `This analytics-install draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the site's real tracking ID wasn't given. Fill it in manually (edit the draft) before this can be applied.` };
+    }
+    return { ok: true, values: { analyticsScript: content.script } };
   }
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };

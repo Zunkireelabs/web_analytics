@@ -14,6 +14,21 @@ const MIN_WORD_COUNT = 300;
 // thin/generic, above it Google truncates the displayed title in results.
 const MIN_TITLE_LEN = 30;
 const MAX_TITLE_LEN = 60;
+// Meaningfully large, not incidental — a handful of one-off inline styles is
+// normal; this flags pages where inline style="" has effectively replaced
+// shared CSS, same "several, not one-off" bar as hasFaqAccordion's >=2.
+export const MAX_INLINE_STYLE_COUNT = 20;
+// ~100KB matches the common "keep HTML lean" guidance behind Lighthouse/PSI's
+// own large-payload audits — well past this, HTML parse/transfer time starts
+// to matter. Measured off the fetched (already-decompressed) HTML string
+// via Buffer.byteLength, so it reflects real transfer-relevant size even
+// with multi-byte characters, not raw wire bytes (fetch already decodes
+// Content-Encoding before this module ever sees the string).
+export const MAX_HTML_SIZE_BYTES = 100 * 1024;
+// Common short function/structure words that appear in nearly every title
+// regardless of topic — excluded so keyword-consistency only compares the
+// title's real topical terms against the body, not incidental glue words.
+const TITLE_STOPWORDS = new Set(['a', 'an', 'and', 'the', 'of', 'in', 'on', 'for', 'to', 'with', 'at', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'or', 'as', 'that', 'this', 'your', 'you', 'our', 'we', '&']);
 
 // String-level guard against fetching a private/local address — every page
 // this module fetches ultimately comes from real, external data (a site's
@@ -268,6 +283,12 @@ export function analyzePage(html, pageUrl) {
   const viewportBlocksZoom = /user-scalable\s*=\s*no/i.test(viewportContent || '')
     || /maximum-scale\s*=\s*(0(\.\d+)?|1(\.0*)?)\b/i.test(viewportContent || '');
 
+  // Page-weight signals — real counts off the actual fetched HTML, not
+  // guessed. See MAX_INLINE_STYLE_COUNT/MAX_HTML_SIZE_BYTES for the
+  // "worth flagging" thresholds these feed in contentGapChecks below.
+  const inlineStyleCount = $('[style]').length;
+  const htmlByteSize = Buffer.byteLength(html, 'utf8');
+
   return {
     title,
     metaDescription, // raw text — hasMetaDescription below is the boolean other callers already rely on
@@ -309,7 +330,25 @@ export function analyzePage(html, pageUrl) {
     hasReviewSchema,
     externalCitationDomainCount: externalCitationDomains.size,
     hasExternalCitations: externalCitationDomains.size >= 2,
+    inlineStyleCount, // technical-seo.js: elements with a style="" attribute
+    htmlByteSize, // technical-seo.js: fetched (decompressed) HTML size in bytes
   };
+}
+
+// Real title-vs-body keyword overlap — a title can pass the length checks
+// above (Title length) and still not reflect what the page actually talks
+// about (a stale title left over from a content rewrite, or a title written
+// for a different query than what the body now covers). Same "does the real
+// content back this up" philosophy as hasExternalCitations, not a guessed
+// heuristic: every "topical" word is pulled straight from the title, and
+// "consistent" means the body text actually contains it.
+export function titleKeywordConsistency(title, bodyText) {
+  const titleWords = [...new Set((title || '').toLowerCase().match(/[a-z0-9']+/g) || [])]
+    .filter((w) => w.length > 2 && !TITLE_STOPWORDS.has(w));
+  if (titleWords.length === 0) return { checked: false, ratio: null, missingWords: [] };
+  const body = (bodyText || '').toLowerCase();
+  const missingWords = titleWords.filter((w) => !body.includes(w));
+  return { checked: true, ratio: (titleWords.length - missingWords.length) / titleWords.length, missingWords };
 }
 
 // Real-time answer-engine crawlers — the ones that actually fetch/browse a
@@ -412,6 +451,17 @@ export async function fetchTextIfExists(url) {
   }
 }
 
+// llms.txt convention (llmstxt.org) requires a top-level "# Title" heading
+// and at least one markdown link — a file that exists but is plain text or
+// missing links doesn't actually help AI crawlers navigate the site, even
+// though a bare existence check (a 200 response) would call it "ready".
+export function llmsTxtHasValidStructure(text) {
+  if (!text) return false;
+  const hasTitle = /^#\s+\S/m.test(text);
+  const hasMarkdownLink = /\[[^\]]+\]\([^)]+\)/.test(text);
+  return hasTitle && hasMarkdownLink;
+}
+
 // Site-level (not per-page) AI-crawler readiness: does /llms.txt exist, and
 // does /robots.txt avoid flatly blocking major AI crawlers. Fetched once per
 // agent run against the site's own root domain.
@@ -422,6 +472,9 @@ export async function checkLlmsReadiness(origin) {
   ]);
   return {
     hasLlmsTxt: llms.ok,
+    // Only meaningful when hasLlmsTxt is true — a missing file is neither
+    // valid nor malformed structure, it's simply absent.
+    hasValidLlmsTxtStructure: llms.ok ? llmsTxtHasValidStructure(llms.text) : false,
     hasRobotsTxt: robots.ok,
     robotsAllowsAiCrawlers: robots.ok ? robotsAllowsAiCrawlers(robots.text) : null, // null = robots.txt not found, inconclusive
     robotsText: robots.ok ? robots.text : null, // real current file body — generators/llms-txt.js needs this to append to, never blindly overwrite
@@ -529,9 +582,10 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Canonical points to a different domain': null,
   'Missing Open Graph tags': null,
   'Missing structured lists': null,
-  'Missing question-style headings': null,
+  'Missing question-style headings': 'qa-content',
   'Title length': 'meta-title',
   'Meta description length': 'meta-title',
+  'Keyword consistency': 'meta-title',
   // GEO gaps — deliberately null on all four. Every generator that exists
   // today drafts from real evidence already on the page or a caller-given
   // param; none of these can be honestly auto-drafted without fabricating
@@ -548,7 +602,8 @@ export const GAP_TYPE_TO_GENERATOR = {
 // net-new content), not of how important the finding is — kept as one
 // honest, documented lookup instead of a per-agent guessed constant.
 const GENERATOR_EFFORT = {
-  'meta-title': 'Low', faq: 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
+  'meta-title': 'Low', faq: 'Low', 'qa-content': 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
+  'analytics-install': 'Low',
   'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low',
@@ -640,6 +695,10 @@ function contentGapChecks(analysis, queryTexts = []) {
     if (canonicalHost && canonicalHost !== analysis.pageHost) {
       gaps.push({ type: 'Canonical points to a different domain', detail: `Canonical tag points to "${analysis.canonicalUrl}" — a different domain than this page (${analysis.pageHost}).` });
     }
+  }
+  const keywordConsistency = titleKeywordConsistency(analysis.title, analysis.bodyText);
+  if (keywordConsistency.checked && keywordConsistency.ratio < 0.5) {
+    gaps.push({ type: 'Keyword consistency', detail: `Title's key terms barely appear in the page body (missing: ${keywordConsistency.missingWords.join(', ')}) — the title may no longer reflect what the page actually covers.` });
   }
   if (!analysis.hasOpenGraph) gaps.push({ type: 'Missing Open Graph tags', detail: 'No og:title/og:description found.' });
   if (analysis.listCount === 0) gaps.push({ type: 'Missing structured lists', detail: 'No ordered/unordered lists — lists help answer-engine extraction.' });

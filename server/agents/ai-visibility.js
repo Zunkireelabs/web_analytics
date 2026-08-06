@@ -69,26 +69,43 @@ const RECOMMENDATION_RULES = [
 // pages are scored, from the same real hasLlmsTxt/robotsAllowsAiCrawlers
 // ground truth the old per-page rule checked.
 const LLMS_TXT_LABEL = 'Publish an llms.txt file and update robots.txt to explicitly allow AI answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot).';
+const LLMS_TXT_MALFORMED_LABEL = 'Fix llms.txt to follow the convention: a top-level "# Site Name" heading, a short description, and markdown links to key pages.';
 const LLMS_TXT_KEY_PAGES_LIMIT = 8;
 
 function llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end }) {
-  if (!llmsReadiness || (llmsReadiness.hasLlmsTxt && llmsReadiness.robotsAllowsAiCrawlers !== false)) return null;
+  if (!llmsReadiness) return null;
+  const missing = !llmsReadiness.hasLlmsTxt;
+  const blockedByRobots = llmsReadiness.robotsAllowsAiCrawlers === false;
+  const malformed = llmsReadiness.hasLlmsTxt && !llmsReadiness.hasValidLlmsTxtStructure;
+  if (!missing && !blockedByRobots && !malformed) return null;
+
   const topPages = prioritized.slice(0, LLMS_TXT_KEY_PAGES_LIMIT).map((p) => p.page);
   // prioritized/priorities are already worst-score-first — the same ranking
   // every per-page finding's priority is drawn from, so this stays on the
   // same scale rather than inventing a separate one.
   const priority = priorities[0] || 'medium';
+  const reason = missing
+    ? 'no llms.txt file found'
+    : malformed
+      ? 'llms.txt exists but is missing the required "# Title" heading and/or markdown links'
+      : 'robots.txt blocks one or more AI answer-engine crawlers';
   return makeFinding({
     id: 'ai-visibility:site:llms-txt',
     evidence: {
       analyzedPages: prioritized.length,
       hasLlmsTxt: llmsReadiness.hasLlmsTxt,
+      hasValidLlmsTxtStructure: llmsReadiness.hasValidLlmsTxtStructure,
       robotsAllowsAiCrawlers: llmsReadiness.robotsAllowsAiCrawlers,
       topPages,
     },
-    whyItMatters: `Site-wide: ${!llmsReadiness.hasLlmsTxt ? 'no llms.txt file found' : 'robots.txt blocks one or more AI answer-engine crawlers'}. This affects AI-citation readiness across all ${prioritized.length} analyzed page(s), not just one.`,
+    whyItMatters: `Site-wide: ${reason}. This affects AI-citation readiness across all ${prioritized.length} analyzed page(s), not just one.`,
     priority,
-    recommendedAction: { label: LLMS_TXT_LABEL, generatorId: 'llms-txt', params: { priorityPages: topPages, start, end }, effort: effortForGenerator('llms-txt') },
+    recommendedAction: {
+      label: malformed && !missing && !blockedByRobots ? LLMS_TXT_MALFORMED_LABEL : LLMS_TXT_LABEL,
+      generatorId: 'llms-txt',
+      params: { priorityPages: topPages, start, end },
+      effort: effortForGenerator('llms-txt'),
+    },
     expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: prioritized.reduce((s, p) => s + p.impressions, 0) },
   });
 }

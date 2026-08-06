@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, MAX_INLINE_STYLE_COUNT } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -59,6 +59,44 @@ describe('robotsAllowsAiCrawlers', () => {
   test('crawler token matching is case-insensitive', () => {
     const robotsTxt = ['User-agent: gptbot', 'Disallow: /'].join('\n');
     assert.equal(robotsAllowsAiCrawlers(robotsTxt), false);
+  });
+});
+
+// Regression coverage for a real production case (zunkireelabs.com): the
+// site's live llms.txt returns 200 with text/plain content-type — passing
+// the bare existence check — but is a plain "Key Pages:" list with no "#
+// Title" heading and no markdown links, so it doesn't actually follow the
+// llms.txt convention and gives AI crawlers nothing structured to parse.
+describe('llmsTxtHasValidStructure', () => {
+  test('true for a well-formed file: top-level heading plus at least one markdown link', () => {
+    const text = '# Acme Inc\n\nAcme sells widgets.\n\n## Key Pages\n- [Pricing](https://acme.com/pricing)';
+    assert.equal(llmsTxtHasValidStructure(text), true);
+  });
+
+  test('false for a real production example: plain-text list, no heading, no markdown links', () => {
+    const text = 'Key Pages:\n- URL: https://zunkireelabs.com/blog Title: Blog Meta Description: Our blog';
+    assert.equal(llmsTxtHasValidStructure(text), false);
+  });
+
+  test('false when a markdown link exists but there is no top-level heading', () => {
+    const text = 'Some intro text.\n- [Pricing](https://acme.com/pricing)';
+    assert.equal(llmsTxtHasValidStructure(text), false);
+  });
+
+  test('false when a heading exists but there are no markdown links', () => {
+    const text = '# Acme Inc\n\nAcme sells widgets. Visit https://acme.com/pricing for pricing.';
+    assert.equal(llmsTxtHasValidStructure(text), false);
+  });
+
+  test('false for empty or missing content', () => {
+    assert.equal(llmsTxtHasValidStructure(''), false);
+    assert.equal(llmsTxtHasValidStructure(null), false);
+    assert.equal(llmsTxtHasValidStructure(undefined), false);
+  });
+
+  test('a "#" inside body text (not at the start of a line) does not count as a heading', () => {
+    const text = 'This costs #5 per unit.\n- [Pricing](https://acme.com/pricing)';
+    assert.equal(llmsTxtHasValidStructure(text), false);
   });
 });
 
@@ -200,5 +238,68 @@ describe('contentGapsFor — GEO gap types', () => {
     assert.ok(gaps.includes('Missing freshness signal'));
     assert.ok(gaps.includes('Missing review/rating schema'));
     assert.ok(gaps.includes('Missing external citations'));
+  });
+});
+
+describe('titleKeywordConsistency', () => {
+  test('not checked when the title is empty or only stopwords', () => {
+    assert.equal(titleKeywordConsistency('', 'some body text').checked, false);
+    assert.equal(titleKeywordConsistency('The And Of', 'some body text').checked, false);
+  });
+
+  test('ratio 1 when every real title keyword appears in the body', () => {
+    const result = titleKeywordConsistency('Best Hiking Boots for Winter', 'Our best winter hiking boots are built for cold trails.');
+    assert.equal(result.checked, true);
+    assert.equal(result.ratio, 1);
+    assert.deepEqual(result.missingWords, []);
+  });
+
+  test('ratio reflects the fraction of title keywords missing from the body, case-insensitively', () => {
+    const result = titleKeywordConsistency('Best Scuba Diving Gear', 'This page talks about hiking boots only.');
+    assert.equal(result.checked, true);
+    assert.ok(result.ratio < 0.5);
+    assert.ok(result.missingWords.includes('scuba'));
+    assert.ok(result.missingWords.includes('diving'));
+  });
+});
+
+describe('contentGapsFor — Keyword consistency gap', () => {
+  const baseAnalysis = {
+    title: 'A perfectly good title for this page', metaDescription: 'A'.repeat(80),
+    hasMetaDescription: true, hasFaq: true, hasSchema: true, h1Count: 1, h2Count: 1,
+    hasComparisonContent: true, imagesTotal: 0, imagesWithoutAlt: 0, hasCanonical: true,
+    canonicalUrl: null, pageHost: null, hasOpenGraph: true, listCount: 1, questionHeadingCount: 1,
+    hasAuthorSignal: true, hasFreshnessSignal: true, hasReviewSchema: true,
+    externalCitationDomainCount: 3, hasExternalCitations: true,
+    bodyText: 'A perfectly good page about this exact title and topic, written in full.',
+  };
+
+  test('no gap when the title\'s real keywords show up in the body', () => {
+    const gaps = contentGapsFor(baseAnalysis, []).map((g) => g.type);
+    assert.ok(!gaps.includes('Keyword consistency'));
+  });
+
+  test('flags a gap when the title\'s keywords are absent from the body', () => {
+    const analysis = { ...baseAnalysis, title: 'Scuba Diving Equipment Reviews', bodyText: 'This page is actually about hiking trails and camping gear.' };
+    const gaps = contentGapsFor(analysis, []).map((g) => g.type);
+    assert.ok(gaps.includes('Keyword consistency'));
+  });
+});
+
+describe('analyzePage — page-weight signals', () => {
+  test('counts elements with a style="" attribute', () => {
+    const html = `<html><head><title>T</title></head><body>${'<div style="color:red">x</div>'.repeat(3)}<p>no style here</p></body></html>`;
+    const analysis = analyzePage(html, 'https://example.com/');
+    assert.equal(analysis.inlineStyleCount, 3);
+  });
+
+  test('reports the real byte size of the fetched HTML', () => {
+    const html = '<html><head><title>T</title></head><body>hello</body></html>';
+    const analysis = analyzePage(html, 'https://example.com/');
+    assert.equal(analysis.htmlByteSize, Buffer.byteLength(html, 'utf8'));
+  });
+
+  test('MAX_INLINE_STYLE_COUNT is a positive threshold', () => {
+    assert.ok(MAX_INLINE_STYLE_COUNT > 0);
   });
 });
