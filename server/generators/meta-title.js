@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'meta-title',
@@ -31,11 +31,9 @@ export async function generate({ params }) {
     'not present in the excerpt. If no page content is given, write generically around the query only. Respond ' +
     'with ONLY a JSON object: {"titles": ["...", "...", "..."], "metaDescription": "..."}';
   const user = `Query: ${query}\n${pageContext ? `Current title: ${pageContext.currentTitle}\nPage text: ${pageContext.bodyExcerpt}` : 'No existing page — new content.'}`;
-  const raw = await callLLM(system, user, { maxTokens: 400 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 400 });
   } catch {
     throw Object.assign(new Error('Meta title generation failed: model did not return valid JSON'), { status: 400 });
   }

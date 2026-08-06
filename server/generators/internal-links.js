@@ -1,7 +1,7 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'internal-links',
@@ -49,11 +49,9 @@ export async function generate({ siteId, params }) {
     'invent a URL not in that list), and a one-sentence rationale. Respond with ONLY a JSON array: ' +
     '[{"anchorText": "...", "targetUrl": "...", "rationale": "..."}]';
   const user = `Source page text: ${fetched.analysis.bodyText.slice(0, 2500)}\n\nCandidate target URLs:\n${candidates.join('\n')}`;
-  const raw = await callLLM(system, user, { maxTokens: 600 });
-
   let suggestions;
   try {
-    suggestions = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    suggestions = await callLLMForJson(system, user, { maxTokens: 600 });
     if (!Array.isArray(suggestions)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Internal links generation failed: model did not return valid JSON'), { status: 400 });

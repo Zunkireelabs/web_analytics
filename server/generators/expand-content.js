@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 import { configured as cseConfigured, searchSources } from '../ingest/competitor-providers/google-cse.js';
 
 // Real citation search is opt-in, separate from GOOGLE_CSE_API_KEY's mere
@@ -86,11 +86,9 @@ export async function generate({ params }) {
     }
   }
 
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let sections;
   try {
-    sections = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    sections = await callLLMForJson(system, user, { maxTokens: 900 });
     if (!Array.isArray(sections)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400 });

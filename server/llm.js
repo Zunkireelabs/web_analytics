@@ -83,3 +83,45 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   }));
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
 }
+
+// Strips a markdown code fence wrapper (```json ... ``` or ``` ... ```) if
+// present — models frequently wrap JSON in one despite an explicit
+// "respond with ONLY JSON" instruction.
+function stripCodeFence(raw) {
+  return raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+}
+
+// Best-effort JSON extraction: a direct parse first, then (if the model
+// added stray prose before/after the JSON despite instructions not to) the
+// widest {...}/[...] substring in the response. Returns null, never throws
+// — callers decide what "still no valid JSON" means for them.
+export function extractJson(raw) {
+  const stripped = stripCodeFence(raw || '');
+  try { return JSON.parse(stripped); } catch { /* fall through to substring extraction */ }
+  const firstBrace = stripped.search(/[{[]/);
+  const lastBrace = Math.max(stripped.lastIndexOf('}'), stripped.lastIndexOf(']'));
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  try { return JSON.parse(stripped.slice(firstBrace, lastBrace + 1)); } catch { return null; }
+}
+
+// callLLM, but for a JSON-shaped response — a distinct failure mode from
+// the transient network/5xx retry callLLM already does internally: the
+// HTTP call succeeds, but the model's actual text content isn't parseable
+// JSON (stray prose, truncation, or just missing the mark despite an
+// explicit "respond with ONLY JSON" instruction). Confirmed as a real,
+// recurring failure across multiple generators (schema/faq/expand-content/
+// meta-title/...), not a one-off — one retry with a sharper, explicit
+// correction appended to the prompt before giving up honestly.
+export async function callLLMForJson(system, user, options = {}) {
+  const raw = await callLLM(system, user, options);
+  const parsed = extractJson(raw);
+  if (parsed !== null) return parsed;
+
+  console.warn('[llm] first response was not valid JSON, retrying once with a corrective nudge…');
+  const retryUser = `${user}\n\nYour previous response was not valid JSON. Respond with ONLY the raw JSON — no markdown code fences, no explanation, no text before or after it.`;
+  const retryRaw = await callLLM(system, retryUser, options);
+  const retryParsed = extractJson(retryRaw);
+  if (retryParsed !== null) return retryParsed;
+
+  throw Object.assign(new Error('Model did not return valid JSON after 2 attempts.'), { status: 400 });
+}

@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'schema',
@@ -74,9 +74,8 @@ async function draftJsonLd(schemaType, title, bodyText) {
     'date, or other fact that is not actually in the text. Respond with ONLY the JSON-LD object (include ' +
     '"@context": "https://schema.org" and the correct "@type").';
   const user = `Page title: ${title}\nPage text: ${bodyText.slice(0, 3000)}`;
-  const raw = await callLLM(system, user, { maxTokens: 700 });
   try {
-    return JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    return await callLLMForJson(system, user, { maxTokens: 700 });
   } catch {
     throw Object.assign(new Error('Schema generation failed: model did not return valid JSON'), { status: 400 });
   }

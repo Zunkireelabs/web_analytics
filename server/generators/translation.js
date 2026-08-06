@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'translation',
@@ -32,11 +32,9 @@ export async function generate({ params }) {
     '{"translatedTitle": "...", "translatedMetaDescription": "...", "translatedContent": "..."} (use empty ' +
     'strings for any field with no corresponding source text).';
   const user = `Title: ${title}\nMeta description: ${metaDescription}\nContent: ${keyContent}`;
-  const raw = await callLLM(system, user, { maxTokens: 1500 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 1500 });
   } catch {
     throw Object.assign(new Error('Translation generation failed: model did not return valid JSON'), { status: 400 });
   }

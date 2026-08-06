@@ -1,6 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { callLLM } from '../llm.js';
+import { callLLM, callLLMForJson } from '../llm.js';
 
 // New file, not an extension of blog-outline.js — blog-outline's content
 // shape is explicitly an OUTLINE (sections of heading+notes, no real prose),
@@ -67,11 +67,9 @@ export async function generate({ siteId, params }) {
     '"heading": "...", "directAnswer": "...", "supportingSections": [{"heading": "...", "body": "..."}], ' +
     '"suggestedFaqTopics": ["...", "..."], "suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
   const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 900 });
   } catch {
     throw Object.assign(new Error('Direct-answer generation failed: model did not return valid JSON'), { status: 400 });
   }

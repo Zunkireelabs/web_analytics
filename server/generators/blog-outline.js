@@ -1,6 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'blog-outline',
@@ -40,11 +40,9 @@ export async function generate({ siteId, params }) {
     '{"title": "...", "metaDescription": "...", "sections": [{"heading": "...", "notes": "..."}], ' +
     '"suggestedFaqTopics": ["...", "..."], "suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 900 });
   } catch {
     throw Object.assign(new Error('Blog outline generation failed: model did not return valid JSON'), { status: 400 });
   }

@@ -1,4 +1,4 @@
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'landing-page',
@@ -19,11 +19,9 @@ export async function generate({ params }) {
     'present in the given context. Respond with ONLY a JSON object: {"headline": "...", "subheadline": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "cta": "...", "metaTitle": "...", "metaDescription": "..."}';
   const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 900 });
   } catch {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }
