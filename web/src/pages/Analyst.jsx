@@ -234,6 +234,25 @@ function AnalystBody({ clientId, onSummary }) {
     localStorage.removeItem('analyst_density');
   };
 
+  // Must run unconditionally, ahead of the `if (error)`/`if (!dashboard)`
+  // early returns below — a hook called only after those returns resolve
+  // would be skipped on the first (loading) render and then called on every
+  // later render once dashboard loads, changing the hook count between
+  // renders (React error #310: hooks order/count must stay identical across
+  // renders). Guarding the effect's own BODY on `dashboard` (not skipping
+  // the hook call itself) is what keeps this legal.
+  useEffect(() => {
+    if (!dashboard) return;
+    const metrics = Object.entries(dashboard.groups || {}).flatMap(([group, ms]) => ms.map((m) => ({ ...m, dashboard_group: group })));
+    const ins = dashboard.insights || [];
+    onSummary?.({
+      openFindings: ins.length,
+      forecastRisks: ins.filter((i) => i.insight_type === 'forecast_risk').length,
+      readyFixes: ins.filter((i) => i.recommendation_id).length,
+      metricsTotal: metrics.length,
+    });
+  }, [dashboard, onSummary]);
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -301,13 +320,6 @@ function AnalystBody({ clientId, onSummary }) {
     allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
 
   const insights = dashboard.insights || [];
-  const summary = {
-    openFindings: insights.length,
-    forecastRisks: insights.filter((i) => i.insight_type === 'forecast_risk').length,
-    readyFixes: insights.filter((i) => i.recommendation_id).length,
-    metricsTotal: allMetrics.length,
-  };
-  useEffect(() => { onSummary?.(summary); }, [insights.length, allMetrics.length]);
 
   const resolve = async (insight) => {
     if (!insight.recommendation_id) return;

@@ -88,7 +88,7 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
   }, withErrorHandling('delete_draft', async ({ id }) => {
     const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
     const ok = await deleteDraft(siteId, id);
-    if (!ok) return { isError: true, content: [{ type: 'text', text: 'Draft not found.' }] };
+    if (!ok) return { isError: true, content: [{ type: 'text', text: 'Draft not found, or already implemented (an implemented draft is the audit record of a real shipped change and can\'t be discarded).' }] };
     return jsonResult({ ok: true });
   }));
 

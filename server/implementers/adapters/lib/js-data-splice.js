@@ -189,6 +189,72 @@ export function findArrayFieldRange(content, objRange, fieldName, format = 'js-e
   return { start, end };
 }
 
+// Locates the value range of an EXISTING top-level `fieldName: "..."` /
+// 'value'-string scalar property directly inside the given object — the
+// scalar counterpart to findTopLevelArrayKeyStart/findArrayFieldRange
+// above, used for writing a single title/description string (e.g. into
+// locations.js/comparisons.js) rather than splicing a nested array.
+// Deliberately conservative in three ways an array field doesn't need to
+// be: (1) a leading negative lookbehind on the unquoted js-export-array key
+// so `title:` never matches inside `subtitle:` — quoted json-array keys
+// don't have this risk since the value's own closing quote is part of the
+// key match itself; (2) only a plain `"..."`/`'...'` value is accepted — a
+// template literal (`` `...${x}...` ``) or any non-string value is left
+// alone rather than guessed at, since a static splice can't safely reason
+// about real interpolation; (3) more than one top-level match (shouldn't
+// happen for a well-formed object, but same "don't guess" posture as
+// findObjectRange's zero-or-many -> null) returns null.
+export function findScalarFieldRange(content, objRange, fieldName, format = 'js-export-array') {
+  const keySrc = format === 'json-array' ? keyRegexSource(fieldName, format) : `(?<![A-Za-z0-9_$])${keyRegexSource(fieldName, format)}`;
+  const keyRe = new RegExp(keySrc, 'g');
+  keyRe.lastIndex = objRange.start + 1;
+  const found = [];
+  let m;
+  while ((m = keyRe.exec(content)) && m.index < objRange.end) {
+    let depth = 0;
+    let i = objRange.start + 1;
+    while (i < m.index) {
+      const c = content[i];
+      if (c === '"' || c === "'" || c === '`') {
+        const quote = c;
+        i++;
+        while (i < content.length && content[i] !== quote) { if (content[i] === '\\') i++; i++; }
+        i++;
+        continue;
+      }
+      if (c === '/' && content[i + 1] === '/') { const nl = content.indexOf('\n', i); i = nl === -1 ? content.length : nl + 1; continue; }
+      if (c === '/' && content[i + 1] === '*') { const e = content.indexOf('*/', i + 2); i = e === -1 ? content.length : e + 2; continue; }
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') depth--;
+      i++;
+    }
+    if (depth === 0) {
+      let j = m.index + m[0].length;
+      while (j < content.length && /\s/.test(content[j])) j++;
+      const quote = content[j];
+      if (quote === '"' || quote === "'") {
+        let k = j + 1;
+        while (k < content.length && content[k] !== quote) { if (content[k] === '\\') k++; k++; }
+        if (k < content.length) found.push({ valueStart: j, valueEnd: k + 1, quote });
+      }
+    }
+    keyRe.lastIndex = m.index + 1;
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+// Replaces an existing scalar field's string value in place, re-escaping
+// backslashes and the field's own quote character the same minimal way
+// lib/marker-merge.js's applyMarker does for a LINE marker's quoted value —
+// null (no edit made) on anything findScalarFieldRange itself refused to
+// resolve, leaving the caller's existing "couldn't find it" failure honest.
+export function spliceScalarField(content, objRange, fieldName, newValue, format = 'js-export-array') {
+  const range = findScalarFieldRange(content, objRange, fieldName, format);
+  if (!range) return null;
+  const escaped = String(newValue).replace(/\\/g, '\\\\').replace(new RegExp(escapeRegExp(range.quote), 'g'), `\\${range.quote}`);
+  return content.slice(0, range.valueStart) + range.quote + escaped + range.quote + content.slice(range.valueEnd);
+}
+
 // ---- js-export-array: comment-marker-based splice (today's real, tested mechanism) ----
 
 const MARKER_START = '/* SEOAI:FAQ:START */';

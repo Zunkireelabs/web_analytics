@@ -64,6 +64,17 @@ const GENERATOR_COLORS = {
 // manually" (the legacy bypass button) must never show for it.
 const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service'];
 
+// Generator ids with NO implementer registered at all, by deliberate design
+// (see each generator's own file — duplicate-id-fix.js, geo-audit.js): the
+// safe fix genuinely can't be known from a static page fetch (every CSS
+// selector / JS call / anchor that might reference a renamed id, e.g.), so
+// these only ever produce a plan for a developer to apply by hand in their
+// own repo — never a real file diff or branch. Kept in sync with
+// server/implementers/*.js's `handles` arrays (nothing there lists these
+// two ids) so the UI never invites an action that can only ever 404 with
+// "No implementer wired".
+const ADVISORY_ONLY_TYPES = ['duplicate-id-fix', 'geo-audit'];
+
 const STATUS_INFO = {
   draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },
   edited: { label: 'Edited draft · never published', color: '#f59e0b', bg: '#f59e0b0c', border: '#f59e0b20' },
@@ -190,6 +201,11 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
   const [copyLabel, setCopyLabel] = useState('Copy');
   const [error, setError] = useState(null);
   const [filePreview, setFilePreview] = useState(null); // null | 'loading' | {ok, ...} | {ok:false, error}
+  // Set when a server call tells us this exact draft row no longer exists
+  // (404) — most often because it was discarded from another tab/session
+  // while this modal stayed open on stale data. Once true, every action
+  // button is disabled (they'd just 404 too) in favor of one clear way out.
+  const [draftGone, setDraftGone] = useState(false);
   const status = STATUS_INFO[draft.status] || STATUS_INFO.draft;
   const brandColor = GENERATOR_COLORS[draft.action_type] || '#6366f1';
   const [showDiff, setShowDiff] = useState(true);
@@ -209,6 +225,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       const result = await api.actionCenter.previewDraft(draft.id);
       setFilePreview(result);
     } catch (e) {
+      if (e.status === 404) setDraftGone(true);
       setFilePreview({ ok: false, error: e.message || 'Preview failed' });
     }
   };
@@ -221,6 +238,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       const updated = await action();
       onSaved(updated);
     } catch (e) {
+      if (e.status === 404) setDraftGone(true);
       setError(e.message || 'Action failed');
     } finally {
       setTransitioning(false);
@@ -339,6 +357,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       await api.actionCenter.deleteDraft(draft.id);
       onDeleted(draft.id);
     } catch (e) {
+      if (e.status === 404) { setDraftGone(true); return; }
       setError(e.message || 'Delete failed');
     }
   };
@@ -355,6 +374,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
       await api.actionCenter.reject(draft.id, 'sent_back_to_recommendations');
       onDeleted(draft.id);
     } catch (e) {
+      if (e.status === 404) { setDraftGone(true); return; }
       setError(e.message || 'Failed to send back to Recommendations');
     } finally {
       setTransitioning(false);
@@ -399,6 +419,21 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
         </div>
 
         {/* Error/Notice banners */}
+        {draftGone && (
+          <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <AlertTriangle size={14} className="text-rose-500 shrink-0" />
+              <span><span className="font-extrabold">This draft no longer exists on the server.</span> It was likely discarded or already handled from another tab or session — this view is showing stale data. Close it and refresh the list.</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onDeleted(draft.id)}
+              className="text-[11px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg bg-rose-600 text-white hover:bg-rose-700 transition shrink-0"
+            >
+              Close &amp; Refresh
+            </button>
+          </div>
+        )}
         {draft.apply_error && (
           <div className="px-6 py-3 border-b border-slate-100 bg-rose-50 text-xs text-rose-700 leading-relaxed flex items-center gap-2">
             <AlertTriangle size={14} className="text-rose-500 shrink-0" />
@@ -513,7 +548,21 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
 
               {/* GitHub File Diff Preview Section — for an implemented draft
                   this shows the real, currently-live content instead of a
-                  pending diff (see FileDiffPreview's `result.live` branch). */}
+                  pending diff (see FileDiffPreview's `result.live` branch).
+                  Skipped entirely for advisory-only types (no implementer
+                  exists, so there is no file diff to fetch — see
+                  ADVISORY_ONLY_TYPES above) in favor of a plain explanation,
+                  so this never invites a "No implementer wired" dead end. */}
+              {ADVISORY_ONLY_TYPES.includes(draft.action_type) ? (
+                <div className="mt-5 pt-5 border-t border-slate-100">
+                  <div className="text-xs text-slate-600 bg-slate-50 border border-slate-150 rounded-2xl p-4 leading-relaxed flex items-start gap-2.5">
+                    <AlertTriangle size={16} className="text-slate-400 shrink-0 mt-0.5" />
+                    <p>
+                      This is an advisory fix plan, not an automatic file change — the safe rename can't be confirmed from a static page fetch alone (every CSS selector, JS call, and anchor link that might reference these ids would need checking). Copy the plan above and apply it by hand in your own repo, then mark this draft implemented.
+                    </p>
+                  </div>
+                </div>
+              ) : (
               <div className="mt-5 pt-5 border-t border-slate-100">
                   {draft.status === 'branch_pushed' && (
                     <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
@@ -569,6 +618,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                     </div>
                   )}
                 </div>
+              )}
             </>
           )}
           {error && (
@@ -609,7 +659,15 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
 
         {/* Modal Footer Controls */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-6 py-4 border-t border-slate-100 bg-slate-50/50 rounded-b-3xl">
-          {draft.status !== 'implemented' ? (
+          {draftGone ? (
+            <button
+              onClick={() => onDeleted(draft.id)}
+              className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-sm ml-auto"
+              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+            >
+              Close &amp; Refresh
+            </button>
+          ) : draft.status !== 'implemented' ? (
             <div className="flex items-center gap-1">
               <button
                 onClick={sendBackToRecommendation}
@@ -628,6 +686,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
             </div>
           ) : <span />}
 
+          {!draftGone && (
           <div className="flex flex-wrap items-center justify-end gap-2 ml-auto">
             {editing ? (
               <>
@@ -696,14 +755,16 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                         Mark Implemented manually
                       </button>
                     )}
-                    <button
-                      onClick={() => runPublishAction('push-branch')}
-                      disabled={transitioning}
-                      className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
-                      style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      <GitBranch size={12} /> {transitioning ? 'Pushing…' : 'Push Branch'}
-                    </button>
+                    {!ADVISORY_ONLY_TYPES.includes(draft.action_type) && (
+                      <button
+                        onClick={() => runPublishAction('push-branch')}
+                        disabled={transitioning}
+                        className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
+                        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                      >
+                        <GitBranch size={12} /> {transitioning ? 'Pushing…' : 'Push Branch'}
+                      </button>
+                    )}
                   </>
                 )}
 
@@ -809,6 +870,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
               </>
             )}
           </div>
+          )}
         </div>
       </div>
     </div>
