@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,6 +9,13 @@ from app.api.routes import (
 )
 from app.config import settings
 from app.ingestion.scheduler import start_scheduler, stop_scheduler
+
+# Nothing else in this app ever configured logging, so any module-level
+# `logger.info(...)` call (e.g. app/ingestion/scheduler.py) was silently
+# dropped — Python's root logger defaults to WARNING with no handler.
+# uvicorn configures its own "uvicorn"/"uvicorn.error"/"uvicorn.access"
+# loggers independently of this, so this only affects our own app code.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
 
 @asynccontextmanager
