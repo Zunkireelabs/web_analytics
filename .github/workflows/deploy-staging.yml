@@ -108,6 +108,11 @@ jobs:
             GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
             GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
 
+            # ── Content Expansion citations (opt-in, shares the Google CSE key/quota above) ──
+            # Without this, expand-content.js refuses to draft external-citations
+            # sections rather than invent an ungrounded link (see generators/expand-content.js).
+            ENABLE_CONTENT_CITATION_SEARCH=true
+
             # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
             # Without this, technical-seo.js still reports real GSC index
             # status/broken links — just without Core Web Vitals findings.
