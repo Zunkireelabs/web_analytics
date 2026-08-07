@@ -10,7 +10,7 @@ export const COMPLIANCE_DISCLAIMER = 'This is a draft template generated from da
 // landing-page.js's own "don't invent claims" instruction), and same
 // disclaimer. Only the page label and which real facts matter differ per
 // page type, passed in by each generator's own thin wrapper.
-export async function generateCompliancePage({ siteId, params, pageLabel, factsGuidance, maxTokens = 900 }) {
+export async function generateCompliancePage({ siteId, params, pageLabel, factsGuidance, requiredSections, maxTokens = 1300 }) {
   const site = await getSiteById(siteId);
   const siteName = params?.siteName || site?.name || null;
   const domain = params?.domain || site?.website_domain || null;
@@ -20,9 +20,26 @@ export async function generateCompliancePage({ siteId, params, pageLabel, factsG
 
   const facts = { siteName, domain, cookiesObserved, trackersDetected };
 
-  const system = `You are drafting a ${pageLabel} page for a website. Use ONLY the real facts given below — ` +
-    'the site\'s own name/domain, and the cookies/trackers actually detected on it. Never invent a cookie name, ' +
-    `third-party service, jurisdiction, or legal claim not present in the given facts. ${factsGuidance} ` +
+  // Two different kinds of claim get two different rules: anything about
+  // what THIS site specifically collects/tracks/does must come only from
+  // `facts` (never invented) — but a real policy also needs standard
+  // sections (user rights, retention, how to control cookies via browser
+  // settings, contact) that are true for any site regardless of what was
+  // detected here. Without spelling those out by name, an empty
+  // cookiesObserved/trackersDetected made the model fall back to a
+  // one-paragraph stub (confirmed live on zunkireelabs.com's /privacy/ and
+  // /cookie/ — both shipped with just an Introduction + a single "none
+  // detected" line) instead of a genuinely complete page.
+  const sectionsList = requiredSections?.length
+    ? `\n\nA complete ${pageLabel} also needs these standard sections, which are true for any site regardless of ` +
+      `what was detected — write them as normal generic policy language, not a site-specific claim: ` +
+      `${requiredSections.join('; ')}. Always include every one of these, in addition to whatever the real ` +
+      'detected facts support.'
+    : '';
+  const system = `You are drafting a ${pageLabel} page for a website. Use ONLY the real facts given below for any ` +
+    'claim about what this specific site actually collects, tracks, or does — the site\'s own name/domain, and ' +
+    'the cookies/trackers actually detected on it. Never invent a cookie name, third-party service, jurisdiction, ' +
+    `or site-specific data claim not present in the given facts. ${factsGuidance}${sectionsList} ` +
     'Respond with ONLY a JSON object: {"headline": "...", "sections": [{"heading": "...", "body": "..."}], ' +
     '"metaTitle": "...", "metaDescription": "..."}';
   const raw = await callLLM(system, `Facts: ${JSON.stringify(facts)}`, { maxTokens });

@@ -27,7 +27,8 @@ import {
   GitPullRequest,
   ShieldCheck,
   ShieldAlert,
-  XCircle
+  XCircle,
+  RefreshCw
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -181,6 +182,8 @@ export default function ActionCenter() {
   const [executionJobDetail, setExecutionJobDetail] = useState(null);
   const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
+  const [recheckingId, setRecheckingId] = useState(null);
+  const [recheckResult, setRecheckResult] = useState(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all'); // 'all' | 'seo' | 'aeo' | 'geo'
 
@@ -344,6 +347,27 @@ export default function ActionCenter() {
       setError(`${item.tag}: ${e.message || 'Approve & Ship failed'}`);
     } finally {
       setShippingId(null);
+    }
+  };
+
+  // On-demand re-verification of a single finding — for when the user just
+  // fixed something on their own site and doesn't want to wait for its page
+  // to come back around in that agent's daily rotation batch (see
+  // recommendation-coordinator.js's recheckRecommendation).
+  const recheckNow = async (item) => {
+    setRecheckingId(item.id);
+    setRecheckResult(null);
+    try {
+      const result = await api.actionCenter.recheckRecommendation(item.id);
+      setRecheckResult({ id: item.id, ...result });
+      if (result.changed) {
+        setSelectedRecommendation(null);
+        loadRecs();
+      }
+    } catch (e) {
+      setError(`${item.tag}: ${e.message || 'Re-check failed'}`);
+    } finally {
+      setRecheckingId(null);
     }
   };
 
@@ -900,6 +924,20 @@ export default function ActionCenter() {
                   </div>
 
                   <div className="p-6 border-t border-slate-100 bg-slate-50/30 flex items-center justify-end gap-2.5">
+                    {(selectedRecommendation.params?.page || selectedRecommendation.params?.href) && (
+                      <button
+                        onClick={() => recheckNow(selectedRecommendation)}
+                        disabled={recheckingId === selectedRecommendation.id}
+                        title="Re-examine this page/link right now instead of waiting for its next scheduled scan"
+                        className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-4 py-3 rounded-xl text-slate-600 bg-white border border-slate-200 transition hover:border-slate-350 disabled:opacity-60 cursor-pointer"
+                      >
+                        <RefreshCw size={12} className={recheckingId === selectedRecommendation.id ? 'animate-spin' : ''} />
+                        {recheckingId === selectedRecommendation.id ? 'Re-checking…' : 'Re-check Now'}
+                      </button>
+                    )}
+                    {recheckResult?.id === selectedRecommendation.id && !recheckResult.changed && (
+                      <span className="text-[10px] font-bold text-slate-450 italic">Still detected — not fixed yet.</span>
+                    )}
                     {selectedRecommendation.riskTier === 'safe' && (
                       <button
                         onClick={() => generate(selectedRecommendation)}

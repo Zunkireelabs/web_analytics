@@ -16,5 +16,15 @@ export async function generate({ siteId, params }) {
       'do not describe form submissions, account data, payment data, or any other collection practice unless it ' +
       'is one of the given facts. If both are empty, say so plainly (e.g. "no third-party trackers were detected ' +
       'on this site") instead of describing generic data practices.',
+    requiredSections: [
+      'Information We Collect (grounded strictly in the given trackers/cookies facts, per the rule above)',
+      'How We Use Information',
+      'Your Privacy Rights (access, correction, and deletion requests)',
+      'Data Retention',
+      "Children's Privacy",
+      'Third-Party Links',
+      'Changes to This Policy',
+      'Contact Us (using the given site name/domain)',
+    ],
   });
 }

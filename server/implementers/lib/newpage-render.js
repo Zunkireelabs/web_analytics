@@ -97,14 +97,40 @@ export function renderTranslationBody(content) {
   return `${front}\n${content.translatedContent || ''}\n`;
 }
 
+// Only a tiny, deliberately narrow parse of the two fields this codebase's
+// own real compliance-page templates set — not a general YAML parser.
+// Overwriting an already-linked page (frontend.js's COMPLIANCE_ACTION_TYPES
+// existingFile branch) without preserving these would silently orphan it:
+// no `layout` means no site chrome/styling wraps the new content, and no
+// `permalink` means Eleventy falls back to a filename-derived URL instead
+// of the real one (e.g. zunkireelabs.com's /privacy/ actually lives at
+// src/pages/privacy-policy-zunkiree-labs.njk with an explicit
+// `permalink: /privacy/` — losing that would move the live page to
+// /privacy-policy-zunkiree-labs/ and 404 the real URL).
+export function extractPreservedFrontMatter(rawContent) {
+  if (!rawContent) return {};
+  const match = rawContent.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  const preserved = {};
+  for (const line of match[1].split('\n')) {
+    const m = line.match(/^(layout|permalink):\s*"?([^"\n]*)"?\s*$/);
+    if (m) preserved[m[1]] = m[2];
+  }
+  return preserved;
+}
+
 // Cookie Policy / Privacy Policy / Terms of Service — same minimal
 // front-matter + heading/section shape as renderLandingPageBody, plus the
 // generator's disclaimer rendered as a visible callout at the very top of
 // the file (not just a `content` field a reviewer could miss), so "this is
 // a template, not legal advice, have it reviewed" survives into the real PR
-// diff a human reviews before merging.
-export function renderCompliancePageBody(content) {
+// diff a human reviews before merging. `preserved` (from
+// extractPreservedFrontMatter, existing-file overwrites only) is written
+// first so a real layout/permalink always wins over nothing.
+export function renderCompliancePageBody(content, preserved = {}) {
   const front = frontMatter([
+    ['layout', preserved.layout],
+    ['permalink', preserved.permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription],
   ]);

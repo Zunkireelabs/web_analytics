@@ -13,7 +13,14 @@ export async function generate({ siteId, params }) {
   return generateCompliancePage({
     siteId, params, pageLabel: 'Cookie Policy',
     factsGuidance: 'If cookiesObserved or trackersDetected is empty, say so plainly (e.g. "no third-party ' +
-      'tracking cookies were detected on this site") instead of padding with generic industry-standard cookie ' +
-      'boilerplate.',
+      'tracking cookies were detected on this site") instead of inventing specific cookie names or third-party ' +
+      'services that were not detected.',
+    requiredSections: [
+      'What Are Cookies',
+      'Cookies We Use (grounded strictly in the given cookiesObserved/trackersDetected facts, per the rule above)',
+      'How to Control or Disable Cookies (standard browser-settings guidance — not a site-specific claim)',
+      'Changes to This Policy',
+      'Contact Us (using the given site name/domain)',
+    ],
   });
 }

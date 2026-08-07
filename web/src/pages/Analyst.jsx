@@ -104,7 +104,7 @@ function SectionShell({ sec, idx, sectionList, handleMoveSection, handleToggleSe
   );
 }
 
-function AnalystBody({ clientId, onSummary }) {
+function AnalystBody({ clientId, onSummary, onRegisterNavigate }) {
   const [dashboard, setDashboard] = useState(null);
   const [error, setError] = useState(null);
   const [selectedMetricKey, setSelectedMetricKey] = useState(null);
@@ -211,6 +211,25 @@ function AnalystBody({ clientId, onSummary }) {
   const handleToggleSection = (id) => {
     setSectionList((prev) => prev.map((s) => (s.id === id ? { ...s, visible: !s.visible } : s)));
   };
+
+  // Drives click-through from the header status chips and hero stat tiles:
+  // force the target section visible (it may be hidden via customizer), then
+  // scroll to it once the visibility change has actually painted.
+  const [pendingScrollId, setPendingScrollId] = useState(null);
+  const handleNavigateToSection = (id, metricKey) => {
+    if (metricKey) setSelectedMetricKey(metricKey);
+    setSectionList((prev) => prev.map((s) => (s.id === id ? { ...s, visible: true } : s)));
+    setPendingScrollId(id);
+  };
+  useEffect(() => {
+    if (!pendingScrollId) return;
+    document.getElementById(`sec-${pendingScrollId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setPendingScrollId(null);
+  }, [pendingScrollId, sectionList]);
+
+  useEffect(() => {
+    onRegisterNavigate?.(() => handleNavigateToSection);
+  }, [onRegisterNavigate]);
 
   const handleMoveSection = (index, direction) => {
     const targetIndex = index + direction;
@@ -360,7 +379,7 @@ function AnalystBody({ clientId, onSummary }) {
   const renderSectionContent = (secId) => {
     switch (secId) {
       case 'hero':
-        return <AnalystPredictiveHero dashboard={dashboard} />;
+        return <AnalystPredictiveHero dashboard={dashboard} onNavigateToSection={handleNavigateToSection} />;
       case 'fixes':
         return (
           <AnalystProactiveActionBoard
@@ -568,6 +587,7 @@ export default function Analyst() {
   const [clients, setClients] = useState(null);
   const [clientId, setClientId] = useState(null);
   const [summary, setSummary] = useState(null);
+  const [navigateToSection, setNavigateToSection] = useState(null);
 
   const [activePreset, setActivePreset] = useState(() => localStorage.getItem('analyst_preset') || 'executive');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -621,6 +641,7 @@ export default function Analyst() {
           onToggleCustomizer={() => setCustomizerOpen(true)}
           onOpenShortcuts={() => setShortcutsModalOpen(true)}
           summary={summary}
+          onNavigateToSection={navigateToSection}
         />
 
         {clients === null ? (
@@ -636,7 +657,7 @@ export default function Analyst() {
             />
           </div>
         ) : clientId ? (
-          <AnalystBody key={clientId} clientId={clientId} onSummary={setSummary} />
+          <AnalystBody key={clientId} clientId={clientId} onSummary={setSummary} onRegisterNavigate={setNavigateToSection} />
         ) : null}
 
         <AnalystCommandPalette

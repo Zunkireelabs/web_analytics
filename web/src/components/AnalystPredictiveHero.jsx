@@ -30,7 +30,7 @@ function buildReadout(metrics) {
   return { forecastable, up, down, horizon, biggestRisk, biggestGain, total: metrics.length };
 }
 
-export default function AnalystPredictiveHero({ dashboard }) {
+export default function AnalystPredictiveHero({ dashboard, onNavigateToSection }) {
   const metrics = useMemo(
     () => Object.entries(dashboard?.groups || {}).flatMap(([g, ms]) => ms.map((m) => ({ ...m, dashboard_group: g }))),
     [dashboard]
@@ -103,10 +103,10 @@ export default function AnalystPredictiveHero({ dashboard }) {
 
         {/* Projection key stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
-          <Stat label="Metrics projected up" value={String(upCount)} tone="emerald" />
-          <Stat label="Metrics projected down" value={String(downCount)} tone="rose" />
-          <Stat label="Metrics steady" value={String(neutralCount)} tone="slate" />
-          <Stat label="Forecast horizon" value={`${readout.horizon} periods`} tone="violet" />
+          <Stat label="Metrics projected up" value={String(upCount)} tone="emerald" onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics'))} />
+          <Stat label="Metrics projected down" value={String(downCount)} tone="rose" onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics'))} />
+          <Stat label="Metrics steady" value={String(neutralCount)} tone="slate" onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics'))} />
+          <Stat label="Forecast horizon" value={`${readout.horizon} periods`} tone="violet" onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics'))} />
         </div>
 
         {/* Featured risk / opportunity rail */}
@@ -119,6 +119,7 @@ export default function AnalystPredictiveHero({ dashboard }) {
                 title="Biggest predicted risk"
                 metric={readout.biggestRisk.metric}
                 delta={readout.biggestRisk.delta}
+                onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics', readout.biggestRisk.metric.metric_key))}
               />
             )}
             {readout.biggestGain && (
@@ -128,6 +129,7 @@ export default function AnalystPredictiveHero({ dashboard }) {
                 title="Strongest growth signal"
                 metric={readout.biggestGain.metric}
                 delta={readout.biggestGain.delta}
+                onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics', readout.biggestGain.metric.metric_key))}
               />
             )}
           </div>
@@ -137,23 +139,33 @@ export default function AnalystPredictiveHero({ dashboard }) {
   );
 }
 
-function Stat({ label, value, tone }) {
+function Stat({ label, value, tone, onClick }) {
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div className="rounded-2xl bg-slate-100/50 border border-slate-200 p-3.5">
+    <Tag
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      className={`rounded-2xl bg-slate-100/50 border border-slate-200 p-3.5 text-left w-full ${onClick ? 'cursor-pointer hover:border-indigo-300 hover:bg-slate-100 transition' : ''}`}
+    >
       <div className={`text-2xl font-black leading-none ${tone === 'emerald' ? 'text-emerald-600' : tone === 'rose' ? 'text-rose-600' : tone === 'violet' ? 'text-indigo-500' : 'text-slate-700'}`}>
         {value}
       </div>
       <div className="an-label mt-1.5">{label}</div>
-    </div>
+    </Tag>
   );
 }
 
-function FeaturedCard({ tone, icon: Icon, title, metric, delta }) {
+function FeaturedCard({ tone, icon: Icon, title, metric, delta, onClick }) {
   const positive = delta > 0;
   const forecast = metric.forecast;
   const lastPoint = forecast?.points?.[forecast.points.length - 1];
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div className={`rounded-2xl border p-4 ${tone === 'rose' ? 'bg-rose-500/[0.06] border-rose-500/25' : 'bg-emerald-500/[0.06] border-emerald-500/25'}`}>
+    <Tag
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      className={`rounded-2xl border p-4 text-left w-full ${tone === 'rose' ? 'bg-rose-500/[0.06] border-rose-500/25' : 'bg-emerald-500/[0.06] border-emerald-500/25'} ${onClick ? 'cursor-pointer hover:brightness-95 transition' : ''}`}
+    >
       <div className="flex items-center gap-2 mb-2">
         <Icon size={13} className={tone === 'rose' ? 'text-rose-600' : 'text-emerald-600'} />
         <span className="an-label">{title}</span>
@@ -173,6 +185,6 @@ function FeaturedCard({ tone, icon: Icon, title, metric, delta }) {
           {pct(delta)}
         </div>
       </div>
-    </div>
+    </Tag>
   );
 }

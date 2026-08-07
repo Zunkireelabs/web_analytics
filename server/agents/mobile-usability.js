@@ -94,6 +94,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const facts = {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
+    checkedPages: batch, // this run's rotation batch — see security-headers.js facts for why
     pagesChecked: reachable.length,
     pagesMissingViewport: missingViewport.length,
     pagesWithWrongViewport: wrongViewport.length,

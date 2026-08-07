@@ -1,8 +1,12 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations, closeStaleRecommendations, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { classify } from './recommendation-taxonomy.js';
+import { recheckLink } from './technical-seo-analysis.js';
+import { getSiteById } from '../../store/read.js';
+import { daysAgoInTz } from '../../util/dates.js';
+import { runAgent } from '../runner.js';
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -49,15 +53,15 @@ export function recommendationPageKey(item) {
   return item.params?.page || '';
 }
 
-// grounded = buildRecommendations()'s { items, lastAnalyzedAt } output.
-// Upserts one recommendations row per (siteId, page, generatorId): a new
-// key inserts, an existing open key merges in the new finding/agent.
-// Deliberately create-and-merge only, never closes a row — buildRecommendations()
-// already hides findings that already have a draft, so an item's key
-// disappearing from `grounded` could mean either "fixed" or "now drafted,"
-// and this milestone has no way to tell those apart yet (auto-closing is
-// deferred to whichever later milestone wires draft/execution status back
-// into recommendation status).
+// grounded = buildRecommendations()'s { items, lastAnalyzedAt, detectedKeys }
+// output. Upserts one recommendations row per (siteId, page, generatorId): a
+// new key inserts, an existing open key merges in the new finding/agent.
+// Then closes (status = 'superseded') every currently-open row whose key is
+// missing from grounded.detectedKeys — the agent that originally flagged it
+// re-ran and no longer finds the issue, so it's resolved. detectedKeys is
+// built BEFORE buildRecommendations' draftedFindingIds filter specifically
+// so a finding with an unshipped draft still counts as "detected" here and
+// its recommendation row is never closed out from under a pending draft.
 export async function syncFromGrounded(siteId, grounded) {
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
@@ -77,6 +81,70 @@ export async function syncFromGrounded(siteId, grounded) {
       });
     }
   }
+  if (grounded.detectedKeys) {
+    await closeStaleRecommendations(siteId, grounded.detectedKeys, {
+      agentCheckedKeys: grounded.agentCheckedKeys,
+      linkCrawlCheckedKeys: grounded.linkCrawlCheckedKeys,
+      batchRotatedAgentIds: grounded.batchRotatedAgentIds,
+    });
+  }
+}
+
+// Manual "re-check now" action on a single open recommendation — the
+// instant counterpart to closeStaleRecommendations' bulk, rotation-gated
+// sweep above. A user who just fixed something on their site shouldn't have
+// to wait for that page's turn in a batch-rotated agent's rotation; this
+// re-examines exactly the one page/link right away and closes the
+// recommendation immediately if it's genuinely clean now.
+//
+// broken-link-fix gets its own path (recheckLink checks one href directly,
+// cheaper and more precise than re-running the whole page's link crawl).
+// Every other page-scoped recommendation type re-runs its detecting agent
+// via the same params.pages single-page bypass selectCandidatePages-based
+// agents already support for exactly this purpose (see e.g. ai-visibility.js
+// facts.checkedPages) — persist:false so this on-demand check never
+// overwrites the agent's real latest scheduled run. Site-level
+// recommendations (page === '') aren't re-checked here — they cover many
+// pages worth of evidence collapsed into one row, so they close naturally on
+// the next full sync instead.
+export async function recheckRecommendation(siteId, recommendationId) {
+  const rec = await getRecommendationById(siteId, recommendationId);
+  if (!rec) { const err = new Error('Recommendation not found'); err.status = 404; throw err; }
+  if (rec.status !== 'open') return { status: rec.status, changed: false };
+
+  if (rec.recommendation_type === 'broken-link-fix') {
+    const href = rec.params?.href;
+    if (!href) return { status: 'open', changed: false, reason: 'no link on record to re-check' };
+    const result = await recheckLink(href);
+    if (!result.broken) {
+      await closeRecommendation(rec.id);
+      return { status: 'superseded', changed: true, detail: result };
+    }
+    return { status: 'open', changed: false, detail: result };
+  }
+
+  if (!rec.page) return { status: 'open', changed: false, reason: 'site-level recommendation — re-checked automatically on the next full sync' };
+
+  const agentId = rec.detecting_agents?.[0];
+  if (!agentId) return { status: 'open', changed: false, reason: 'no detecting agent on record' };
+
+  const site = await getSiteById(siteId);
+  const end = daysAgoInTz(site?.timezone || 'UTC', 0);
+  const start = daysAgoInTz(site?.timezone || 'UTC', 28);
+
+  let output;
+  try {
+    output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
+  } catch (err) {
+    return { status: 'open', changed: false, reason: `re-check failed: ${err.message}` };
+  }
+  const stillDetected = (output.facts?.findings || []).some((f) => (
+    f.recommendedAction?.generatorId === rec.recommendation_type
+    && recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params }) === rec.page
+  ));
+  if (stillDetected) return { status: 'open', changed: false };
+  await closeRecommendation(rec.id);
+  return { status: 'superseded', changed: true };
 }
 
 // Drop-in replacement for buildRecommendations() at the two call sites that

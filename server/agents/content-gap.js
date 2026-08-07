@@ -273,6 +273,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     rangeEnd: end,
     pages,
     count: pages.length,
+    checkedPages: batch, // this run's rotation batch — see security-headers.js facts for why
     findings,
     // Null when fewer than MIN_TRACKED_COMPETITORS reachable competitor
     // profiles exist yet — an honest "not enough real data for a market

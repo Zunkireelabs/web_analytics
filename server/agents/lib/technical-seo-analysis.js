@@ -216,5 +216,33 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
 
   const broken = finalResults.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400) || r.softNotFound);
   const redirectChains = finalResults.filter((r) => !r.error && r.hops >= LONG_CHAIN_HOP_THRESHOLD);
-  return { checked: finalResults.length, broken, redirectChains };
+  // Every source page that had at least one outbound link actually checked
+  // this run — as opposed to every page in the batch, most of which never
+  // get their links re-verified since crawlInternalLinks caps at
+  // MAX_LINK_CHECKS_PER_DAY hrefs total, not per page. Recommendation
+  // auto-close (recommendation-coordinator.js) needs this: a page missing
+  // from today's broken-link findings only means "fixed" if its links were
+  // actually re-checked, not just "not this run's rotation."
+  const checkedPages = new Set();
+  for (const r of finalResults) for (const p of r.sourcePages) checkedPages.add(p);
+  return { checked: finalResults.length, broken, redirectChains, checkedPages: [...checkedPages] };
+}
+
+// On-demand single-link check for the manual "re-check now" action
+// (recommendation-coordinator.js's recheckRecommendation) — same broken
+// classification as crawlInternalLinks (status/error/soft-404) but scoped
+// to one href instead of a whole page's link crawl, so a user who just
+// fixed a specific link can confirm it immediately instead of waiting for
+// its page to rotate back into a batch.
+export async function recheckLink(href) {
+  let origin;
+  try { origin = new URL(href).origin; } catch { return { broken: true, error: 'invalid URL', finalStatus: null, softNotFound: false }; }
+  const [redirectResult, fingerprint] = await Promise.all([
+    followRedirects(href),
+    fetchSoftNotFoundFingerprint(origin),
+  ]);
+  const eligible = !redirectResult.error && redirectResult.finalStatus != null && redirectResult.finalStatus >= 200 && redirectResult.finalStatus < 300;
+  const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
+  const broken = !!redirectResult.error || (redirectResult.finalStatus != null && redirectResult.finalStatus >= 400) || softNotFound;
+  return { broken, finalStatus: redirectResult.finalStatus, error: redirectResult.error, softNotFound };
 }

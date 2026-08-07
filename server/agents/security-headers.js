@@ -126,6 +126,11 @@ export async function run({ siteId, start, end, params }) {
   const facts = {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
+    // Plain page-URL list of this run's rotation batch — separate from
+    // pagesChecked below (per-page ok/error detail) because recommendation
+    // auto-close (recommendation-coordinator.js) needs a uniform shape
+    // across every batch-rotated agent, not each agent's own result shape.
+    checkedPages: batch,
     pagesChecked: fetched.map((r) => ({ page: r.page, ok: r.result.ok, error: r.result.ok ? null : r.result.error })),
     findings,
   };

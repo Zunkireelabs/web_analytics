@@ -3,7 +3,7 @@ import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
-import { syncFromGrounded, getRecommendations } from '../agents/lib/recommendation-coordinator.js';
+import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
@@ -512,6 +512,17 @@ router.get('/action-center/execution-stats/today', async (req, res, next) => {
   try {
     res.json(await getTodayExecutionStats(req.siteId));
   } catch (e) { next(e); }
+});
+
+// Manual "re-check now" — immediately re-verifies one recommendation's page
+// or link instead of waiting for its agent's next rotation-batched run.
+router.post('/action-center/recommendations/:id/recheck', async (req, res, next) => {
+  try {
+    res.json(await recheckRecommendation(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
 });
 
 router.post('/action-center/recommendations/:id/approve-and-ship', async (req, res, next) => {
