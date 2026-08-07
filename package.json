@@ -23,7 +23,8 @@
     "dev:mcp": "node --watch mcp-server/index.js",
     "dev:web": "vite",
     "build:web": "vite build",
-    "preview:web": "vite preview"
+    "preview:web": "vite preview",
+    "check-error-leaks": "node server/scripts/check-error-leaks.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
