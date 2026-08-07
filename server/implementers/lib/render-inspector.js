@@ -1,4 +1,5 @@
 import { callLLM } from '../../llm.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // Deterministic-first, fully autonomous render-mode inspection: replaces the
 // old static url_file_map.pages[url].render config as the source of truth
@@ -149,11 +150,8 @@ async function llmAssistedInspection(fileContent, deterministicSignals, { visibl
     const raw = await callLLM(system, user, { maxTokens: 300 });
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch (err) {
-    return {
-      mode: null, confidence: 0,
-      reason: `Could not determine render mode automatically (analysis failed: ${err.message}).`,
-      source: 'llm-assisted',
-    };
+    const { message } = safeMessage('render-inspector.inspectRenderMode', err, 'Could not determine render mode automatically right now.');
+    return { mode: null, confidence: 0, reason: message, source: 'llm-assisted' };
   }
 
   const mode = parsed.mode === 'visible' ? 'visible' : 'schema-only'; // any unexpected value defaults safe

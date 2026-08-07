@@ -196,6 +196,22 @@ export async function getPullRequest(site, prNumber) {
   return { state: data.state, merged: data.merged, mergeable: data.mergeable, mergeableState: data.mergeable_state };
 }
 
+// Full recursive file listing of a branch's tree — the one real inventory of
+// "every file that actually exists in this repo," used by
+// implementers/lib/discover-file-mapping.js to find a url_file_map candidate
+// by real filename instead of guessing from framework convention. GitHub
+// truncates the response (silently, via `truncated: true`) past ~100,000
+// entries/7MB — surfaced to the caller rather than swallowed, since a
+// truncated listing can produce false "no candidate found" results.
+export async function getRepoTree(site, branch) {
+  const sha = await getBranchSha(site, branch);
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/trees/${sha}?recursive=1`);
+  if (!res.ok) throw new Error(`getRepoTree failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  const files = (data.tree || []).filter((entry) => entry.type === 'blob').map((entry) => entry.path);
+  return { files, truncated: !!data.truncated };
+}
+
 // Last-resort candidate finder for broken-link-fix's Layer 2 (see
 // implementers/backend.js's computeBrokenLinkFixMerge) — locates files by
 // literal content match via GitHub's Code Search API, when url_file_map has

@@ -5,16 +5,25 @@
 // duplicateIds). This generator just turns that into a reviewable,
 // per-occurrence fix plan.
 //
-// Deliberately advisory, not an auto-applied file diff: renaming an id
-// safely requires knowing every CSS selector (#id), JS call
-// (getElementById/querySelector), and anchor link (#id) that references it
-// — none of which a static single-page fetch can see with confidence.
-// Blindly rewriting one occurrence risks silently breaking styling or
-// behavior elsewhere. Same posture as geo-audit.js (a report for a human,
-// not a mergeable patch) — no implementer is registered for this
-// generatorId, so it never appears in the Execute Safe Fixes auto-chain
-// (risk-tiers.js defaults any unlisted generatorId to 'manual' tier) and
-// stays a draft for a developer to act on directly in their own repo.
+// Deliberately advisory for the general case, not an auto-applied file
+// diff: renaming an id safely requires knowing every CSS selector (#id), JS
+// call (getElementById/querySelector), and anchor link (#id) that
+// references it — none of which a static single-page fetch can see with
+// confidence. Blindly rewriting one occurrence risks silently breaking
+// styling or behavior elsewhere.
+//
+// backend.js DOES register an implementer for this generatorId, but it only
+// auto-applies one provably-safe shape: a duplicate id on an SVG
+// linearGradient/radialGradient/clipPath/mask that's referenced solely by
+// url(#id) inside its own <svg> block (see
+// implementers/lib/duplicate-id-inject.js) — no cross-file or cross-CSS/JS
+// blast radius to reason about. Every other occurrence in the plan still
+// refuses and falls back to this advisory draft, all-or-nothing per draft.
+// risk-tiers.js still defaults this generatorId to 'manual' tier (it's not
+// in SAFE_GENERATOR_IDS), so it never enters the Execute Safe Fixes
+// auto-chain even for the safe shape — a human still reviews and clicks
+// Apply per draft, same as geo-audit.js's posture, just no longer a dead
+// end when they do.
 
 export const meta = {
   id: 'duplicate-id-fix',

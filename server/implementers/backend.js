@@ -1,7 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
@@ -10,13 +10,15 @@ import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } fro
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
 import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
+import { safeMessage } from '../lib/errors.js';
+import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
 
 
 export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -31,7 +33,11 @@ const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-lin
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
 // in the "no markers configured" error below, never hardcoded to one type
-// regardless of which draft actually triggered it.
+// regardless of which draft actually triggered it. analytics-install has no
+// single static field — see ANALYTICS_PROVIDER_FIELDS (marker-merge.js):
+// each provider (ga4/facebook-pixel) gets its own field/marker so two
+// analytics-install drafts for different providers don't clobber each
+// other's marker on apply.
 const MARKER_FIELD_BY_ACTION_TYPE = {
   'meta-title': 'title',
   faq: 'faq',
@@ -41,11 +47,12 @@ const MARKER_FIELD_BY_ACTION_TYPE = {
   'open-graph': 'openGraph',
   'expand-content': 'expandedContent',
   'qa-content': 'qaContent',
-  'analytics-install': 'analyticsScript',
 };
 
-function markerConfigExample(actionType) {
-  const field = MARKER_FIELD_BY_ACTION_TYPE[actionType] || 'field';
+function markerConfigExample(actionType, provider) {
+  const field = actionType === 'analytics-install'
+    ? (ANALYTICS_PROVIDER_FIELDS[provider] || Object.values(ANALYTICS_PROVIDER_FIELDS).join('" and "'))
+    : (MARKER_FIELD_BY_ACTION_TYPE[actionType] || 'field');
   return { field, marker: field.toUpperCase() };
 }
 
@@ -311,6 +318,118 @@ async function previewLiveRedirectFix(site, draft) {
   return { ok: true, filePath, live: true, changedRegions: anchors.map((content) => ({ field: 'href', content })) };
 }
 
+// duplicate-id-fix.js's own generator deliberately stays advisory for the
+// general case — no implementer used to be registered for it at all (see
+// that file's header comment). This auto-applies only the one shape that's
+// provably safe: a duplicate id on an SVG paint-def tag
+// (linearGradient/radialGradient/clipPath/mask) that's referenced solely by
+// `url(#id)` inside its own <svg> block — see lib/duplicate-id-inject.js.
+// Every other duplicate id (referenced by CSS, JS, or an anchor link,
+// anywhere in the repo) refuses rather than guesses, all-or-nothing per
+// draft: if any one occurrence in the plan isn't safe, none of them are
+// applied, so a reviewer never has to reason about a half-renamed page.
+const SVG_PAINT_DEF_TAGS = new Set(['lineargradient', 'radialgradient', 'clippath', 'mask']);
+
+async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
+  const page = draft.content?.page;
+  const filePath = resolveFile(site, page);
+  if (!filePath) {
+    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
+  }
+  const file = await getFileContent(site, filePath, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+
+  const entries = draft.content?.fixPlan || [];
+  if (!entries.length) {
+    return { ok: false, reason: 'draft-not-ready', error: 'This draft has no renameable occurrences.' };
+  }
+
+  const unsafe = [];
+  const edits = [];
+  const changedRegions = [];
+  for (const entry of entries) {
+    const occurrences = entry.occurrences || [];
+    const renamable = occurrences.filter((occ) => !occ.keep);
+    if (!renamable.length) continue;
+
+    const nonGradientTag = occurrences.find((occ) => !SVG_PAINT_DEF_TAGS.has(String(occ.tag).toLowerCase()));
+    if (nonGradientTag) {
+      unsafe.push(`id="${entry.id}" is on a <${nonGradientTag.tag}> element, not a gradient/clipPath/mask def — renaming it could affect a CSS selector, JS lookup, or anchor link this fix can't see.`);
+      continue;
+    }
+    if (hasDangerousReference(file.content, entry.id)) {
+      unsafe.push(`id="${entry.id}" is referenced by something other than a plain url(#...) fill in ${filePath} (a CSS selector, getElementById/querySelector call, or #anchor) — refusing to rename it automatically.`);
+      continue;
+    }
+    if (await hasExternalReferences(site, entry.id, filePath, searchCodeForString)) {
+      unsafe.push(`id="${entry.id}" also appears in another file in this repo — can't confirm it's safe to rename without a human checking that reference.`);
+      continue;
+    }
+
+    // Positional, not snippet-text, matching — see findIdScopesInOrder's
+    // comment: when occurrences are byte-identical duplicated components, a
+    // substring search can't tell "the second one" from "the first one",
+    // only document order can. scopes.length must equal occurrences.length
+    // exactly, or the live file no longer matches what was scanned.
+    const scopes = findIdScopesInOrder(file.content, entry.id);
+    if (!scopes || scopes.length !== occurrences.length) {
+      unsafe.push(`id="${entry.id}" now has ${scopes ? scopes.length : 'a different number of'} occurrence(s) in <svg> blocks in ${filePath}, not the ${occurrences.length} this plan was drafted from — the file has changed since it was scanned.`);
+      continue;
+    }
+
+    occurrences.forEach((occ, i) => {
+      if (occ.keep) return;
+      const scope = scopes[i];
+      edits.push({ start: scope.start, end: scope.end, oldId: entry.id, newId: occ.suggestedId });
+      changedRegions.push({ field: 'id', markerName: entry.id, before: `id="${entry.id}"`, after: `id="${occ.suggestedId}"` });
+    });
+  }
+
+  if (unsafe.length) {
+    return { ok: false, reason: 'not-provably-safe', error: `Can't safely auto-apply this duplicate-id fix: ${unsafe.join(' ')} Apply the fix plan by hand instead.` };
+  }
+  if (!edits.length) {
+    return { ok: false, reason: 'draft-not-ready', error: 'This draft has no renameable occurrences.' };
+  }
+
+  const newContent = applyScopeRenames(file.content, edits);
+  return { ok: true, filePath, oldContent: file.content, newContent, changedRegions };
+}
+
+async function pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeDuplicateIdFixMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveDuplicateIdFix(site, draft) {
+  const page = draft.content?.page;
+  const filePath = resolveFile(site, page);
+  if (!filePath) return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}".` };
+  const file = await getFileContent(site, filePath, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${filePath} does not exist on branch "${baseBranch(site)}".` };
+
+  const toRename = (draft.content?.fixPlan || []).flatMap((entry) =>
+    (entry.occurrences || []).filter((occ) => !occ.keep).map((occ) => ({ ...occ, id: entry.id }))
+  );
+  const changedRegions = toRename
+    .map((occ) => {
+      const idAttr = `id="${occ.suggestedId}"`;
+      const idx = file.content.indexOf(idAttr);
+      return idx === -1 ? null : { field: 'id', markerName: occ.id, content: file.content.slice(idx, idx + 160) };
+    })
+    .filter(Boolean);
+
+  if (!changedRegions.length) {
+    return { ok: false, reason: 'no-insertion-marker', error: `None of this draft's renamed ids were found in ${filePath} — it may have changed since this draft was implemented.` };
+  }
+  return { ok: true, filePath, live: true, changedRegions };
+}
+
 const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case calls on the rate-limited search fallback
 
 // One readable sentence summarizing every attempt across both layers, for
@@ -382,7 +501,8 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   try {
     candidates = await searchCodeForString(site, href, { maxResults: CODE_SEARCH_MAX_CANDIDATES });
   } catch (err) {
-    attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: err.message });
+    const { message } = safeMessage('backend.computeBrokenLinkFixMerge', err, 'the code search fallback is temporarily unavailable');
+    attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: message });
   }
 
   for (const filePath of candidates) {
@@ -464,17 +584,44 @@ async function previewLiveBrokenLinkFix(site, draft) {
 // stop, never persisted as site config.
 async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
-  const filePath = resolveFile(site, page);
+
+  // analytics-install installs a tracking script SITEWIDE (GA4/Meta Pixel) —
+  // it's not per-page content the way canonical/open-graph genuinely are.
+  // Routing it through resolveFile(page) like those types would mean the
+  // script only ever fires on whichever one page's file got edited, which
+  // defeats the entire point of an "install." It targets the site's one
+  // shared layout template instead — the same siteRoot.layoutTemplate
+  // html-lang/security-headers already use for other sitewide concerns —
+  // so its marker is configured ONCE, via
+  // url_file_map.defaults.placements['analytics-install'] (resolveMarkers
+  // already falls back to this site-level default when no page/pattern
+  // entry exists), not duplicated across every individual page.
+  const isSitewideInstall = draft.action_type === 'analytics-install';
+  const filePath = isSitewideInstall ? resolveSiteRootFile(site, 'layoutTemplate') : resolveFile(site, page);
   if (!filePath) {
-    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
+    return isSitewideInstall
+      ? { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' }
+      : { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
   }
 
   const markerMap = resolveMarkers(site, page, draft.action_type);
-  if (!markerMap) {
-    const { field, marker } = markerConfigExample(draft.action_type);
+  // For analytics-install specifically, markerMap can be non-null (another
+  // provider is configured) while THIS draft's own provider field is still
+  // missing — spliceMarkers silently no-ops on a field it was never told
+  // about (it only visits markerMap's own keys), which would otherwise look
+  // like a successful apply that wrote nothing. Checked explicitly so a
+  // second provider's missing config surfaces the same honest error a
+  // wholly-unconfigured type gets, not a silent no-op PR.
+  const providerField = isSitewideInstall ? ANALYTICS_PROVIDER_FIELDS[draft.content?.provider] : null;
+  const markersUsable = markerMap && (!isSitewideInstall || (providerField && providerField in markerMap));
+  if (!markersUsable) {
+    const { field, marker } = markerConfigExample(draft.action_type, draft.content?.provider);
+    const configHint = isSitewideInstall
+      ? `add e.g. {"${field}":"${marker}"} to url_file_map.defaults.placements["analytics-install"].markers (once, sitewide)`
+      : `add e.g. {"${field}":"${marker}"} to url_file_map.pages[...].placements or .markers`;
     return {
       ok: false, reason: 'no-insertion-marker',
-      error: `No markers configured for "${page}" in url_file_map.pages[...].placements or .markers — add e.g. {"${field}":"${marker}"} there, and a matching marker in ${filePath}: either <!-- SEOAI:${marker}:START -->...<!-- SEOAI:${marker}:END --> around HTML content, or a trailing # SEOAI:${marker} comment on a single quoted-value line (e.g. front matter).`,
+      error: `No markers configured for "${page || '(sitewide)'}" — ${configHint}, and a matching marker in ${filePath}: either <!-- SEOAI:${marker}:START -->...<!-- SEOAI:${marker}:END --> around HTML content, or a trailing # SEOAI:${marker} comment on a single quoted-value line (e.g. front matter).`,
     };
   }
 
@@ -621,6 +768,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
@@ -667,6 +815,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
+    if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
     if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
@@ -693,6 +842,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);

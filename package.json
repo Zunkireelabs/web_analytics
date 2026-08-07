@@ -12,6 +12,8 @@
     "create-client": "node server/scripts/create-client.js",
     "connect-site": "node server/scripts/connect-site.js",
     "connect-repo": "node server/scripts/connect-repo.js",
+    "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
+    "check-env-parity": "node server/scripts/check-env-parity.js",
     "refresh-commoncrawl-graph": "node server/scripts/refresh-commoncrawl-graph.js",
     "weekly": "node server/scripts/weekly.js",
     "executive-report": "node server/scripts/executive-report.js",
@@ -23,7 +25,8 @@
     "dev:mcp": "node --watch mcp-server/index.js",
     "dev:web": "vite",
     "build:web": "vite build",
-    "preview:web": "vite preview"
+    "preview:web": "vite preview",
+    "check-error-leaks": "node server/scripts/check-error-leaks.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",

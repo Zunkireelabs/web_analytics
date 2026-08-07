@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import { pool, updateSiteRepoConfig } from '../db.js';
 import { getSiteById } from '../store/read.js';
+import { auditSite } from './audit-url-file-map.js';
 
 // Attach a GitHub repo to a site already created via `npm run create-client`,
 // so the Action Center can apply approved drafts as real pull requests
@@ -73,6 +74,19 @@ async function main() {
 
   if (updated.repo_owner && updated.repo_name) {
     console.log(`Repo configured: ${updated.repo_owner}/${updated.repo_name}. Make sure the ${updated.github_pat_env_var} env var is set, then check Integration Health for "GitHub (Action Center)".`);
+
+    // Auto-run the same config-completeness check `npm run audit-url-file-map`
+    // does, right now, instead of leaving it as a separate step someone has
+    // to remember — this is exactly the gap that let drafts get stuck on
+    // missing url_file_map entries / vanished SEOAI markers after onboarding
+    // looked "done." Best-effort: a failure here (e.g. GitHub API hiccup)
+    // must not undo the repo config write above.
+    console.log('\nRunning config-completeness check...');
+    try {
+      await auditSite(siteId);
+    } catch (err) {
+      console.warn(`Config check failed to run: ${err.message} — run \`npm run audit-url-file-map -- --site-id ${siteId}\` manually before relying on this site's drafts.`);
+    }
   } else {
     console.log('Still missing repo_owner/repo_name — Apply Change will 400 until both are set.');
   }

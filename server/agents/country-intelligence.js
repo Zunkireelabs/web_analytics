@@ -17,6 +17,26 @@ export const meta = {
 
 const TOP_LIMIT = 10;
 const DELTA_LIMIT = 8;
+// Generating a landing page is a real, costly content-generation action (a
+// whole new page, drafted and PR'd) — unlike the growingMarkets/growingCities
+// facts feeding the narrative (fine to show any real gainer, however small),
+// a recommendation to actually build one needs a real signal behind it, not
+// statistical noise. Real report: "India grew from 0 to 1 sessions" (a
+// single session) was surfacing as a "Generate Landing Page" recommendation
+// — growingMarkets[0]/growingCities[0] is just the single largest delta
+// among gainers with zero floor, so a market's very first visitor ever
+// (0 -> 1, delta 1) ranks #1 whenever nothing else grew by more. Mirrors the
+// MIN_IMPRESSIONS convention opportunity.js/competitor-intelligence.js
+// already use to keep a low-volume metric from driving a recommendation.
+const MIN_SESSIONS_FOR_LANDING_PAGE = 10;
+
+// Highest-delta gainer that also clears the real-volume floor — exported so
+// the threshold behavior (see MIN_SESSIONS_FOR_LANDING_PAGE above) is
+// directly unit-testable without mocking this file's full GA4/GSC data
+// pipeline.
+export function topGainerAboveThreshold(gainers, minSessions = MIN_SESSIONS_FOR_LANDING_PAGE) {
+  return gainers.find((g) => g.recent >= minSessions) || null;
+}
 
 export async function run({ siteId, start, end }) {
   const prior = priorPeriod(start, end);
@@ -70,7 +90,7 @@ export async function run({ siteId, start, end }) {
   // are transient (used only to rank findings below), stripped from the
   // public `recommendations` facts field.
   const recCandidates = [];
-  const topMarket = growingMarkets[0];
+  const topMarket = topGainerAboveThreshold(growingMarkets);
   if (topMarket) {
     recCandidates.push({
       tag: 'Generate Landing Page', generatorId: 'landing-page',
@@ -80,7 +100,7 @@ export async function run({ siteId, start, end }) {
       evidence: { country: topMarket.country, prior: topMarket.prior, recent: topMarket.recent, delta: topMarket.delta },
     });
   }
-  const topCity = growingCities[0];
+  const topCity = topGainerAboveThreshold(growingCities);
   if (topCity) {
     recCandidates.push({
       tag: 'Generate Landing Page', generatorId: 'landing-page',

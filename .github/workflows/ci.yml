@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — check-error-leaks.js diffs against origin/${{ github.base_ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -24,3 +26,11 @@ jobs:
 
       - name: Build dashboard
         run: npm run build:web
+
+      - name: Check opt-in flag deploy parity
+        run: npm run check-env-parity
+
+      - name: Check for raw error leaks into customer-facing content
+        run: npm run check-error-leaks
+        env:
+          CI_BASE_REF: origin/${{ github.base_ref }}

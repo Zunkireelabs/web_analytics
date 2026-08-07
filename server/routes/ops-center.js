@@ -8,6 +8,7 @@ import { pickProvider, MODEL_DEFAULTS } from '../llm.js';
 import {
   getPlatformAgentLatestRuns, getPlatformExecutionLog, getPlatformTodayCounts,
 } from '../store/admin/ops-center.js';
+import { safeMessage, describeHttpFailure } from '../lib/errors.js';
 
 // AI Operations Center — platform-wide (cross-tenant), technical operational
 // view for staff, distinct from the client-facing AI Growth Command Center
@@ -31,9 +32,10 @@ async function checkForecastEngine() {
       headers: { 'X-Admin-Key': DATA_ANALYST_AGENT_ADMIN_KEY },
       signal: AbortSignal.timeout(3000),
     });
-    return { id: 'forecast-engine', name: 'Forecast Engine (data-analyst-agent)', status: res.ok ? 'ok' : 'error', errorMessage: res.ok ? null : `HTTP ${res.status}` };
+    return { id: 'forecast-engine', name: 'Forecast Engine (data-analyst-agent)', status: res.ok ? 'ok' : 'error', errorMessage: res.ok ? null : describeHttpFailure(res.status) };
   } catch (e) {
-    return { id: 'forecast-engine', name: 'Forecast Engine (data-analyst-agent)', status: 'error', errorMessage: e.message || 'unreachable' };
+    const { message } = safeMessage('ops-center.checkForecastEngine', e, 'unreachable');
+    return { id: 'forecast-engine', name: 'Forecast Engine (data-analyst-agent)', status: 'error', errorMessage: message };
   }
 }
 

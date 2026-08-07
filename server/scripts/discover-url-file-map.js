@@ -8,6 +8,7 @@ import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js'
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { safeEvalJsDataFile } from './lib/safe-js-data-eval.js';
+import { normalizedPath, findCandidateFile } from '../implementers/lib/discover-file-mapping.js';
 
 // Proposes a fix for every class of `faq` gap audit-url-file-map.js surfaces
 // diagnostically: no file mapping at all, no marker configured, or a
@@ -50,11 +51,6 @@ const PAGE_LIMIT = 300;
 // loops `{% for item in faq %}` is naming its own real data source.
 const LOOP_SOURCE_PATTERN = /\{%\s*for\s+\w+\s+in\s+(\w+)\s*%\}/i;
 
-// Real template file extensions worth searching the repo tree for when a
-// page has no configured file mapping at all. Deliberately narrow — this is
-// candidate evidence, not a guess at what MIGHT render the page.
-const TEMPLATE_EXTENSIONS = ['njk', 'html', 'liquid', 'hbs', 'ejs', 'md'];
-
 function parseArgs(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -75,38 +71,9 @@ function defaultRange() {
   return { start, end };
 }
 
-function normalizedPath(pageUrl) {
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
-  return path.length > 1 ? path.replace(/\/+$/, '') : path;
-}
-
 function isFlatFaqArray(json) {
   return Array.isArray(json) && json.length > 0
     && json.every((x) => x && typeof x === 'object' && 'question' in x && 'answer' in x);
-}
-
-// Finds a single, real candidate file for a page with NO url_file_map entry
-// at all, by matching the URL's last path segment against real filenames in
-// the repo's own tree (`getRepoTree`) — never a framework-convention guess.
-// Multiple matches are disambiguated using the URL's other segments as
-// directory hints; anything still ambiguous is reported, not picked for.
-function findCandidateFile(pageUrl, repoFiles) {
-  const segments = normalizedPath(pageUrl).split('/').filter(Boolean);
-  if (!segments.length) return { kind: 'ambiguous', candidates: [] };
-  const lastSegment = segments[segments.length - 1];
-
-  const extPattern = new RegExp(`/${lastSegment}\\.(${TEMPLATE_EXTENSIONS.join('|')})$`);
-  let candidates = repoFiles.filter((f) => extPattern.test(`/${f}`));
-
-  if (candidates.length > 1 && segments.length > 1) {
-    const otherSegments = segments.slice(0, -1);
-    const narrowed = candidates.filter((f) => otherSegments.every((seg) => f.includes(seg)));
-    if (narrowed.length) candidates = narrowed;
-  }
-
-  if (candidates.length === 1) return { kind: 'resolved', file: candidates[0] };
-  return { kind: 'ambiguous', candidates };
 }
 
 // Tries `src/_data/<varName>.json` first (fully verifiable — parsed and

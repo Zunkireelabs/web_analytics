@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import { fetchHtml, isPrivateOrLocalHost } from './page-content.js';
+import { describeFetchFailure, describeHttpFailure } from '../../lib/errors.js';
 
 // Visits a client's own website and picks out their logo, so onboarding
 // doesn't require staff to manually source and upload a logo file.
@@ -62,16 +63,16 @@ async function fetchImage(url) {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +logo-discovery)' },
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    if (!res.ok) return { ok: false, error: describeHttpFailure(res.status) };
     const contentType = (res.headers.get('content-type') || '').split(';')[0].trim();
-    if (!contentType.startsWith('image/')) return { ok: false, error: `not an image: ${contentType || 'unknown content-type'}` };
+    if (!contentType.startsWith('image/')) return { ok: false, error: 'not an image' };
     const contentLength = Number(res.headers.get('content-length'));
     if (contentLength && contentLength > MAX_IMAGE_BYTES) return { ok: false, error: 'too large' };
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > MAX_IMAGE_BYTES) return { ok: false, error: 'too large' };
     return { ok: true, buf, contentType };
   } catch (err) {
-    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+    return { ok: false, error: describeFetchFailure('logo-discovery.fetchImage', err) };
   } finally {
     clearTimeout(timeout);
   }

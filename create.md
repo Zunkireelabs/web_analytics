@@ -53,6 +53,8 @@ Scheduling source of truth: `server/job.js` (`MONTHLY_AGENT_IDS`) and `server/ag
 
 None of the generators are flag-gated; all always-on, invoked on demand from Action Center findings.
 
+**Required setup before a site's drafts can actually apply as PRs**: `npm run connect-repo -- --site-id <id> --repo-owner ... --repo-name ... --url-file-map path.json` (migration 028). This now auto-runs the same config-completeness check as `npm run audit-url-file-map -- --site-id <id>` immediately afterward (migration 088) and persists the result on the site row, surfaced in Integration Health for "GitHub (Action Center)" — so a stuck-draft class of failure (missing `url_file_map` entry, or a configured `SEOAI:<name>` marker that's vanished from the live file) is caught at onboarding time, not discovered later when an already-approved draft fails to push. Security-headers' nginx marker specifically cannot be auto-created — it must be hand-placed in the site's nginx config before `connect-repo`/the audit is run (see [[project_security-headers-html-lang-generators]]).
+
 ### A.3 Related, but not agents in the framework sense
 
 - **Common Crawl ETL** — `server/scripts/refresh-commoncrawl-graph.js`. Standalone, manually-run pipeline (no `meta`/`run()` contract, not in `server/agents/`). Feeds free fallback backlink data to Authority + Competitor Intelligence. See [[project_commoncrawl-etl-pending]] — still needs a re-run against staging/prod's own DB.
@@ -62,6 +64,8 @@ None of the generators are flag-gated; all always-on, invoked on demand from Act
 ### A.4 Gating summary
 
 Only `ai-recommendation` uses the "dedicated opt-in flag" pattern (needs both an API key and a separate enable flag — see [[project_authority-ai-recommendation-agents]]). `authority`, `competitor-intelligence`, and `technical-seo` degrade gracefully instead of being disabled outright when their optional provider credentials are missing.
+
+Every `*_ENABLED`/`ENABLE_*` flag is checked in CI (`.github/workflows/ci.yml` → `npm run check-env-parity`, `server/scripts/check-env-parity.js`) against `.env.example` and both deploy workflows' env blocks. It fails the build only if a flag is referenced in code but set NOWHERE (the "feature can never turn on" case — this is what happened with `ENABLE_CONTENT_CITATION_SEARCH` missing from `deploy-staging.yml`); a flag differing between staging and prod is printed as an informational note, not a failure, since staged rollouts are legitimate.
 
 ---
 

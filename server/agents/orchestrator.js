@@ -2,6 +2,7 @@ import { listAgentMeta } from './registry.js';
 import { runAgent } from './runner.js';
 import { callLLM } from '../llm.js';
 import { createPageCache } from './lib/fetch-cache.js';
+import { safeMessage } from '../lib/errors.js';
 
 // The one shared place that knows how to run N specialist agents and combine
 // their structured findings into one answer. Executive Report, Action
@@ -88,8 +89,8 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
       const out = await runAgent(id, { siteId, start, end, pageCache }, { persist: persistSubAgentRuns });
       return [id, out];
     } catch (err) {
-      console.error(`[orchestrator] agent "${id}" failed:`, err.message);
-      return [id, { status: 'error', message: String(err?.message || err) }];
+      const { message } = safeMessage(`orchestrator.runOrchestration:${id}`, err, 'this signal is temporarily unavailable');
+      return [id, { status: 'error', message }];
     }
   }));
 

@@ -11,6 +11,8 @@
 // https://programmablesearchengine.google.com/) — both free to create, but
 // must be created by the account owner; this file can't provision them.
 
+import { describeHttpFailure, logInternal } from '../../lib/errors.js';
+
 export const id = 'google-cse';
 
 const ENDPOINT = 'https://www.googleapis.com/customsearch/v1';
@@ -46,7 +48,8 @@ async function rawSearch(query, num) {
   const res = await fetch(`${ENDPOINT}?${params.toString()}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(`Google Custom Search request failed: HTTP ${res.status}${body?.error?.message ? ` — ${body.error.message}` : ''}`);
+    logInternal('google-cse.rawSearch', new Error(`HTTP ${res.status}${body?.error?.message ? ` — ${body.error.message}` : ''}`));
+    throw new Error(`Google Custom Search is temporarily unavailable (${describeHttpFailure(res.status)}).`);
   }
   const body = await res.json();
   return body.items || [];
@@ -57,7 +60,8 @@ export async function fetchRankings(query) {
   try {
     items = await rawSearch(query, RESULTS_PER_QUERY);
   } catch (e) {
-    throw new Error(`${e.message} — competitor intelligence cannot fetch real rankings.`);
+    logInternal('google-cse.fetchRankings', e);
+    throw new Error('Competitor intelligence cannot fetch real rankings right now.');
   }
   return items
     .map((item, i) => ({ domain: hostnameOf(item.link), url: item.link, position: i + 1 }))

@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { describeFetchFailure, describeHttpFailure } from '../../lib/errors.js';
 
 // Live-fetches a landing page and checks what's actually on it, so the
 // Opportunity Agent's recommendations are grounded in the real page instead
@@ -70,20 +71,20 @@ export async function fetchHtml(url) {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +opportunity-agent)' },
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    if (!res.ok) return { ok: false, error: describeHttpFailure(res.status) };
     // Harmless when every caller only ever passes a known page URL (from
     // GSC), but the site-wide crawler (site-discovery.js) follows arbitrary
     // discovered hrefs — some of which are PDFs/images/etc, not HTML —
     // and cheerio parsing binary content as HTML is a waste at best.
     const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('html')) return { ok: false, error: `not HTML: ${contentType || 'unknown content-type'}` };
+    if (!contentType.includes('html')) return { ok: false, error: 'not HTML' };
     // `res.url` is the real final URL after `fetch`'s default redirect-follow
     // — lets a caller notice "this link redirected back to the page it was
     // linked from" (trust-compliance.js's dead cookie/privacy/terms link
     // check) without a second request.
     return { ok: true, html: await res.text(), url: res.url };
   } catch (err) {
-    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+    return { ok: false, error: describeFetchFailure('page-content.fetchHtml', err) };
   } finally {
     clearTimeout(timeout);
   }
@@ -413,10 +414,10 @@ export async function fetchResponseHeaders(url) {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +security-headers-agent)' },
     });
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    if (!res.ok) return { ok: false, error: describeHttpFailure(res.status) };
     return { ok: true, headers: res.headers, status: res.status };
   } catch (err) {
-    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+    return { ok: false, error: describeFetchFailure('page-content.fetchResponseHeaders', err) };
   } finally {
     clearTimeout(timeout);
   }
@@ -516,7 +517,7 @@ async function fetchFinalUrl(url) {
     });
     return { ok: true, finalUrl: res.url };
   } catch (err) {
-    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err?.message || err) };
+    return { ok: false, error: describeFetchFailure('page-content.fetchFinalUrl', err) };
   } finally {
     clearTimeout(timeout);
   }

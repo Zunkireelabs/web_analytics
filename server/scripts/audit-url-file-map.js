@@ -1,9 +1,9 @@
 import 'dotenv/config';
-import { pool } from '../db.js';
+import { pool, recordActionCenterConfigCheck } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
-import { resolveFile, resolveMarkers, resolveAdapter } from '../implementers/lib/url-file-map.js';
-import { hasMarker } from '../implementers/lib/marker-merge.js';
+import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile } from '../implementers/lib/url-file-map.js';
+import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
@@ -19,15 +19,29 @@ import { getLessons } from '../lessons.js';
 // url_file_map can still declare a marker name that config-wise looks fine
 // while the actual `SEOAI:<name>` comment has quietly vanished from the live
 // file (e.g. after a client-side template redesign that never touched this
-// app). ensureMarkers (marker-merge.js) auto-creates a missing BLOCK/marker
-// at apply-time for most fields, so this isn't fatal by itself — but for
-// LINE-convention fields (front-matter `title:`) and HEAD-scoped fields
-// (canonical/openGraph, which are never auto-inserted at EOF), a vanished
-// marker means every draft for that (page, actionType) is doomed to fail at
-// push time. This audit now fetches each configured file's real live
-// content and checks with hasMarker(), so that class of drift is caught
-// here, proactively, instead of burning generation + review time on a draft
-// that can never actually apply.
+// app). This audit fetches each configured file's real live content and
+// checks with hasMarker(), so that class of drift is caught here,
+// proactively, instead of burning generation + review time on a draft that
+// can never actually apply.
+//
+// A missing marker isn't automatically fatal, though — marker-merge.js's
+// ensureMarkers() auto-creates most marker types at apply time (see its
+// module comment). classifyMarkerGap (same module, imported above) is the
+// single source of truth both this script and ensureMarkers use for "will
+// this heal itself, or does it need a real human-placed anchor first" — so
+// a missing BLOCK marker (schema/faq/links) is reported as self-healing
+// noise, not counted as a real gap, and the count/summary below reflects
+// only what genuinely needs a person: no file mapping, no markers
+// configured at all, a missing file, or a marker gap classifyMarkerGap
+// calls fatal (no front matter / no HEAD region / no safe body anchor).
+//
+// The nginx security-headers marker gets its own dedicated check (below,
+// separate from ACTION_TYPES) since it's a site-root marker, not a
+// per-page one, and — unlike every other marker type — can never be
+// auto-created at apply time (see generators/security-headers.js): there's
+// no framework-agnostic way to guess where inside an arbitrary nginx
+// `server {}` block it belongs, so it's the one marker this audit must
+// name explicitly rather than fold into a generic per-page count.
 //
 //   node server/scripts/audit-url-file-map.js --site-id <id>
 //
@@ -36,7 +50,24 @@ import { getLessons } from '../lessons.js';
 // called from a siteIds loop) so wiring --all later is additive, not a
 // rewrite: swap the single-id array for listConnectedSites()'s ids.
 
-const ACTION_TYPES = ['meta-title', 'faq', 'schema', 'internal-links'];
+// Every PER-PAGE action type marker-merge.js's buildMergeValues() knows how
+// to splice (its own `actionType === '...'` branches) — kept in sync with
+// that list by hand since there's no registry to read it from generically.
+// Used to be just 4 of these, which is exactly how a real "no markers
+// configured" gap on analytics-install went undetected by this audit even
+// after every other fix in this file: the audit simply never asked about
+// it. llms-txt/robots.txt/sitemap (site-root, not per-page) and
+// blog-outline/landing-page/translation (net-new content, no existing
+// marker to check) are deliberately excluded — they're not marker-based.
+const ACTION_TYPES = ['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content'];
+
+// analytics-install is marker-based too, but SITEWIDE (installs GA4/Meta
+// Pixel once, in the site's shared layout template) rather than per-page —
+// backend.js's computeMarkerMerge routes it through
+// url_file_map.siteRoot.layoutTemplate + defaults.placements, not
+// resolveFile(page), so it needs its own dedicated check (below, alongside
+// the nginx marker) instead of being folded into the per-page ACTION_TYPES
+// loop, where it would incorrectly report "no file mapping" once per page.
 const DEFAULT_WINDOW_DAYS = 90;
 const PAGE_LIMIT = 300;
 
@@ -60,7 +91,11 @@ function defaultRange() {
   return { start, end };
 }
 
-async function auditSite(siteId) {
+// Exported so connect-repo.js can run this same check automatically right
+// after url_file_map is set, instead of relying on the operator to remember
+// a separate `npm run audit-url-file-map` step (the exact class of gap this
+// whole script exists to catch — see the module comment above).
+export async function auditSite(siteId) {
   const site = await getSiteById(siteId);
   if (!site) { console.log(`Site #${siteId}: not found — skipping.`); return; }
   if (!site.repo_owner || !site.repo_name) {
@@ -132,11 +167,19 @@ async function auditSite(siteId) {
 
   // Real evidence, not config — only meaningful for a file that actually
   // exists and was readable; a missing/errored file is already reported
-  // above and would just double-report as "marker missing" too.
-  const markersMissing = markersToCheck.filter(({ filePath, markerName }) => {
+  // above and would just double-report as "marker missing" too. Split via
+  // classifyMarkerGap (marker-merge.js) into what ensureMarkers will fix
+  // automatically at apply time vs. what genuinely needs a human anchor —
+  // the same classification the implementer itself uses, not a re-guess.
+  const markersMissingRaw = markersToCheck.filter(({ filePath, markerName }) => {
     const cached = fileCache.get(filePath);
     return cached && cached !== 'error' && !hasMarker(cached.content, markerName);
   });
+  const markersMissing = markersMissingRaw.map((m) => ({
+    ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content),
+  }));
+  const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
+  const markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
 
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);
   for (const { page, actionType } of noFileMapping) console.log(`  [${actionType}] ${page}`);
@@ -149,9 +192,14 @@ async function auditSite(siteId) {
   console.log(`\n-- FILE NOT FOUND IN REPO (${missingFiles.length}) --`);
   for (const filePath of missingFiles) console.log(`  ${filePath}`);
 
-  console.log(`\n-- MARKERS MISSING FROM LIVE FILE (configured, but SEOAI:<name> comment isn't actually in the file) (${markersMissing.length}) --`);
-  for (const { page, actionType, filePath, markerField, markerName } of markersMissing) {
-    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName})`);
+  console.log(`\n-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (${markersSelfHealing.length}) --`);
+  for (const { page, actionType, filePath, markerField, markerName } of markersSelfHealing) {
+    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (will auto-create SEOAI:${markerName})`);
+  }
+
+  console.log(`\n-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (${markersFatal.length}) --`);
+  for (const { page, actionType, filePath, markerField, markerName, gap } of markersFatal) {
+    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName}, reason: ${gap})`);
   }
 
   console.log(`\n-- ADAPTER-ROUTED, not deep-checked here (${adapterRouted.length}) --`);
@@ -160,9 +208,79 @@ async function auditSite(siteId) {
     console.log(`  ${adapterId}: ${entries.length} page/type combination(s)`);
   }
 
-  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersMissing.length === 0
-    && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
+  // Dedicated nginx security-headers marker check — a site-root marker, not
+  // per-page, and the one marker type that can NEVER auto-create itself
+  // (see the module comment above), so it gets checked and named explicitly
+  // instead of folding into the generic per-page counts above.
+  const nginxPath = resolveSiteRootFile(site, 'nginxConfig');
+  let nginxMarkerOk = null; // null = not configured, so nothing to check
+  if (nginxPath) {
+    try {
+      const file = await getFileContent(site, nginxPath, baseBranch(site));
+      nginxMarkerOk = !!file && hasMarker(file.content, 'SECURITY-HEADERS');
+      console.log(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- ${nginxMarkerOk ? 'present' : 'MISSING (fatal — must be hand-placed; see generators/security-headers.js)'}`);
+    } catch (err) {
+      console.warn(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- could not check: ${err.message}`);
+    }
+  } else {
+    console.log('\n-- NGINX SECURITY-HEADERS MARKER -- url_file_map.siteRoot.nginxConfig not configured, skipping.');
+  }
+
+  // Dedicated analytics-install check — sitewide (layoutTemplate + a single
+  // defaults.placements entry), not per-page; see the ACTION_TYPES comment
+  // above for why this can't just be another entry in that loop.
+  const layoutPath = resolveSiteRootFile(site, 'layoutTemplate');
+  let analyticsInstallGap = null; // null = nothing to report
+  if (!layoutPath) {
+    analyticsInstallGap = 'no-file-mapping';
+    console.log('\n-- ANALYTICS-INSTALL (sitewide) -- url_file_map.siteRoot.layoutTemplate not configured (fatal — needed before this can ever apply).');
+  } else {
+    // Each provider (ga4/facebook-pixel) has its own field/marker — see
+    // ANALYTICS_PROVIDER_FIELDS (marker-merge.js) — so both can be
+    // configured and applied without one clobbering the other's marker.
+    // This checks whatever's actually configured; a provider whose field
+    // isn't in analyticsMarkers yet just won't be able to apply, same as
+    // "no markers configured" below, one provider at a time.
+    const analyticsMarkers = resolveMarkers(site, null, 'analytics-install');
+    if (!analyticsMarkers) {
+      analyticsInstallGap = 'no-markers-configured';
+      console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- no markers configured (add e.g. {"analyticsScriptGa4":"ANALYTICSSCRIPTGA4","analyticsScriptFacebookPixel":"ANALYTICSSCRIPTFACEBOOKPIXEL"} to url_file_map.defaults.placements["analytics-install"].markers — configure whichever provider(s) you actually use).`);
+    } else {
+      try {
+        const file = await getFileContent(site, layoutPath, baseBranch(site));
+        if (!file) {
+          analyticsInstallGap = 'file-not-found';
+          console.log(`\n-- ANALYTICS-INSTALL (sitewide) -- ${layoutPath} not found in repo.`);
+        } else {
+          const missing = Object.entries(analyticsMarkers).filter(([, name]) => !hasMarker(file.content, name));
+          if (!missing.length) {
+            console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- OK, marker(s) present.`);
+          } else {
+            const [field, markerName] = missing[0];
+            const gap = classifyMarkerGap(field, layoutPath, file.content);
+            if (gap === 'self-heals') {
+              console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- marker missing but self-healing (will auto-create SEOAI:${markerName} at apply time).`);
+            } else {
+              analyticsInstallGap = gap;
+              console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- marker missing, FATAL (expected SEOAI:${markerName}, reason: ${gap}).`);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- could not check: ${err.message}`);
+      }
+    }
+  }
+
+  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
+    && nginxMarkerOk !== false && analyticsInstallGap === null && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
   console.log(`\nSite #${siteId}: ${clean ? 'CLEAN — no gaps found.' : 'gaps found — see above.'}`);
+
+  const gapCount = noFileMapping.length + missingFiles.length + markersFatal.length
+    + (nginxMarkerOk === false ? 1 : 0)
+    + (analyticsInstallGap !== null ? 1 : 0)
+    + ACTION_TYPES.reduce((sum, t) => sum + noMarkers[t].length, 0);
+  await recordActionCenterConfigCheck(siteId, gapCount);
 }
 
 async function main() {
