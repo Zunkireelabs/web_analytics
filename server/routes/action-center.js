@@ -11,6 +11,7 @@ import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
+import { findScaffoldingIssues } from '../generators/lib/content-scaffolding-guard.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
@@ -207,7 +208,28 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }
   }
 
-  const { content, summary } = await generator.generate({ siteId, params: params || {} });
+  // Never persist a draft (and never let schema/PR steps downstream see one)
+  // that's still outline instructions, placeholder brackets, or other LLM
+  // scaffolding instead of finished content — one bounded regeneration
+  // attempt first, matching generators' own "one bounded retry, never a
+  // hard failure" convention, then reject outright rather than shipping it.
+  const MAX_GENERATION_ATTEMPTS = 2;
+  let content, summary, scaffoldingIssues;
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
+    scaffoldingIssues = findScaffoldingIssues(content, generatorId);
+    if (scaffoldingIssues.length === 0) break;
+    if (attempt < MAX_GENERATION_ATTEMPTS) {
+      console.warn(`[action-center] ${generatorId} draft failed scaffolding guard (attempt ${attempt}), regenerating:`, scaffoldingIssues);
+    }
+  }
+  if (scaffoldingIssues.length > 0) {
+    const err = new Error(`This recommendation could not be generated cleanly (incomplete/placeholder content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
+    err.status = 502;
+    err.userFacing = true;
+    throw err;
+  }
+
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
   });
