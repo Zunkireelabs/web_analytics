@@ -1,3 +1,5 @@
+import { safeErrorMessage } from './lib/errors.js';
+
 // Ceiling only, not a target duration — Run Full Analysis legitimately awaits
 // ~19 parallel agents server-side, some LLM-heavy. Without this, a stalled
 // request leaves the calling page's "Running…" state stuck forever with no
@@ -5,6 +7,15 @@
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 // Thin fetch wrapper. Sends cookies (session) and throws on non-2xx.
+//
+// Every thrown Error's `.message` here is passed through safeErrorMessage
+// (lib/errors.js) — the one place in the whole frontend this needs to
+// happen, since ~90 components across this app just do
+// `setError(e.message || '...')` with no sanitization of their own. The
+// server already centralizes this at the source (server/lib/errors.js), so
+// this is defense-in-depth: it also catches a raw browser/network-level
+// failure (a fetch() TypeError, a devtools-visible connection error) that
+// never went through the server's sanitizer at all.
 async function req(path, opts = {}) {
   let res;
   try {
@@ -18,7 +29,7 @@ async function req(path, opts = {}) {
     if (e.name === 'TimeoutError') {
       throw new Error('Request timed out — it may still be running on the server.');
     }
-    throw e;
+    throw new Error(safeErrorMessage(e?.message, 'Could not reach the server — check your connection and try again.'));
   }
   if (res.status === 401) {
     // Lets App.jsx react to a session going invalid on ANY data call, not
@@ -30,11 +41,14 @@ async function req(path, opts = {}) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    const message = safeErrorMessage(body.error, 'Something went wrong — please try again.');
     // Most callers only ever read `.message` — this just makes any other
     // fields a specific error response includes (e.g. render-mode-uncertain's
     // confidence/suggestedMode) available to callers that need them, without
-    // changing behavior for the ones that don't.
-    throw Object.assign(new Error(body.error || `HTTP ${res.status}`), body, { status: res.status });
+    // changing behavior for the ones that don't. Those fields are always
+    // categorical/enum-shaped, never raw error text, so they don't need the
+    // same sanitization `.message` just got.
+    throw Object.assign(new Error(message), body, { status: res.status });
   }
   return res.json();
 }
