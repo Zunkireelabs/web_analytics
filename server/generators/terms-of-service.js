@@ -17,5 +17,13 @@ export async function generate({ siteId, params }) {
       'clause generic site-usage language (acceptable use, content ownership, no warranty). Do not invent a ' +
       'specific liability cap, governing-law jurisdiction, or dispute-resolution process, since none of those ' +
       'are given as real facts.',
+    requiredSections: [
+      'Acceptance of Terms',
+      'Use of Site',
+      'Content Ownership',
+      'Disclaimer of Warranties',
+      'Limitation of Liability (generic language only, per the rule above)',
+      'Changes to Terms',
+    ],
   });
 }

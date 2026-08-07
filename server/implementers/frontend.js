@@ -1,7 +1,7 @@
 import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 
 export const meta = {
   id: 'frontend',
@@ -71,7 +71,12 @@ async function resolveTargetAndBody(site, draft) {
       const pageHint = page ? ` (real target "${page}" isn't in url_file_map.pages either)` : '';
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured${pageHint} — add one via \`npm run connect-repo\` before this can be applied.` };
     }
-    return { ok: true, filePath, body: renderCompliancePageBody(content) };
+    // Overwriting a real, already-linked page — preserve its own
+    // layout/permalink front matter (see extractPreservedFrontMatter) so
+    // this doesn't silently orphan the live URL.
+    const existing = existingFile ? await getFileContent(site, existingFile, baseBranch(site)) : null;
+    const preserved = extractPreservedFrontMatter(existing?.content);
+    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved) };
   }
 
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };
