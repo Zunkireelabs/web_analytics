@@ -46,6 +46,18 @@ export async function getLatestFindings(siteId, agentIds) {
       agentVersion: r.agent_version,
       summary: r.narrative,
       findings: r.facts?.findings || [],
+      // Every batch-rotated agent's facts carries checkedPages (this run's
+      // rotation batch) — lets recommendation auto-close tell "fixed" apart
+      // from "page just wasn't in today's batch" (see security-headers.js
+      // facts and recommendation-coordinator.js's closeStaleRecommendations
+      // gating for the full story). null for agents that check every page
+      // every run (no rotation), which keep the old close-on-absence rule.
+      checkedPages: r.facts?.checkedPages || null,
+      // technical-seo only: pages whose outbound links were actually
+      // re-checked this run (crawlInternalLinks is capped independently of
+      // the page batch above — a page can be in checkedPages without its
+      // links having been re-crawled if the daily href cap was already hit).
+      linkCrawlCheckedPages: r.facts?.linkCrawl?.checkedPages || null,
       // The date range that produced this run — callers that need to ground
       // a finding's recommendedAction (e.g. looking up a page's real query
       // before drafting a meta-title) need this, not just the findings.

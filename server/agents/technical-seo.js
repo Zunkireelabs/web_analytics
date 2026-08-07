@@ -489,6 +489,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const facts = {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
+    checkedPages: pageResults.map((r) => r.page), // this run's rotation batch — see security-headers.js facts for why
     pagesChecked: pageResults.map((r) => ({
       page: r.page, impressions: r.impressions,
       verdict: r.indexStatus.ok ? r.indexStatus.verdict : null,
@@ -499,7 +500,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     })),
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
-    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length },
+    linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
     orphanedPageCount: orphanedPages.length,
     sitemapUrlCount: sitemapUrls.length,
     crossDomainSitemapUrlCount: crossDomainUrls.length,

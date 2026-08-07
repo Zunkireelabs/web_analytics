@@ -61,9 +61,30 @@ export async function buildRecommendations(siteId) {
   // (recommendation-coordinator.js), or a pending draft's recommendation row
   // would get closed out from under it before it's ever shipped.
   const detectedKeys = new Set();
+  // Everything syncFromGrounded's auto-close (recommendation-coordinator.js)
+  // needs to tell "this page's finding is genuinely gone" apart from "this
+  // page just wasn't in today's rotation batch." Most agents (technical-seo,
+  // security-headers, ai-visibility, mobile-usability, geo-signals,
+  // content-gap, accessibility, internal-linking) only examine a bounded
+  // rotation batch per run (see agents/lib/candidate-pages.js) — a
+  // generatorId+page missing from this run's findings for one of them means
+  // "not re-checked today" far more often than "fixed." Agents that check
+  // everything relevant every run (no rotation) never set facts.checkedPages,
+  // so they're absent from batchRotatedAgentIds and keep the original
+  // close-on-absence behavior — their non-detection is already trustworthy.
+  const agentCheckedKeys = new Set(); // `${agentId}::${page}`
+  const linkCrawlCheckedKeys = new Set(); // broken-link-fix only: narrower than technical-seo's own batch, since crawlInternalLinks caps total hrefs checked independently of which pages are in the batch
+  const batchRotatedAgentIds = new Set();
 
   for (const run of allRuns) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
+    if (run.checkedPages) {
+      batchRotatedAgentIds.add(run.agentId);
+      for (const page of run.checkedPages) agentCheckedKeys.add(`${run.agentId}::${page}`);
+    }
+    if (run.linkCrawlCheckedPages) {
+      for (const page of run.linkCrawlCheckedPages) linkCrawlCheckedKeys.add(page);
+    }
     for (const f of run.findings) {
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
@@ -85,5 +106,5 @@ export async function buildRecommendations(siteId) {
       });
     }
   }
-  return { items, lastAnalyzedAt, detectedKeys };
+  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds };
 }

@@ -71,9 +71,14 @@ function recommendationsFor(analysis, page, query, schemaTypes) {
   }));
 }
 
-export async function run({ siteId, start, end, pageCache }) {
+export async function run({ siteId, start, end, pageCache, params }) {
   const fetchPage = pageCache || analyzePageUrl;
-  const { batch, impressionsByPage } = await selectCandidatePages(siteId, 'geo-signals', { start, end, batchSize: MAX_PAGES });
+  // params.pages bypasses the daily rotation for an on-demand single-page
+  // recheck (recommendation-coordinator.js's manual recheck action) — same
+  // pattern as technical-seo.js/security-headers.js.
+  const { batch, impressionsByPage } = params?.pages?.length
+    ? { batch: params.pages, impressionsByPage: new Map() }
+    : await selectCandidatePages(siteId, 'geo-signals', { start, end, batchSize: MAX_PAGES });
 
   const fetched = await Promise.all(batch.map(async (page) => {
     const result = await fetchPage(page);
@@ -83,7 +88,7 @@ export async function run({ siteId, start, end, pageCache }) {
     return { page, impressions: perf, result, topQuery };
   }));
 
-  await markPagesChecked(siteId, 'geo-signals', batch);
+  if (!params?.pages?.length) await markPagesChecked(siteId, 'geo-signals', batch);
 
   let origin = null;
   for (const f of fetched) {
@@ -148,6 +153,7 @@ export async function run({ siteId, start, end, pageCache }) {
     rangeStart: start,
     rangeEnd: end,
     pages: prioritized,
+    checkedPages: batch, // this run's rotation batch — see security-headers.js facts for why
     findings: [...findings, ...(siteFinding ? [siteFinding] : [])],
     note: 'GEO signals are deterministic checks against each page\'s real fetched HTML — author attribution, content freshness, comparison content, external citations, and review schema. These are the specific signals generative engines weigh when deciding what content to cite.',
   };

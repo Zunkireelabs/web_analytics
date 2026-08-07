@@ -79,6 +79,13 @@ export async function getRecommendationById(siteId, id) {
   return rows[0] || null;
 }
 
+// Closes a single recommendation on demand — used by the manual "re-check
+// now" action (recommendation-coordinator.js's recheckRecommendation), as
+// opposed to closeStaleRecommendations' bulk sweep on every sync.
+export async function closeRecommendation(id) {
+  await query(`UPDATE recommendations SET status = 'superseded', updated_at = now() WHERE id = $1`, [id]);
+}
+
 // risk_tier is not currently exposed on execution_job_id's caller, but every
 // safe-tier recommendation not already claimed by an in-flight job is a
 // candidate for executeSafeFixes (agents/lib/execution-engine.js) —
@@ -110,13 +117,38 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 // it opens a brand new row rather than being blocked by this closed one.
 // Called once per site per sync from recommendation-coordinator.js's
 // syncFromGrounded — see that file for how stillDetectedKeys is built.
-export async function closeStaleRecommendations(siteId, stillDetectedKeys) {
+//
+// checked = { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds },
+// built by buildRecommendations (agents/lib/recommendations.js). Most agents
+// only examine a bounded rotation batch per run — a page missing from this
+// run's findings usually means "not re-checked today," not "fixed," so
+// closing on absence alone was making recommendations vanish in bulk (then
+// often reappear later) without ever being confirmed clean. A stale row is
+// only closed when we're sure it was actually re-verified:
+//   - no page (site-level/collapsed key, e.g. cookie-policy, security-headers
+//     as a fix action): unchanged — these are recomputed in full every run
+//   - broken-link-fix: only if the page's outbound links were part of this
+//     run's link crawl (narrower than its agent's own page batch — see
+//     technical-seo-analysis.js)
+//   - everything else: only if every agent that originally flagged it either
+//     isn't rotation-batched (checks everything every run, so its silence is
+//     already trustworthy) or did re-check this exact page this run
+export async function closeStaleRecommendations(siteId, stillDetectedKeys, checked = {}) {
+  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds } = checked;
   const { rows } = await query(
-    `SELECT id, page, recommendation_type FROM recommendations WHERE site_id = $1 AND status = 'open'`,
+    `SELECT id, page, recommendation_type, detecting_agents FROM recommendations WHERE site_id = $1 AND status = 'open'`,
     [siteId]
   );
   const staleIds = rows
-    .filter((r) => !stillDetectedKeys.has(`${r.recommendation_type}::${r.page}`))
+    .filter((r) => {
+      const key = `${r.recommendation_type}::${r.page}`;
+      if (stillDetectedKeys.has(key)) return false;
+      if (!r.page) return true;
+      if (r.recommendation_type === 'broken-link-fix') return !!linkCrawlCheckedKeys?.has(r.page);
+      return (r.detecting_agents || []).every((agentId) => (
+        !batchRotatedAgentIds?.has(agentId) || !!agentCheckedKeys?.has(`${agentId}::${r.page}`)
+      ));
+    })
     .map((r) => r.id);
   if (!staleIds.length) return 0;
   await query(

@@ -132,7 +132,7 @@ export function webMcpFinding({ webMcpReadiness, analyzedCount }) {
   });
 }
 
-export async function run({ siteId, start, end, pageCache }) {
+export async function run({ siteId, start, end, pageCache, params }) {
   // Falls back to a direct (uncached) fetch when run standalone, outside an
   // orchestrated run — keeps this agent independently runnable/testable
   // with identical output either way (see lib/fetch-cache.js).
@@ -144,7 +144,12 @@ export async function run({ siteId, start, end, pageCache }) {
   // every single run. Scoring itself never depends on GSC metrics (purely
   // the page's own fetched HTML structure), so a zero-traffic page scores
   // identically to a high-traffic one.
-  const { batch, impressionsByPage } = await selectCandidatePages(siteId, 'ai-visibility', { start, end, batchSize: MAX_PAGES });
+  // params.pages bypasses the daily rotation for an on-demand single-page
+  // recheck (recommendation-coordinator.js's manual recheck action) — same
+  // pattern as technical-seo.js/security-headers.js.
+  const { batch, impressionsByPage } = params?.pages?.length
+    ? { batch: params.pages, impressionsByPage: new Map() }
+    : await selectCandidatePages(siteId, 'ai-visibility', { start, end, batchSize: MAX_PAGES });
 
   // Real per-page top query — grounds the FAQ generator's own required
   // query/topic param the same way content-gap.js already does, instead of
@@ -155,7 +160,7 @@ export async function run({ siteId, start, end, pageCache }) {
     result: await fetchPage(page),
     topQuery: (await getQueriesForPage(siteId, start, end, page, 1))[0]?.query || '',
   })));
-  await markPagesChecked(siteId, 'ai-visibility', batch);
+  if (!params?.pages?.length) await markPagesChecked(siteId, 'ai-visibility', batch);
 
   // Site-level LLMS readiness: one fetch per run, derived from the first
   // page that resolved to a real hostname — not repeated per page.
@@ -234,6 +239,7 @@ export async function run({ siteId, start, end, pageCache }) {
     llmsReadiness,
     webMcpReadiness,
     pages: prioritized,
+    checkedPages: batch, // this run's rotation batch — see security-headers.js facts for why
     findings,
     unanalyzedCount: pages.length - scoredPages.length,
     note: 'Category and overall scores are computed only from real, verifiable signals on the page\'s own fetched ' +
