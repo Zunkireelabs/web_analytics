@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api.routes import (
@@ -5,6 +7,15 @@ from app.api.routes import (
     investigations, opportunities, recommendations,
 )
 from app.config import settings
+from app.ingestion.scheduler import start_scheduler, stop_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
 
 # root_path tells FastAPI (and the /docs Swagger UI it generates) the public
 # path prefix this service is reached under when deployed behind the Node
@@ -15,6 +26,7 @@ app = FastAPI(
     title="Data Analyst Agent",
     description="Admin-only, multi-tenant SEO/growth analytics agent.",
     root_path=settings.root_path,
+    lifespan=lifespan,
 )
 
 app.include_router(health.router)
