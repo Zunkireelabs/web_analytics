@@ -1,13 +1,14 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 
-// 'manual' risk tier (risk-tiers.js) — deliberately, not an oversight.
-// Unlike JSON-LD (marker-merge.js) or array-content (data-array-content.js),
-// there's no implementer capability yet to splice alt="" back into an
-// arbitrary <img> tag inside a target repo's own templates, so this
-// generator's draft is applied by a human today. Still worth drafting and
-// auto-routing to (page-content.js's GAP_TYPE_TO_GENERATOR) rather than
-// leaving the gap unreachable from the manual Generate/Submit/Approve UI.
+// 'safe' risk tier (risk-tiers.js) — implementers/lib/alt-text-inject.js
+// patches alt="" into each image's real <img> tag by finding its exact
+// outerHTML (originalTag, captured at detection time by page-content.js)
+// verbatim in the site's own template source, refusing the whole draft if
+// any single tag's anchor is missing or ambiguous. That refusal is what
+// makes zero-review auto-attempt safe: a component-based/dynamic site where
+// the anchor no longer matches just leaves the recommendation open for a
+// human, same as any other apply-time failure (see auto-remediation.js).
 export const meta = {
   id: 'alt-text',
   name: 'Image Alt Text Generator',
@@ -49,8 +50,8 @@ export async function generate({ siteId, params }) {
   }
 
   const items = images
-    .map((img, i) => ({ src: img.src, alt: (altTexts[i] || '').toString().trim() }))
-    .filter((item) => item.alt);
+    .map((img, i) => ({ src: img.src, alt: (altTexts[i] || '').toString().trim(), originalTag: img.originalTag }))
+    .filter((item) => item.alt && item.originalTag);
 
   const content = { page, items };
   return { content, summary: `${items.length} alt text draft(s) for ${page}` };

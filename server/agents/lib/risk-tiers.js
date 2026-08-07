@@ -37,6 +37,13 @@ const SAFE_GENERATOR_IDS = new Set([
   // recommendation open for a human, same "exact-match auto-patch, else
   // fall back to manual" rule confirmed for alt-text below.
   'schema-repair',
+  // Re-confirmed with the user 2026-08-07: moved from implicitly-manual
+  // (no SAFE_GENERATOR_IDS entry) now that implementers/lib/alt-text-inject.js
+  // gives it the same exact-match-or-refuse auto-patch as schema-repair
+  // above — a missing/ambiguous anchor already means the whole draft is
+  // refused at apply time, which is what leaves the recommendation open for
+  // a human instead of silently failing.
+  'alt-text',
 ]);
 
 export function riskTierForGenerator(generatorId) {
