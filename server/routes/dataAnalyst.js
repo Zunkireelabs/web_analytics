@@ -5,6 +5,7 @@ import { getSiteById } from '../store/read.js';
 import { createInsightReportDoc } from '../report/insight-doc.js';
 import { generateDraft } from './action-center.js';
 import { seoDraftEligibility } from '../agents/lib/analyst-seo-mapping.js';
+import { safeMessage, describeHttpFailure } from '../lib/errors.js';
 
 // Narrow, JSON-shaped proxy to the standalone data-analyst-agent/ Python
 // service, for the in-app /analyst page (web/src/pages/Analyst.jsx) — a
@@ -35,14 +36,15 @@ async function callPython(path, { method = 'GET', body, query } = {}) {
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    const err = new Error(`Data Analyst Agent unreachable: ${e.message}`);
+    const { message } = safeMessage('dataAnalyst.callPython', e, 'Data Analyst Agent is unreachable right now');
+    const err = new Error(message);
     err.status = 502;
     throw err;
   }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.detail || `Data Analyst Agent returned HTTP ${res.status}`);
+    const err = new Error(data.detail || `Data Analyst Agent request ${describeHttpFailure(res.status)}`);
     err.status = res.status;
     throw err;
   }

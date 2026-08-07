@@ -1,6 +1,7 @@
 import { getAgent } from './registry.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { emitAgentStart, emitAgentDone } from './lib/activity-bus.js';
+import { safeMessage } from '../lib/errors.js';
 
 // The one place that invokes an agent, times it, and persists the result —
 // agents themselves never touch agent_runs. Set persist:false for in-process
@@ -30,10 +31,11 @@ export async function runAgent(id, input, { persist = true } = {}) {
     const tookMs = Date.now() - startedAt;
     emitAgentDone(input.siteId, agent.meta.id, { status: 'error', tookMs });
     if (persist) {
+      const { message } = safeMessage(`runner.runAgent:${id}`, err, 'this run did not complete');
       await saveAgentRun({
         siteId: input.siteId, agentId: agent.meta.id, agentVersion: agent.meta.version,
         input, status: 'error', facts: null, narrative: null,
-        error: String(err?.message || err), tookMs,
+        error: message, tookMs,
       }).catch((e) => console.error(`[agents] failed to log error run for "${id}":`, e.message));
     }
     throw err;

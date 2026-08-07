@@ -53,7 +53,16 @@ const ALLOWED_PATH_PATTERNS = [
 // string later reused elsewhere, which this simple per-line check can't see
 // — acceptable given the stated regex-net tradeoff above.
 function isLoggingLine(line) {
-  return /console\.(error|warn)\(/.test(line);
+  return /console\.(error|warn)\(/.test(line) || /\blogInternal\(/.test(line);
+}
+
+// `String(err.message || ...).includes('SOME_CODE')` is a content check
+// deciding a boolean (e.g. quotaExceeded), not text ever shown to anyone —
+// the message's raw wording never leaves this expression. Distinct from
+// `error: String(err.message || err)`, which assigns the raw text itself to
+// a field that flows onward.
+function isMessageContentCheck(line) {
+  return /String\([^)]*\.message[^)]*\)\.includes\(/.test(line);
 }
 
 // baseRef is the full ref to diff against (e.g. "origin/main"), passed in
@@ -115,7 +124,7 @@ function main() {
     content.split('\n').forEach((line, i) => {
       const lineNo = i + 1;
       if (addedLines && !addedLines.has(lineNo)) return;
-      if (isLoggingLine(line)) return;
+      if (isLoggingLine(line) || isMessageContentCheck(line)) return;
       if (DANGEROUS_PATTERNS.some((p) => p.test(line))) {
         findings.push({ file, line: lineNo, text: line.trim() });
       }

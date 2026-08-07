@@ -1,5 +1,6 @@
 import { getSearchConsole } from '../auth/google.js';
 import { prioritizeForRecheck } from '../store/technical-seo-checks.js';
+import { safeMessage } from '../lib/errors.js';
 
 // GSC's URL Inspection + Sitemaps APIs — covered by the `webmasters` OAuth
 // scope (server/auth/google.js). Real per-page index status (the "Coverage"
@@ -37,10 +38,11 @@ export async function inspectUrl(site, pageUrl) {
     };
   } catch (err) {
     const status = err?.code || err?.response?.status;
+    const { message } = safeMessage('gsc-technical.inspectUrl', err, 'this page could not be inspected right now');
     return {
       ok: false,
       quotaExceeded: status === 429 || String(err?.message || '').includes('RESOURCE_EXHAUSTED'),
-      error: String(err?.message || err),
+      error: message,
     };
   }
 }
@@ -65,7 +67,8 @@ export async function listSitemaps(site) {
       })),
     };
   } catch (err) {
-    return { ok: false, sitemaps: [], error: String(err?.message || err) };
+    const { message } = safeMessage('gsc-technical.listSitemaps', err, 'sitemap status could not be checked right now');
+    return { ok: false, sitemaps: [], error: message };
   }
 }
 
@@ -89,12 +92,13 @@ export async function submitSitemap(site, feedpath) {
   } catch (err) {
     const status = err?.code || err?.response?.status;
     const insufficientScope = status === 403 || String(err?.message || '').includes('insufficient authentication scopes');
+    const { message } = safeMessage('gsc-technical.submitSitemap', err, 'this sitemap could not be resubmitted right now');
     return {
       ok: false,
       reason: insufficientScope ? 'insufficient-scope' : 'google-api-error',
       error: insufficientScope
         ? 'This site\'s Search Console connection only has read access — ask an admin to grant write (webmasters) scope before sitemap resubmission can work.'
-        : String(err?.message || err),
+        : message,
     };
   }
 }

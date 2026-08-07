@@ -13,6 +13,7 @@ import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
+import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
 import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
@@ -94,7 +95,8 @@ router.post('/internal/clients', async (req, res, next) => {
     } catch (err) {
       // Site is left in place (harmless — nothing ingests against it until
       // connected below) — same recovery shape create-client.js documents.
-      return res.status(500).json({ error: `Site #${site.id} was created, but the login failed: ${err.message}`, siteId: site.id });
+      const { message } = safeMessage('clients.createClient', err, 'the login could not be created');
+      return res.status(500).json({ error: `Site #${site.id} was created, but ${message} — finish it via \`npm run create-client -- <email> <password> --site-id ${site.id}\`.`, siteId: site.id });
     }
 
     await recordAuditEvent(req, {
@@ -159,7 +161,8 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
       // can finish it via `npm run create-client -- <email> <password>
       // --site-id <id>`). The request is already claimed 'approved' above
       // and can't be re-approved — that's the race guard working as intended.
-      return res.status(500).json({ error: `Site #${site.id} was created, but the login failed: ${err.message}`, siteId: site.id });
+      const { message } = safeMessage('clients.approveSignupRequest', err, 'the login could not be created');
+      return res.status(500).json({ error: `Site #${site.id} was created, but ${message} — finish it via \`npm run create-client -- <email> <password> --site-id ${site.id}\`.`, siteId: site.id });
     }
 
     await setSignupRequestCreatedSite(requestId, site.id);
@@ -225,8 +228,9 @@ async function runBaselineSequence(siteId, site) {
   try {
     ingestion = await runDailyIngestForSite(site);
   } catch (err) {
+    const { message } = safeMessage('clients.runBaselineSequence', err, 'GSC/GA4 data could not be fetched right now');
     return {
-      error: `Couldn't fetch real GSC/GA4 data: ${err.message}. Confirm the platform's Google account has been granted access to this exact property, then retry — nothing was fabricated in place of this.`,
+      error: `Couldn't fetch real GSC/GA4 data — ${message}. Confirm the platform's Google account has been granted access to this exact property, then retry — nothing was fabricated in place of this.`,
       discovery,
     };
   }
