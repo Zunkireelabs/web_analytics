@@ -27,5 +27,13 @@ class Settings(BaseSettings):
     forecast_horizon_months: int = 3
     min_history_months_for_forecast: int = 3
 
+    # In-process nightly ingestion cron (app/ingestion/scheduler.py) — mirrors
+    # the main Node app's in-process node-cron pattern (server/cron.js), no
+    # separate worker/queue container. Runs after the Node app's own ~01:30 UTC
+    # (07:00 Asia/Kolkata) daily GSC/GA4 pull so this service's MCP calls see
+    # fresh upstream data rather than racing it.
+    ingest_schedule_enabled: bool = True
+    ingest_schedule_hour_utc: int = 3
+
 
 settings = Settings()
