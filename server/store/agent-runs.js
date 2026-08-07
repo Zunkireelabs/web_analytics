@@ -1,9 +1,15 @@
 import { query } from '../db.js';
+import { sanitizeForCustomer } from '../lib/errors.js';
 
 // Append-only log for agent_runs — see server/migrations/010_agent_runs.sql
 // for why this is insert-only rather than an upsert like daily_reports.
 
 export async function saveAgentRun({ siteId, agentId, agentVersion, input, status, facts, narrative, error, tookMs }) {
+  // Defense-in-depth net (server/lib/errors.js) — every known caller already
+  // builds a sanitized `error` before reaching here, this just stops a
+  // future caller's raw exception text from ever landing in a row that
+  // agent-status/command-center surfaces could read from.
+  const safeError = error != null ? sanitizeForCustomer(error, 'This run did not complete — our team has been notified.') : null;
   await query(
     `INSERT INTO agent_runs (site_id, agent_id, agent_version, input, status, facts, narrative, error, took_ms)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -13,7 +19,7 @@ export async function saveAgentRun({ siteId, agentId, agentVersion, input, statu
       status,
       facts != null ? JSON.stringify(facts) : null,
       narrative ?? null,
-      error ?? null,
+      safeError,
       tookMs ?? null,
     ]
   );

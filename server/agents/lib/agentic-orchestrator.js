@@ -6,6 +6,7 @@ import { summarizeAgentRuns } from '../orchestrator.js';
 import { withRetry, isRetryable, LLM_TIMEOUT_MS } from '../../llm.js';
 import { normalizeCompetitorDomain } from './competitor-analysis.js';
 import { saveAgenticOrchestrationRun } from '../../store/agentic-orchestration-runs.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // A genuine multi-round LLM tool-calling loop, distinct from orchestrator.js's
 // runOrchestration: that one always fans a FIXED agentIds list out in one
@@ -398,7 +399,7 @@ export async function runAgenticLoop({
         totalCalls++;
         const input = { siteId, start, end, pageCache, ...(params ? { params } : {}) };
         pendingThisRound.set(key, runAgentWithRetry(id, input, { persist: persistSubAgentRuns })
-          .catch((err) => ({ status: 'error', message: String(err?.message || err) })));
+          .catch((err) => ({ status: 'error', message: safeMessage(`agentic-orchestrator:${id}`, err, 'this signal is temporarily unavailable').message })));
       }
 
       const results = await Promise.all(msg.tool_calls.map(async (tc) => {

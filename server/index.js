@@ -6,6 +6,7 @@ import { createServer as createHttpServer } from 'node:http';
 import express from 'express';
 import session from 'express-session';
 import connectPgSimple from 'connect-pg-simple';
+import { logInternal } from './lib/errors.js';
 import loginRouter from './routes/login.js';
 import metricsRouter from './routes/metrics.js';
 import agentsRouter from './routes/agents.js';
@@ -174,9 +175,22 @@ if (process.env.NODE_ENV === 'production') {
   app.use(vite.middlewares);
 }
 
+// Default-safe: only a deliberately-thrown UserFacingError (see
+// server/lib/errors.js) reaches the client with its own message. Every
+// other error — a raw exception from Postgres, an external API client, or
+// anywhere else uncaught — is logged in full here and replaced with a
+// generic message plus a correlation id, so a developer can find the real
+// error in the logs without a customer (or an admin route's response body)
+// ever seeing infrastructure detail. This is the last line of defense; most
+// call sites should already be using UserFacingError/safeMessage before an
+// error gets this far.
 app.use((err, req, res, _next) => {
-  console.error('[api] error:', err);
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  if (err.userFacing) {
+    res.status(err.status || 400).json({ error: err.message });
+    return;
+  }
+  const id = logInternal(`api:${req.method} ${req.path}`, err);
+  res.status(err.status || 500).json({ error: 'Something went wrong on our end. Our team has been notified.', errorId: id });
 });
 
 httpServer.listen(port, () => {

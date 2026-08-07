@@ -18,6 +18,7 @@ import {
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
 import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
@@ -25,6 +26,7 @@ import { getSiteById } from '../store/read.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
 import { markQueryDrafted } from '../store/growth-queries.js';
+import { safeMessage, sanitizeForCustomer } from '../lib/errors.js';
 
 // Best-effort post-merge Search Console notification (multi-tenant
 // refactor Part 3) — never blocks or fails the caller's response, since
@@ -48,15 +50,37 @@ async function notifyGscBestEffort(site, draft) {
 // whichever extra fields (reason/confidence/suggestedMode/draftStatus) the
 // original inline res.status(...).json({...}) calls used to send, so both
 // callers can reconstruct the exact same response shape from one thrown value.
+// Always marked userFacing: every message passed here is either a static
+// string authored right at the call site, or an implementer's own
+// `{ok:false, error}` text — never a raw caught exception's `.message` (see
+// server/lib/errors.js's UserFacingError; implementers are responsible for
+// keeping their own `error` field free of raw provider/exception text).
 function httpError(status, message, extra) {
   const err = new Error(message);
   err.status = status;
+  err.userFacing = true;
   if (extra) Object.assign(err, extra);
   return err;
 }
 
+// Local shortcut used by 5 route handlers below that respond directly
+// instead of deferring to the global error handler (server/index.js) — so
+// it needs its own copy of that handler's default-safe rule. e.message only
+// passes through as-is when the error is a deliberately-thrown, developer-
+// authored UserFacingError/httpError (see that function's own comment);
+// anything else is a net catching a raw exception that reached here some
+// other way, and gets replaced with a generic fallback rather than shown.
+// Shared by the several route handlers below that check `e.status` directly
+// rather than going through the global error handler — same default-safe
+// rule as sendHttpError, for the simpler case with no extra fields.
+function respondWithStatusError(res, e, fallback) {
+  const message = e.userFacing ? e.message : (sanitizeForCustomer(e.message) ?? fallback);
+  res.status(e.status).json({ error: message });
+}
+
 function sendHttpError(res, e) {
-  const body = { error: e.message };
+  const message = e.userFacing ? e.message : sanitizeForCustomer(e.message, 'This action could not be completed right now — try again shortly.');
+  const body = { error: message };
   if (e.reason !== undefined) body.reason = e.reason;
   if (e.confidence !== undefined) body.confidence = e.confidence;
   if (e.suggestedMode !== undefined) body.suggestedMode = e.suggestedMode;
@@ -219,7 +243,10 @@ router.post('/action-center/generate', async (req, res, next) => {
     const { generatorId, params, source, findingId } = req.body || {};
     res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId }));
   } catch (e) {
-    if (e.status === 400 || e.status === 404) return res.status(e.status).json({ error: e.message });
+    if (e.status === 400 || e.status === 404) {
+      const message = e.userFacing ? e.message : sanitizeForCustomer(e.message, 'This recommendation could not be generated right now — try again shortly.');
+      return res.status(e.status).json({ error: message });
+    }
     next(e);
   }
 });
@@ -431,7 +458,7 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
     return { ok: true, draft: approved };
   } catch (e) {
-    const message = e.message || 'Execution failed';
+    const message = e.userFacing ? e.message : (sanitizeForCustomer(e.message) ?? safeMessage('action-center.executeRecommendation', e, 'Execution failed').message);
     await updateJobRecommendationStatus(jobRec.id, 'failed', { error: message });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'failed' });
     await appendJobLog(jobId, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") failed: ${message}`);
@@ -492,7 +519,7 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   try {
     res.json(await executeSafeFixes(req.siteId, { userId: req.userId, limit: req.body?.limit }));
   } catch (e) {
-    if (e.status) return res.status(e.status).json({ error: e.message });
+    if (e.status) return respondWithStatusError(res, e, 'Could not execute safe fixes right now — try again shortly.');
     next(e);
   }
 });
@@ -520,7 +547,7 @@ router.post('/action-center/recommendations/:id/recheck', async (req, res, next)
   try {
     res.json(await recheckRecommendation(req.siteId, req.params.id));
   } catch (e) {
-    if (e.status) return res.status(e.status).json({ error: e.message });
+    if (e.status) return respondWithStatusError(res, e, 'This recommendation could not be re-checked right now.');
     next(e);
   }
 });
@@ -529,7 +556,7 @@ router.post('/action-center/recommendations/:id/approve-and-ship', async (req, r
   try {
     res.json(await approveAndShipRecommendation(req.siteId, req.params.id, { userId: req.userId }));
   } catch (e) {
-    if (e.status) return res.status(e.status).json({ error: e.message });
+    if (e.status) return respondWithStatusError(res, e, 'Could not approve and ship this recommendation right now.');
     next(e);
   }
 });
@@ -641,8 +668,24 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
   const draft = await getDraft(siteId, draftId);
   if (!draft || draft.status !== 'approved') throw httpError(404, 'Draft not found, or not yet approved');
 
-  const site = await getSiteById(siteId);
+  let site = await getSiteById(siteId);
   if (!site.repo_owner || !site.repo_name) throw httpError(400, 'This site has no repository configured yet — run `npm run connect-repo` first.');
+
+  // Self-heal a missing url_file_map entry inline, right before it would
+  // otherwise fail with "no-file-mapping" — the same deterministic,
+  // single-real-file-match discovery discover-url-file-map.js's manual CLI
+  // already does, just triggered automatically instead of waiting for
+  // someone to remember to run it and re-apply the output. Every implementer
+  // routes through this one push path, so fixing it here covers all of them
+  // at once instead of retrofitting each resolveFile() call site.
+  const page = draft.content?.page;
+  if (page && !resolveFile(site, page)) {
+    const healed = await autoHealFileMapping(site, page, draft.action_type).catch((err) => {
+      console.warn(`[action-center] auto-heal url_file_map failed for site #${siteId}, page ${page}: ${err.message}`);
+      return null;
+    });
+    if (healed) site = healed;
+  }
 
   const resolved = await resolveImplementerForApply(site, draft, renderMode);
   if (resolved.reason === 'render-mode-uncertain') {
@@ -741,7 +784,8 @@ export async function checkDraftPrStatus(siteId, draftId) {
   try {
     pr = await getPullRequest(site, draft.pr_number);
   } catch (e) {
-    throw httpError(502, `Could not read PR status from GitHub: ${e.message}`);
+    const { message } = safeMessage('action-center.checkDraftPrStatus', e, 'Could not read this pull request\'s status right now — try again shortly.');
+    throw httpError(502, message);
   }
 
   if (pr.merged) {

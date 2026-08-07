@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { sanitizeForCustomer } from '../lib/errors.js';
 
 // Full Site Audit persistence (migration 043). audit_runs is one row per
 // audit invocation, checkpointed incrementally (pages_discovered/audited)
@@ -27,14 +28,19 @@ export async function updateAuditRunProgress(auditRunId, { pagesDiscovered, page
   await query(`UPDATE audit_runs SET ${sets.join(', ')} WHERE id = $${values.length}`, values);
 }
 
+// Defense-in-depth net (server/lib/errors.js) — rendered directly to the
+// customer in web/src/pages/SiteAudit.jsx and SiteAuditSummaryCard.jsx, so
+// this is the last stop before a raw exception from anywhere in the audit
+// pipeline could reach that banner.
 export async function completeAuditRun(auditRunId, { status, agentIdsRun, healthScore, errorMessage } = {}) {
+  const safeError = errorMessage != null ? sanitizeForCustomer(errorMessage, 'This audit run did not complete — our team has been notified.') : null;
   await query(
     `UPDATE audit_runs
         SET status = $2, finished_at = now(),
             agent_ids_run = COALESCE($3, agent_ids_run),
             health_score = $4, error_message = $5
       WHERE id = $1`,
-    [auditRunId, status, agentIdsRun || null, healthScore ?? null, errorMessage ?? null]
+    [auditRunId, status, agentIdsRun || null, healthScore ?? null, safeError]
   );
 }
 

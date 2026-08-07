@@ -7,6 +7,7 @@ import { runAgent } from '../runner.js';
 import { listAgentMeta } from '../registry.js';
 import { createPageCache } from './fetch-cache.js';
 import { computeHealthScore } from './health-score.js';
+import { safeMessage } from '../../lib/errors.js';
 import {
   createAuditRun, updateAuditRunProgress, completeAuditRun, saveAuditPageFindingsBatch, updateAuditPageFinding,
   getAuditPageFindings,
@@ -275,7 +276,8 @@ export async function runFullSiteAudit(siteId, {
     await completeAuditRun(auditRun.id, { status: 'completed', agentIdsRun: agentIds, healthScore });
     return { auditRunId: auditRun.id, pagesDiscovered: pages.length, pagesAudited, findingsWritten, healthScore };
   } catch (err) {
-    await completeAuditRun(auditRun.id, { status: 'failed', errorMessage: String(err?.message || err) }).catch(() => {});
+    const { message } = safeMessage(`bulk-audit:${auditRun.id}`, err, 'This audit run could not finish — our team has been notified.');
+    await completeAuditRun(auditRun.id, { status: 'failed', errorMessage: message }).catch(() => {});
     throw err;
   }
 }

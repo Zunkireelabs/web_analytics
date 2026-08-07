@@ -1,4 +1,5 @@
 import { callLLM } from '../../llm.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -193,7 +194,8 @@ export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate,
     const raw = await callLLMFn(system, user, { maxTokens: 1200 });
     parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch (err) {
-    return { ok: false, error: `Could not derive an updated template: ${err.message}` };
+    const { message } = safeMessage('design-drift.deriveUpdatedTemplate', err, 'Could not derive an updated template right now — try again shortly.');
+    return { ok: false, error: message };
   }
   if (!parsed?.wrapper || !parsed?.row) {
     return { ok: false, error: 'Model did not return a valid {wrapper, row} template.' };

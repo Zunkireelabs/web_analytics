@@ -2,6 +2,7 @@ import { analyzePageUrl, isPrivateOrLocalHost, fetchResponseHeaders, isCompresse
 import { inspectUrl } from '../../ingest/gsc-technical.js';
 import { fetchCoreWebVitals, configured as pagespeedConfigured } from '../../ingest/pagespeed.js';
 import { listTitlesForSite } from '../../store/technical-seo-checks.js';
+import { describeFetchFailure } from '../../lib/errors.js';
 
 // Rotation-batch selection now lives in agents/lib/candidate-pages.js
 // (selectCandidatePages, called from technical-seo.js with an adapter over
@@ -37,11 +38,11 @@ export async function runPageChecks(site, pages, pageCache) {
       fetchPage(page),
       inspectUrl(site, page),
       pagespeedConfigured()
-        ? fetchCoreWebVitals(page).catch((err) => ({ ok: false, error: String(err?.message || err) }))
+        ? fetchCoreWebVitals(page).catch((err) => ({ ok: false, error: describeFetchFailure('technical-seo-analysis.fetchCoreWebVitals', err) }))
         : Promise.resolve({ ok: false, error: 'not-configured' }),
       // Separate, lightweight headers-only fetch (no body read) — real
       // Content-Encoding, not guessed from response size or file extension.
-      fetchResponseHeaders(page).catch((err) => ({ ok: false, error: String(err?.message || err) })),
+      fetchResponseHeaders(page).catch((err) => ({ ok: false, error: describeFetchFailure('technical-seo-analysis.fetchResponseHeaders', err) })),
     ]);
     return {
       page,
@@ -106,7 +107,7 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS) {
         res = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
       }
     } catch (err) {
-      return { chain, finalStatus: null, hops: chain.length, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+      return { chain, finalStatus: null, hops: chain.length, error: describeFetchFailure('technical-seo-analysis.followRedirects', err) };
     } finally {
       clearTimeout(timeout);
     }

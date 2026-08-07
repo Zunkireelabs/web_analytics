@@ -1,4 +1,5 @@
 import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase } from '../../github/client.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -104,7 +105,8 @@ export async function pushDraftBranch(site, draft, files, target) {
 
     return { ok: true, branchName };
   } catch (err) {
-    return { ok: false, reason: 'github-error', error: err.message };
+    const { message } = safeMessage('github-ops.pushDraftBranch', err, 'This change could not be pushed to a branch right now — our team has been notified.');
+    return { ok: false, reason: 'github-error', error: message };
   }
 }
 
@@ -131,7 +133,8 @@ export async function openRollbackPr(site, draft, branchName) {
     });
     return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
-    return { ok: false, reason: 'github-error', error: err.message };
+    const { message } = safeMessage('github-ops.openRollbackPr', err, 'This rollback pull request could not be opened right now — our team has been notified.');
+    return { ok: false, reason: 'github-error', error: message };
   }
 }
 
@@ -160,6 +163,7 @@ export async function openPrForBranch(site, draft, branchName) {
     });
     return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
-    return { ok: false, reason: 'github-error', error: err.message };
+    const { message } = safeMessage('github-ops.openPrForBranch', err, 'This pull request could not be opened right now — our team has been notified.');
+    return { ok: false, reason: 'github-error', error: message };
   }
 }

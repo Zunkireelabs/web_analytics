@@ -1,12 +1,15 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
-import { configured as cseConfigured, searchSources } from '../ingest/competitor-providers/google-cse.js';
+import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
+import { safeMessage } from '../lib/errors.js';
 
-// Real citation search is opt-in, separate from GOOGLE_CSE_API_KEY's mere
-// presence — that key is already live for competitor intelligence
-// (ingest/competitor-providers/google-cse.js), and citation search would
-// silently start spending its shared daily quota (100 free queries/day,
-// then paid) on a different feature without this explicit switch.
+// Real citation search is opt-in, separate from any one provider's own
+// credentials being set (e.g. GOOGLE_CSE_API_KEY, already live for
+// competitor intelligence) — citation search would silently start spending
+// a shared quota on a different feature without this explicit switch. Which
+// specific provider actually serves the search is decided by
+// search-grounding-providers/index.js, not hard-coded here, so adding a
+// second grounding-capable provider later never requires touching this file.
 const CITATION_SEARCH_ENABLED = process.env.ENABLE_CONTENT_CITATION_SEARCH === 'true';
 
 export const meta = {
@@ -56,10 +59,10 @@ const FOCUS_SYSTEMS = {
 // params: { page: string, query?: string, focus?: string }
 export async function generate({ siteId, params }) {
   const { page, query, focus } = params || {};
-  if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
+  if (!page) throw Object.assign(new Error('page is required'), { status: 400, userFacing: true });
 
   const fetched = await analyzePageUrl(page);
-  if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
+  if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400, userFacing: true });
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
@@ -71,17 +74,18 @@ export async function generate({ siteId, params }) {
   // marker, it's indistinguishable published body text, and it shipped
   // straight to a live page. Fail honestly instead of drafting filler.
   if (focus === 'external-citations') {
-    if (!CITATION_SEARCH_ENABLED || !cseConfigured()) {
-      throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + Google CSE) — refusing to draft an ungrounded citations section.'), { status: 400 });
+    if (!CITATION_SEARCH_ENABLED || !groundingProviderConfigured()) {
+      throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + a configured search-grounding provider) — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true });
     }
     let sources;
     try {
-      sources = await searchSources(query || fetched.analysis.title, 3);
+      sources = await searchGroundedSources(query || fetched.analysis.title, 3);
     } catch (err) {
-      throw Object.assign(new Error(`Citation search failed: ${err.message}`), { status: 502 });
+      const { message } = safeMessage('expand-content.searchSources', err, 'Citation search is temporarily unavailable — try again shortly, or draft this section without external citations.');
+      throw Object.assign(new Error(message), { status: 502, userFacing: true });
     }
     if (!sources.length) {
-      throw Object.assign(new Error('No real source candidates found for this page/query — refusing to draft an ungrounded citations section.'), { status: 400 });
+      throw Object.assign(new Error('No real source candidates found for this page/query — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true });
     }
     system = SYSTEM_CITATIONS_GROUNDED;
     user += `\n\nReal source candidates (cite ONLY from this list, using these exact URLs):\n` +
@@ -93,7 +97,7 @@ export async function generate({ siteId, params }) {
     sections = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(sections)) throw new Error('not an array');
   } catch {
-    throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400 });
+    throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
   }
   sections = sections.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string').slice(0, 4);
 

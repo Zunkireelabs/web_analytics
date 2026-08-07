@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
+import { sanitizeForCustomer } from '../lib/errors.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -227,12 +228,19 @@ export async function recordGscNotification(siteId, id, result) {
 // "Push Branch" is simply retryable once the underlying issue (missing
 // mapping, GitHub error) is fixed — never leaves a draft stuck in a broken
 // state.
+// Defense-in-depth net (server/lib/errors.js) right at the boundary this
+// column is rendered from verbatim (web/src/components/DraftModal.jsx's
+// "Deployment Attempt Failed" banner) — every known caller already builds a
+// sanitized message before reaching here, but this is the one place that
+// stops a future caller's mistake from ever reaching the customer, not just
+// today's known call sites.
 export async function recordApplyFailure(siteId, id, errorMessage, renderModeInfo = null) {
+  const safeError = sanitizeForCustomer(errorMessage, 'This change could not be applied — our team has been notified.');
   const { rows } = await query(
     `UPDATE drafts SET apply_error = $3, render_mode_confirm = $4, updated_at = now()
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, errorMessage, renderModeInfo ? JSON.stringify(renderModeInfo) : null]
+    [siteId, id, safeError, renderModeInfo ? JSON.stringify(renderModeInfo) : null]
   );
   return rows[0] || null;
 }
@@ -288,11 +296,12 @@ export async function hasImplementedVisibleFaqForPage(siteId, page) {
 // is already real/pushed at this point, only the merge call failed, so this
 // stays at branch_pushed rather than reverting anything.
 export async function recordMergeFailure(siteId, id, errorMessage) {
+  const safeError = sanitizeForCustomer(errorMessage, 'This pull request could not be opened — our team has been notified.');
   const { rows } = await query(
     `UPDATE drafts SET apply_error = $3, updated_at = now()
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
-    [siteId, id, errorMessage]
+    [siteId, id, safeError]
   );
   return rows[0] || null;
 }

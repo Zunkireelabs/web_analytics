@@ -7,6 +7,7 @@ import { recheckLink } from './technical-seo-analysis.js';
 import { getSiteById } from '../../store/read.js';
 import { daysAgoInTz } from '../../util/dates.js';
 import { runAgent } from '../runner.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -136,7 +137,8 @@ export async function recheckRecommendation(siteId, recommendationId) {
   try {
     output = await runAgent(agentId, { siteId, start, end, params: { pages: [rec.page] } }, { persist: false });
   } catch (err) {
-    return { status: 'open', changed: false, reason: `re-check failed: ${err.message}` };
+    const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
+    return { status: 'open', changed: false, reason: message };
   }
   const stillDetected = (output.facts?.findings || []).some((f) => (
     f.recommendedAction?.generatorId === rec.recommendation_type
