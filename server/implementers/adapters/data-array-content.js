@@ -4,7 +4,7 @@ import { resolveAdapter } from '../lib/url-file-map.js';
 import {
   findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray, insertNewArrayField,
   assertValidContent, dedupeAndValidateFaqItems, diffFaqItems, parseManagedFaqItems,
-  findScalarFieldRange, spliceScalarField, findObjectFieldRange,
+  findScalarFieldRange, spliceScalarField, findObjectFieldRange, spliceObjectField, insertNewObjectField,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
 
@@ -185,11 +185,80 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
   return { ok: true, filePath: config.dataFile, oldContent: file.content, newContent: content, changedRegions };
 }
 
+// Writes a schema draft's JSON-LD onto an existing object's own field
+// (config.schemaField) as a real object literal — the object counterpart to
+// computeScalarFieldChange's string-field write above, for a schema.js
+// draft targeting a data-driven page (a locations.js service entry, a
+// comparisons.js entry) with no per-page template file of its own to
+// marker-splice into. That's not an oversight — a marker splice targets a
+// SHARED pagination template (see lib/url-file-map.js's resolveAdapter doc
+// comment), so a naive splice there would apply one page's schema to every
+// page using that template; writing into this specific entry's own field in
+// the data array is the safe, real per-page equivalent, mirroring how
+// `fields` above already does this for meta-title. The corresponding
+// template (e.g. location-service.njk) must itself render this field as a
+// JSON-LD script tag for the write to actually surface on the live page —
+// this only writes the data half.
+//
+// Same "don't auto-publish an unverified guess" rule lib/marker-merge.js's
+// buildMergeValues enforces for the marker-merge schema path applies here
+// too: a draft with any unresolved placeholder field refuses, not just a
+// missing jsonLd outright.
+async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config) {
+  const page = draft.content?.page || draft.input?.page;
+  if (!draft.content?.jsonLd) {
+    return { ok: false, reason: 'draft-not-ready', error: 'This schema draft has no JSON-LD to apply.' };
+  }
+  if (draft.content.placeholderFields?.length) {
+    return {
+      ok: false, reason: 'draft-not-ready',
+      error: `This schema draft has ${draft.content.placeholderFields.length} unverified placeholder field(s) (${draft.content.placeholderFields.join(', ')}) — the model couldn't confirm these from the real page text. Fill them in manually (edit the draft) before this can be applied.`,
+    };
+  }
+
+  const idField = config.idField || 'id';
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+
+  const format = config.format || 'js-export-array';
+  let objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) {
+    return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+  }
+  if (config.nestedField) {
+    objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
+    if (!objRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+    }
+  }
+
+  const fieldName = config.schemaField;
+  const existingRange = findObjectFieldRange(file.content, objRange, fieldName, format);
+  const before = existingRange ? file.content.slice(existingRange.start, existingRange.end + 1) : '(none)';
+  const newContent = existingRange
+    ? spliceObjectField(file.content, objRange, fieldName, draft.content.jsonLd, format)
+    : insertNewObjectField(file.content, objRange, fieldName, draft.content.jsonLd, format);
+
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  }
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
+    changedRegions: [{ field: 'schema', markerName: fieldName, before, after: JSON.stringify(draft.content.jsonLd) }],
+  };
+}
+
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
   const config = resolveAdapter(site, page, draft.action_type);
+  if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
   const flatArray = config?.shape === 'flat-array';
   if (!config?.dataFile || (!flatArray && !config?.itemsField)) {

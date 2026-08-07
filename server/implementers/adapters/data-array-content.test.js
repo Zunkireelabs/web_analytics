@@ -352,3 +352,108 @@ describe('data-array-content computeChange — flat-array shape (zunkireelabs-we
     assert.equal(r.renderMode, 'visible');
   });
 });
+
+// schemaField config — real report: "Add Review or AggregateRating JSON-LD
+// schema" recommendations for /locations/<location>/<service>/ pages (e.g.
+// /locations/kathmandu/web-development/) always failed with "No
+// url_file_map entry matches", because these pages are rendered by ONE
+// shared pagination template (location-service.njk) for every
+// location×service combination — a marker splice there would apply one
+// page's schema to every page using that template, so schema was never
+// wired to `file`/marker-merge for this pattern (see url-file-map.js's
+// isPageMapped/resolveAdapter). schemaField is the safe fix: it writes into
+// this specific entry's own field in the data array (the same real
+// per-page-uniqueness mechanism `fields` already proves out for
+// meta-title), for the site's own template to render.
+const tenantAWithSchema = {
+  id: 1,
+  url_file_map: {
+    patterns: [
+      {
+        match: '^/locations/([^/]+)/([^/]+)/?$',
+        adapters: {
+          schema: { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', nestedField: 'services', schemaField: 'reviewSchema' },
+        },
+      },
+    ],
+  },
+};
+
+describe('data-array-content computeChange — schemaField (JSON-LD object writes)', () => {
+  const jsonLd = { '@context': 'https://schema.org', '@type': 'Article', headline: 'Web Development in Kathmandu' };
+
+  test('inserts a brand-new schema field into the real nested services.<id> sub-object', async () => {
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/locations.js');
+    assert.match(r.newContent, /reviewSchema:\s*\{/);
+    assert.match(r.newContent, /"headline":\s*"Web Development in Kathmandu"/);
+    // sibling service and the location's own top-level fields untouched
+    assert.match(r.newContent, /title: "AI Development Services in Kathmandu"/);
+    assert.match(r.newContent, /id: "pokhara"/);
+  });
+
+  test('splices an EXISTING schema field in place on a second draft, does not duplicate it', async () => {
+    const first = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
+    }, fetchLocations);
+    const fetchAfterFirst = async () => ({ content: first.newContent });
+    const updatedJsonLd = { ...jsonLd, headline: 'Updated headline' };
+    const second = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd: updatedJsonLd, placeholderFields: [] },
+    }, fetchAfterFirst);
+    assert.equal(second.ok, true);
+    assert.match(second.newContent, /"headline":\s*"Updated headline"/);
+    assert.doesNotMatch(second.newContent, /Web Development in Kathmandu/);
+    assert.equal((second.newContent.match(/reviewSchema/g) || []).length, 1);
+  });
+
+  test('no jsonLd on the draft -> honest draft-not-ready, never a silent no-op', async () => {
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/' },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'draft-not-ready');
+  });
+
+  test('unresolved placeholder fields refuse to auto-apply, same rule as the marker-merge schema path', async () => {
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: {
+        page: 'https://zunkireelabs.com/locations/kathmandu/web-development/',
+        jsonLd, placeholderFields: ['reviewRating.ratingValue'],
+      },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'draft-not-ready');
+    assert.match(r.error, /unverified placeholder/);
+  });
+
+  test('a service id that does not exist on the location -> honest no-insertion-marker, never fabricated', async () => {
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/not-a-real-service/', jsonLd, placeholderFields: [] },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+
+  test('written content is valid JS — a fresh computeChange re-parse of the result succeeds', async () => {
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    const reparsed = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/', jsonLd, placeholderFields: [] },
+    }, async () => ({ content: r.newContent }));
+    assert.equal(reparsed.ok, true);
+  });
+});

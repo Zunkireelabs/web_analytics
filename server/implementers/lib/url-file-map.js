@@ -53,6 +53,22 @@ export function resolveFile(site, pageUrl) {
   return m ? pattern.file.replace(/\$(\d+)/g, (_, n) => m[Number(n)] ?? '') : null;
 }
 
+// Whether a (page, actionType) recommendation could ever actually apply —
+// checked BEFORE a recommendation is persisted/surfaced (see
+// agents/lib/recommendations.js's buildRecommendations) instead of only
+// discovering "No url_file_map entry matches" at approve/apply time
+// (backend.js/frontend.js's own resolveFile calls). Real incident: a
+// /compare/:slug pattern configured `adapters` for faq/meta-title but not
+// schema, so geo-signals.js's Review/AggregateRating schema finding kept
+// generating an "auto-eligible" recommendation that failed every time
+// someone tried to apply it. An adapter route is trusted on its own
+// (without also requiring resolveFile) — an adapter's dataFile is a
+// separate concern it validates itself, at apply time.
+export function isPageMapped(site, pageUrl, actionType) {
+  if (resolveAdapter(site, pageUrl, actionType)) return true;
+  return !!resolveFile(site, pageUrl);
+}
+
 // Recommended, non-exhaustive slot vocabulary for placement config below —
 // documentation/consistency only (e.g. a future UI dropdown), never
 // validated against. A site is free to use any other string as a slot name.

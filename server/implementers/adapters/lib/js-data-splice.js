@@ -314,6 +314,44 @@ export function spliceScalarField(content, objRange, fieldName, newValue, format
   return content.slice(0, range.valueStart) + range.quote + escaped + range.quote + content.slice(range.valueEnd);
 }
 
+// Renders a plain JS value as valid object-literal source — JSON.stringify's
+// quoted-key output is valid syntax in BOTH js-export-array (a real .js
+// file — quoted keys are legal JS) and json-array (real JSON) formats, so
+// one renderer serves both, unlike the FAQ-items path below which needs
+// per-format marker/sentinel handling for idempotent re-application. A
+// schema/JSON-LD field is a single opaque object, always fully replaced
+// wholesale on redraft — there's no "existing items to preserve" concept
+// for it the way there is for a hand-authored FAQ array.
+function renderObjectLiteral(value, indent) {
+  return JSON.stringify(value, null, 2).split('\n').join(`\n${indent}`);
+}
+
+// Replaces an EXISTING top-level `fieldName: {...}` object property's value
+// wholesale — the object counterpart to spliceScalarField above (a plain
+// string value). null (no edit made) when the field doesn't exist yet on
+// this entry — see insertNewObjectField for that case, same split as
+// findArrayFieldRange/insertNewArrayField above.
+export function spliceObjectField(content, objRange, fieldName, newValue, format = 'js-export-array') {
+  const range = findObjectFieldRange(content, objRange, fieldName, format);
+  if (!range) return null;
+  return content.slice(0, range.start) + renderObjectLiteral(newValue, '  ') + content.slice(range.end + 1);
+}
+
+// Inserts a brand-new `fieldName: {...}` property as the object's last
+// field — comma-safe relative to whatever field currently comes last, same
+// insertion strategy as insertNewArrayField above. Use only when
+// findObjectFieldRange returned null (the field genuinely doesn't exist
+// yet); once created, later drafts go through spliceObjectField instead.
+export function insertNewObjectField(content, objRange, fieldName, newValue, format = 'js-export-array') {
+  const interior = content.slice(objRange.start + 1, objRange.end);
+  const trimmed = interior.replace(/\s+$/, '');
+  const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
+  const insertPoint = objRange.start + 1 + trimmed.length;
+  const key = format === 'json-array' ? JSON.stringify(fieldName) : fieldName;
+  const insertion = `${needsComma ? ',' : ''}\n    ${key}: ${renderObjectLiteral(newValue, '    ')}\n  `;
+  return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
+}
+
 // ---- js-export-array: comment-marker-based splice (today's real, tested mechanism) ----
 
 const MARKER_START = '/* SEOAI:FAQ:START */';

@@ -1,10 +1,11 @@
 import { getLatestFindings } from './fresh-runs.js';
-import { getQueriesForPage } from '../../store/read.js';
+import { getQueriesForPage, getSiteById } from '../../store/read.js';
 import { getDraftedFindingIds, listDrafts } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
+import { isPageMapped } from '../../implementers/lib/url-file-map.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -45,11 +46,12 @@ async function latestGeoAuditRun(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, geoAuditRun, draftedFindingIds, catByAgent] = await Promise.all([
+  const [runs, geoAuditRun, draftedFindingIds, catByAgent, site] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     latestGeoAuditRun(siteId),
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
+    getSiteById(siteId),
   ]);
   const allRuns = geoAuditRun ? [...runs, geoAuditRun] : runs;
   const lookupQuery = makeQueryLookup(siteId);
@@ -88,6 +90,22 @@ export async function buildRecommendations(siteId) {
     for (const f of run.findings) {
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
+      // A page-scoped finding whose page has no real deploy target (no
+      // url_file_map entry, no adapter route) can never actually be
+      // applied — surfacing it as an "auto-eligible" recommendation only
+      // for it to fail with "No url_file_map entry matches..." at
+      // approve/apply time. Skip it entirely (not added to detectedKeys
+      // either) so any already-open recommendation for it closes out on
+      // the next sync instead of staying stuck. See
+      // implementers/lib/url-file-map.js's isPageMapped and
+      // scripts/audit-url-file-map.js, which surfaces this same gap
+      // proactively for a whole site's config.
+      // broken-link-fix is excluded: computeBrokenLinkFixMerge (backend.js)
+      // has its own GitHub code-search fallback for exactly the pages this
+      // check would flag, so "not in url_file_map" isn't fatal for it the
+      // way it is for every other generatorId here.
+      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
+        && !isPageMapped(site, action.params.page, action.generatorId)) continue;
       detectedKeys.add(`${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`);
       if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const params = { ...action.params };
