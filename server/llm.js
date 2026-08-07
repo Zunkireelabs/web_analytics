@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { getLessons } from './lessons.js';
 
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
@@ -60,10 +61,33 @@ export const MODEL_DEFAULTS = {
   anthropic: { daily: 'claude-haiku-4-5', monthly: 'claude-opus-4-8' },
 };
 
+// Prepends any recorded fix_lessons (migration 086) for this generator as a
+// "known issues" block on the system prompt — so a mistake class already
+// corrected once (by a person or a prior fix) doesn't have to be
+// re-explained every time it resurfaces on a new page/site. Silently
+// no-ops (falls back to the plain system prompt) if the lookup itself
+// fails — a lessons-table outage must never break drafting.
+async function withLessons(system, generatorId, siteId) {
+  if (!generatorId) return system;
+  let lessons;
+  try {
+    lessons = await getLessons(generatorId, siteId);
+  } catch (err) {
+    console.warn(`[llm] fix_lessons lookup failed for "${generatorId}", continuing without it: ${err.message}`);
+    return system;
+  }
+  if (!lessons.length) return system;
+  const block = lessons.map((l) => `- ${l.title}: ${l.lesson}`).join('\n');
+  return `${system}\n\nKnown issues from past fixes — do not repeat these:\n${block}`;
+}
+
 // Calls the chosen LLM with a system + user prompt and returns plain text.
 // `model` overrides the resolved default outright; `tier` picks which
 // REPORT_MODEL_* env var / built-in default to fall back to otherwise.
-export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily' } = {}) {
+// `generatorId` (+ optional `siteId`) opts into the fix_lessons prompt
+// injection above — pass the calling generator's own meta.id.
+export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId } = {}) {
+  system = await withLessons(system, generatorId, siteId);
   const provider = pickProvider();
   const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
   const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
@@ -89,4 +113,46 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
     messages: [{ role: 'user', content: user }],
   }));
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
+}
+
+// Strips a markdown code fence wrapper (```json ... ``` or ``` ... ```) if
+// present — models frequently wrap JSON in one despite an explicit
+// "respond with ONLY JSON" instruction.
+function stripCodeFence(raw) {
+  return raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+}
+
+// Best-effort JSON extraction: a direct parse first, then (if the model
+// added stray prose before/after the JSON despite instructions not to) the
+// widest {...}/[...] substring in the response. Returns null, never throws
+// — callers decide what "still no valid JSON" means for them.
+export function extractJson(raw) {
+  const stripped = stripCodeFence(raw || '');
+  try { return JSON.parse(stripped); } catch { /* fall through to substring extraction */ }
+  const firstBrace = stripped.search(/[{[]/);
+  const lastBrace = Math.max(stripped.lastIndexOf('}'), stripped.lastIndexOf(']'));
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  try { return JSON.parse(stripped.slice(firstBrace, lastBrace + 1)); } catch { return null; }
+}
+
+// callLLM, but for a JSON-shaped response — a distinct failure mode from
+// the transient network/5xx retry callLLM already does internally: the
+// HTTP call succeeds, but the model's actual text content isn't parseable
+// JSON (stray prose, truncation, or just missing the mark despite an
+// explicit "respond with ONLY JSON" instruction). Confirmed as a real,
+// recurring failure across multiple generators (schema/faq/expand-content/
+// meta-title/...), not a one-off — one retry with a sharper, explicit
+// correction appended to the prompt before giving up honestly.
+export async function callLLMForJson(system, user, options = {}) {
+  const raw = await callLLM(system, user, options);
+  const parsed = extractJson(raw);
+  if (parsed !== null) return parsed;
+
+  console.warn('[llm] first response was not valid JSON, retrying once with a corrective nudge…');
+  const retryUser = `${user}\n\nYour previous response was not valid JSON. Respond with ONLY the raw JSON — no markdown code fences, no explanation, no text before or after it.`;
+  const retryRaw = await callLLM(system, retryUser, options);
+  const retryParsed = extractJson(retryRaw);
+  if (retryParsed !== null) return retryParsed;
+
+  throw Object.assign(new Error('Model did not return valid JSON after 2 attempts.'), { status: 400 });
 }

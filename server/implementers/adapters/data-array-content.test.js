@@ -154,6 +154,75 @@ describe('data-array-content computeChange — fields config (meta-title scalar 
   });
 });
 
+// nestedField — location × service pages (e.g. /locations/kathmandu/aeo-seo/),
+// where the real content lives at services.<serviceId> on the location
+// object: a plain KEYED object, not another id-matched array entry. Real
+// report this closes: these pages produced "No url_file_map entry matches"
+// for every generator, since the old idFromPageUrl (last URL segment only)
+// had no way to express "match the location by its OWN id, then reach one
+// level deeper into a specific named property."
+const tenantAWithNestedServices = {
+  id: 1,
+  url_file_map: {
+    patterns: [
+      {
+        match: '^/locations/([^/]+)/([^/]+)/?$',
+        adapters: {
+          'meta-title': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', nestedField: 'services', fields: { title: 'title', metaDescription: 'description' } },
+        },
+      },
+    ],
+  },
+};
+
+describe('data-array-content computeChange — nestedField (location × service pages)', () => {
+  test('writes into the real nested services.<id> sub-object, sibling services and fields untouched', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: {
+        page: 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/',
+        selectedTitle: 'AEO & SEO in Kathmandu — Zunkiree Labs',
+        metaDescription: 'Refreshed, on-length meta description for the Kathmandu AEO/SEO service page.',
+      },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /title: "AEO & SEO in Kathmandu — Zunkiree Labs"/);
+    assert.match(r.newContent, /description: "Refreshed, on-length meta description for the Kathmandu AEO\/SEO service page\."/);
+    // a sibling service's own title on the SAME location must be untouched
+    assert.match(r.newContent, /title: "AI Development Services in Kathmandu"/);
+    // the location's own top-level title (a different field entirely) must be untouched
+    assert.match(r.newContent, /title: "AI Development Company in Kathmandu \| Zunkiree Labs"/);
+  });
+
+  test('a location with no services object at all -> honest no-insertion-marker, not a guess', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', selectedTitle: 'x' },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+    assert.match(r.error, /services\.aeo-seo/);
+  });
+
+  test('a real location but a service id that does not exist on it -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/not-a-real-service/', selectedTitle: 'x' },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+
+  test('URL too short to have both a location and a service segment -> honest no-file-mapping', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', selectedTitle: 'x' },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+});
+
 describe('data-array-content computeChange — json-array format, synthetic fixture', () => {
   const jsonFixture = JSON.stringify([
     { id: 'widget-a', name: 'Widget A', faqs: [{ question: 'Hand-authored', answer: 'Kept as-is' }] },

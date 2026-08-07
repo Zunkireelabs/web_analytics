@@ -107,6 +107,11 @@ jobs:
             # not a secret, just an internal hostname. See .env.example.
             DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-prod:8000
 
+            # Must match data-analyst-agent's own ADMIN_API_KEY exactly (see
+            # the second .env write below) — this app's /analyst routes
+            # (routes/dataAnalyst.js) inject it as X-Admin-Key server-side.
+            DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+
             # ── Standalone MCP server (mcp-server/index.js) ─────────────────
             # POST /api/mcp + the OAuth 2.1 surface, on their own subdomain —
             # see the plan: "Split the MCP server onto its own subdomain".
@@ -122,9 +127,45 @@ jobs:
 
             docker compose up -d
 
+            # ── data-analyst-agent: sibling Python service, same repo, own
+            # docker-compose.yml (own dedicated Postgres in prod — see that
+            # file's own `db` service — never this app's Neon database).
+            # Reverse-proxied under this app's own domain at /data-agent
+            # (routes/data-agent.js) via DATA_ANALYST_AGENT_INTERNAL_URL
+            # above, so no separate DNS/Traefik domain is required for it
+            # to actually be usable — DATA_ANALYST_AGENT_DOMAIN below only
+            # matters if direct external access to it is wanted later.
+            cd "$DIR/data-analyst-agent"
+
+            cat > .env << 'ENVEOF'
+            DATABASE_URL=postgresql+asyncpg://data_analyst_agent:${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}@db:5432/data_analyst_agent
+            POSTGRES_PASSWORD=${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}
+            DATA_ANALYST_AGENT_DOMAIN=${{ vars.DATA_ANALYST_AGENT_DOMAIN }}
+            ROOT_PATH=/data-agent
+            TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}
+            # /api/mcp on analytics-app-prod:3002 is now just a 307
+            # compatibility redirect to the standalone mcp-server (see
+            # server/index.js's own comment) — pointing straight at that
+            # real service internally, same as staging's equivalent env
+            # var does over its public MCP_DOMAIN.
+            MCP_BASE_URL=http://analytics-mcp-prod:3003/api/mcp
+            ADMIN_API_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            INGEST_LOOKBACK_DAYS=400
+            Z_SCORE_THRESHOLD=3.0
+            IQR_MULTIPLIER=1.5
+            FORECAST_HORIZON_DAYS=14
+            MIN_HISTORY_DAYS_FOR_FORECAST=30
+            ENVEOF
+
+            docker compose build
+            docker compose up -d
+
+            cd "$DIR"
+
             echo "Waiting for containers to be healthy..."
             sleep 10
-            for CONTAINER in analytics-app-prod analytics-mcp-prod; do
+            for CONTAINER in analytics-app-prod analytics-mcp-prod data-analyst-agent-prod; do
               HEALTHY=0
               for i in $(seq 1 12); do
                 STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")

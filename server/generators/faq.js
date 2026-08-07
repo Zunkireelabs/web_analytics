@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'faq',
@@ -32,7 +32,7 @@ const PAGE_PURPOSE_GUIDANCE = {
 };
 
 // params: { page?: string, query?: string, topic?: string, schemaType?: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, query, topic, schemaType } = params;
   const subject = query || topic;
   if (!subject) throw Object.assign(new Error('query or topic is required'), { status: 400 });
@@ -53,11 +53,9 @@ export async function generate({ params }) {
     (pageGuidance ? `${pageGuidance} ` : '') +
     'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
   const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let items;
   try {
-    items = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
     if (!Array.isArray(items)) throw new Error('not an array');
   } catch {
     throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });

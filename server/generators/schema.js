@@ -1,5 +1,5 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'schema',
@@ -66,7 +66,7 @@ export function needsArticleFallback(schemaType, placeholderFields) {
   return schemaType !== 'Article' && placeholderFields.length > 0;
 }
 
-async function draftJsonLd(schemaType, title, bodyText) {
+async function draftJsonLd(schemaType, title, bodyText, siteId) {
   const system = `You are a structured-data specialist. Draft valid schema.org JSON-LD of type "${schemaType}" ` +
     'for a real page, using ONLY its real title and body text given below. Populate a field ONLY if its value ' +
     `is actually present in that text. For any schema-required field you cannot verify from the text, set its ` +
@@ -74,16 +74,15 @@ async function draftJsonLd(schemaType, title, bodyText) {
     'date, or other fact that is not actually in the text. Respond with ONLY the JSON-LD object (include ' +
     '"@context": "https://schema.org" and the correct "@type").';
   const user = `Page title: ${title}\nPage text: ${bodyText.slice(0, 3000)}`;
-  const raw = await callLLM(system, user, { maxTokens: 700 });
   try {
-    return JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    return await callLLMForJson(system, user, { maxTokens: 700, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Schema generation failed: model did not return valid JSON'), { status: 400 });
   }
 }
 
 // params: { page: string, schemaType: string }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, schemaType } = params;
   if (!page) throw Object.assign(new Error('page is required'), { status: 400 });
   if (!schemaType || !SCHEMA_TYPE_RE.test(schemaType)) {
@@ -95,12 +94,12 @@ export async function generate({ params }) {
   const { title, bodyText } = fetched.analysis;
 
   let effectiveType = schemaType;
-  let jsonLd = await draftJsonLd(effectiveType, title, bodyText);
+  let jsonLd = await draftJsonLd(effectiveType, title, bodyText, siteId);
   let placeholderFields = resolvePlaceholders(jsonLd);
 
   if (needsArticleFallback(schemaType, placeholderFields)) {
     effectiveType = 'Article';
-    jsonLd = await draftJsonLd(effectiveType, title, bodyText);
+    jsonLd = await draftJsonLd(effectiveType, title, bodyText, siteId);
     placeholderFields = resolvePlaceholders(jsonLd);
   }
 

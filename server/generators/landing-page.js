@@ -1,4 +1,4 @@
-import { callLLM } from '../llm.js';
+import { callLLMForJson } from '../llm.js';
 
 export const meta = {
   id: 'landing-page',
@@ -8,7 +8,7 @@ export const meta = {
 };
 
 // params: { market?: string, city?: string, topic?: string, context?: string (real supporting data, e.g. session growth) }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { market, city, topic, context } = params;
   const target = city ? `${city}${market ? `, ${market}` : ''}` : (market || topic);
   if (!target) throw Object.assign(new Error('market, city, or topic is required'), { status: 400 });
@@ -19,11 +19,9 @@ export async function generate({ params }) {
     'present in the given context. Respond with ONLY a JSON object: {"headline": "...", "subheadline": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "cta": "...", "metaTitle": "...", "metaDescription": "..."}';
   const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}`;
-  const raw = await callLLM(system, user, { maxTokens: 900 });
-
   let parsed;
   try {
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }

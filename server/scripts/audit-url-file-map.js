@@ -7,6 +7,7 @@ import { hasMarker } from '../implementers/lib/marker-merge.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
+import { getLessons } from '../lessons.js';
 
 // Read-only config-completeness audit for a site's url_file_map — surfaces
 // exactly the class of gap that let the homepage-FAQ and /compare/-FAQ
@@ -182,6 +183,23 @@ async function main() {
   }
 
   const siteIds = [Number(flags['site-id'])];
+
+  // fix_lessons (migration 086) recorded with no generator_id are
+  // structural/architectural gotchas learned from real past fixes (e.g.
+  // "a page pattern may already get its schema/content computed by the
+  // site's own template at build time — check before wiring a generator
+  // adapter for it") rather than a single generator's prompt mistake.
+  // Surfacing them here, at onboarding-audit time, is what lets a new
+  // client's config get checked against issues already hit once before —
+  // instead of re-discovering the same class of gap from scratch.
+  for (const id of siteIds) {
+    const lessons = await getLessons(null, id);
+    if (lessons.length) {
+      console.log(`\nKnown issues to check for site #${id} (from past fixes):`);
+      for (const l of lessons) console.log(`  - ${l.title}: ${l.lesson}`);
+    }
+  }
+
   for (const id of siteIds) await auditSite(id);
 
   await pool.end();
