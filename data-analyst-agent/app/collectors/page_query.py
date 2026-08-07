@@ -8,6 +8,9 @@ from app.mcp_client.tools import get_gsc_breakdown_daily_top_n
 
 DIMENSIONS = ("page", "query")
 TOP_N_PER_DAY = 50
+# Postgres caps bound parameters per statement at 65535; 8 columns per row
+# keeps well under that even at the largest realistic batch.
+BATCH_SIZE = 500
 
 
 class PageQueryCollector(Collector):
@@ -28,13 +31,22 @@ class PageQueryCollector(Collector):
             rows = await get_gsc_breakdown_daily_top_n(
                 mcp, window_start.isoformat(), window_end.isoformat(), dim, TOP_N_PER_DAY
             )
-            for row in rows:
-                day = datetime.strptime(row["date"], "%Y-%m-%d").date()
-                stmt = pg_insert(PageQueryObservation).values(
-                    client_id=client.id, dimension_type=dim, dimension_value=row["dim_value"],
-                    period_start=day, clicks=row.get("clicks"), impressions=row.get("impressions"),
-                    ctr=row.get("ctr"), position=row.get("position"),
-                )
+            values = [
+                {
+                    "client_id": client.id, "dimension_type": dim, "dimension_value": row["dim_value"],
+                    "period_start": datetime.strptime(row["date"], "%Y-%m-%d").date(),
+                    "clicks": row.get("clicks"), "impressions": row.get("impressions"),
+                    "ctr": row.get("ctr"), "position": row.get("position"),
+                }
+                for row in rows
+            ]
+            # Batched in one multi-row upsert per chunk instead of one
+            # awaited round-trip per row — a full lookback window is up to
+            # TOP_N_PER_DAY * ~400 days per dimension, and at one row per
+            # round-trip that made this collector alone take tens of minutes.
+            for i in range(0, len(values), BATCH_SIZE):
+                batch = values[i:i + BATCH_SIZE]
+                stmt = pg_insert(PageQueryObservation).values(batch)
                 stmt = stmt.on_conflict_do_update(
                     index_elements=["client_id", "dimension_type", "dimension_value", "period_start"],
                     set_={
