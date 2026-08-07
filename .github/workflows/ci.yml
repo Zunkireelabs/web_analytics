@@ -27,6 +27,9 @@ jobs:
       - name: Build dashboard
         run: npm run build:web
 
+      - name: Check opt-in flag deploy parity
+        run: npm run check-env-parity
+
       - name: Check for raw error leaks into customer-facing content
         run: npm run check-error-leaks
         env:

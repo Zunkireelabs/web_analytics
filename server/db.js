@@ -118,6 +118,21 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   return rows[0];
 }
 
+// Persists the outcome of an audit-url-file-map.js run (migration 088), so
+// "has this site's Action Center config actually been verified clean" is a
+// queryable fact — read by integrations/github.js's Integration Health check
+// to nudge when a repo is connected but was never audited, or was audited
+// with gaps still open.
+export async function recordActionCenterConfigCheck(siteId, gapCount) {
+  const { rows } = await query(
+    `UPDATE sites SET action_center_config_checked_at = now(), action_center_config_gap_count = $2
+     WHERE id = $1 RETURNING *`,
+    [siteId, gapCount]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 // Tenant lifecycle (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3). Each function
 // bakes its required source status into the UPDATE's WHERE clause and
 // returns null when the row didn't match — the same atomic-claim shape

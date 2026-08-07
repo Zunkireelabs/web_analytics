@@ -1,7 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
@@ -33,7 +33,11 @@ const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-lin
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
 // in the "no markers configured" error below, never hardcoded to one type
-// regardless of which draft actually triggered it.
+// regardless of which draft actually triggered it. analytics-install has no
+// single static field — see ANALYTICS_PROVIDER_FIELDS (marker-merge.js):
+// each provider (ga4/facebook-pixel) gets its own field/marker so two
+// analytics-install drafts for different providers don't clobber each
+// other's marker on apply.
 const MARKER_FIELD_BY_ACTION_TYPE = {
   'meta-title': 'title',
   faq: 'faq',
@@ -43,11 +47,12 @@ const MARKER_FIELD_BY_ACTION_TYPE = {
   'open-graph': 'openGraph',
   'expand-content': 'expandedContent',
   'qa-content': 'qaContent',
-  'analytics-install': 'analyticsScript',
 };
 
-function markerConfigExample(actionType) {
-  const field = MARKER_FIELD_BY_ACTION_TYPE[actionType] || 'field';
+function markerConfigExample(actionType, provider) {
+  const field = actionType === 'analytics-install'
+    ? (ANALYTICS_PROVIDER_FIELDS[provider] || Object.values(ANALYTICS_PROVIDER_FIELDS).join('" and "'))
+    : (MARKER_FIELD_BY_ACTION_TYPE[actionType] || 'field');
   return { field, marker: field.toUpperCase() };
 }
 
@@ -579,17 +584,44 @@ async function previewLiveBrokenLinkFix(site, draft) {
 // stop, never persisted as site config.
 async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = baseBranch(site)) {
   const page = draft.content?.page || draft.input?.page;
-  const filePath = resolveFile(site, page);
+
+  // analytics-install installs a tracking script SITEWIDE (GA4/Meta Pixel) —
+  // it's not per-page content the way canonical/open-graph genuinely are.
+  // Routing it through resolveFile(page) like those types would mean the
+  // script only ever fires on whichever one page's file got edited, which
+  // defeats the entire point of an "install." It targets the site's one
+  // shared layout template instead — the same siteRoot.layoutTemplate
+  // html-lang/security-headers already use for other sitewide concerns —
+  // so its marker is configured ONCE, via
+  // url_file_map.defaults.placements['analytics-install'] (resolveMarkers
+  // already falls back to this site-level default when no page/pattern
+  // entry exists), not duplicated across every individual page.
+  const isSitewideInstall = draft.action_type === 'analytics-install';
+  const filePath = isSitewideInstall ? resolveSiteRootFile(site, 'layoutTemplate') : resolveFile(site, page);
   if (!filePath) {
-    return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
+    return isSitewideInstall
+      ? { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' }
+      : { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
   }
 
   const markerMap = resolveMarkers(site, page, draft.action_type);
-  if (!markerMap) {
-    const { field, marker } = markerConfigExample(draft.action_type);
+  // For analytics-install specifically, markerMap can be non-null (another
+  // provider is configured) while THIS draft's own provider field is still
+  // missing — spliceMarkers silently no-ops on a field it was never told
+  // about (it only visits markerMap's own keys), which would otherwise look
+  // like a successful apply that wrote nothing. Checked explicitly so a
+  // second provider's missing config surfaces the same honest error a
+  // wholly-unconfigured type gets, not a silent no-op PR.
+  const providerField = isSitewideInstall ? ANALYTICS_PROVIDER_FIELDS[draft.content?.provider] : null;
+  const markersUsable = markerMap && (!isSitewideInstall || (providerField && providerField in markerMap));
+  if (!markersUsable) {
+    const { field, marker } = markerConfigExample(draft.action_type, draft.content?.provider);
+    const configHint = isSitewideInstall
+      ? `add e.g. {"${field}":"${marker}"} to url_file_map.defaults.placements["analytics-install"].markers (once, sitewide)`
+      : `add e.g. {"${field}":"${marker}"} to url_file_map.pages[...].placements or .markers`;
     return {
       ok: false, reason: 'no-insertion-marker',
-      error: `No markers configured for "${page}" in url_file_map.pages[...].placements or .markers — add e.g. {"${field}":"${marker}"} there, and a matching marker in ${filePath}: either <!-- SEOAI:${marker}:START -->...<!-- SEOAI:${marker}:END --> around HTML content, or a trailing # SEOAI:${marker} comment on a single quoted-value line (e.g. front matter).`,
+      error: `No markers configured for "${page || '(sitewide)'}" — ${configHint}, and a matching marker in ${filePath}: either <!-- SEOAI:${marker}:START -->...<!-- SEOAI:${marker}:END --> around HTML content, or a trailing # SEOAI:${marker} comment on a single quoted-value line (e.g. front matter).`,
     };
   }
 

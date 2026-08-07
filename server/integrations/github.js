@@ -33,11 +33,27 @@ export async function check(site) {
   }
   try {
     const sha = await getDefaultBranchSha(full);
+
+    // PAT auth working doesn't mean drafts can actually apply — that also
+    // needs url_file_map + live SEOAI markers to be populated (migration 028)
+    // and verified (migration 088, server/scripts/audit-url-file-map.js).
+    // Reuses recoveryAction (rather than a new field) so this reaches the
+    // stored/polled listing too (store/upsert.js's recordIntegrationCheck
+    // only persists errorMessage/recoveryAction) — ok stays true and
+    // errorMessage stays null so it reads as "connected, review config"
+    // rather than "broken".
+    let recoveryAction = null;
+    if (!full.action_center_config_checked_at) {
+      recoveryAction = `url_file_map / marker config has never been audited. Run \`npm run audit-url-file-map -- --site-id ${full.id}\` before relying on drafts applying cleanly.`;
+    } else if (full.action_center_config_gap_count > 0) {
+      recoveryAction = `Last audit (${new Date(full.action_center_config_checked_at).toISOString().slice(0, 10)}) found ${full.action_center_config_gap_count} config gap(s). Run \`npm run audit-url-file-map -- --site-id ${full.id}\` for details.`;
+    }
+
     return {
       ok: true,
       authStatus: 'valid',
       errorMessage: null,
-      recoveryAction: null,
+      recoveryAction,
       detail: { repo: `${full.repo_owner}/${full.repo_name}`, defaultBranchSha: sha },
     };
   } catch (err) {

@@ -6,7 +6,8 @@ describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {
     assert.equal(isHeadScopedField('canonical'), true);
     assert.equal(isHeadScopedField('openGraph'), true);
-    assert.equal(isHeadScopedField('analyticsScript'), true);
+    assert.equal(isHeadScopedField('analyticsScriptGa4'), true);
+    assert.equal(isHeadScopedField('analyticsScriptFacebookPixel'), true);
     assert.equal(isHeadScopedField('faq'), false);
     assert.equal(isHeadScopedField('title'), false);
   });
@@ -152,22 +153,37 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.error, /ogTitle/);
   });
 
-  test('analytics-install produces the real script verbatim once a real tracking ID is resolved', () => {
+  test('analytics-install produces the real script verbatim once a real tracking ID is resolved, under its provider-specific field', () => {
     const result = buildMergeValues('analytics-install', {
+      provider: 'ga4',
       script: '<script>gtag("config", "G-REAL123");</script>',
       placeholderFields: [],
     });
     assert.equal(result.ok, true);
-    assert.equal(result.values.analyticsScript, '<script>gtag("config", "G-REAL123");</script>');
+    assert.equal(result.values.analyticsScriptGa4, '<script>gtag("config", "G-REAL123");</script>');
+  });
+
+  test('analytics-install uses a DIFFERENT field per provider, so a GA4 draft and a Facebook Pixel draft never target the same marker', () => {
+    const ga4 = buildMergeValues('analytics-install', { provider: 'ga4', script: '<script>ga4</script>', placeholderFields: [] });
+    const pixel = buildMergeValues('analytics-install', { provider: 'facebook-pixel', script: '<script>pixel</script>', placeholderFields: [] });
+    assert.deepEqual(Object.keys(ga4.values), ['analyticsScriptGa4']);
+    assert.deepEqual(Object.keys(pixel.values), ['analyticsScriptFacebookPixel']);
   });
 
   test('analytics-install blocks publishing when the real tracking ID is still a placeholder', () => {
     const result = buildMergeValues('analytics-install', {
+      provider: 'ga4',
       script: '<!-- placeholder -->',
       placeholderFields: ['trackingId'],
     });
     assert.equal(result.ok, false);
     assert.match(result.error, /trackingId/);
+  });
+
+  test('analytics-install fails honestly for an unknown provider instead of silently picking a field', () => {
+    const result = buildMergeValues('analytics-install', { provider: 'bing-ads', script: '<script>x</script>', placeholderFields: [] });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Unknown analytics-install provider/);
   });
 
   test('expand-content falls back to plain, zero-CSS-assumption tags when the site has no configured template', () => {

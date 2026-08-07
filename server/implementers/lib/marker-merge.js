@@ -77,7 +77,18 @@ const LINE_CONVENTION_FIELDS = new Set(['title']);
 // applied) rather than drafting a tag that will never take effect. A future
 // head-metadata generator just adds its field name here — no per-generator
 // placement code.
-const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', 'analyticsScript']);
+// analytics-install has ONE field per PROVIDER, not one shared field, so a
+// GA4 draft and a Facebook Pixel draft can both be configured and applied
+// without clobbering each other. Before this, both providers wrote to the
+// same `analyticsScript` field/marker — spliceMarkers replaces whatever's
+// between a marker's START/END on every apply, so approving both drafts
+// meant whichever merged second silently overwrote the first one's script,
+// leaving only one tracking script actually live despite two "successful"
+// PRs. Exported so backend.js's computeMarkerMerge/markerConfigExample can
+// build a provider-aware error hint instead of a generic wrong one.
+export const ANALYTICS_PROVIDER_FIELDS = { ga4: 'analyticsScriptGa4', 'facebook-pixel': 'analyticsScriptFacebookPixel' };
+
+const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', ...Object.values(ANALYTICS_PROVIDER_FIELDS)]);
 const HEAD_MARKER_NAME = 'HEAD';
 
 // Exposed so callers (backend.js's computeMarkerMerge) can give a more
@@ -106,6 +117,31 @@ const NO_EOF_INSERT_FIELDS = new Set(['expandedContent', 'qaContent']);
 // a body-scoped field — same spirit as isHeadScopedField above.
 export function isNoEofInsertField(field) {
   return NO_EOF_INSERT_FIELDS.has(field);
+}
+
+// Single source of truth for "will ensureMarkers actually be able to create
+// this marker automatically, or does it need a real human-placed anchor
+// first" — used by BOTH ensureMarkers below (the apply-time behavior) and
+// audit-url-file-map.js (the diagnostic script), so the two can never
+// silently disagree about what counts as a real gap. Before this existed,
+// the audit script counted every missing marker equally, even ones
+// ensureMarkers heals automatically at apply time — inflating its gap count
+// with noise and burying the marker gaps that actually need a person.
+//
+// Returns 'self-heals' (ensureMarkers will create it, no action needed) or a
+// specific 'fatal-*' reason naming the missing anchor a human must place
+// once, matching the guard clauses in ensureMarkers exactly.
+export function classifyMarkerGap(field, filePath, fileContent) {
+  if (LINE_CONVENTION_FIELDS.has(field)) {
+    return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
+  }
+  if (HEAD_SCOPED_FIELDS.has(field)) {
+    return blockRegex(HEAD_MARKER_NAME).test(fileContent) ? 'self-heals' : 'fatal-no-head-region';
+  }
+  if (NO_EOF_INSERT_FIELDS.has(field)) {
+    return isPlainMarkdownFile(filePath) ? 'self-heals' : 'fatal-no-safe-anchor';
+  }
+  return 'self-heals'; // default BLOCK convention — always EOF-safe
 }
 
 // The one case where EOF genuinely IS inside the rendered body: a pure
@@ -501,7 +537,9 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (content.placeholderFields?.length) {
       return { ok: false, error: `This analytics-install draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the site's real tracking ID wasn't given. Fill it in manually (edit the draft) before this can be applied.` };
     }
-    return { ok: true, values: { analyticsScript: content.script } };
+    const field = ANALYTICS_PROVIDER_FIELDS[content.provider];
+    if (!field) return { ok: false, error: `Unknown analytics-install provider "${content.provider}" — no marker field mapped for it.` };
+    return { ok: true, values: { [field]: content.script } };
   }
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };
