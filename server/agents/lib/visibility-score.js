@@ -4,7 +4,7 @@
 // tiers of real evidence rather than a flat pass/fail, so the score reflects
 // "how much" readiness signal exists, not just whether any exists at all.
 
-const ENTITY_SCHEMA_TYPES = ['Organization', 'Person', 'Product', 'LocalBusiness'];
+const ENTITY_SCHEMA_TYPES = ['Organization', 'Person', 'Product', 'LocalBusiness', 'Service'];
 
 function schemaScore(analysis) {
   return Math.min(100, analysis.schemaTypes.length * 25);

@@ -34,8 +34,17 @@ const MAX_PAGES = 20;
 const RECOMMENDATION_RULES = [
   // schemaScore only ever produces {0,25,50,75,100} (schemaTypes.length * 25)
   // — <=50 (not <50) so exactly 2 schema types still gets the "add more"
-  // nudge instead of silently passing at the halfway point.
-  { test: (c) => c.schema <= 50, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
+  // nudge instead of silently passing at the halfway point. BUT a raw type
+  // count alone can't tell "2 thin/structural types" (e.g. WebPage +
+  // BreadcrumbList) apart from "2 real entity types" (e.g. Service +
+  // LocalBusiness on a programmatic location page whose template already
+  // renders full, valid JSON-LD for both — confirmed false-positive against
+  // zunkireelabs-web's /locations/:city/:service pages, 2026-08-07). The
+  // `c.entities < 100` guard (entitiesScore, same ENTITY_SCHEMA_TYPES list)
+  // only lets this fire when the page's schema ALSO lacks real entity
+  // coverage, so a page already covered by 2+ genuine entity types stops
+  // getting told to add markup that's already there.
+  { test: (c) => c.schema <= 50 && c.entities < 100, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
   // structuredContentScore only ever produces {0,33,34,66,67,100} — the label
   // requires all three of H1/H2/list-or-table, so "not 100" is the correct
   // condition, not an arbitrary 67 cutoff that misses both 2-of-3 states that
@@ -110,7 +119,7 @@ function llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end }) 
   });
 }
 
-function recommendationsFor(categories) {
+export function recommendationsFor(categories) {
   return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
 }
 
