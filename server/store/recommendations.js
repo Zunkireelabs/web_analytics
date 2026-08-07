@@ -100,3 +100,28 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
     [id, executionJobId ?? null, executionStatus ?? null]
   );
 }
+
+// Closes every currently-open row whose (recommendation_type, page) key is
+// not in stillDetectedKeys — i.e. the agent that originally flagged it
+// re-ran and no longer finds the issue. `superseded` (not `dismissed`,
+// which means a human said "not relevant") and it frees the row's dedup
+// key (recommendations_dedup_key is a partial unique index scoped to
+// status = 'open'), so if the same page + type genuinely regresses later
+// it opens a brand new row rather than being blocked by this closed one.
+// Called once per site per sync from recommendation-coordinator.js's
+// syncFromGrounded — see that file for how stillDetectedKeys is built.
+export async function closeStaleRecommendations(siteId, stillDetectedKeys) {
+  const { rows } = await query(
+    `SELECT id, page, recommendation_type FROM recommendations WHERE site_id = $1 AND status = 'open'`,
+    [siteId]
+  );
+  const staleIds = rows
+    .filter((r) => !stillDetectedKeys.has(`${r.recommendation_type}::${r.page}`))
+    .map((r) => r.id);
+  if (!staleIds.length) return 0;
+  await query(
+    `UPDATE recommendations SET status = 'superseded', updated_at = now() WHERE id = ANY($1::int[])`,
+    [staleIds]
+  );
+  return staleIds.length;
+}

@@ -1,4 +1,4 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations, closeStaleRecommendations } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -49,15 +49,15 @@ export function recommendationPageKey(item) {
   return item.params?.page || '';
 }
 
-// grounded = buildRecommendations()'s { items, lastAnalyzedAt } output.
-// Upserts one recommendations row per (siteId, page, generatorId): a new
-// key inserts, an existing open key merges in the new finding/agent.
-// Deliberately create-and-merge only, never closes a row — buildRecommendations()
-// already hides findings that already have a draft, so an item's key
-// disappearing from `grounded` could mean either "fixed" or "now drafted,"
-// and this milestone has no way to tell those apart yet (auto-closing is
-// deferred to whichever later milestone wires draft/execution status back
-// into recommendation status).
+// grounded = buildRecommendations()'s { items, lastAnalyzedAt, detectedKeys }
+// output. Upserts one recommendations row per (siteId, page, generatorId): a
+// new key inserts, an existing open key merges in the new finding/agent.
+// Then closes (status = 'superseded') every currently-open row whose key is
+// missing from grounded.detectedKeys — the agent that originally flagged it
+// re-ran and no longer finds the issue, so it's resolved. detectedKeys is
+// built BEFORE buildRecommendations' draftedFindingIds filter specifically
+// so a finding with an unshipped draft still counts as "detected" here and
+// its recommendation row is never closed out from under a pending draft.
 export async function syncFromGrounded(siteId, grounded) {
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
@@ -77,6 +77,7 @@ export async function syncFromGrounded(siteId, grounded) {
       });
     }
   }
+  if (grounded.detectedKeys) await closeStaleRecommendations(siteId, grounded.detectedKeys);
 }
 
 // Drop-in replacement for buildRecommendations() at the two call sites that

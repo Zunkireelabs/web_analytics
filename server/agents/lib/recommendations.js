@@ -4,6 +4,7 @@ import { getDraftedFindingIds, listDrafts } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
+import { recommendationPageKey } from './recommendation-coordinator.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -54,13 +55,20 @@ export async function buildRecommendations(siteId) {
   const lookupQuery = makeQueryLookup(siteId);
   const items = [];
   const lastAnalyzedAt = {};
+  // Every generatorId+page this run's agents still flag, independent of the
+  // draftedFindingIds filter below — an unshipped draft must NOT make its
+  // still-live finding look "resolved" to syncFromGrounded's auto-close
+  // (recommendation-coordinator.js), or a pending draft's recommendation row
+  // would get closed out from under it before it's ever shipped.
+  const detectedKeys = new Set();
 
   for (const run of allRuns) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     for (const f of run.findings) {
-      if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
+      detectedKeys.add(`${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`);
+      if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const params = { ...action.params };
       if ((action.generatorId === 'meta-title' || action.generatorId === 'faq') && !params.query) {
         if (!params.page || !run.start || !run.end) continue; // no grounding possible
@@ -77,5 +85,5 @@ export async function buildRecommendations(siteId) {
       });
     }
   }
-  return { items, lastAnalyzedAt };
+  return { items, lastAnalyzedAt, detectedKeys };
 }

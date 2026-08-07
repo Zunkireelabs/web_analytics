@@ -4,13 +4,19 @@ import {
   Radar, AlertTriangle, ListChecks, TrendingUp,
 } from 'lucide-react';
 
-function StatusChip({ icon: Icon, label, value, tone = 'violet' }) {
+function StatusChip({ icon: Icon, label, value, tone = 'violet', onClick }) {
   return (
-    <span className={`an-chip an-chip-${tone}`} title={label}>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      className={`an-chip an-chip-${tone} ${onClick ? 'cursor-pointer hover:brightness-95 transition' : ''}`}
+      title={onClick ? `${label} — jump to details` : label}
+    >
       <Icon size={10} />
       <span>{label}</span>
       <strong className="font-black">{value}</strong>
-    </span>
+    </button>
   );
 }
 
@@ -28,6 +34,7 @@ export default function AnalystHeaderOS({
   isRefreshing,
   onRefresh,
   summary, // { openFindings, forecastRisks, readyFixes, insightsTotal } optional
+  onNavigateToSection, // (sectionId) => void, jumps to & un-hides a dashboard section
 }) {
   const [prompt, setPrompt] = useState('');
 
@@ -103,10 +110,10 @@ export default function AnalystHeaderOS({
         {/* Center/Right: prediction & action status chips */}
         {summary && (
           <div className="flex items-center gap-1.5 flex-wrap">
-            <StatusChip icon={Radar} label="Forecast risk" value={summary.forecastRisks ?? 0} tone="rose" />
-            <StatusChip icon={AlertTriangle} label="Open findings" value={summary.openFindings ?? 0} tone="amber" />
-            <StatusChip icon={ListChecks} label="Fixes ready" value={summary.readyFixes ?? 0} tone="emerald" />
-            <StatusChip icon={TrendingUp} label="Metrics" value={summary.metricsTotal ?? 0} tone="cyan" />
+            <StatusChip icon={Radar} label="Forecast risk" value={summary.forecastRisks ?? 0} tone="rose" onClick={onNavigateToSection && (() => onNavigateToSection('workspace'))} />
+            <StatusChip icon={AlertTriangle} label="Open findings" value={summary.openFindings ?? 0} tone="amber" onClick={onNavigateToSection && (() => onNavigateToSection('workspace'))} />
+            <StatusChip icon={ListChecks} label="Fixes ready" value={summary.readyFixes ?? 0} tone="emerald" onClick={onNavigateToSection && (() => onNavigateToSection('fixes'))} />
+            <StatusChip icon={TrendingUp} label="Metrics" value={summary.metricsTotal ?? 0} tone="cyan" onClick={onNavigateToSection && (() => onNavigateToSection('diagnostics'))} />
           </div>
         )}
 
