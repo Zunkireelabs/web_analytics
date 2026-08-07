@@ -23,6 +23,7 @@ import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
+import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
 import { getImplementedFindingIds } from './store/drafts.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
@@ -178,6 +179,8 @@ export async function runDailyAgentAnalysisForSite(site) {
   const recommendations = await buildRecommendations(site.id);
   await syncFromGrounded(site.id, recommendations)
     .catch((err) => console.error(`[job] site ${site.id} recommendation coordinator sync failed:`, err.message));
+  await autoRemediateSafeRecommendations(site.id)
+    .catch((err) => console.error(`[job] site ${site.id} auto-remediation failed:`, err.message));
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
   const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
     .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });

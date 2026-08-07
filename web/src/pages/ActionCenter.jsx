@@ -36,7 +36,7 @@ const GENERATOR_META = {
   faq: { label: 'FAQ Blocks', icon: '❓', color: '#0ea5e9' },
   schema: { label: 'Schema Markup', icon: '🧩', color: '#8b5cf6' },
   'internal-links': { label: 'Internal Links', icon: '🔗', color: '#14b8a6' },
-  'blog-outline': { label: 'Blog Outlines', icon: '📝', color: '#ec4899' },
+  'blog-outline': { label: 'Blog Posts', icon: '📝', color: '#ec4899' },
   'landing-page': { label: 'Landing Pages', icon: '🚀', color: '#c2410c' },
   translation: { label: 'Translations', icon: '🌐', color: '#06b6d4' },
   'llms-txt': { label: 'llms.txt Files', icon: '🤖', color: '#10b981' },

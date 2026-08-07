@@ -48,8 +48,21 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // both as separate cards). Encoding `provider` into the key is enough to
 // keep them distinct; it's never rendered (getRecommendations doesn't
 // return the `page` column to callers), so it's safe to repurpose here.
+//
+// expand-content has the identical shape: geo-signals.js raises up to 4
+// independent findings for the same page (author-byline, freshness-date,
+// comparison-content, external-citations — see GEO_SIGNAL_RULES), each with
+// its own non-interchangeable `params.focus`. Without a discriminator they
+// collided into one row: `issue` froze on whichever focus was inserted
+// first, `params` kept getting overwritten by whichever focus synced last
+// (mergeIntoRecommendation's `params = COALESCE($5, params)`), so the card
+// could show the author-byline label while actually holding
+// external-citations params — generating it then ran the wrong focus and
+// surfaced a citation-search error under an author-byline heading. Same
+// fix as analytics-install: encode the discriminator into the key.
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
+  if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }

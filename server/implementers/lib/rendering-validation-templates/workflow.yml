@@ -1,0 +1,35 @@
+name: Rendering Validation
+
+# Phase 2 of the Rendering Validation Gate (see check-rendered-output.mjs,
+# same directory, in the zunkiree-analytics app) — installed once per client
+# repo by that app's server/scripts/install-rendering-workflow.js. Runs the
+# real site build in GitHub's own sandboxed runner (never on the analytics
+# app's own infrastructure) and checks the real rendered HTML output for
+# raw Markdown / unresolved template syntax that should have been rendered
+# away. The job name below ("rendering-validation") must stay in sync with
+# implementers/lib/rendering-gate.js's CLIENT_BUILD_CHECK_NAME — that's the
+# exact string the analytics app looks up via the GitHub Check Runs API.
+
+on:
+  pull_request:
+    branches: [ "__DEFAULT_BRANCH__" ]
+
+jobs:
+  rendering-validation:
+    name: rendering-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: __INSTALL_COMMAND__
+
+      - name: Build site
+        run: __BUILD_COMMAND__
+
+      - name: Check rendered output for raw Markdown / unresolved template syntax
+        run: node scripts/check-rendered-output.mjs "__OUTPUT_DIR__"

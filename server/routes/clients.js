@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
@@ -50,6 +50,10 @@ router.get('/internal/clients', async (req, res, next) => {
       oauthMaxPermissionLevel: s.oauth_max_permission_level,
       visibleFaqCap: s.visible_faq_cap,
       visibleFaqBaseline: s.visible_faq_baseline,
+      authorName: s.author_name,
+      authorRole: s.author_role,
+      authorUrl: s.author_url,
+      requireVisibleByline: s.require_visible_byline,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -448,6 +452,43 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
     });
 
     res.json({ id: site.id, visibleFaqCap: site.visible_faq_cap });
+  } catch (e) { next(e); }
+});
+
+// The site's real author/byline identity (migration 090) — a human,
+// staff-confirmed fact, never inferred. Once set, schema.js and
+// expand-content.js's author-byline focus draft the real thing instead of a
+// "[Author Name]" placeholder, which is what lets geo-signals.js's "missing
+// author signal" finding (already routed to expand-content, already
+// 'safe'-tier) get fully auto-remediated instead of staying a permanent
+// recommendation nothing could ever act on.
+router.post('/internal/clients/:id/author-profile', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { authorName, authorRole, authorUrl, requireVisibleByline } = req.body || {};
+    if (authorUrl) {
+      try { new URL(authorUrl); } catch { return res.status(400).json({ error: 'authorUrl must be a valid URL.' }); }
+    }
+
+    const site = await updateSiteAuthorProfile({ siteId, authorName, authorRole, authorUrl, requireVisibleByline });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.author_profile_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { authorName: site.author_name, authorRole: site.author_role, requireVisibleByline: site.require_visible_byline },
+      success: true,
+    });
+
+    res.json({
+      id: site.id, authorName: site.author_name, authorRole: site.author_role,
+      authorUrl: site.author_url, requireVisibleByline: site.require_visible_byline,
+    });
   } catch (e) { next(e); }
 });
 

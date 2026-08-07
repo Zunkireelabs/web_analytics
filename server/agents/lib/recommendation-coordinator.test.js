@@ -41,3 +41,23 @@ describe('recommendationPageKey — analytics-install keys by provider, not page
     assert.notEqual(ga4Key, fbKey);
   });
 });
+
+// Regression coverage for a real report: geo-signals.js raises up to 4
+// independent findings for the same page under generatorId 'expand-content'
+// (author-byline, freshness-date, comparison-content, external-citations —
+// GEO_SIGNAL_RULES), each with its own non-interchangeable params.focus.
+// Without a discriminator here they collided into one recommendation row:
+// `issue` froze on whichever focus inserted first, `params` kept getting
+// overwritten by whichever focus synced last (mergeIntoRecommendation's
+// `params = COALESCE($5, params)`) — so a card could display the
+// author-byline label while its params silently held external-citations,
+// and clicking Generate ran the wrong focus and surfaced a citation-search
+// error under an author-byline heading.
+describe('recommendationPageKey — expand-content keys by focus, not just page', () => {
+  test('the 4 GEO-signal focuses produce 4 distinct keys despite sharing generatorId and page', () => {
+    const page = 'https://example.com/a';
+    const keys = ['author-byline', 'freshness-date', 'comparison-content', 'external-citations']
+      .map((focus) => recommendationPageKey({ generatorId: 'expand-content', params: { page, focus } }));
+    assert.equal(new Set(keys).size, keys.length);
+  });
+});

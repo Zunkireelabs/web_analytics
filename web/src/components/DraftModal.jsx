@@ -16,12 +16,15 @@ import {
   Undo,
   RotateCcw,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldQuestion
 } from 'lucide-react';
 
 const ACTION_LABELS = {
   'meta-title': 'Meta Title & Description', faq: 'FAQ', schema: 'Schema Markup',
-  'internal-links': 'Internal Links', 'blog-outline': 'Blog Outline',
+  'internal-links': 'Internal Links', 'blog-outline': 'Blog Post',
   'landing-page': 'Landing Page', translation: 'Translation', 'llms-txt': 'llms.txt & AI-Crawler Robots.txt',
   'security-headers': 'Security Headers', 'html-lang': 'Page Language',
   viewport: 'Viewport Meta Tag', canonical: 'Canonical Tag', 'robots-fix': 'Robots.txt Fix',
@@ -85,6 +88,95 @@ const STATUS_INFO = {
   pr_opened: { label: 'PR opened · review & merge on GitHub', color: '#2563eb', bg: '#2563eb0c', border: '#2563eb20' },
   implemented: { label: 'Implemented · live on main', color: '#16a34a', bg: '#16a34a0c', border: '#16a34a20' },
 };
+
+// The Approval Gate's persisted validation_status (server/routes/lib/
+// approval-gate.js + server/implementers/lib/rendering-gate.js) — never
+// just informational, so this always renders the specific reason a check
+// failed and, for the client-build check, a real link to that repo's own
+// CI logs (the only place a build-time failure can actually be diagnosed —
+// this app never runs that build itself, see the action-center-onboarding
+// skill's §1b). `ok: null` (clientBuild before a PR/check exists yet, or
+// before this repo has the rendering-validation workflow installed) reads
+// as "pending," never as a silent pass.
+const VALIDATION_LABELS = {
+  qualityGate: 'Quality Gate',
+  renderingConfig: 'Rendering Config',
+  clientBuild: 'Client Build (CI)',
+};
+
+function ValidationBadge({ checkKey, check }) {
+  if (!check) return null;
+  const label = VALIDATION_LABELS[checkKey] || checkKey;
+  if (check.ok === true) {
+    return (
+      <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+        <ShieldCheck size={11} /> {label}
+      </span>
+    );
+  }
+  if (check.ok === false) {
+    return (
+      <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
+        <ShieldAlert size={11} /> {label}
+      </span>
+    );
+  }
+  // ok === null/undefined — not yet known (clientBuild before a PR exists,
+  // or before this repo has the CI workflow installed).
+  return (
+    <span className="text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-slate-50 text-slate-500 border border-slate-200 flex items-center gap-1">
+      <ShieldQuestion size={11} /> {label}
+    </span>
+  );
+}
+
+// One banner, shown whenever ANY known check has failed — badges for every
+// check that's been evaluated so far (pass/fail/pending), plus the specific
+// blocking reason and, for a failed/pending client-build check, a direct
+// link to that repo's real CI Checks tab. Rendered even for a draft that
+// isn't blocked right now (e.g. clientBuild still pending on an open PR) so
+// "first-class, not informational" holds for the whole lifecycle, not just
+// the moment of rejection.
+function ValidationStatusBanner({ draft }) {
+  const v = draft.validation_status;
+  if (!v) return null;
+  const checks = ['qualityGate', 'renderingConfig', 'clientBuild'].filter((k) => v[k]);
+  if (!checks.length) return null;
+
+  const failing = checks.find((k) => v[k].ok === false);
+  const pending = checks.find((k) => v[k].ok !== true && v[k].ok !== false);
+  const allPassing = checks.every((k) => v[k].ok === true);
+
+  return (
+    <div className={`px-6 py-3 border-b border-slate-100 text-xs leading-relaxed ${failing ? 'bg-rose-50' : pending ? 'bg-slate-50' : 'bg-emerald-50/40'}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        {checks.map((k) => <ValidationBadge key={k} checkKey={k} check={v[k]} />)}
+      </div>
+      {failing && (
+        <div className="flex items-start gap-2 mt-2 text-rose-700">
+          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+          <span><span className="font-extrabold">{VALIDATION_LABELS[failing]} failed:</span> {v[failing].error || 'validation failed'}</span>
+        </div>
+      )}
+      {v.clientBuild?.mergedDespiteNotPassing && (
+        <div className="flex items-start gap-2 mt-2 text-amber-700">
+          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+          <span><span className="font-extrabold">Merged despite a non-passing build check</span> — this was merged on GitHub before (or without) the rendering-validation check passing. Check the live page.</span>
+        </div>
+      )}
+      {v.clientBuild?.checksUrl && (v.clientBuild.ok !== true || v.clientBuild.mergedDespiteNotPassing) && (
+        <a href={v.clientBuild.checksUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 mt-2 font-bold text-indigo-600 hover:underline">
+          View client CI logs <ExternalLink size={11} />
+        </a>
+      )}
+      {allPassing && !v.clientBuild?.mergedDespiteNotPassing && (
+        <div className="flex items-center gap-1.5 mt-2 text-emerald-700 font-bold">
+          <Check size={12} strokeWidth={3} /> All checked validations passing.
+        </div>
+      )}
+    </div>
+  );
+}
 
 // matchedVia/matchedFrom only ever appear on broken-link-fix results
 // (server/implementers/backend.js's computeBrokenLinkFixMerge) — undefined,
@@ -491,6 +583,8 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
           </div>
         )}
 
+        <ValidationStatusBanner draft={draft} />
+
         {draft.rolled_back_at && !rollbackPr && (
           <div className="px-6 py-3 border-b border-slate-100 bg-amber-50 text-xs text-amber-800 leading-relaxed flex items-center gap-2">
             <Undo size={14} className="text-amber-500 shrink-0" />
@@ -798,7 +892,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                 {draft.status === 'pr_opened' && (
                   <>
                     <span className="text-[10px] font-semibold text-slate-400 max-w-[200px] leading-snug">
-                      Waiting on a human to review and merge the PR on GitHub.
+                      Waiting on a human to review and merge the PR on GitHub. This also refreshes the client build (CI) check above.
                     </span>
                     <button
                       onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id))}

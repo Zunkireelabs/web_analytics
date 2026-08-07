@@ -13,6 +13,7 @@
     "connect-site": "node server/scripts/connect-site.js",
     "connect-repo": "node server/scripts/connect-repo.js",
     "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
+    "install-rendering-workflow": "node server/scripts/install-rendering-workflow.js",
     "check-env-parity": "node server/scripts/check-env-parity.js",
     "refresh-commoncrawl-graph": "node server/scripts/refresh-commoncrawl-graph.js",
     "weekly": "node server/scripts/weekly.js",

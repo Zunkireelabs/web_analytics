@@ -1,4 +1,4 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 
 // Pure, deterministic generator — no LLM call. og:title/og:description are
 // grounded directly in the page's own real, already-fetched title/meta
@@ -10,12 +10,17 @@ import { analyzePageUrl } from '../agents/lib/page-content.js';
 export const meta = {
   id: 'open-graph',
   name: 'Open Graph Tags Generator',
-  description: 'Drafts og:title/og:description grounded in the real page title and description.',
+  description: 'Drafts og:title/og:description and matching Twitter Card tags, grounded in the real page title and description.',
   recommendationTags: [],
 };
 
 const PLACEHOLDER_NOTE = '[NEEDS INPUT — not verifiable from real site data]';
 const EXCERPT_LEN = 160;
+// 'summary_large_image' is the safe universal default (Twitter/X falls back
+// to 'summary' automatically if no image ends up configured) — there's no
+// image-selection pipeline here to pick a real og:image/twitter:image from,
+// so this only ever drafts the text fields, same as og:title/og:description.
+const TWITTER_CARD_TYPE = 'summary_large_image';
 
 // params: { page: string }
 export async function generate({ params }) {
@@ -27,7 +32,11 @@ export async function generate({ params }) {
 
   const { title, metaDescription, bodyText } = fetched.analysis;
   const ogTitle = title || PLACEHOLDER_NOTE;
-  const ogDescription = metaDescription || (bodyText ? bodyText.slice(0, EXCERPT_LEN) : PLACEHOLDER_NOTE);
+  // A thin/boilerplate-only extraction must fall through to the placeholder,
+  // same as an empty bodyText already did — otherwise a real meta
+  // description gap on a nav-heavy page would silently ship nav/footer text
+  // as the og:description instead of flagging it for manual input.
+  const ogDescription = metaDescription || (hasSufficientGroundingContent(fetched.analysis) ? bodyText.slice(0, EXCERPT_LEN) : PLACEHOLDER_NOTE);
 
   // Same placeholderFields contract as schema.js's PLACEHOLDER_NOTE fields —
   // marker-merge.js's buildMergeValues blocks publishing while any are
@@ -38,8 +47,15 @@ export async function generate({ params }) {
   if (ogTitle === PLACEHOLDER_NOTE) placeholderFields.push('ogTitle');
   if (ogDescription === PLACEHOLDER_NOTE) placeholderFields.push('ogDescription');
 
+  // Twitter Card tags deterministically mirror the same real title/
+  // description — no second grounding decision to make, no separate
+  // placeholder logic: whatever ogTitle/ogDescription resolved to (real
+  // content or the placeholder) is exactly right for these too.
   return {
-    content: { page, ogTitle, ogDescription, placeholderFields },
-    summary: `Open Graph tags for ${page}`,
+    content: {
+      page, ogTitle, ogDescription, placeholderFields,
+      twitterCard: TWITTER_CARD_TYPE, twitterTitle: ogTitle, twitterDescription: ogDescription,
+    },
+    summary: `Open Graph + Twitter Card tags for ${page}`,
   };
 }

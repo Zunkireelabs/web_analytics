@@ -238,6 +238,19 @@ export async function searchCodeForString(site, literal, { maxResults = 5 } = {}
   return [...new Set(paths)].slice(0, maxResults);
 }
 
+// GitHub Check Runs for a real commit/ref — the read half of the Rendering
+// Validation Gate's Phase 2 (implementers/lib/rendering-gate.js's
+// checkClientBuildStatus): a client repo's own "rendering-validation"
+// GitHub Actions job (installed via scripts/install-rendering-workflow.js)
+// reports its result here, and this app reads it back rather than trusting
+// a locally-run build it never actually performed.
+export async function getCheckRunsForRef(site, ref) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/commits/${encodeURIComponent(ref)}/check-runs`);
+  if (!res.ok) throw new Error(`getCheckRunsForRef failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.check_runs || []).map((r) => ({ name: r.name, status: r.status, conclusion: r.conclusion }));
+}
+
 // Lists open PRs whose head is exactly `branch` — used to detect "does
 // today's batch branch already have a PR open" before trying to open a new
 // one, since GitHub 422s on a second PR for the same head->base pair.

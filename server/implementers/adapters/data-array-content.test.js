@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { computeChange } from './data-array-content.js';
+import { computeChange, isDataReady } from './data-array-content.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const locationsFixture = readFileSync(join(HERE, 'lib', '__fixtures__', 'locations.js'), 'utf8');
@@ -220,6 +220,37 @@ describe('data-array-content computeChange — nestedField (location × service 
     }, fetchLocations);
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'no-file-mapping');
+  });
+});
+
+// isDataReady is the pre-flight readiness check agents/lib/recommendations.js
+// calls before ever surfacing a recommendation, so a page whose nested
+// service data doesn't exist yet stops resurfacing as a dead-end
+// recommendation every refresh (previously only discovered per-draft, at
+// apply time, via the exact same no-insertion-marker error the tests above
+// assert on). Same fixture/config, so "ready according to this check" and
+// "computeChange actually succeeds" can never quietly disagree.
+describe('data-array-content isDataReady — pre-flight check mirrors computeChange exactly', () => {
+  const config = tenantAWithNestedServices.url_file_map.patterns[0].adapters['meta-title'];
+
+  test('a real location + real service -> ready', async () => {
+    const ready = await isDataReady(tenantAWithNestedServices, 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/', config, fetchLocations);
+    assert.equal(ready, true);
+  });
+
+  test('a location with no services object at all -> not ready', async () => {
+    const ready = await isDataReady(tenantAWithNestedServices, 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', config, fetchLocations);
+    assert.equal(ready, false);
+  });
+
+  test('a real location but a service id that does not exist on it -> not ready', async () => {
+    const ready = await isDataReady(tenantAWithNestedServices, 'https://zunkireelabs.com/locations/kathmandu/not-a-real-service/', config, fetchLocations);
+    assert.equal(ready, false);
+  });
+
+  test('URL too short to have both segments -> not ready', async () => {
+    const ready = await isDataReady(tenantAWithNestedServices, 'https://zunkireelabs.com/locations/kathmandu/', config, fetchLocations);
+    assert.equal(ready, false);
   });
 });
 

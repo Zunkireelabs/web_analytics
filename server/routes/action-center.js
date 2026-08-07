@@ -4,6 +4,7 @@ import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
@@ -11,11 +12,16 @@ import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
-import { findScaffoldingIssues } from '../generators/lib/content-scaffolding-guard.js';
+import { runQualityGate } from '../generators/lib/quality-gate.js';
+import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
+import { addLesson, recordLessonOutcome, getActiveAutoRules } from '../lessons.js';
+import { categoryForPattern, rootCauseForPattern } from '../generators/lib/pattern-categories.js';
+import { evaluateApprovalGate } from './lib/approval-gate.js';
+import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
+  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -166,6 +172,7 @@ export async function refreshRecommendations(siteId, { start, end }) {
   }
   const grounded = await buildRecommendations(siteId);
   await syncFromGrounded(siteId, grounded);
+  await autoRemediateSafeRecommendations(siteId).catch((err) => console.error(`[action-center] site ${siteId} auto-remediation failed:`, err.message));
   return getRecommendations(siteId);
 }
 
@@ -208,30 +215,60 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }
   }
 
-  // Never persist a draft (and never let schema/PR steps downstream see one)
-  // that's still outline instructions, placeholder brackets, or other LLM
-  // scaffolding instead of finished content — one bounded regeneration
-  // attempt first, matching generators' own "one bounded retry, never a
-  // hard failure" convention, then reject outright rather than shipping it.
+  // The Quality Gate — stage 1 of Generate -> Validate -> Auto-fix ->
+  // Validate again. Never persist a draft (and never let schema/PR steps
+  // downstream see one) that's still outline instructions, placeholder
+  // brackets, duplicate paragraphs, or invalid JSON-LD instead of finished
+  // content — one bounded regeneration attempt first, matching generators'
+  // own "one bounded retry, never a hard failure" convention, then reject
+  // outright rather than shipping it. This is the ONE place every
+  // generator's output is validated, whether called from the manual UI,
+  // the MCP tool, or the unattended execution-engine/auto-remediation
+  // chains — a future generator gets this for free just by existing.
   const MAX_GENERATION_ATTEMPTS = 2;
-  let content, summary, scaffoldingIssues;
+  let content, summary, gateResult;
+  let firstAttemptIssues = null;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    scaffoldingIssues = findScaffoldingIssues(content, generatorId);
-    if (scaffoldingIssues.length === 0) break;
+    gateResult = runQualityGate(content, generatorId);
+    if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
+    if (gateResult.clean) break;
     if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.warn(`[action-center] ${generatorId} draft failed scaffolding guard (attempt ${attempt}), regenerating:`, scaffoldingIssues);
+      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
     }
   }
-  if (scaffoldingIssues.length > 0) {
-    const err = new Error(`This recommendation could not be generated cleanly (incomplete/placeholder content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
+  if (!gateResult.clean) {
+    const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
     throw err;
   }
 
+  // Learning system, stage 1 — the first attempt failed but a later one
+  // didn't: real, deterministic evidence that this generator's output for
+  // this class of issue was auto-fixed successfully. Recorded as
+  // fix_lessons rows keyed by the exact validation rule (patternId) that
+  // fired, so server/llm.js's existing withLessons() picks it up on this
+  // generator's very next call — the "before every generation, check for
+  // previously-observed patterns and avoid repeating them" half of the
+  // learning loop needs no new code beyond writing here; the read/inject
+  // path already exists. gateResolvedPatterns rides along on the draft row
+  // so approveAndPublishDraft can later confirm (or not) that this fix
+  // actually held.
+  let gateResolvedPatterns = null;
+  if (firstAttemptIssues?.length) {
+    gateResolvedPatterns = [...new Set(firstAttemptIssues.map((i) => i.patternId))];
+    await Promise.all(gateResolvedPatterns.map((patternId) => addLesson({
+      generatorId, siteId, validationRuleId: patternId, source: 'auto-fix-success',
+      category: categoryForPattern(patternId), rootCause: rootCauseForPattern(patternId),
+      title: `Regeneration was needed to fix a "${patternId}" issue`,
+      lesson: `Past ${generatorId} drafts have hit "${patternId}" and needed a second attempt to fix it` +
+        `${rootCauseForPattern(patternId) ? ` (${rootCauseForPattern(patternId)})` : ''} — avoid it on the first attempt this time.`,
+    }).catch((err) => console.error(`[action-center] failed to record auto-fix lesson for ${generatorId}/${patternId}:`, err.message))));
+  }
+
   const draft = await createDraft(siteId, {
-    actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId,
+    actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId, gateResolvedPatterns,
   });
 
   // geo-audit is a generator, not an orchestrator-run agent (recommendation-
@@ -372,6 +409,72 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     throw httpError(404, 'Draft not found, or not submitted for approval');
   }
 
+  // Quality Gate stage 2 — re-validated here, not just at generation time,
+  // because a draft can be hand-edited (DraftModal.jsx) between generateDraft
+  // and this approval step; a human editing scaffolding/a duplicate
+  // paragraph/a broken JSON-LD field back INTO an otherwise-clean draft must
+  // never reach a real PR. No regeneration possible here (a human already
+  // wrote this content) — just refuse approval with the specific issues so
+  // they know what to fix.
+  const gateResult = runQualityGate(draft.content, draft.action_type);
+  // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
+  // or fails, so Action Center can show "quality gate: ok" as real evidence,
+  // not just silence-means-fine — see that module's comment for the
+  // first-class-not-informational framing.
+  await recordValidationStatus(siteId, draft.id, { qualityGate: { ok: gateResult.clean, issues: gateResult.issues } });
+  if (!gateResult.clean) {
+    throw httpError(422, `This draft can't be approved yet — it still has ${gateResult.issues.length} unresolved quality issue(s) ` +
+      `(${[...new Set(gateResult.issues.map((i) => i.patternId))].join(', ')}). Fix the content and resubmit.`, { issues: gateResult.issues });
+  }
+
+  // Phase 4 — continuous learning: a human editing this draft before
+  // approving it (DraftModal.jsx -> updateDraft) is a real, verified
+  // correction, worth more than a recommendation nobody acts on twice. Best
+  // effort only — a lesson-writing failure must never block a real
+  // approval, same defensive convention as every other non-critical
+  // side-effect in this function (recordAuditEvent, etc.).
+  const humanEdited = draft.original_content && JSON.stringify(draft.original_content) !== JSON.stringify(draft.content);
+  if (humanEdited) {
+    const lesson = extractEditLesson(draft.action_type, draft.original_content, draft.content);
+    if (lesson) {
+      await addLesson({ generatorId: draft.action_type, siteId, ...lesson, source: 'human-edit' })
+        .catch((err) => console.error(`[action-center] failed to record edit lesson for draft ${draft.id}:`, err.message));
+    }
+  }
+
+  // Learning system, stage 2 — the outcome of a lesson recorded at
+  // generation time (see generateDraft's own comment). Reaching this exact
+  // point means the Quality Gate above already passed on the CURRENT
+  // content, so any pattern this draft's generation self-corrected really
+  // did hold through to real approval: re-recording the identical lesson
+  // hits addLesson's own dedup-by-validationRuleId path, which increments
+  // occurrence_count/confidence and promotes 'candidate' -> 'auto_rule'
+  // after enough confirmations, instead of a fresh duplicate row.
+  if (draft.gate_resolved_patterns?.length) {
+    await Promise.all(draft.gate_resolved_patterns.map((patternId) => addLesson({
+      generatorId: draft.action_type, siteId, validationRuleId: patternId, source: 'auto-fix-success',
+      category: categoryForPattern(patternId), rootCause: rootCauseForPattern(patternId),
+      title: `Regeneration was needed to fix a "${patternId}" issue`,
+      lesson: `Past ${draft.action_type} drafts have hit "${patternId}" and needed a second attempt to fix it` +
+        `${rootCauseForPattern(patternId) ? ` (${rootCauseForPattern(patternId)})` : ''} — avoid it on the first attempt this time.`,
+    }).catch((err) => console.error(`[action-center] failed to confirm auto-fix lesson for draft ${draft.id}/${patternId}:`, err.message))));
+  }
+
+  // A human editing a draft from a generator that already has a trusted,
+  // repeatedly-confirmed rule behind it (status='auto_rule') is a real
+  // signal that rule may no longer hold — this app can't semantically prove
+  // the edit undid THAT specific rule's effect, so this is deliberately a
+  // coarser, honestly-described signal ("humans keep editing this
+  // generator's output despite an active rule"), not a precise per-rule
+  // override match. Enough repeats flips the rule to 'flagged_for_review'
+  // (lessons.js's OVERRIDE_REVIEW_RATIO) instead of it silently continuing
+  // to apply unchanged.
+  if (humanEdited) {
+    const activeRules = await getActiveAutoRules(draft.action_type, siteId).catch(() => []);
+    await Promise.all(activeRules.map((rule) => recordLessonOutcome(rule.id, 'overridden')
+      .catch((err) => console.error(`[action-center] failed to record override for lesson ${rule.id}:`, err.message))));
+  }
+
   const site = await getSiteById(siteId);
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
@@ -387,6 +490,26 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
           reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
           missingClasses: previewResult.missingClasses, componentKey: previewResult.componentKey,
         });
+      }
+
+      // Approval Gate, Phase 1 (implementers/lib/rendering-gate.js) — the
+      // exact same check implementer.apply()'s pushDraftBranch will run
+      // deep inside itself, run again here as its OWN named, surfaced
+      // check, before approveDraft() flips real status. Redundant with the
+      // one inside apply() by design (same accepted "minor cost" tradeoff
+      // as preview()/apply() both computing a live GitHub read — see this
+      // function's own module comment above) — the point is that a
+      // Markdown-unsafe target is rejected as a clearly labeled validation
+      // failure here, not just an opaque "apply failed" after status has
+      // already moved past submitted_for_approval.
+      const renderingCheck = await validateRendering(site, {
+        path: previewResult.filePath, content: previewResult.newContent,
+        contentFormat: previewResult.contentFormat, actionType: draft.action_type,
+      });
+      await recordValidationStatus(siteId, draft.id, { renderingConfig: renderingCheck });
+      const renderingGate = evaluateApprovalGate({ renderingConfig: renderingCheck });
+      if (!renderingGate.ok) {
+        throw httpError(422, `This draft can't be approved yet — ${renderingGate.blockingError}`, { reason: renderingCheck.reason });
       }
     }
   }
@@ -445,6 +568,23 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
 // pricing, nav, etc.) never go through this function; they stay on the
 // existing stepped Generate/Submit/Approve UI so a human deliberately
 // reviews each step.
+// meta-title's own generator always returns 3 candidate titles (never one),
+// by design, for a human to pick from in the manual UI — but neither
+// shipRecommendation's (below) nor auto-remediation.js's unattended chains
+// have a human here to click "Use this" (DraftModal.jsx). Without a
+// selection, buildMergeValues (marker-merge.js) refuses to publish at all
+// ("No title selected yet"), which meant meta-title could never actually
+// auto-ship despite being listed in SAFE_GENERATOR_IDS. Deterministically
+// taking the first candidate is safe here specifically because all 3 are
+// already equally real, grounded LLM output (same query, same page text) —
+// this is an arbitrary pick among validated options, not a fabricated fact,
+// so it doesn't cross the same line as guessing a price or rating. Returns
+// the updated content, or null if no auto-selection was needed/possible.
+export function autoSelectMetaTitle(generatorId, content) {
+  if (generatorId !== 'meta-title' || content?.selectedTitle || !content?.titles?.[0]) return null;
+  return { ...content, selectedTitle: content.titles[0] };
+}
+
 async function shipRecommendation(siteId, rec, { userId, jobId }) {
   const jobRec = await addJobRecommendation(jobId, rec.id);
   try {
@@ -454,19 +594,9 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });
 
-    // meta-title's own generator always returns 3 candidate titles (never
-    // one), by design, for a human to pick from in the manual UI — but this
-    // is the unattended auto-chain, so there's no human here to click "Use
-    // this" (DraftModal.jsx). Without a selection, buildMergeValues
-    // (marker-merge.js) refuses to publish at all ("No title selected yet"),
-    // which meant meta-title could never actually auto-ship despite being
-    // listed in SAFE_GENERATOR_IDS. Deterministically taking the first
-    // candidate is safe here specifically because all 3 are already equally
-    // real, grounded LLM output (same query, same page text) — this is an
-    // arbitrary pick among validated options, not a fabricated fact, so it
-    // doesn't cross the same line as guessing a price or rating.
-    if (rec.recommendation_type === 'meta-title' && !draft.content?.selectedTitle && draft.content?.titles?.[0]) {
-      const updated = await updateDraft(siteId, draft.id, { content: { ...draft.content, selectedTitle: draft.content.titles[0] } });
+    const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);
+    if (autoSelected) {
+      const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
       if (updated) draft.content = updated.content;
     }
 
@@ -809,6 +939,26 @@ export async function checkDraftPrStatus(siteId, draftId) {
     const { message } = safeMessage('action-center.checkDraftPrStatus', e, 'Could not read this pull request\'s status right now — try again shortly.');
     throw httpError(502, message);
   }
+
+  // Approval Gate, Phase 2 (implementers/lib/rendering-gate.js) — polled
+  // alongside the PR's own merge state so Action Center always shows the
+  // client repo's real build-check result, not just GitHub's merge status.
+  // checkClientBuildStatus never throws (it reports its own failures
+  // honestly as {ok:false}), so it never blocks this poll from completing —
+  // GitHub's PR/merge state is still real evidence worth recording even for
+  // a repo that hasn't had the rendering-validation workflow installed yet.
+  const buildStatus = await checkClientBuildStatus(site, draft.branch_name);
+  await recordValidationStatus(siteId, draft.id, {
+    clientBuild: {
+      ...buildStatus,
+      checksUrl: draft.pr_url ? `${draft.pr_url}/checks` : null,
+      // Merging is always a human, on GitHub itself (see github-ops.js) —
+      // this app has no way to have prevented it. What it CAN do is make
+      // sure a merge that happened while this check wasn't green is never
+      // silently indistinguishable from a clean one in Action Center.
+      mergedDespiteNotPassing: !!pr.merged && buildStatus.ok !== true,
+    },
+  });
 
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');

@@ -1,5 +1,6 @@
 import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
+import { validateRenderingBatch } from './rendering-gate.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -84,6 +85,14 @@ export function batchBranchConflictError(site, batchInfo) {
 // is no longer derived from draft.action_type/draft.id here, since it's no
 // longer 1:1 with a single draft — every caller must decide.
 export async function pushDraftBranch(site, draft, files, target) {
+  // Generic pre-PR Rendering Validation Gate (see lib/rendering-gate.js) —
+  // checked before anything is written, so a batch never partially lands on
+  // the shared branch. Every implementer funnels through this one function,
+  // so this is the single place a future generator/implementer inherits the
+  // gate automatically, with no per-generator code.
+  const renderGate = await validateRenderingBatch(site, files);
+  if (!renderGate.ok) return renderGate;
+
   const { branchName, exists } = target;
   try {
     if (!exists) {

@@ -497,6 +497,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     return { ok: true, values: { schema: `<script type="application/ld+json">${JSON.stringify(content.jsonLd)}</script>` } };
   }
 
+  if (actionType === 'breadcrumbs') {
+    if (mode === 'schema-only') return { ok: false, error: '"breadcrumbs" has no schema-only representation — it is already schema-only by nature.' };
+    if (!content.jsonLd) return { ok: false, error: 'This breadcrumbs draft has no JSON-LD to apply.' };
+    // Its own field, distinct from 'schema' — a page can have real Article/
+    // Product/etc. schema (schema.js) AND a BreadcrumbList at the same time,
+    // and marker-merge's splice is a wholesale replace, not an append (see
+    // spliceMarkers below), so sharing one field/marker would mean whichever
+    // of schema.js/breadcrumbs.js applies second silently destroys the
+    // other's JSON-LD. Same reasoning faq.js's schemaJsonLd already gets its
+    // own 'faq' field instead of also using 'schema'.
+    return { ok: true, values: { breadcrumbSchema: `<script type="application/ld+json">${JSON.stringify(content.jsonLd)}</script>` } };
+  }
+
   if (actionType === 'internal-links') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
@@ -515,7 +528,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (content.placeholderFields?.length) {
       return { ok: false, error: `This Open Graph draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the page had no real title/description to draft from. Fill them in manually (edit the draft) before this can be applied.` };
     }
-    const tags = `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">\n<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`;
+    const tags = [
+      `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">`,
+      `<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`,
+      // Twitter Card tags — deterministic mirror of the same real og:title/
+      // description (see generators/open-graph.js), under the SAME
+      // 'openGraph' field/marker rather than a new one: one generator, one
+      // draft, one PR already covers both, so there's no coexistence
+      // conflict the way schema.js/breadcrumbs.js has (nothing else ever
+      // writes into this same marker).
+      `<meta name="twitter:card" content="${escapeHtml(content.twitterCard || 'summary_large_image')}">`,
+      `<meta name="twitter:title" content="${escapeHtml(content.twitterTitle || content.ogTitle)}">`,
+      `<meta name="twitter:description" content="${escapeHtml(content.twitterDescription || content.ogDescription || '')}">`,
+    ].join('\n');
     return { ok: true, values: { openGraph: tags } };
   }
 

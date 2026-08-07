@@ -137,6 +137,16 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.openGraph, /og:description" content="Desc"/);
   });
 
+  test('open-graph also emits matching Twitter Card tags under the same field', () => {
+    const result = buildMergeValues('open-graph', {
+      ogTitle: 'Title', ogDescription: 'Desc', twitterCard: 'summary_large_image', twitterTitle: 'Title', twitterDescription: 'Desc',
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.openGraph, /twitter:card" content="summary_large_image"/);
+    assert.match(result.values.openGraph, /twitter:title" content="Title"/);
+    assert.match(result.values.openGraph, /twitter:description" content="Desc"/);
+  });
+
   test('open-graph escapes untrusted content', () => {
     const result = buildMergeValues('open-graph', { ogTitle: '<script>x</script>', ogDescription: '' });
     assert.equal(result.ok, true);
@@ -309,6 +319,42 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
 
   test('internal-links fails honestly with no suggestions', () => {
     const result = buildMergeValues('internal-links', { suggestions: [] });
+    assert.equal(result.ok, false);
+  });
+});
+
+// Regression coverage for a real bug: breadcrumbs.js (generators/) and
+// risk-tiers.js both already treated 'breadcrumbs' as a real, safe-tier
+// generator, but buildMergeValues had no case for it at all — every
+// breadcrumbs draft would fail at apply time with "No merge strategy for
+// action type." These pin the fix, including the field name: breadcrumbs
+// must NOT share schema.js's 'schema' field, since a page can carry real
+// Article/Product/etc. schema AND a BreadcrumbList at once, and
+// spliceMarkers is a wholesale replace, not an append — sharing one field
+// would mean whichever of the two generators applies second destroys the
+// other's JSON-LD.
+describe('buildMergeValues — breadcrumbs', () => {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [{ '@type': 'ListItem', position: 1, name: 'Home', item: 'https://example.com/' }],
+  };
+
+  test('produces a JSON-LD script tag under its own breadcrumbSchema field, not schema', () => {
+    const result = buildMergeValues('breadcrumbs', { jsonLd });
+    assert.equal(result.ok, true);
+    assert.deepEqual(Object.keys(result.values), ['breadcrumbSchema']);
+    assert.match(result.values.breadcrumbSchema, /<script type="application\/ld\+json">/);
+    assert.match(result.values.breadcrumbSchema, /"@type":"BreadcrumbList"/);
+  });
+
+  test('fails honestly with no JSON-LD', () => {
+    const result = buildMergeValues('breadcrumbs', {});
+    assert.equal(result.ok, false);
+  });
+
+  test('has no schema-only representation (already schema-only by nature)', () => {
+    const result = buildMergeValues('breadcrumbs', { jsonLd }, 'schema-only');
     assert.equal(result.ok, false);
   });
 });

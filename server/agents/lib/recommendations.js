@@ -5,7 +5,10 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
-import { isPageMapped } from '../../implementers/lib/url-file-map.js';
+import { isPageMapped, resolveAdapter } from '../../implementers/lib/url-file-map.js';
+import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { getFileContent } from '../../github/client.js';
+import { baseBranch } from '../../implementers/lib/github-ops.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -55,6 +58,19 @@ export async function buildRecommendations(siteId) {
   ]);
   const allRuns = geoAuditRun ? [...runs, geoAuditRun] : runs;
   const lookupQuery = makeQueryLookup(siteId);
+  // One real GitHub read per unique data file for this whole refresh, no
+  // matter how many candidate pages share it (e.g. every /locations/:city/
+  // page routes through the same locations.js) — same caching idiom
+  // audit-url-file-map.js already uses, so isDataReady below stays cheap
+  // even across a large candidate-page pool.
+  const dataFileCache = new Map(); // `${path}@${ref}` -> file | null
+  const cachedFetchFile = async (site, path, ref) => {
+    const key = `${path}@${ref}`;
+    if (dataFileCache.has(key)) return dataFileCache.get(key);
+    const file = await getFileContent(site, path, ref).catch(() => null);
+    dataFileCache.set(key, file);
+    return file;
+  };
   const items = [];
   const lastAnalyzedAt = {};
   // Every generatorId+page this run's agents still flag, independent of the
@@ -106,6 +122,20 @@ export async function buildRecommendations(siteId) {
       // way it is for every other generatorId here.
       if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
         && !isPageMapped(site, action.params.page, action.generatorId)) continue;
+      // isPageMapped above only confirms a ROUTE exists (a file, or an
+      // adapter configured for this actionType) — for data-array-content
+      // specifically, that route can be configured while the adapter's own
+      // data still has nothing for this exact page (e.g. a location with
+      // no `services.web-development` entry yet). Checked here, not just
+      // inside the adapter's own apply(), so a recommendation that can
+      // never actually apply stops resurfacing every refresh — the same
+      // "known dead end" a human would eventually notice and stop
+      // clicking, minus the frustration of noticing it themselves.
+      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site) {
+        const adapterConfig = resolveAdapter(site, action.params.page, action.generatorId);
+        if (adapterConfig?.id === 'data-array-content'
+          && !(await isDataReady(site, action.params.page, adapterConfig, cachedFetchFile, baseBranch(site)))) continue;
+      }
       detectedKeys.add(`${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`);
       if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const params = { ...action.params };

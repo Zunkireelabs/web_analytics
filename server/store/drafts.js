@@ -9,12 +9,21 @@ import { sanitizeForCustomer } from '../lib/errors.js';
 // dashboard so, the same real-evidence pattern hasDraftSince() already
 // leans on for the Watchlist, one step further along.
 
-export async function createDraft(siteId, { actionType, source, input, content, findingId }) {
+export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns }) {
+  // original_content (migration 091) is the generator's first output,
+  // frozen here and never touched again — updateDraft below only ever
+  // writes `content`, so a later diff of the two is how
+  // auto-remediation.js's approval-time lesson extraction knows whether a
+  // human corrected this draft before approving it. gate_resolved_patterns
+  // (migration 093) is which validation-rule hits this generation needed a
+  // self-correction for, if any — see generateDraft's learning-system
+  // comment (routes/action-center.js) for how approveAndPublishDraft later
+  // confirms it.
   const { rows } = await query(
-    `INSERT INTO drafts (site_id, action_type, source, input, content, finding_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns)
+     VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
      RETURNING *`,
-    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null]
+    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null]
   );
   return rows[0];
 }
@@ -211,6 +220,27 @@ export async function recordPrState(siteId, id, prState, mergeableState = null) 
   return rows[0] || null;
 }
 
+// Pure annotation write, shallow-merged (Postgres `||`) rather than
+// overwritten — the Approval Gate (routes/lib/approval-gate.js) has more
+// than one writer for this one column over a draft's lifecycle:
+// approveAndPublishDraft writes `qualityGate`/`renderingConfig`
+// synchronously at approval time, checkDraftPrStatus writes `clientBuild`
+// later, asynchronously, once a real PR/check exists. A full-row overwrite
+// here would let whichever call lands second silently erase the other's
+// result — the shallow merge means each caller only ever touches the
+// top-level key(s) it actually knows about. Same no-status-guard,
+// annotation-only shape as recordPrState/recordGscNotification above: this
+// never represents a lifecycle transition on its own.
+export async function recordValidationStatus(siteId, id, partial) {
+  const { rows } = await query(
+    `UPDATE drafts SET validation_status = COALESCE(validation_status, '{}'::jsonb) || $3::jsonb, updated_at = now()
+     WHERE site_id = $1 AND id = $2
+     RETURNING *`,
+    [siteId, id, JSON.stringify({ ...partial, checkedAt: new Date().toISOString() })]
+  );
+  return rows[0] || null;
+}
+
 // Best-effort record of the post-merge Search Console notification result
 // (multi-tenant refactor Part 3) — does not gate or change draft status;
 // this is pure audit visibility for Action Center, called after
@@ -313,7 +343,7 @@ export async function recordMergeFailure(siteId, id, errorMessage) {
 // ONLY path to 'implemented' for all 10. The legacy manual bypass below is
 // kept only as an escape hatch for a draft whose type somehow isn't in this
 // list (defensive, not expected to ever apply today).
-export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'qa-content', 'analytics-install', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service'];
+export const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'qa-content', 'analytics-install', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service', 'breadcrumbs', 'schema-repair'];
 
 // approved -> implemented. Three distinct evidence paths, all real:
 //   - legacy manual path: ONLY for a draft whose generator type has no real

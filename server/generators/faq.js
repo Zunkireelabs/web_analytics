@@ -1,4 +1,4 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 
 export const meta = {
@@ -40,7 +40,11 @@ export async function generate({ siteId, params }) {
   let bodyExcerpt = null;
   if (page) {
     const fetched = await analyzePageUrl(page);
-    if (fetched.ok) bodyExcerpt = fetched.analysis.bodyText.slice(0, 3000);
+    // A thin/empty extraction (client-side-rendered content, or a genuinely
+    // nav-only page) is treated the same as a failed fetch: fall through to
+    // this generator's existing "no page content given" mode rather than
+    // grounding the FAQ in whatever boilerplate is left.
+    if (fetched.ok && hasSufficientGroundingContent(fetched.analysis)) bodyExcerpt = fetched.analysis.bodyText.slice(0, 3000);
   }
 
   const pageGuidance = schemaType ? PAGE_PURPOSE_GUIDANCE[schemaType] : null;

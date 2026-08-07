@@ -17,7 +17,22 @@ import { auditSite } from './audit-url-file-map.js';
 //     [--url-file-map path/to/url-file-map.json]
 //
 // url-file-map.json shape (see server/implementers/types.js / migration 028):
-//   { "pages": {...}, "patterns": [...], "newContentTargets": {...}, "siteRoot": {...} }
+//   { "pages": {...}, "patterns": [...], "newContentTargets": {...}, "siteRoot": {...},
+//     "renderCapabilities": {...} }
+//
+// renderCapabilities is REQUIRED before any newContentTargets entry (net-new
+// pages: landing-page, blog-outline, direct-answer, translation, legal/
+// compliance pages) can actually apply — see types.js's "Render capability"
+// doc block. It records, per file extension (and optionally per action
+// type), whether this repo's own static-site generator actually runs a
+// Markdown pass on that target — e.g.:
+//   "renderCapabilities": {
+//     "generator": "eleventy",
+//     "extensions": { ".md": {"markdown": true}, ".njk": {"markdown": false} },
+//     "overrides": { "landing-page": {"markdown": true} }
+//   }
+// `npm run audit-url-file-map` (auto-run below) reports any newContentTargets
+// entry missing a matching renderCapabilities entry as a config gap.
 
 function parseArgs(argv) {
   const flags = {};

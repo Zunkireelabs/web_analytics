@@ -23,11 +23,21 @@ const SCAFFOLDING_PATTERNS = [
   { id: 'instructional-filler', regex: /\b(write|insert|add)\s+(a|an|the)?\s*(introduction|conclusion|paragraph|section|body copy|content)\s+here\b/i },
   { id: 'llm-meta-commentary', regex: /\bas an ai (language model|assistant)\b/i },
   { id: 'llm-refusal', regex: /\bi('m| am)?\s*(unable to|cannot|can't)\s+(help|assist|generate|provide|complete)\b/i },
+  // Defense-in-depth against page-content.js's extraction bug class (fixed
+  // 2026-08-07: analyzePage() no longer grounds LLM prompts in raw
+  // document.body, see extractMainText) — catches nav/template boilerplate
+  // that made it into generated copy anyway, e.g. an LLM echoing "grounding"
+  // text back verbatim instead of writing new prose about it.
+  { id: 'nav-leakage', regex: /\b(skip to (main )?content|toggle navigation|all rights reserved|back to top|subscribe to our newsletter|add to cart|main menu)\b/i },
+  // expand-content.js's author-byline focus falls back to instructing the
+  // LLM to write "By [Author Name], [Role]" whenever a site has no real
+  // configured author profile (generators/lib/author-profile.js) — that's
+  // the right behavior for a human editor to fill in later, but it must
+  // never silently auto-ship as real byline text, since expand-content is
+  // 'safe'-tier (risk-tiers.js) and this exact focus is what
+  // auto-remediation.js would otherwise publish unattended.
+  { id: 'author-placeholder', regex: /\[\s*(author name|your name|role|job title)\s*\]/i },
 ];
-
-// Skip generators whose entire, intentional output shape IS an outline —
-// "notes"/"section" fields there are the product, not leftover scaffolding.
-const EXEMPT_GENERATOR_IDS = new Set(['blog-outline']);
 
 function walk(value, path, issues) {
   if (typeof value === 'string') {
@@ -47,9 +57,12 @@ function walk(value, path, issues) {
 }
 
 // Returns [] when content is clean, otherwise a list of
-// { path, patternId, snippet } describing every match found.
-export function findScaffoldingIssues(content, generatorId) {
-  if (EXEMPT_GENERATOR_IDS.has(generatorId)) return [];
+// { path, patternId, snippet } describing every match found. generatorId is
+// accepted (not currently used to skip anything — the last exemption,
+// blog-outline, was removed 2026-08-07 once it stopped shipping outlines)
+// so a future genuinely-outline-shaped generator can reintroduce a
+// narrower exemption without changing every call site.
+export function findScaffoldingIssues(content, _generatorId) {
   const issues = [];
   walk(content, '', issues);
   return issues;

@@ -1,7 +1,9 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
 import { safeMessage } from '../lib/errors.js';
+import { getSiteById } from '../store/read.js';
+import { hasAuthorProfile, authorByline } from './lib/author-profile.js';
 
 // Real citation search is opt-in, separate from any one provider's own
 // credentials being set (e.g. GOOGLE_CSE_API_KEY, already live for
@@ -63,6 +65,31 @@ export async function generate({ siteId, params }) {
 
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400, userFacing: true });
+  requireGroundedContent(fetched.analysis, { generatorId: meta.id });
+
+  // EEAT — a site with a real configured author (sites.author_name,
+  // migration 090) never needs the LLM to draft a "[Author Name]"
+  // placeholder byline: the real name is already known, so this is a
+  // deterministic transform, not a generation. Only drafted when the site's
+  // own policy actually wants a VISIBLE byline (require_visible_byline) —
+  // a site that wants author EEAT via schema only (schema.js already
+  // handles that for Article-like types) gets a clear refusal instead of an
+  // unwanted visible section, same "fail honestly instead of drafting
+  // filler" principle external-citations already uses below.
+  if (focus === 'author-byline') {
+    const site = await getSiteById(siteId);
+    if (hasAuthorProfile(site)) {
+      if (!site.require_visible_byline) {
+        throw Object.assign(
+          new Error('This site\'s author profile is configured for schema-only attribution (require_visible_byline is off) — refusing to add an unwanted visible byline section. Schema author markup is already handled by the schema generator.'),
+          { status: 400, userFacing: true },
+        );
+      }
+      const byline = authorByline(site);
+      const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
+      return { content, summary: `Author byline for ${page}: "${byline}"` };
+    }
+  }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
