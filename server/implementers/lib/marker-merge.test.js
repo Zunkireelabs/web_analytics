@@ -45,20 +45,34 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/">/);
   });
 
-  test('a normal BLOCK field (faq) is unaffected — still auto-inserts at EOF', () => {
-    const file = 'plain body content';
-    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' });
+  // Plain Markdown/MDX is the one shape where EOF really is inside the
+  // rendered body (see isNoEofInsertField's comment) — every OTHER body
+  // field, including faq, now needs real structural detection
+  // (insertion-engine.js's resolveInsertion) rather than a blind EOF guess.
+  test('a normal BLOCK field (faq) still auto-inserts at EOF on a plain Markdown file', () => {
+    const file = '# Post\n\nplain body content';
+    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' }, 'content/post.md');
     assert.deepEqual(inserted, ['FAQ']);
     assert.match(content, /<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->/);
+  });
+
+  test('a normal BLOCK field (faq) does NOT auto-insert at EOF on a non-Markdown file — real structural detection is required instead', () => {
+    const file = 'plain body content';
+    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' }, 'src/pages/about.astro');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file); // untouched
   });
 });
 
 describe('body-scoped fields (expand-content)', () => {
-  test('isNoEofInsertField identifies expandedContent and qaContent only', () => {
+  test('isNoEofInsertField identifies every body-scoped BLOCK field, not just expandedContent/qaContent — LINE and HEAD-scoped fields are the only exceptions', () => {
     assert.equal(isNoEofInsertField('expandedContent'), true);
     assert.equal(isNoEofInsertField('qaContent'), true);
-    assert.equal(isNoEofInsertField('faq'), false);
+    assert.equal(isNoEofInsertField('faq'), true);
+    assert.equal(isNoEofInsertField('schema'), true);
+    assert.equal(isNoEofInsertField('links'), true);
     assert.equal(isNoEofInsertField('canonical'), false);
+    assert.equal(isNoEofInsertField('title'), false);
   });
 
   // Regression test: a component-based page (.jsx/.tsx/.astro) has real
@@ -406,12 +420,15 @@ describe('buildMergeValues — faq (per-site template, not one tenant\'s markup 
 });
 
 describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
-  test('ensureMarkers uses {/* */} comments, not <!-- -->, when creating a marker on a .tsx file', () => {
+  // ensureMarkers itself no longer creates a body-scoped marker on a .tsx
+  // file at all (see isNoEofInsertField above) — that's now
+  // insertion-engine.js's job, via real structural detection, and it's the
+  // one that uses the {/* */} JSX comment convention (see its own tests).
+  test('ensureMarkers refuses a body-scoped marker on a .tsx file, leaving it for real structural detection', () => {
     const file = 'export default function Page() {\n  return <main>hi</main>;\n}\n';
     const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'src/pages/about.tsx');
-    assert.deepEqual(inserted, ['LINKS']);
-    assert.match(content, /\{\/\* SEOAI:LINKS:START \*\/\}\{\/\* SEOAI:LINKS:END \*\/\}/);
-    assert.doesNotMatch(content, /<!--/);
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file);
   });
 
   test('spliceMarkers wraps the value in dangerouslySetInnerHTML for a JSX marker, never splices raw HTML as JSX children', () => {

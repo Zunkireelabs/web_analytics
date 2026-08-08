@@ -518,6 +518,20 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   if (!approvedDraft) throw httpError(404, 'Draft not found, or not submitted for approval');
   if (!resolved) return approvedDraft;
 
+  // Terminal-state gate (universal insertion engine, see
+  // insertion-engine.js's buildUnresolvedInsertionFailure): markDraftBranchPushed
+  // and mergeToStage below are only ever reached when applyResult.ok is
+  // true, i.e. when every marker the draft needed was genuinely resolved
+  // and spliced — a draft that came back unresolved (applyResult.reason ===
+  // 'no-confident-insertion-point', or any other apply failure) always
+  // returns here instead, never proceeds to a PR. This branch, and the
+  // GitHub push/PR calls implementer.apply()/mergeToStage() make internally,
+  // have no automated test coverage — this repo has no convention for
+  // mocking GitHub network calls (no supertest/nock/sinon, no
+  // server/routes/*.test.js), so that gap predates this feature and applies
+  // equally to every implementer. The PURE per-field failure-shape logic
+  // this gate depends on (buildUnresolvedInsertionFailure) is unit-tested in
+  // server/implementers/lib/insertion-engine.test.js.
   const { implementer, implementerId } = resolved;
   const applyResult = await implementer.apply(site, approvedDraft, { renderModeOverride: renderMode });
   if (!applyResult.ok) {
@@ -846,6 +860,11 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
   if (resolved.error) throw httpError(400, resolved.error);
   const { implementer, implementerId } = resolved;
 
+  // Same terminal-state gate as approveAndPublishDraft above: markDraftBranchPushed
+  // is only reached on a genuine result.ok. See that function's comment for
+  // why this branch (and the surrounding GitHub network calls) has no
+  // automated route-level test — a pre-existing, repo-wide gap, not specific
+  // to this change.
   const result = await implementer.apply(site, draft, { renderModeOverride: renderMode });
   if (!result.ok) {
     const renderModeInfo = result.reason === 'render-mode-uncertain'
@@ -854,7 +873,7 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
     await recordApplyFailure(siteId, draft.id, result.error, renderModeInfo);
     throw httpError(422, result.error, {
       reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted,
-      missingClasses: result.missingClasses, componentKey: result.componentKey,
+      missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
     });
   }
   return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });

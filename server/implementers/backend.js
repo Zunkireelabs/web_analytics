@@ -1,7 +1,8 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
+import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
@@ -14,7 +15,6 @@ import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
-import { detectAndOpenBootstrapPr } from './lib/marker-bootstrap.js';
 
 
 export const meta = {
@@ -31,7 +31,11 @@ export const meta = {
 // shape as faq's; internal-links renders its suggestion list to a
 // deterministic <ul> first (see marker-merge.js's renderLinksHtml) — neither
 // needs a different mechanism, just its own marker name and value-builder.
-const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
+// Exported so server/scripts/bootstrap-structural-markers.js (the
+// onboarding/migration warm-cache tool) iterates the SAME real set of
+// marker-merge action types this implementer actually handles, rather than
+// keeping its own independent, driftable copy of the list.
+export const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
 
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
@@ -680,59 +684,30 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
-  // Auto-creates any marker in markerMap that isn't already in the live
-  // file — see lib/marker-merge.js's ensureMarkers for the two placement
-  // strategies. `oldContent` below stays the true original fetch, so the
-  // diff a reviewer sees includes the marker's own creation alongside the
-  // content splice, not just the content — nothing here skips review, it
-  // only removes the separate manual "push an empty marker first" step
-  // that used to have to happen before a draft could even reach preview.
-  const ensured = ensureMarkers(file.content, markerMap, filePath);
+  // Resolves any marker in markerMap that isn't already in the live file —
+  // the universal insertion engine (insertion-engine.js's resolveInsertion):
+  // learned-strategy-first (strategy-registry.js), then real structural
+  // detection, creating whatever's missing inline. `oldContent` below stays
+  // the true original fetch, so the diff a reviewer sees includes any
+  // marker's own creation alongside the content splice, not just the
+  // content — nothing here skips review (this is still the same daily batch
+  // PR every other draft goes through), it only removes the separate manual
+  // "push an empty marker first" step that used to have to happen before a
+  // draft could even reach preview, and the separate stand-alone bootstrap
+  // PR that used to have to be merged first.
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap);
 
-  const spliced = spliceMarkers(ensured.content, markerMap, built.values);
-  if (!spliced.ok) {
-    const names = spliced.missingMarkers.map((m) => `SEOAI:${m}`).join(', ');
-    // A head-scoped field (canonical, open-graph, ...) is never auto-inserted
-    // at EOF — it can only be auto-created nested inside a human-placed
-    // SEOAI:HEAD region (see marker-merge.js). If its own marker is still
-    // missing after ensureMarkers ran, that region doesn't exist yet — tell
-    // the operator exactly what one-time step to do, not just which marker
-    // name is missing.
-    const missingEntries = Object.entries(markerMap).filter(([, markerName]) => spliced.missingMarkers.includes(markerName));
-    const headHint = missingEntries.some(([field]) => isHeadScopedField(field))
-      ? ` This field must be placed inside a <!-- SEOAI:HEAD:START -->...<!-- SEOAI:HEAD:END --> region within <head> — add that region to ${filePath} first (a one-time step per template), then this field's own marker is created automatically.`
-      : '';
-    const bodyScopedMarker = missingEntries.find(([field]) => isNoEofInsertField(field))?.[1];
-
-    // Before falling back to "a human must hand-place this," try real
-    // structural detection (structural-detect.js) and propose it as a
-    // reviewable bootstrap PR — see marker-bootstrap.js's module comment for
-    // why this stops short of an unreviewed direct commit. Only attempted
-    // for body-scoped fields (the case EOF genuinely can't cover); a
-    // head-scoped gap still gets the manual HEAD-region hint above, since
-    // that's a sitewide layout concern, not a per-page content container.
-    if (bodyScopedMarker) {
-      const bootstrap = await detectAndOpenBootstrapPr(site, filePath, file.content, bodyScopedMarker);
-      if (bootstrap.ok) {
-        const prNote = bootstrap.opened
-          ? `A one-time setup pull request was just opened, adding this marker automatically inside ${bootstrap.containerDescription} (structurally detected, not guessed): ${bootstrap.prUrl}`
-          : `A setup pull request adding this marker is already open and awaiting review: ${bootstrap.prUrl}`;
-        return {
-          ok: false, reason: 'bootstrap-pr-pending',
-          error: `Marker(s) not found in the live file: ${names}. ${prNote} Merge it, then re-apply this draft — no manual edits needed.`,
-          bootstrapPrUrl: bootstrap.prUrl, bootstrapPrNumber: bootstrap.prNumber,
-        };
-      }
-      // bootstrap.ok === false here means detection genuinely found nothing
-      // safe (or a real GitHub error) — fall through to the honest manual
-      // hint below rather than silently retrying forever.
-    }
-
-    const bodyHint = bodyScopedMarker
-      ? ` This field renders as real page-body content, so its marker can't be safely auto-placed at end-of-file (that position is outside the rendered component tree on most React/Next/Astro templates) — add <!-- SEOAI:${bodyScopedMarker}:START --><!-- SEOAI:${bodyScopedMarker}:END --> by hand at the real spot in ${filePath} where this content should appear, then re-apply.`
-      : '';
-    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.${headHint}${bodyHint}` };
-  }
+  const spliced = spliceMarkers(ensuredContent, markerMap, built.values);
+  // Per this platform's daily-batch contract: a field that couldn't be
+  // safely resolved must never be spliced with real content and must never
+  // reach a PR — reported honestly, by name, with its real reason, rather
+  // than a generic "add this marker manually" message. This draft alone is
+  // unresolved; nothing here prevents any OTHER draft in the same batch from
+  // applying and reaching the PR normally. See insertion-engine.js's
+  // buildUnresolvedInsertionFailure for the (independently unit-tested)
+  // contract this enforces.
+  const failure = buildUnresolvedInsertionFailure(filePath, spliced, unresolved);
+  if (failure) return failure;
 
   return {
     ok: true, filePath, oldContent: file.content, newContent: spliced.newContent, changedRegions: spliced.changedRegions,

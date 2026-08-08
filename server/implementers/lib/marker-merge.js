@@ -118,50 +118,70 @@ export function isHeadScopedField(field) {
   return HEAD_SCOPED_FIELDS.has(field);
 }
 
-// Fields whose real render location can't be assumed to be "wherever the
-// file happens to end" the way flat HTML/Markdown body content can. A
-// component-based page (React/Next/Astro/.jsx/.tsx) has real markup after
-// its last line of source — outside the rendered component tree entirely —
-// so the default BLOCK convention's EOF auto-insert (insertBlockMarker
-// below) would "succeed" (marker created, PR merges, build passes) while
-// producing a marker that never renders on the live page. Same hazard
-// HEAD_SCOPED_FIELDS already guards against for <head> tags; this is the
-// body-content equivalent. These fields are therefore never auto-inserted
-// at EOF — only ever spliced into a marker a human has already placed
-// somewhere genuinely inside the page's real rendered body. If that marker
-// doesn't exist yet, this fails honestly (no draft applied) rather than
-// drafting content that will never actually be visible.
-const NO_EOF_INSERT_FIELDS = new Set(['expandedContent', 'qaContent']);
-
+// Every field that isn't LINE-convention or HEAD-scoped is a generic
+// body-content BLOCK field (faq, schema, internal-links, breadcrumbSchema,
+// expandedContent, qaContent, and any future one) — and NONE of them can
+// safely assume "wherever the file happens to end" is inside the rendered
+// body. A component-based page (React/Next/Astro/.jsx/.tsx) has real markup
+// after its last line of source — outside the rendered component tree
+// entirely — so a blind EOF auto-insert would "succeed" (marker created, PR
+// merges, build passes) while producing a marker that never renders on the
+// live page. Same hazard HEAD_SCOPED_FIELDS already guards against for
+// <head> tags; this is the body-content equivalent. `ensureMarkers` below
+// therefore only auto-inserts a body-scoped marker at EOF on a plain
+// Markdown/MDX file (isPlainMarkdownFile — the one shape where EOF really
+// is inside the rendered body); everywhere else, real structural detection
+// is required — see insertion-engine.js's `resolveInsertion`, which
+// `ensureMarkers` here defers to via its caller (backend.js) rather than
+// ever guessing an EOF position itself.
+//
 // Exposed so callers can give a more specific "marker not found" error for
 // a body-scoped field — same spirit as isHeadScopedField above.
 export function isNoEofInsertField(field) {
-  return NO_EOF_INSERT_FIELDS.has(field);
+  return !LINE_CONVENTION_FIELDS.has(field) && !HEAD_SCOPED_FIELDS.has(field);
 }
 
-// Single source of truth for "will ensureMarkers actually be able to create
-// this marker automatically, or does it need a real human-placed anchor
-// first" — used by BOTH ensureMarkers below (the apply-time behavior) and
-// audit-url-file-map.js (the diagnostic script), so the two can never
-// silently disagree about what counts as a real gap. Before this existed,
-// the audit script counted every missing marker equally, even ones
-// ensureMarkers heals automatically at apply time — inflating its gap count
-// with noise and burying the marker gaps that actually need a person.
+// Exposed so insertion-engine.js's resolveInsertion can tell a LINE field
+// (front-matter value — its own safe, narrow auto-heal path in ensureMarkers
+// below, never structural detection) apart from a generic body-scoped BLOCK
+// field, the same way isHeadScopedField already lets it distinguish that
+// third category.
+export function isLineConventionField(field) {
+  return LINE_CONVENTION_FIELDS.has(field);
+}
+
+// Single source of truth for "will the marker-existence pipeline actually be
+// able to create this marker automatically, or is there genuinely no safe
+// anchor" — used by BOTH ensureMarkers/insertion-engine.js (the apply-time
+// behavior) and audit-url-file-map.js (the diagnostic script), so the two
+// can never silently disagree about what counts as a real gap. Before this
+// existed, the audit script counted every missing marker equally, even ones
+// that self-heal automatically at apply time — inflating its gap count with
+// noise and burying the marker gaps that actually need attention.
 //
-// Returns 'self-heals' (ensureMarkers will create it, no action needed) or a
-// specific 'fatal-*' reason naming the missing anchor a human must place
-// once, matching the guard clauses in ensureMarkers exactly.
-export function classifyMarkerGap(field, filePath, fileContent) {
+// Returns 'self-heals' (no action needed — either ensureMarkers' own
+// LINE/HEAD-nested paths, or real structural detection, will resolve it) or
+// a specific 'fatal-*' reason naming the missing anchor. `detectors` (both
+// optional) are structural-detect.js's real detection functions —
+// `detectBody` (`detectInsertionPoint`) and `detectHead` (`detectHeadRegion`)
+// — injected rather than imported directly so this module (already the
+// lowest-level, most-imported implementer lib) never needs a static
+// dependency on the AST/DOM parsing stack. Omitting them falls back to the
+// conservative pre-structural-detection answer (matches this function's
+// contract before the universal insertion engine existed) rather than
+// silently claiming something self-heals that was never actually checked.
+export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) {
   if (LINE_CONVENTION_FIELDS.has(field)) {
     return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
-    return blockRegex(HEAD_MARKER_NAME).test(fileContent) ? 'self-heals' : 'fatal-no-head-region';
+    if (blockRegex(HEAD_MARKER_NAME).test(fileContent)) return 'self-heals';
+    if (!detectors.detectHead) return 'fatal-no-head-region';
+    return detectors.detectHead(fileContent).ok ? 'self-heals' : 'fatal-no-head-region';
   }
-  if (NO_EOF_INSERT_FIELDS.has(field)) {
-    return isPlainMarkdownFile(filePath) ? 'self-heals' : 'fatal-no-safe-anchor';
-  }
-  return 'self-heals'; // default BLOCK convention — always EOF-safe
+  if (isPlainMarkdownFile(filePath)) return 'self-heals';
+  if (!detectors.detectBody) return 'fatal-no-safe-anchor';
+  return detectors.detectBody(fileContent, filePath).ok ? 'self-heals' : 'fatal-no-safe-anchor';
 }
 
 // The one case where EOF genuinely IS inside the rendered body: a pure
@@ -171,7 +191,7 @@ export function classifyMarkerGap(field, filePath, fileContent) {
 // a markdown renderer as the article. There's no markup "after the last
 // line" the way a .jsx/.tsx/.astro component has — the last line of the
 // file IS the end of the rendered article. So for these extensions only,
-// the EOF fallback below is safe and NO_EOF_INSERT_FIELDS's guard doesn't
+// the EOF fallback below is safe and isNoEofInsertField's guard doesn't
 // apply. Anything else (component templates, unknown extensions) keeps the
 // conservative "fail honestly" behavior.
 function isPlainMarkdownFile(filePath) {
@@ -285,7 +305,7 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
-    if (NO_EOF_INSERT_FIELDS.has(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
+    if (isNoEofInsertField(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see isNoEofInsertField's comment above; insertion-engine.js's resolveInsertion handles this case via real structural detection
     content = insertBlockMarker(content, markerName, filePath);
     inserted.push(markerName);
   }

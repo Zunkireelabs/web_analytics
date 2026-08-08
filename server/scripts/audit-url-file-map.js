@@ -4,6 +4,7 @@ import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile } from '../implementers/lib/url-file-map.js';
 import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
+import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
@@ -35,6 +36,12 @@ import { getLessons } from '../lessons.js';
 // only what genuinely needs a person: no file mapping, no markers
 // configured at all, a missing file, or a marker gap classifyMarkerGap
 // calls fatal (no front matter / no HEAD region / no safe body anchor).
+// classifyMarkerGap now runs the same real structural detectors
+// (structural-detect.js) the insertion engine itself uses (passed in as
+// DETECTORS below) rather than a static field allowlist, so this script's
+// "self-heals" count can never silently drift from what actually self-heals
+// at apply time.
+const DETECTORS = { detectBody: detectInsertionPoint, detectHead: detectHeadRegion };
 //
 // The nginx security-headers marker gets its own dedicated check (below,
 // separate from ACTION_TYPES) since it's a site-root marker, not a
@@ -177,7 +184,7 @@ export async function auditSite(siteId) {
     return cached && cached !== 'error' && !hasMarker(cached.content, markerName);
   });
   const markersMissing = markersMissingRaw.map((m) => ({
-    ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content),
+    ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content, DETECTORS),
   }));
   const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
   const markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
@@ -290,7 +297,7 @@ export async function auditSite(siteId) {
             console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- OK, marker(s) present.`);
           } else {
             const [field, markerName] = missing[0];
-            const gap = classifyMarkerGap(field, layoutPath, file.content);
+            const gap = classifyMarkerGap(field, layoutPath, file.content, DETECTORS);
             if (gap === 'self-heals') {
               console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- marker missing but self-healing (will auto-create SEOAI:${markerName} at apply time).`);
             } else {
