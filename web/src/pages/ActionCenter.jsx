@@ -59,6 +59,9 @@ const GENERATOR_META = {
   'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
 
   'duplicate-id-fix': { label: 'Duplicate ID Fix Plans', icon: '🆔', color: '#f97316' },
+  breadcrumbs: { label: 'Breadcrumbs Schema', icon: '🍞', color: '#84cc16' },
+  'schema-repair': { label: 'Structured Data Repairs', icon: '🔧', color: '#a855f7' },
+  'alt-text': { label: 'Image Alt Text', icon: '🖼️', color: '#f472b6' },
 };
 
 // Source filter (decision: redesign the existing Action Center into a

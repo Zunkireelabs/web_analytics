@@ -1,7 +1,7 @@
 import { getSiteById, getSearchPerformanceForPages, getQueriesForPage } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { effortForGenerator, inferSchemaType, fetchTextIfExists, checkHttpsStatus, MAX_INLINE_STYLE_COUNT, MAX_HTML_SIZE_BYTES } from './lib/page-content.js';
-import { runPageChecks, detectDuplicateTitles, crawlInternalLinks } from './lib/technical-seo-analysis.js';
+import { runPageChecks, detectDuplicateTitles, crawlInternalLinks, crawlExternalCitations } from './lib/technical-seo-analysis.js';
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
 import { listOrphanedPages } from '../store/page-inventory.js';
@@ -99,6 +99,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   }).catch((err) => console.error(`[agents] technical-seo: failed to persist check for ${r.page}:`, err.message))));
 
   const crawl = await crawlInternalLinks(pageResults);
+  const citationCrawl = await crawlExternalCitations(pageResults);
   // Re-upsert with the per-page broken-link slice now that the crawl is done.
   await Promise.all(pageResults.map((r) => {
     const broken = crawl.broken.filter((b) => b.sourcePages.includes(r.page));
@@ -383,6 +384,23 @@ export async function run({ siteId, start, end, pageCache, params }) {
     expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
   }));
 
+  // Same fix as any other dead link (strip it, keep the real visible text —
+  // broken-link-fix.js doesn't care WHY a link died, only that it's dead),
+  // just a distinguishable finding label/id so a citation going stale reads
+  // differently in the Action Center than a random dead nav/body link.
+  const citationCandidates = [...citationCrawl.broken].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages));
+  const citationPriorities = priorityByRank(citationCandidates);
+  const citationFindings = citationCandidates.map((c, i) => makeFinding({
+    id: `technical-seo:invalid-citation:${c.sourcePages[0]}:${c.href}`,
+    evidence: { sourcePages: c.sourcePages, href: c.href, status: c.finalStatus, error: c.error },
+    whyItMatters: c.error
+      ? `A cited external source (${c.href}, on ${c.sourcePages.length} page(s)) is no longer reachable: ${c.error}.`
+      : `A cited external source (${c.href}, on ${c.sourcePages.length} page(s)) now returns HTTP ${c.finalStatus} — the citation is dead.`,
+    priority: citationPriorities[i],
+    recommendedAction: { label: 'Remove invalid citation', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
+    expectedImpact: { label: impactFromPriority(citationPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+  }));
+
   const chainCandidates = [...crawl.redirectChains].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages) || b.hops - a.hops);
   const chainPriorities = priorityByRank(chainCandidates);
   const chainFindings = chainCandidates.map((c, i) => {
@@ -481,7 +499,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
 
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
-    ...schemaFindings, ...brokenFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
+    ...schemaFindings, ...brokenFindings, ...citationFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
     ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
     ...inlineStylesFindings, ...largeHtmlFindings,
   ];
@@ -501,6 +519,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     sitemaps: sitemapResult.ok ? sitemapResult.sitemaps : [],
     sitemapsError: sitemapResult.ok ? null : sitemapResult.error,
     linkCrawl: { checked: crawl.checked, brokenCount: crawl.broken.length, redirectChainCount: crawl.redirectChains.length, checkedPages: crawl.checkedPages },
+    citationCrawl: { checked: citationCrawl.checked, brokenCount: citationCrawl.broken.length, checkedPages: citationCrawl.checkedPages },
     orphanedPageCount: orphanedPages.length,
     sitemapUrlCount: sitemapUrls.length,
     crossDomainSitemapUrlCount: crossDomainUrls.length,

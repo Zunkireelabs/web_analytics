@@ -33,7 +33,8 @@ const ACTION_LABELS = {
   'expand-content': 'Content Expansion', sitemap: 'Sitemap Update', 'geo-audit': 'GEO Audit Report', 'direct-answer': 'Direct Answer',
 
   'cookie-policy': 'Cookie Policy', 'privacy-policy': 'Privacy Policy', 'terms-of-service': 'Terms of Service',
-  'duplicate-id-fix': 'Duplicate ID Fix Plan',
+  'duplicate-id-fix': 'Duplicate ID Fix Plan', breadcrumbs: 'Breadcrumbs Schema',
+  'schema-repair': 'Structured Data Repair', 'alt-text': 'Image Alt Text',
 };
 
 const GENERATOR_COLORS = {
@@ -60,6 +61,9 @@ const GENERATOR_COLORS = {
   'privacy-policy': '#d97706',
   'terms-of-service': '#b45309',
   'duplicate-id-fix': '#f97316',
+  breadcrumbs: '#84cc16',
+  'schema-repair': '#a855f7',
+  'alt-text': '#f472b6',
 };
 
 // Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every

@@ -193,6 +193,19 @@ describe('analyzePage — GEO signals', () => {
     assert.equal(a.externalCitationDomainCount, 1);
     assert.equal(a.hasExternalCitations, false);
   });
+
+  // Regression coverage: only the DOMAIN set was ever kept, so nothing
+  // could liveness-check a specific citation later — technical-seo-
+  // analysis.js's crawlExternalCitations needs the real hrefs themselves.
+  test('externalCitationLinks captures the real hrefs, not just their domains, self-links excluded', () => {
+    const html = `<html><body>
+      <a href="https://example.com/other-page">self</a>
+      <a href="https://wikipedia.org/x">source 1</a>
+      <a href="https://nytimes.com/z">source 2</a>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.externalCitationLinks.sort(), ['https://nytimes.com/z', 'https://wikipedia.org/x']);
+  });
 });
 
 describe('isCompressedEncoding', () => {

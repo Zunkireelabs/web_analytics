@@ -229,6 +229,37 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   return { checked: finalResults.length, broken, redirectChains, checkedPages: [...checkedPages] };
 }
 
+// Same liveness check as crawlInternalLinks, scoped to real EXTERNAL
+// citation-style links (page-content.js's externalCitationLinks — the
+// `article a[href], main a[href], body a[href]` selector, i.e. real content
+// links, not nav/footer boilerplate) instead of internal ones. Deliberately
+// no soft-404 check here (that heuristic exists to catch a client-rendered
+// SPA fooling itself on ITS OWN routes — meaningless against a third-party
+// domain we don't control) and no redirect-chain-length finding (a
+// citation redirecting is normal and not the concern; only a genuinely
+// dead one is). Bounded the same way, for the same reason: an unbounded
+// external crawl on every run would hammer other sites' servers.
+export async function crawlExternalCitations(pageResults, maxChecks = MAX_LINK_CHECKS_PER_DAY) {
+  const sourcesByHref = new Map(); // href -> Set(sourcePage)
+  for (const r of pageResults) {
+    for (const href of r.analysis?.externalCitationLinks || []) {
+      if (!sourcesByHref.has(href)) sourcesByHref.set(href, new Set());
+      sourcesByHref.get(href).add(r.page);
+    }
+  }
+  const hrefs = [...sourcesByHref.keys()].slice(0, maxChecks);
+
+  const results = await Promise.all(hrefs.map(async (href) => {
+    const r = await followRedirects(href);
+    return { href, sourcePages: [...sourcesByHref.get(href)], ...r };
+  }));
+
+  const broken = results.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400));
+  const checkedPages = new Set();
+  for (const r of results) for (const p of r.sourcePages) checkedPages.add(p);
+  return { checked: results.length, broken, checkedPages: [...checkedPages] };
+}
+
 // On-demand single-link check for the manual "re-check now" action
 // (recommendation-coordinator.js's recheckRecommendation) — same broken
 // classification as crawlInternalLinks (status/error/soft-404) but scoped

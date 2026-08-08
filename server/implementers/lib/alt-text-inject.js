@@ -12,12 +12,15 @@ import { applyExactMatchPatches, describePatchFailure } from './exact-match-patc
 // drifted since detection and even one tag's anchor no longer matches
 // exactly, no image in this draft gets patched — never a partial write a
 // human would have to untangle.
-function withAlt(originalTag, alt) {
+export function withAlt(originalTag, alt) {
   const escaped = alt.replace(/"/g, '&quot;');
   // Self-closing vs. not doesn't matter for the attribute insertion itself —
   // inserted right after the tag name, before any existing attributes, so
-  // it reads naturally regardless of what else the tag already has.
-  return originalTag.replace(/^<img\b/i, `<img alt="${escaped}"`);
+  // it reads naturally regardless of what else the tag already has. Keeps
+  // the tag name's own original casing (<img> vs <IMG>) — a minimal,
+  // single-attribute diff, not an incidental normalization of markup this
+  // fix has no business touching.
+  return originalTag.replace(/^<(img)\b/i, (_m, tagName) => `<${tagName} alt="${escaped}"`);
 }
 
 export async function computeAltTextMerge(site, draft, beforeRef = baseBranch(site)) {

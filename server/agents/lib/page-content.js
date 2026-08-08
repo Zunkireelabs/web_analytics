@@ -288,13 +288,19 @@ export function analyzePage(html, pageUrl) {
   // Well-sourced content (citing outside authorities) is more likely to be
   // reused/cited by an AI assistant than a page that never links out.
   const externalCitationDomains = new Set();
+  // Real hrefs (not just the domain set above) — technical-seo-analysis.js's
+  // crawlExternalCitations liveness-checks these the same way
+  // crawlInternalLinks already checks internalLinks, so a citation that's
+  // gone dead since this page was written gets flagged/removed the same as
+  // any other broken link, distinct only in its finding label.
+  const externalCitationLinks = [];
   if (host) {
     $('article a[href], main a[href], body a[href]').each((_, el) => {
       const href = ($(el).attr('href') || '').trim();
       if (!/^https?:\/\//i.test(href)) return;
       try {
         const linkHost = new URL(href).hostname.replace(/^www\./, '');
-        if (linkHost !== host.replace(/^www\./, '')) externalCitationDomains.add(linkHost);
+        if (linkHost !== host.replace(/^www\./, '')) { externalCitationDomains.add(linkHost); externalCitationLinks.push(href); }
       } catch { /* ignore malformed href */ }
     });
   }
@@ -464,6 +470,7 @@ export function analyzePage(html, pageUrl) {
     hasReviewSchema,
     externalCitationDomainCount: externalCitationDomains.size,
     hasExternalCitations: externalCitationDomains.size >= 2,
+    externalCitationLinks, // transient, like internalLinks — real hrefs for technical-seo-analysis.js's crawlExternalCitations
     inlineStyleCount, // technical-seo.js: elements with a style="" attribute
     htmlByteSize, // technical-seo.js: fetched (decompressed) HTML size in bytes
   };
