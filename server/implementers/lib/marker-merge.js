@@ -22,6 +22,8 @@
 //   instead and rewrites the quoted value on that same line:
 //     title: "current value" # SEOAI:NAME
 
+import { isJsxFile } from './structural-detect.js';
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -32,6 +34,22 @@ function blockRegex(name) {
   // [\s\S] (not .) so this matches across newlines. Captures the start/end
   // tags too, so a replacement can re-wrap them exactly, preserving the
   // marker for the next real merge.
+  return new RegExp(`(${escapeRegExp(start)})([\\s\\S]*?)(${escapeRegExp(end)})`);
+}
+
+// JSX/TSX's own comment convention — `<!-- -->` is NOT a comment inside JSX
+// (JSX has no HTML-comment syntax; that literal text would render as
+// visible garbage on the live page), so a `.jsx`/`.tsx` file needs its own
+// marker form, `{/* SEOAI:NAME:START */}`, which Babel/React strip like any
+// other JS comment. Same start/end capture shape as blockRegex so
+// findMarker/applyMarker can treat both conventions uniformly aside from
+// the wrapper syntax itself. Written and consumed only by
+// structural-detect.js's bootstrap flow and this module — never hand-placed
+// by a human, since JSX file structure makes a plain-text instruction less
+// obvious to place correctly than the HTML comment form.
+function jsxBlockRegex(name) {
+  const start = `{/* SEOAI:${name}:START */}`;
+  const end = `{/* SEOAI:${name}:END */}`;
   return new RegExp(`(${escapeRegExp(start)})([\\s\\S]*?)(${escapeRegExp(end)})`);
 }
 
@@ -46,6 +64,8 @@ function lineRegex(name) {
 function findMarker(fileContent, name) {
   const block = blockRegex(name).exec(fileContent);
   if (block) return { kind: 'block', old: block[2] };
+  const jsx = jsxBlockRegex(name).exec(fileContent);
+  if (jsx) return { kind: 'jsx', old: jsx[2] };
   const line = lineRegex(name).exec(fileContent);
   if (line) return { kind: 'line', old: line[3] };
   return null;
@@ -232,9 +252,15 @@ function insertLineMarker(fileContent, field, markerName) {
 // additive, so it can never disturb existing template syntax, front
 // matter, or layout regardless of framework. The same position every
 // block marker has been manually placed at by hand this session.
-function insertBlockMarker(fileContent, markerName) {
+// `filePath`-aware: a .jsx/.tsx file gets the JSX comment convention (see
+// jsxBlockRegex above) since `<!-- -->` isn't a real comment in JSX and
+// would otherwise render as literal visible text.
+function insertBlockMarker(fileContent, markerName, filePath) {
   const sep = fileContent.length > 0 && !fileContent.endsWith('\n') ? '\n' : '';
-  return `${fileContent}${sep}<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->\n`;
+  const marker = isJsxFile(filePath)
+    ? `{/* SEOAI:${markerName}:START */}{/* SEOAI:${markerName}:END */}`
+    : `<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  return `${fileContent}${sep}${marker}\n`;
 }
 
 // Auto-creates any marker referenced in markerMap that isn't already
@@ -260,7 +286,7 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
     if (NO_EOF_INSERT_FIELDS.has(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
-    content = insertBlockMarker(content, markerName);
+    content = insertBlockMarker(content, markerName, filePath);
     inserted.push(markerName);
   }
   return { content, inserted };
@@ -275,10 +301,31 @@ export function getMarkerContent(fileContent, name) {
   return findMarker(fileContent, name)?.old ?? null;
 }
 
+// Raw HTML (renderFaqHtml/renderQaHtml/... output below) is not valid JSX
+// source — unquoted attributes like `class="faq"`, void elements, and any
+// literal `{`/`}` in generated text would all be JS/JSX syntax errors if
+// spliced in as literal JSX children. Wrapping it as a single
+// dangerouslySetInnerHTML expression is the one form that's simultaneously
+// (a) valid JSX regardless of what the HTML inside contains, since it's a
+// JS string literal, not parsed markup, and (b) renders the exact same
+// visible HTML a non-JSX template would get via a literal splice.
+// suppressHydrationWarning is a real, standard React DOM prop (harmless
+// even outside Next.js) — without it, a Next.js SSR build can log a
+// hydration-mismatch warning here even though the content itself is correct
+// and static, because this div's children are set via __html/injected
+// after the fact rather than usual JSX-rendered markup.
+function jsxSafeWrap(rawHtml) {
+  return `<div suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(String(rawHtml))} }} />`;
+}
+
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
   if (block.test(fileContent)) {
     return fileContent.replace(block, (_m, start, _old, end) => `${start}${newValue}${end}`);
+  }
+  const jsx = jsxBlockRegex(name);
+  if (jsx.test(fileContent)) {
+    return fileContent.replace(jsx, (_m, start, _old, end) => `${start}${jsxSafeWrap(newValue)}${end}`);
   }
   const line = lineRegex(name);
   const match = line.exec(fileContent);

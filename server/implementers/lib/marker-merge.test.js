@@ -404,3 +404,28 @@ describe('buildMergeValues — faq (per-site template, not one tenant\'s markup 
     assert.equal(result.ok, false);
   });
 });
+
+describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
+  test('ensureMarkers uses {/* */} comments, not <!-- -->, when creating a marker on a .tsx file', () => {
+    const file = 'export default function Page() {\n  return <main>hi</main>;\n}\n';
+    const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'src/pages/about.tsx');
+    assert.deepEqual(inserted, ['LINKS']);
+    assert.match(content, /\{\/\* SEOAI:LINKS:START \*\/\}\{\/\* SEOAI:LINKS:END \*\/\}/);
+    assert.doesNotMatch(content, /<!--/);
+  });
+
+  test('spliceMarkers wraps the value in dangerouslySetInnerHTML for a JSX marker, never splices raw HTML as JSX children', () => {
+    const file = 'function Page() {\n  return (\n    <main>\n      {/* SEOAI:QACONTENT:START */}{/* SEOAI:QACONTENT:END */}\n    </main>\n  );\n}\n';
+    const spliced = spliceMarkers(file, { qaContent: 'QACONTENT' }, { qaContent: '<div class="qa"><p>Q</p></div>' });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /dangerouslySetInnerHTML=\{\{ __html: "<div class=\\"qa\\"><p>Q<\/p><\/div>" \}\}/);
+    assert.doesNotMatch(spliced.newContent, /<main>\s*<div class="qa">/); // never a raw, invalid-JSX splice
+  });
+
+  test('a marker already present on a JSX file round-trips through ensureMarkers unchanged', () => {
+    const file = 'function Page() {\n  return <main>{/* SEOAI:LINKS:START */}{/* SEOAI:LINKS:END */}</main>;\n}\n';
+    const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'page.jsx');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file);
+  });
+});

@@ -163,9 +163,10 @@ any future caller that wants to gate on it (a merge-readiness badge, an
 
 ## 2. One-time manual template bootstrap (nothing can safely automate these)
 
-These three anchors are the only markers that can never be auto-created —
-guessing where to place them risks silently producing content that never
-renders. A human places each **once**, directly in the real repo:
+These two anchors are sitewide layout concerns with no framework-agnostic
+way to locate them — guessing risks silently producing content that never
+renders, or headers that never take effect. A human places each **once**,
+directly in the real repo:
 
 1. **HEAD region**, inside the real `<head>...</head>` of the shared layout
    template from §1: `<!-- SEOAI:HEAD:START --><!-- SEOAI:HEAD:END -->`.
@@ -177,13 +178,34 @@ renders. A human places each **once**, directly in the real repo:
    `# SEOAI:SECURITY-HEADERS:START` / `# SEOAI:SECURITY-HEADERS:END` (plain
    comments, hash-based — see `server/generators/security-headers.js`).
    Skip if this site's headers aren't managed through this app.
-3. **Body-content anchors for non-markdown pages** — `qaContent` and
-   `expandedContent` can only auto-insert at end-of-file on a plain
-   `.md`/`.mdx` file (the file's last line genuinely is the end of its
-   rendered content there). On a component-based template (`.njk`, `.astro`,
-   `.jsx`, ...), EOF is outside the rendered tree, so these two fields need
-   their marker hand-placed once, in the real visible spot, on every page
-   you expect to use them — most commonly just the homepage to start.
+
+**Body-content anchors (`qaContent`/`expandedContent`) no longer need a
+manual step.** They still auto-insert at end-of-file on plain `.md`/`.mdx`
+(EOF genuinely is the end of the rendered article there — unchanged). On a
+component-based template (`.jsx`/`.tsx`/`.astro`/`.njk`/`.html`/`.vue`/...),
+where EOF is outside the rendered tree, `server/implementers/lib/
+structural-detect.js` now parses the file for real (a JSX AST for React/
+Next.js, a located DOM for Astro/HTML-shaped templates) to find the actual
+`<main>`/`<article>` content container, and `server/implementers/lib/
+marker-bootstrap.js` opens a small PR adding the marker there — never a
+silent direct commit, since a structural match is real evidence, not proof
+of correct intent on someone else's production repo. This happens two ways:
+
+- **Lazily**, the first time a real recommendation needs that marker and
+  it's missing — `backend.js`'s `computeMarkerMerge` already tries this
+  before falling back to today's manual-placement error.
+- **Proactively**, for a whole site at once:
+  ```
+  npm run bootstrap-structural-markers -- --site-id <id>
+  ```
+  Run this once right after §1/§3 are configured (new client) or any time
+  on an existing site to catch newly-added pages. Merge whatever PR(s) it
+  opens — after that, `qa-content`/`expand-content` recommendations for
+  those pages apply automatically, no manual marker-editing step, ever.
+  A page whose file has no confident `<main>`/`<article>` container (or
+  multiple ambiguous JSX-returning components in one file) still falls back
+  to the honest manual-placement message — detection refuses rather than
+  guesses on those, same discipline as everywhere else in this app.
 
 Run `npm run audit-url-file-map -- --site-id <id>` after this step — its
 "MARKERS MISSING, FATAL" and "NGINX SECURITY-HEADERS MARKER" sections
@@ -195,9 +217,25 @@ fatal vs. what self-heals automatically at apply time, so this list and
 ## 3. Per-page config — files, patterns, and adapter routing
 
 For existing-page generators (`schema`, `meta-title`, `faq`,
-`internal-links`, `canonical`, `open-graph`), `resolveFile`
+`internal-links`, `canonical`, `open-graph`, `breadcrumbs`), `resolveFile`
 (`url-file-map.js`) needs either an exact `pages[url].file` entry or a
 `patterns[]` regex covering the URL shape. Two ways to populate this:
+
+`breadcrumbs` needs its own marker field, `breadcrumbSchema` — deliberately
+NOT shared with `schema`'s own marker, since a page can carry both real
+Article/Product/etc. schema AND a `BreadcrumbList` at once, and
+`marker-merge.js`'s splice is a wholesale replace, not an append (see that
+file's `buildMergeValues` comment for the `'breadcrumbs'` case). Add a
+`SEOAI:breadcrumbSchema` marker comment pair wherever the site's template
+should render it (same convention as the `SEOAI:schema`/`SEOAI:faq`
+markers already documented above), or it will 404 at apply time with "No
+merge strategy"/"marker not found" the same way any other unconfigured
+field does. `schema-repair` and `alt-text` need no new marker at all — both
+patch an EXISTING element's real source text directly (a malformed/
+duplicate `<script type="application/ld+json">` block, or a specific
+`<img>` tag missing `alt=""`) rather than filling in a designated slot, so
+they only need the same `pages`/`patterns` file mapping every other
+existing-page generator already needs.
 
 - **Manual, one entry/pattern at a time** via `--url-file-map`.
 - **Self-healing** — if a draft's page has no mapping, `pushDraftBranch`

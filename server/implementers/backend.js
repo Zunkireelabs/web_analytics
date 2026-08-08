@@ -14,6 +14,7 @@ import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
+import { detectAndOpenBootstrapPr } from './lib/marker-bootstrap.js';
 
 
 export const meta = {
@@ -702,6 +703,31 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       ? ` This field must be placed inside a <!-- SEOAI:HEAD:START -->...<!-- SEOAI:HEAD:END --> region within <head> — add that region to ${filePath} first (a one-time step per template), then this field's own marker is created automatically.`
       : '';
     const bodyScopedMarker = missingEntries.find(([field]) => isNoEofInsertField(field))?.[1];
+
+    // Before falling back to "a human must hand-place this," try real
+    // structural detection (structural-detect.js) and propose it as a
+    // reviewable bootstrap PR — see marker-bootstrap.js's module comment for
+    // why this stops short of an unreviewed direct commit. Only attempted
+    // for body-scoped fields (the case EOF genuinely can't cover); a
+    // head-scoped gap still gets the manual HEAD-region hint above, since
+    // that's a sitewide layout concern, not a per-page content container.
+    if (bodyScopedMarker) {
+      const bootstrap = await detectAndOpenBootstrapPr(site, filePath, file.content, bodyScopedMarker);
+      if (bootstrap.ok) {
+        const prNote = bootstrap.opened
+          ? `A one-time setup pull request was just opened, adding this marker automatically inside ${bootstrap.containerDescription} (structurally detected, not guessed): ${bootstrap.prUrl}`
+          : `A setup pull request adding this marker is already open and awaiting review: ${bootstrap.prUrl}`;
+        return {
+          ok: false, reason: 'bootstrap-pr-pending',
+          error: `Marker(s) not found in the live file: ${names}. ${prNote} Merge it, then re-apply this draft — no manual edits needed.`,
+          bootstrapPrUrl: bootstrap.prUrl, bootstrapPrNumber: bootstrap.prNumber,
+        };
+      }
+      // bootstrap.ok === false here means detection genuinely found nothing
+      // safe (or a real GitHub error) — fall through to the honest manual
+      // hint below rather than silently retrying forever.
+    }
+
     const bodyHint = bodyScopedMarker
       ? ` This field renders as real page-body content, so its marker can't be safely auto-placed at end-of-file (that position is outside the rendered component tree on most React/Next/Astro templates) — add <!-- SEOAI:${bodyScopedMarker}:START --><!-- SEOAI:${bodyScopedMarker}:END --> by hand at the real spot in ${filePath} where this content should appear, then re-apply.`
       : '';
