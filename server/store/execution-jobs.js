@@ -1,4 +1,4 @@
-import { query } from '../db.js';
+import { pool, query } from '../db.js';
 
 // CRUD for execution_jobs / execution_job_recommendations (migration 078).
 // Written to exclusively by agents/lib/execution-engine.js.
@@ -11,6 +11,58 @@ export async function createExecutionJob(siteId, { trigger, requestedBy }) {
     [siteId, trigger, requestedBy || null]
   );
   return rows[0];
+}
+
+// Design Agent job (089): status starts at 'queued', not 'preparing' like
+// createExecutionJob above — a design_generate job has no worker to pick it
+// up yet, so it must wait, unlike bulk/single jobs which execute inline in
+// the same request. started_at is left null until a worker actually starts
+// the job.
+export async function createDesignAgentJob(siteId, recommendationId, { requestedBy } = {}) {
+  const { rows } = await query(
+    `INSERT INTO execution_jobs (site_id, trigger, kind, status, recommendation_id, requested_by)
+     VALUES ($1, 'single', 'design_generate', 'queued', $2, $3)
+     RETURNING *`,
+    [siteId, recommendationId, requestedBy || null]
+  );
+  return rows[0];
+}
+
+// Step 6B: atomically claims the oldest queued design_generate job for the
+// calling worker process. SELECT ... FOR UPDATE SKIP LOCKED inside its own
+// transaction is what makes this safe under N concurrent worker processes —
+// a row already locked by another worker's in-flight claim is invisible to
+// this query rather than something this query blocks on, so two workers can
+// never both claim the same job. Returns null (not a rejected promise) when
+// the queue is empty, same "empty is a normal outcome" convention as the
+// rest of this file's read helpers.
+export async function claimNextDesignAgentJob() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: candidates } = await client.query(
+      `SELECT id FROM execution_jobs
+       WHERE kind = 'design_generate' AND status = 'queued'
+       ORDER BY id
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1`
+    );
+    if (!candidates[0]) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const { rows } = await client.query(
+      `UPDATE execution_jobs SET status = 'executing', started_at = now() WHERE id = $1 RETURNING *`,
+      [candidates[0].id]
+    );
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function addJobRecommendation(executionJobId, recommendationId) {
