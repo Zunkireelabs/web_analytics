@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { getSiteById } from '../store/read.js';
+import { checkoutRepoTarball } from './repo-checkout.js';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -34,9 +36,9 @@ function parseJsonAfterPrefix(line, prefix) {
 // whatever the final RESULT_PREFIX line parsed to, or null if the process
 // never produced one (crash/kill before that point). Never rejects on a
 // non-zero exit by itself; the caller decides what a bad exit code means.
-function runDesignTaskProcess({ pythonBin, scriptPath, workspaceDir, env, timeoutMs, killGraceMs, onContainerId }) {
+function runDesignTaskProcess({ pythonBin, scriptPath, workspaceDir, extraArgs, env, timeoutMs, killGraceMs, onContainerId }) {
   return new Promise((resolve) => {
-    const child = spawn(pythonBin, [scriptPath, workspaceDir], { env });
+    const child = spawn(pythonBin, [scriptPath, workspaceDir, ...extraArgs], { env });
 
     let result = null;
     let containerId = null;
@@ -106,14 +108,27 @@ async function backstopDockerCleanup(dockerBin, containerId) {
 // promise is still in flight when worker.stop() awaits it; this function's
 // own try/finally runs exactly the same regardless of who's waiting on it).
 //
-// pythonBin/scriptPath/fixtureDir/dockerBin are all injectable specifically
-// so tests can swap in stubs for the whole Python+Docker boundary (see
-// test-support/) without ever touching a real Python interpreter, the real
-// OpenHands SDK, or a real `docker` binary.
+// pythonBin/scriptPath/dockerBin are all injectable specifically so tests
+// can swap in stubs for the whole Python+Docker boundary (see test-support/)
+// without ever touching a real Python interpreter, the real OpenHands SDK,
+// or a real `docker` binary.
+//
+// workspaceSource(destDir, job) populates destDir (already created, via
+// mkdtemp) before the task runs — defaults to copying `fixtureDir` (Step
+// 6D's fixture-demo path; `fixtureDir` itself defaults to the checked-in
+// test fixture and stays a supported shorthand for the common "just copy a
+// directory" case — server/design-agent/openhands-handler.test.js's stubs
+// still use it). buildArgs(job) returns extra argv passed to design_task.py
+// after the workspace dir — defaults to none (fixture-demo mode).
+// createComponentTemplateHandler below is the other concrete instantiation:
+// real repo checkout + component-templates mode, same underlying
+// spawn/timeout/cleanup machinery.
 export function createOpenHandsHandler({
   pythonBin = process.env.DESIGN_AGENT_PYTHON_BIN || DEFAULT_PYTHON_BIN,
   scriptPath = DEFAULT_SCRIPT_PATH,
   fixtureDir = DEFAULT_FIXTURE_DIR,
+  workspaceSource = (destDir) => cp(fixtureDir, destDir, { recursive: true }),
+  buildArgs = () => [],
   dockerBin = process.env.DESIGN_AGENT_DOCKER_BIN || 'docker',
   timeoutMs = Number(process.env.DESIGN_AGENT_TASK_TIMEOUT_MS || 10 * 60 * 1000),
   killGraceMs = Number(process.env.DESIGN_AGENT_KILL_GRACE_MS || 5000),
@@ -122,7 +137,7 @@ export function createOpenHandsHandler({
     const workspaceDir = await mkdtemp(join(tmpdir(), 'design-agent-'));
     let containerId = null;
     try {
-      await cp(fixtureDir, workspaceDir, { recursive: true });
+      await workspaceSource(workspaceDir, job);
 
       const env = {
         ...process.env,
@@ -133,7 +148,7 @@ export function createOpenHandsHandler({
       };
 
       const { result, code, timedOut, stderrTail } = await runDesignTaskProcess({
-        pythonBin, scriptPath, workspaceDir, env, timeoutMs, killGraceMs,
+        pythonBin, scriptPath, workspaceDir, extraArgs: buildArgs(job), env, timeoutMs, killGraceMs,
         onContainerId: (id) => { containerId = id; },
       });
 
@@ -146,10 +161,49 @@ export function createOpenHandsHandler({
       if (result.status !== 'ok') {
         throw new Error(`OpenHands task failed: ${result.detail || 'unknown error'}`);
       }
-      return { jobId: job.id, detail: result.detail };
+      return { jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates };
     } finally {
       await backstopDockerCleanup(dockerBin, containerId);
       await rm(workspaceDir, { recursive: true, force: true });
     }
+  };
+}
+
+// componentTemplates integration: real repo checkout (repo-checkout.js)
+// instead of the fixture copy, "component-templates" task mode instead of
+// fixture-demo, componentKeys carried on the job's own `params` (090,
+// store/execution-jobs.js's createComponentTemplateJob). Everything else —
+// spawn/stdout-parsing/timeout/SIGKILL-escalation/backstop cleanup — is the
+// exact same createOpenHandsHandler machinery above, just parameterized
+// differently.
+// getSiteByIdFn/checkoutRepoTarballFn are injectable (default to the real
+// store/read.js + repo-checkout.js implementations) so tests can stub the
+// DB lookup and the real GitHub tarball download independently, same
+// dependency-injection convention as pythonBin/scriptPath/dockerBin above.
+export function createComponentTemplateHandler({ getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, ...options } = {}) {
+  return createOpenHandsHandler({
+    ...options,
+    workspaceSource: async (destDir, job) => {
+      const site = await getSiteByIdFn(job.site_id);
+      await checkoutRepoTarballFn(site, destDir);
+    },
+    buildArgs: (job) => ['component-templates', JSON.stringify(job.params?.componentKeys || [])],
+  });
+}
+
+// The worker (worker.js's main()) claims ANY kind='design_generate' job
+// regardless of what it's for — this is the single dispatch point that
+// routes each claimed job to the right handler based on job.params.mode,
+// so the worker's poll loop itself never needs to know how many kinds of
+// design_generate job exist. Falls back to the fixture-demo handler for
+// jobs with no params.mode (or an unrecognized one) — the original Step
+// 6A/6C/6D trigger (routes/action-center.js's design-generate route) never
+// sets params.mode at all.
+export function createDesignAgentHandler(options = {}) {
+  const fixtureDemoHandler = createOpenHandsHandler(options);
+  const componentTemplateHandler = createComponentTemplateHandler(options);
+  return async function dispatchingHandler(job) {
+    if (job.params?.mode === 'component-templates') return componentTemplateHandler(job);
+    return fixtureDemoHandler(job);
   };
 }

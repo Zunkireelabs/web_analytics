@@ -17,15 +17,28 @@ export async function createExecutionJob(siteId, { trigger, requestedBy }) {
 // createExecutionJob above — a design_generate job has no worker to pick it
 // up yet, so it must wait, unlike bulk/single jobs which execute inline in
 // the same request. started_at is left null until a worker actually starts
-// the job.
-export async function createDesignAgentJob(siteId, recommendationId, { requestedBy } = {}) {
+// the job. recommendationId is nullable — a componentTemplates-derivation
+// job (see createComponentTemplateJob below) has no recommendations row to
+// attach to.
+export async function createDesignAgentJob(siteId, recommendationId, { requestedBy, params } = {}) {
   const { rows } = await query(
-    `INSERT INTO execution_jobs (site_id, trigger, kind, status, recommendation_id, requested_by)
-     VALUES ($1, 'single', 'design_generate', 'queued', $2, $3)
+    `INSERT INTO execution_jobs (site_id, trigger, kind, status, recommendation_id, requested_by, params)
+     VALUES ($1, 'single', 'design_generate', 'queued', $2, $3, $4::jsonb)
      RETURNING *`,
-    [siteId, recommendationId, requestedBy || null]
+    [siteId, recommendationId, requestedBy || null, JSON.stringify(params || {})]
   );
   return rows[0];
+}
+
+// componentTemplates integration (090): a design_generate job whose task is
+// "inspect the real repo and derive/refresh {wrapper,row} markup for these
+// action types" rather than "act on one recommendation" — recommendation_id
+// is null (nothing to attach to), and `componentKeys` (the
+// design-drift.js/marker-merge.js action-type strings, e.g. ['faq',
+// 'expand-content']) travels in `params` for the worker's handler to read
+// off the claimed job row.
+export async function createComponentTemplateJob(siteId, componentKeys, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
 }
 
 // Step 6B: atomically claims the oldest queued design_generate job for the
@@ -88,14 +101,19 @@ export async function appendJobLog(executionJobId, message) {
   );
 }
 
-export async function finishExecutionJob(executionJobId, { status, branchName, prNumber, prUrl }) {
+// `result` (090) is the handler's own return value (e.g. the
+// componentTemplates a design_generate job derived) — optional and additive,
+// COALESCEd like branch_name/pr_number/pr_url above, so every existing
+// caller that never passes it is unaffected.
+export async function finishExecutionJob(executionJobId, { status, branchName, prNumber, prUrl, result }) {
   const { rows } = await query(
     `UPDATE execution_jobs SET
        status = $2, branch_name = COALESCE($3, branch_name), pr_number = COALESCE($4, pr_number), pr_url = COALESCE($5, pr_url),
+       result = COALESCE($6::jsonb, result),
        finished_at = now(), duration_ms = EXTRACT(EPOCH FROM (now() - started_at)) * 1000
      WHERE id = $1
      RETURNING *`,
-    [executionJobId, status, branchName || null, prNumber || null, prUrl || null]
+    [executionJobId, status, branchName || null, prNumber || null, prUrl || null, result != null ? JSON.stringify(result) : null]
   );
   return rows[0];
 }

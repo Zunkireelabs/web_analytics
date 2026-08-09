@@ -1,9 +1,15 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pool, query } from '../db.js';
-import { createDesignAgentJob } from '../store/execution-jobs.js';
+import { createDesignAgentJob, createComponentTemplateJob } from '../store/execution-jobs.js';
 import { processOneJob, createWorker } from './worker.js';
 import { createMockHandler } from './test-support/mock-handler.js';
+import { createDesignAgentHandler } from './openhands-handler.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const testSupportDir = path.join(here, 'test-support');
 
 // Integration coverage against the real DB (Postgres FOR UPDATE SKIP LOCKED
 // semantics can't be meaningfully faked with a mock pool) — mirrors the
@@ -218,5 +224,38 @@ describe('createWorker — polling lifecycle', () => {
     await worker.stop();
     const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [job.id]);
     assert.equal(rows[0].status, 'queued');
+  });
+});
+
+describe('componentTemplates job — full real-DB lifecycle through the dispatching handler', () => {
+  test('createComponentTemplateJob -> claim -> dispatch -> completed, with params and result round-tripping through Postgres JSONB', async () => {
+    // Drain any job left queued by an earlier test in this file (e.g. "stop()
+    // before any job is claimed" deliberately leaves one behind) — otherwise
+    // the shared FIFO queue could hand processOneJob below that leftover
+    // instead of the job this test just created.
+    let leftover = await processOneJob({ handler: createMockHandler() });
+    while (leftover) leftover = await processOneJob({ handler: createMockHandler() });
+
+    const job = await createComponentTemplateJob(siteId, ['faq', 'expand-content'], { requestedBy: null, pageUrl: 'https://example.com/faq' });
+    assert.equal(job.kind, 'design_generate');
+    assert.equal(job.status, 'queued');
+    assert.equal(job.recommendation_id, null);
+    assert.deepEqual(job.params, { mode: 'component-templates', componentKeys: ['faq', 'expand-content'], pageUrl: 'https://example.com/faq' });
+
+    const handler = createDesignAgentHandler({
+      pythonBin: process.execPath,
+      scriptPath: path.join(testSupportDir, 'fake-design-task-component-templates.js'),
+      dockerBin: path.join(testSupportDir, 'fake-docker.js'),
+      getSiteByIdFn: async (id) => { assert.equal(id, siteId); return { id: siteId, repo_owner: 'acme', repo_name: 'site' }; },
+      checkoutRepoTarballFn: async () => {}, // no real GitHub call in this suite
+    });
+    const outcome = await processOneJob({ handler });
+    assert.equal(outcome.jobId, job.id);
+    assert.equal(outcome.status, 'completed');
+
+    const { rows } = await query('SELECT status, params, result FROM execution_jobs WHERE id = $1', [job.id]);
+    assert.equal(rows[0].status, 'completed');
+    assert.deepEqual(rows[0].params, { mode: 'component-templates', componentKeys: ['faq', 'expand-content'], pageUrl: 'https://example.com/faq' });
+    assert.deepEqual(Object.keys(rows[0].result.componentTemplates).sort(), ['expand-content', 'faq']);
   });
 });

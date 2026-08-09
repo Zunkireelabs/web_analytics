@@ -212,6 +212,22 @@ export async function getRepoTree(site, branch) {
   return { files, truncated: !!data.truncated };
 }
 
+// Real full-repo snapshot as gzipped tar bytes, at `ref` (defaults to the
+// site's own default branch) — GitHub's tarball endpoint, still one
+// authenticated REST call like everything else in this file (fetch follows
+// the redirect to codeload.github.com itself; no git binary, no PAT ever
+// touches a URL or a cloned .git directory). Used by
+// server/design-agent/repo-checkout.js to give the Design Agent's isolated
+// Docker workspace a real, complete copy of the tenant's actual repo instead
+// of one page's rendered HTML — the only consumer that needs more than a
+// handful of individual files, so it's the one caller of this rather than
+// looping getFileContent over getRepoTree's file list.
+export async function getRepoTarball(site, ref) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/tarball/${encodeURIComponent(ref || defaultBranchName(site))}`);
+  if (!res.ok) throw new Error(`getRepoTarball failed (${res.status}): ${await res.text()}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 // Last-resort candidate finder for broken-link-fix's Layer 2 (see
 // implementers/backend.js's computeBrokenLinkFixMerge) — locates files by
 // literal content match via GitHub's Code Search API, when url_file_map has

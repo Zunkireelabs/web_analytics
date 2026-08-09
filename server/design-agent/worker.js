@@ -1,5 +1,5 @@
 import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
-import { createOpenHandsHandler } from './openhands-handler.js';
+import { createDesignAgentHandler } from './openhands-handler.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 
@@ -25,10 +25,14 @@ export async function processOneJob({ handler = notImplementedHandler } = {}) {
 
   await appendJobLog(job.id, `Claimed by worker pid ${process.pid}`);
   try {
-    await handler(job);
+    const outcome = await handler(job);
     await appendJobLog(job.id, 'Job completed');
-    await finishExecutionJob(job.id, { status: 'completed' });
-    return { jobId: job.id, status: 'completed' };
+    // outcome is the handler's own return value (e.g. openhands-handler.js's
+    // { jobId, detail, componentTemplates } for a component-templates job) —
+    // persisted on the job row (090) so a caller that isn't the process that
+    // ran it (a later HTTP request polling job status) can retrieve it.
+    await finishExecutionJob(job.id, { status: 'completed', result: outcome || null });
+    return { jobId: job.id, status: 'completed', result: outcome };
   } catch (err) {
     await appendJobLog(job.id, `Job failed: ${err.message}`);
     await finishExecutionJob(job.id, { status: 'failed' });
@@ -93,7 +97,7 @@ function installShutdownHandlers(worker) {
 
 function main() {
   const pollIntervalMs = Number(process.env.DESIGN_AGENT_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
-  const worker = createWorker({ pollIntervalMs, handler: createOpenHandsHandler() });
+  const worker = createWorker({ pollIntervalMs, handler: createDesignAgentHandler() });
   console.log(`[design-agent-worker] starting — polling every ${pollIntervalMs}ms for kind='design_generate' queued jobs`);
   installShutdownHandlers(worker);
   worker.start();
