@@ -28,6 +28,13 @@ export const COMPONENT_TEMPLATE_KEY = {
   'expand-content': 'expandContent',
   'internal-links': 'internalLinks',
   'qa-content': 'qaContent',
+  // Net-new whole-page markdown content (compliance pages today — terms/
+  // privacy/cookie-policy, see newpage-render.js) has no repeating-item
+  // "rows" the way faq/expand-content/internal-links do, just a single
+  // {{BODY}} slot — same per-site, Design-Agent-derived template mechanism,
+  // one entry, no `row` placeholder requirement (see REQUIRED_PLACEHOLDERS
+  // and validatePlaceholders below).
+  'content-wrapper': 'contentWrapper',
 };
 
 async function fetchText(url) {
@@ -150,13 +157,17 @@ const REQUIRED_PLACEHOLDERS = {
   'expand-content': { wrapper: ['{{ROWS}}'], row: ['{{HEADING}}', '{{BODY}}'] },
   'internal-links': { wrapper: ['{{ROWS}}'], row: ['{{URL}}', '{{ANCHOR_TEXT}}'] },
   'qa-content': { wrapper: ['{{ROWS}}'], row: ['{{QUESTION}}', '{{ANSWER}}'] },
+  // No `row` — a whole-page markdown body isn't a repeating list, it's one
+  // {{BODY}} slot filled once. validatePlaceholders below treats a missing
+  // `row` requirement as "nothing to check", not "row is required but empty".
+  'content-wrapper': { wrapper: ['{{BODY}}'] },
 };
 
 export function validatePlaceholders(actionType, template) {
   const required = REQUIRED_PLACEHOLDERS[actionType];
   const missing = [
     ...required.wrapper.filter((p) => !template.wrapper?.includes(p)),
-    ...required.row.filter((p) => !template.row?.includes(p)),
+    ...(required.row || []).filter((p) => !template.row?.includes(p)),
   ];
   if (missing.length) {
     return { ok: false, error: `Proposed template is missing required placeholder(s): ${missing.join(', ')}.` };
@@ -178,13 +189,14 @@ export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate,
   const html = await fetchPage(pageUrl);
   if (!html) return { ok: false, error: `Could not fetch ${pageUrl} to derive an updated template from its current real design.` };
 
+  const needsRow = (required.row || []).length > 0;
   const system = 'You are a front-end engineer. A previously-configured HTML component template for this site no ' +
     'longer matches its real, live design — the CSS classes it uses are no longer defined on the site (the design ' +
     'changed since the template was captured). Given the site\'s CURRENT real page HTML, derive an UPDATED template ' +
     'with the exact same structure and placeholder tokens as the old one, but using ONLY real classes/patterns you ' +
     'can actually see used elsewhere in the given live HTML — never invent a class name that doesn\'t appear ' +
     'anywhere in the page. Keep the placeholder tokens verbatim (e.g. {{ROWS}}, {{QUESTION}}) — only the ' +
-    'surrounding real markup/classes should change. Respond with ONLY JSON: {"wrapper": "...", "row": "..."}.';
+    `surrounding real markup/classes should change. Respond with ONLY JSON: ${needsRow ? '{"wrapper": "...", "row": "..."}' : '{"wrapper": "..."}'}.`;
   const user = `Action type: ${actionType}\nOld template (now stale — classes no longer defined: ` +
     `${(missingClasses || []).join(', ') || 'unknown'}):\n${JSON.stringify(oldTemplate)}\n\n` +
     `Current live page HTML (excerpt):\n${html.slice(0, 6000)}`;
@@ -197,12 +209,12 @@ export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate,
     const { message } = safeMessage('design-drift.deriveUpdatedTemplate', err, 'Could not derive an updated template right now — try again shortly.');
     return { ok: false, error: message };
   }
-  if (!parsed?.wrapper || !parsed?.row) {
-    return { ok: false, error: 'Model did not return a valid {wrapper, row} template.' };
+  if (!parsed?.wrapper || (needsRow && !parsed?.row)) {
+    return { ok: false, error: `Model did not return a valid {wrapper${needsRow ? ', row' : ''}} template.` };
   }
 
   const validated = validatePlaceholders(actionType, parsed);
   if (!validated.ok) return validated;
 
-  return { ok: true, template: { wrapper: parsed.wrapper, row: parsed.row } };
+  return { ok: true, template: needsRow ? { wrapper: parsed.wrapper, row: parsed.row } : { wrapper: parsed.wrapper } };
 }
