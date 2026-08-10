@@ -28,8 +28,14 @@ const ENV_REF = /process\.env\.([A-Z][A-Z0-9_]*)/g;
 // for citation search; add an entry here whenever a new opt-in flag depends
 // on specific credential env vars, instead of learning about the gap from a
 // user-facing failure again.
+// Each flag maps to a list of ALTERNATIVE credential sets, not one flat
+// list — search-grounding now has two interchangeable providers
+// (ingest/search-grounding-providers/index.js tries serpapi, falls back to
+// google-cse), so the flag is satisfied by either SERPAPI_KEY alone OR the
+// full GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX pair, not by requiring all three
+// together.
 const REQUIRED_CREDENTIALS = {
-  ENABLE_CONTENT_CITATION_SEARCH: ['GOOGLE_CSE_API_KEY', 'GOOGLE_CSE_CX'],
+  ENABLE_CONTENT_CITATION_SEARCH: [['SERPAPI_KEY'], ['GOOGLE_CSE_API_KEY', 'GOOGLE_CSE_CX']],
 };
 
 function walk(dir, out = []) {
@@ -116,18 +122,23 @@ function main() {
   // that SAME workflow — a flag "on" with its credential missing is the
   // silent-400-at-runtime failure mode, not the "never turns on" one above.
   const missingCredentials = [];
-  for (const [flagName, requiredVars] of Object.entries(REQUIRED_CREDENTIALS)) {
+  for (const [flagName, alternativeSets] of Object.entries(REQUIRED_CREDENTIALS)) {
     for (const [workflowFile, names] of Object.entries(workflows)) {
       if (!names.has(flagName)) continue; // flag not even set here — nothing to pair-check
-      const missing = requiredVars.filter((v) => !names.has(v));
-      if (missing.length) missingCredentials.push({ flagName, workflowFile, missing });
+      const satisfied = alternativeSets.some((set) => set.every((v) => names.has(v)));
+      if (satisfied) continue;
+      // Report what's missing from EVERY alternative, so a dev sees a
+      // complete path to satisfy either one, not just the first.
+      const missingPerSet = alternativeSets.map((set) => set.filter((v) => !names.has(v)));
+      missingCredentials.push({ flagName, workflowFile, missingPerSet });
     }
   }
 
   if (missingCredentials.length) {
-    console.log('\nFAIL — flag is set ON in a workflow, but its required credential(s) are missing from that SAME workflow (silently 400s at runtime, looks configured until someone actually triggers it):');
-    for (const { flagName, workflowFile, missing } of missingCredentials) {
-      console.log(`  ${flagName} is set in ${workflowFile}, but missing: ${missing.join(', ')}`);
+    console.log('\nFAIL — flag is set ON in a workflow, but none of its alternative credential set(s) are fully present in that SAME workflow (silently 400s at runtime, looks configured until someone actually triggers it):');
+    for (const { flagName, workflowFile, missingPerSet } of missingCredentials) {
+      const alternatives = missingPerSet.map((missing) => `[${missing.join(', ')}]`).join(' OR ');
+      console.log(`  ${flagName} is set in ${workflowFile}, but needs one full set from: ${alternatives}`);
     }
   }
 

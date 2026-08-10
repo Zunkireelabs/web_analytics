@@ -104,12 +104,29 @@ jobs:
             # ── Competitor Intelligence (free real-SERP alternative to DataForSEO) ──
             # Without these, competitor-intelligence.js falls back to
             # LLM-only reasoning instead of real, SERP-verified competitor
-            # discovery.
-            COMPETITOR_PROVIDER=google-cse
+            # discovery. GOOGLE_CSE_API_KEY's project has no billing account
+            # linked (Custom Search JSON API requires one even for free-tier
+            # usage), so it silently fails every real call despite passing
+            # configured() — detectCompetitorsFromSerp's per-query
+            # `catch { continue; }` (competitor-analysis.js) meant this had
+            # been falling back to LLM-only guessing on every run, with no
+            # visible error. COMPETITOR_PROVIDER now points at serpapi
+            # (verified working, real position-ordered SERP data returned)
+            # instead — GOOGLE_CSE_API_KEY/CX kept below only as inert
+            # leftover credentials, not read by anything while
+            # COMPETITOR_PROVIDER=serpapi.
+            COMPETITOR_PROVIDER=serpapi
             GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
             GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
 
-            # ── Content Expansion citations (opt-in, shares the Google CSE key/quota above) ──
+            # ── Search grounding (no-billing SerpApi, see
+            # ingest/search-grounding-providers/index.js) ──
+            # Content Expansion citations (opt-in, below) and any future
+            # search-grounding caller try this before falling back to the
+            # (currently broken, no billing linked) Google CSE key above.
+            SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+
+            # ── Content Expansion citations (opt-in, grounded via SERPAPI_KEY above) ──
             # Without this, expand-content.js refuses to draft external-citations
             # sections rather than invent an ungrounded link (see generators/expand-content.js).
             ENABLE_CONTENT_CITATION_SEARCH=true
