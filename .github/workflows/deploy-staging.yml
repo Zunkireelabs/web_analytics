@@ -104,12 +104,25 @@ jobs:
             # ── Competitor Intelligence (free real-SERP alternative to DataForSEO) ──
             # Without these, competitor-intelligence.js falls back to
             # LLM-only reasoning instead of real, SERP-verified competitor
-            # discovery.
+            # discovery. GOOGLE_CSE_API_KEY's project has no billing account
+            # linked (Custom Search JSON API requires one even for free-tier
+            # usage), so it's currently non-functional despite passing
+            # configured() — kept here as a fallback should someone link
+            # billing later, but COMPETITOR_PROVIDER stays on google-cse
+            # until a deliberate decision to switch (see SERPAPI_KEY below
+            # for the search-grounding side of this same gap).
             COMPETITOR_PROVIDER=google-cse
             GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
             GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
 
-            # ── Content Expansion citations (opt-in, shares the Google CSE key/quota above) ──
+            # ── Search grounding (no-billing SerpApi, see
+            # ingest/search-grounding-providers/index.js) ──
+            # Content Expansion citations (opt-in, below) and any future
+            # search-grounding caller try this before falling back to the
+            # (currently broken, no billing linked) Google CSE key above.
+            SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+
+            # ── Content Expansion citations (opt-in, grounded via SERPAPI_KEY above) ──
             # Without this, expand-content.js refuses to draft external-citations
             # sections rather than invent an ungrounded link (see generators/expand-content.js).
             ENABLE_CONTENT_CITATION_SEARCH=true
