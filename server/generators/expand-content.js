@@ -27,10 +27,13 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
   'invent a feature, price, policy, or fact not present in the excerpt. Respond with ONLY a JSON array: ' +
   '[{"heading": "...", "body": "..."}, ...]';
 
-const SYSTEM_AUTHOR = 'You are a content strategist. Given a page\'s real body text, draft an author/byline section that can be added to the page. ' +
-  'The section should include a plausible author name/role based on the content topic, and schema.org Author markup guidance. ' +
-  'Do NOT invent a specific real person — use a placeholder like "By [Author Name], [Role]" with guidance on where to add real author schema. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
+// Same "[NEEDS INPUT — ...]" convention schema.js/open-graph.js/
+// analytics-install.js already use for "real data doesn't exist yet" —
+// content-scaffolding-guard.js's placeholder-bracket/author-placeholder
+// patterns are written to exempt this exact literal (they only match
+// LLM-authored brackets like "[Author Name]"), so this is the one
+// author-byline body the Quality Gate can never reject.
+const AUTHOR_PLACEHOLDER_NOTE = '[NEEDS INPUT — not verifiable from real site data]';
 
 const SYSTEM_FRESHNESS = 'You are a content strategist. Given a page\'s real body text, draft a "Last Updated" or "Published On" section with schema.org datePublished/dateModified markup guidance. ' +
   'Do NOT invent a specific date — use a placeholder with guidance on where to add the real date. ' +
@@ -53,7 +56,6 @@ const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
 
 const FOCUS_SYSTEMS = {
-  'author-byline': SYSTEM_AUTHOR,
   'freshness-date': SYSTEM_FRESHNESS,
   'comparison-content': SYSTEM_COMPARISON,
 };
@@ -89,6 +91,23 @@ export async function generate({ siteId, params }) {
       const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
       return { content, summary: `Author byline for ${page}: "${byline}"` };
     }
+    // No configured author profile: a deterministic placeholder, not an LLM
+    // call. This used to ask the LLM to write "By [Author Name], [Role]" —
+    // but content-scaffolding-guard.js's author-placeholder pattern exists
+    // specifically to reject that exact bracket text (so a fake-looking
+    // byline can never auto-ship), which meant this focus failed the
+    // Quality Gate on EVERY attempt, for EVERY site with no author profile
+    // configured — a guaranteed, permanent failure surfaced as a generic
+    // "try again shortly" error, not the flaky case that message implies.
+    const content = {
+      page,
+      sections: [{
+        heading: 'About the Author',
+        body: `${AUTHOR_PLACEHOLDER_NOTE} — configure a real author name (Settings) for this site, then re-check this recommendation, or add author/byline markup by hand.`,
+      }],
+      focus,
+    };
+    return { content, summary: `Author byline placeholder for ${page} — no author profile configured for this site yet.` };
   }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
