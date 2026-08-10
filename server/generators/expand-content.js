@@ -27,9 +27,16 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
   'invent a feature, price, policy, or fact not present in the excerpt. Respond with ONLY a JSON array: ' +
   '[{"heading": "...", "body": "..."}, ...]';
 
-const SYSTEM_FRESHNESS = 'You are a content strategist. Given a page\'s real body text, draft a "Last Updated" or "Published On" section with schema.org datePublished/dateModified markup guidance. ' +
-  'Do NOT invent a specific date — use a placeholder with guidance on where to add the real date. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
+// No LLM call for freshness-date (see below): the prior prompt asked the
+// LLM to write a placeholder date, but content-scaffolding-guard.js's
+// placeholder-bracket pattern exists specifically to reject that shape of
+// text, so this focus failed the Quality Gate on EVERY attempt, for EVERY
+// page — the same guaranteed-to-fail class as the author-byline focus
+// above. Unlike an author name, a missing datePublished/dateModified has a
+// real, verifiable fix that needs no LLM and no placeholder at all:
+// today's actual date is the true, honest "last updated" date for content
+// being published right now — same convention schema.js's DATE_FIELD_RE
+// auto-fill already uses for the same field.
 
 const SYSTEM_COMPARISON = 'You are a content strategist. Given a page\'s real body text and target query, draft a comparison/alternatives section. ' +
   'Include a comparison table structure or "X vs Y" style content grounded in the page topic. ' +
@@ -48,7 +55,6 @@ const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
 
 const FOCUS_SYSTEMS = {
-  'freshness-date': SYSTEM_FRESHNESS,
   'comparison-content': SYSTEM_COMPARISON,
 };
 
@@ -99,6 +105,21 @@ export async function generate({ siteId, params }) {
     const byline = organizationByline(site);
     const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
     return { content, summary: `Author byline for ${page}: "${byline}"` };
+  }
+
+  if (focus === 'freshness-date') {
+    const today = new Date().toISOString().slice(0, 10);
+    const content = {
+      page,
+      sections: [{
+        heading: 'Last Updated',
+        body: `This page was last updated on ${today}. Add a visible <time datetime="${today}">${today}</time> element ` +
+          `near the top of the page, and set datePublished/dateModified to "${today}" in this page's JSON-LD (or an ` +
+          '"article:modified_time" meta tag) so AI engines and search crawlers can see the freshness signal.',
+      }],
+      focus,
+    };
+    return { content, summary: `Freshness-date section for ${page}: dateModified ${today}` };
   }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;

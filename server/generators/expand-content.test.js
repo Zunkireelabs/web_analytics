@@ -94,3 +94,35 @@ describe('expand-content generator — author-byline with no configured author p
     } finally { globalThis.fetch = original; }
   });
 });
+
+// Real incident (2026-08-10): the old freshness-date prompt told the LLM to
+// write a placeholder date, which content-scaffolding-guard.js's
+// placeholder-bracket pattern then rejected on every attempt — a guaranteed
+// failure, same bug class as the author-byline case above. Fixed by making
+// freshness-date deterministic (today's real date, no LLM call) instead.
+describe('expand-content generator — freshness-date', () => {
+  test('drafts a deterministic Last Updated section with today\'s real date, without calling the LLM, and passes the Quality Gate', async () => {
+    const original = globalThis.fetch;
+    let llmWasCalled = false;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('anthropic') || String(url).includes('openai')) llmWasCalled = true;
+      return {
+        ok: true,
+        headers: { get: () => 'text/html; charset=utf-8' },
+        text: async () => '<html><head><title>Real Page</title></head><body><main><p>'
+          + 'Real, substantial page body content about a product. '.repeat(10)
+          + '</p></main></body></html>',
+        url,
+      };
+    };
+    try {
+      const { content } = await generate({ siteId: 1, params: { page: 'https://example.com/real-page', focus: 'freshness-date' } });
+      assert.equal(llmWasCalled, false);
+      const today = new Date().toISOString().slice(0, 10);
+      assert.match(content.sections[0].body, new RegExp(today));
+      const gate = runQualityGate(content, meta.id);
+      assert.deepEqual(gate.issues, []);
+      assert.equal(gate.clean, true);
+    } finally { globalThis.fetch = original; }
+  });
+});

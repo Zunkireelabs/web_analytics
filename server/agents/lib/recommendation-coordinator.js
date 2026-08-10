@@ -60,9 +60,22 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // external-citations params — generating it then ran the wrong focus and
 // surfaced a citation-search error under an author-byline heading. Same
 // fix as analytics-install: encode the discriminator into the key.
+//
+// broken-link-fix (also used for the "invalid citation" variant — see
+// technical-seo.js) has it too: `params.page` is only the FIRST page a dead
+// href happened to be crawled from (c.sourcePages[0]), so two unrelated dead
+// links that both first turned up on the same page (e.g. a shared
+// footer/nav template, or a repeated citation across many blog posts)
+// collided into one row. Confirmed as a real report: a site with 4 distinct
+// verified broken links showed only 1 in the Action Center, and its `href`
+// kept flipping to whichever finding synced last — the other 3 findings
+// were tracked in finding_ids (so they never re-opened) but had no row of
+// their own to generate a fix from. `href` is the actual identity of a
+// broken-link-fix recommendation, not the page it was first seen on.
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
+  if (item.generatorId === 'broken-link-fix') return `${item.params?.page || ''}::${item.params?.href || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }
