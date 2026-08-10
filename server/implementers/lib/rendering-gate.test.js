@@ -140,5 +140,8 @@ test('checkClientBuildStatus: a GitHub API error is reported honestly, not swall
   const result = await checkClientBuildStatus(site, 'ref', fakeGetCheckRuns);
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'client-build-check-unavailable');
-  assert.match(result.error, /Not Found/);
+  // Reported, not swallowed — but sanitized: the raw GitHub error text must
+  // not reach this (client-visible) result. See server/lib/errors.js.
+  assert.doesNotMatch(result.error, /Not Found/);
+  assert.match(result.error, /ref/);
 });

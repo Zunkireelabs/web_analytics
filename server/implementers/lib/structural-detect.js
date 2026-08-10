@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { parse as babelParse } from '@babel/parser';
 import babelTraverse from '@babel/traverse';
+import { safeMessage } from '../../lib/errors.js';
 
 // Structural (AST/DOM-based) detection of a "real content container" — the
 // universal insertion engine's first layer (see insertion-engine.js). Answers
@@ -233,7 +234,8 @@ function detectJsxContainer(fileContent, { trustedTagName = null } = {}) {
       errorRecovery: false,
     });
   } catch (err) {
-    return { ok: false, reason: 'parse-error', error: `Could not parse this file as JSX/TSX: ${err.message}` };
+    const { message } = safeMessage('structural-detect.detectJsxContainer', err, 'Could not parse this file as JSX/TSX.');
+    return { ok: false, reason: 'parse-error', error: message };
   }
 
   const roots = findReturnedJsxRoots(ast);

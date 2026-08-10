@@ -47,6 +47,7 @@
 //   }
 
 import { getCheckRunsForRef } from '../../github/client.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // Longest known compound suffix first (e.g. `.11ty.md` before `.md`) so a
 // generator-specific compound extension isn't shadowed by naively splitting
@@ -158,9 +159,10 @@ export async function checkClientBuildStatus(site, ref, getCheckRuns = getCheckR
   try {
     runs = await getCheckRuns(site, ref);
   } catch (err) {
+    const { message } = safeMessage('rendering-gate.checkClientBuildStatus', err, `Could not read GitHub check runs for "${ref}" right now.`);
     return {
       ok: false, reason: 'client-build-check-unavailable',
-      error: `Could not read GitHub check runs for "${ref}": ${err.message}`,
+      error: message,
     };
   }
 
