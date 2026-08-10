@@ -8,6 +8,7 @@ import {
   insertNewArrayField, assertValidContent, dedupeAndValidateFaqItems,
   parseExistingFaqItems, parseManagedFaqItems, diffFaqItems,
   findScalarFieldRange, spliceScalarField,
+  findRootObjectBounds, findObjectFieldRange, removeArrayItemByField,
 } from './js-data-splice.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,12 @@ const FIXTURES = join(HERE, '__fixtures__');
 const locations = readFileSync(join(FIXTURES, 'locations.js'), 'utf8');
 const comparisons = readFileSync(join(FIXTURES, 'comparisons.js'), 'utf8');
 const glossary = readFileSync(join(FIXTURES, 'glossary.js'), 'utf8');
+// Real productsDetails.json content (trimmed to 2 of 6 product entries),
+// fetched 2026-08-10 while investigating a stuck broken-link-fix draft —
+// see implementers/backend.js's resolveLinkDataSources-driven layer. Its
+// nested `useCases[].id: "resources"` field is a deliberate stress case:
+// the top-level `"resources": [...]` lookup must not be confused by it.
+const productsDetails = readFileSync(join(FIXTURES, 'productsDetails.json'), 'utf8');
 
 describe('findObjectRange — js-export-array format', () => {
   test('finds every real location entry', () => {
@@ -361,5 +368,84 @@ describe('scanBalanced', () => {
 
   test('returns -1 for unbalanced content', () => {
     assert.equal(scanBalanced('[ "no closing bracket"', 1, '[', ']'), -1);
+  });
+});
+
+describe('findRootObjectBounds', () => {
+  test('finds the whole file for a root-object-keyed-by-id JSON file (productsDetails.json shape)', () => {
+    const bounds = findRootObjectBounds(productsDetails);
+    assert.ok(bounds);
+    assert.equal(productsDetails[bounds.start], '{');
+    assert.equal(productsDetails[bounds.end], '}');
+  });
+
+  test('returns null when the content has no object at all', () => {
+    assert.equal(findRootObjectBounds('[1, 2, 3]'.slice(1, -1)), null);
+  });
+});
+
+describe('findObjectFieldRange on root object bounds — locating a productsDetails.json entry by id', () => {
+  test('finds each real product entry, not confused by the other', () => {
+    const bounds = findRootObjectBounds(productsDetails);
+    for (const id of ['ai-booking-engine', 'dental-ai']) {
+      const entry = findObjectFieldRange(productsDetails, bounds, id, 'json-array');
+      assert.ok(entry, `expected to find "${id}"`);
+      assert.match(productsDetails.slice(entry.start, entry.end + 1), new RegExp(`"id":\\s*"${id}"`));
+    }
+  });
+
+  test('finds the top-level "resources" array field, not the nested useCases[].id: "resources"', () => {
+    const bounds = findRootObjectBounds(productsDetails);
+    const entry = findObjectFieldRange(productsDetails, bounds, 'ai-booking-engine', 'json-array');
+    const resources = findArrayFieldRange(productsDetails, entry, 'resources', 'json-array');
+    assert.ok(resources);
+    const items = JSON.parse(`[${productsDetails.slice(resources.start, resources.end)}]`);
+    assert.ok(items.every((it) => typeof it.url === 'string'), 'every resources[] item should be a real resource with a url, not the nested useCases entry');
+    assert.ok(items.some((it) => it.url === '/docs/booking/api/'));
+  });
+});
+
+describe('removeArrayItemByField', () => {
+  test('removes the one matching resources[] item by url (absolute-vs-relative variant), leaves the rest untouched', () => {
+    const bounds = findRootObjectBounds(productsDetails);
+    const entry = findObjectFieldRange(productsDetails, bounds, 'ai-booking-engine', 'json-array');
+    const resources = findArrayFieldRange(productsDetails, entry, 'resources', 'json-array');
+    const before = JSON.parse(`[${productsDetails.slice(resources.start, resources.end)}]`);
+
+    const newContent = removeArrayItemByField(
+      productsDetails, resources, 'url',
+      ['https://zunkireelabs.com/docs/booking/api/', '/docs/booking/api/', '/docs/booking/api'],
+      'json-array',
+    );
+    assert.ok(newContent);
+    assert.ok(JSON.parse(newContent)); // still valid JSON
+
+    const reparsedBounds = findRootObjectBounds(newContent);
+    const reparsedEntry = findObjectFieldRange(newContent, reparsedBounds, 'ai-booking-engine', 'json-array');
+    const reparsedResources = findArrayFieldRange(newContent, reparsedEntry, 'resources', 'json-array');
+    const after = JSON.parse(`[${newContent.slice(reparsedResources.start, reparsedResources.end)}]`);
+
+    assert.equal(after.length, before.length - 1);
+    assert.ok(!after.some((it) => it.url === '/docs/booking/api/'));
+    assert.ok(after.some((it) => it.url === '/docs/booking/quickstart/'), 'other resources must be untouched');
+
+    // The other product entry (dental-ai) must be completely unaffected.
+    const dentalEntryBefore = findObjectFieldRange(productsDetails, bounds, 'dental-ai', 'json-array');
+    const dentalEntryAfter = findObjectFieldRange(newContent, reparsedBounds, 'dental-ai', 'json-array');
+    assert.equal(
+      productsDetails.slice(dentalEntryBefore.start, dentalEntryBefore.end + 1),
+      newContent.slice(dentalEntryAfter.start, dentalEntryAfter.end + 1),
+    );
+  });
+
+  test('returns null (honest no-match) when no item has that url', () => {
+    const bounds = findRootObjectBounds(productsDetails);
+    const entry = findObjectFieldRange(productsDetails, bounds, 'ai-booking-engine', 'json-array');
+    const resources = findArrayFieldRange(productsDetails, entry, 'resources', 'json-array');
+    assert.equal(removeArrayItemByField(productsDetails, resources, 'url', ['/docs/nonexistent/'], 'json-array'), null);
+  });
+
+  test('returns null for an unsupported format rather than guessing', () => {
+    assert.equal(removeArrayItemByField('[]', { start: 0, end: 0 }, 'url', ['/x'], 'js-export-array'), null);
   });
 });

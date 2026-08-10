@@ -1,4 +1,4 @@
-import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
+import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
@@ -15,6 +15,7 @@ import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
+import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, removeArrayItemByField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 
 export const meta = {
@@ -446,17 +447,60 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const sourceAttempts = attempted.filter((a) => a.matchedVia === 'source-page');
   const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
   const noAnchor = sourceAttempts.length - noMapping;
+  const dataSourceAttempts = attempted.filter((a) => a.matchedVia === 'link-data-source');
   const searchAttempts = attempted.filter((a) => a.matchedVia === 'code-search');
   const searchError = searchAttempts.find((a) => a.reason === 'code-search-error');
 
   const sourceSummary = `${sourcePages.length} known source page(s) (${noMapping} have no url_file_map entry; ${noAnchor} mapped file(s) don't contain this link)`;
+  const dataSourceSummary = dataSourceAttempts.length
+    ? `; also checked ${dataSourceAttempts.length} configured data-array source(s), none matched`
+    : '';
   const searchSummary = searchError
     ? `code search fallback failed: ${searchError.error}`
     : searchAttempts.length
       ? `also checked ${searchAttempts.length} GitHub code-search candidate(s), none matched`
       : 'code search fallback found no candidates';
 
-  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary} — ${searchSummary}.`;
+  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary} — ${searchSummary}.`;
+}
+
+// The id to match within a linkDataSources dataFile is the page URL's own
+// last path segment — same convention adapters/data-array-content.js's
+// idFromPageUrl already establishes for "one entry per page, keyed by its
+// own URL slug" data files (productsDetails.json, servicesDetails.json).
+function lastPathSegment(pageUrl) {
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { return null; }
+  const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
+  return segments.length ? segments[segments.length - 1] : null;
+}
+
+// Pure content -> content edit for one linkDataSources config against
+// already-fetched file content — split out from the fetch/dedupe loop below
+// so multiple matches within the SAME dataFile (e.g. two different pages'
+// dead links both living in productsDetails.json) chain onto each other's
+// already-edited content instead of each starting fresh from beforeRef and
+// clobbering the other's edit.
+function applyLinkDataSourceEdit(content, page, href, source) {
+  const id = lastPathSegment(page);
+  if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page}".` };
+
+  const format = source.format || 'json-array';
+  const rootBounds = findRootObjectBounds(content);
+  if (!rootBounds) return { ok: false, reason: 'no-match', error: `Could not find a root object in ${source.dataFile}.` };
+  const entryRange = findObjectFieldRange(content, rootBounds, id, format);
+  if (!entryRange) return { ok: false, reason: 'no-match', error: `No "${id}" entry found in ${source.dataFile}.` };
+  const arrayRange = findArrayFieldRange(content, entryRange, source.itemsField, format);
+  if (!arrayRange) return { ok: false, reason: 'no-match', error: `"${id}" has no "${source.itemsField}" array in ${source.dataFile}.` };
+
+  const urlField = source.urlField || 'url';
+  const newContent = removeArrayItemByField(content, arrayRange, urlField, hrefVariants(href), format);
+  if (!newContent) return { ok: false, reason: 'no-match', error: `No "${urlField}" matching "${href}" found in ${source.dataFile}'s "${id}" entry.` };
+
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${source.dataFile}'s syntax (${check.error}) — refused to apply.` };
+
+  return { ok: true, newContent };
 }
 
 async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
@@ -473,28 +517,71 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   const files = [];
   const attempted = [];
   const seenPaths = new Set();
+  // dataFile -> { oldContent, content, matchedFrom } — accumulates edits
+  // across sourcePages so two matches in the SAME shared data file compose
+  // instead of the second overwriting the first's work.
+  const dataFileEdits = new Map();
 
   // Layer 1: every known source page's mapped file, not just the first —
   // and every one that genuinely matches, not just the first success. The
   // same dead href is often hardcoded on more than one page's own file.
   for (const page of sourcePages) {
     const filePath = resolveFile(site, page);
-    if (!filePath) { attempted.push({ page, matchedVia: 'source-page', reason: 'no-file-mapping' }); continue; }
-    if (seenPaths.has(filePath)) continue;
-    seenPaths.add(filePath);
+    if (!filePath) {
+      attempted.push({ page, matchedVia: 'source-page', reason: 'no-file-mapping' });
+    } else if (!seenPaths.has(filePath)) {
+      seenPaths.add(filePath);
+      const file = await getFileContent(site, filePath, beforeRef);
+      if (!file) {
+        attempted.push({ page, filePath, matchedVia: 'source-page', reason: 'file-not-found' });
+      } else {
+        const conflict = detectConflictMarkers(file.content);
+        if (conflict) {
+          attempted.push({ page, filePath, matchedVia: 'source-page', reason: conflict.reason, error: conflict.error });
+        } else {
+          const stripped = stripLink(file.content, href);
+          if (!stripped.ok) {
+            attempted.push({ page, filePath, matchedVia: 'source-page', reason: stripped.reason, error: stripped.error });
+          } else {
+            files.push({
+              filePath, oldContent: file.content, newContent: stripped.newContent,
+              changedRegions: [{ field: 'href', before: href, after: null }],
+              matchedVia: 'source-page', matchedFrom: page,
+            });
+          }
+        }
+      }
+    }
 
-    const file = await getFileContent(site, filePath, beforeRef);
-    if (!file) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: 'file-not-found' }); continue; }
-    const conflict = detectConflictMarkers(file.content);
-    if (conflict) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: conflict.reason, error: conflict.error }); continue; }
+    // Layer 1.5: shared data-array sources configured for this page (e.g. a
+    // product page's "Resources" links, rendered by a shared layout from
+    // productsDetails.json — not hardcoded in the page's own template file
+    // at all, so Layer 1 above can never find them there; see
+    // resolveLinkDataSources's doc comment for how this was discovered).
+    for (const source of resolveLinkDataSources(site, page)) {
+      let working = dataFileEdits.get(source.dataFile);
+      if (!working) {
+        const file = await getFileContent(site, source.dataFile, beforeRef);
+        if (!file) { attempted.push({ page, filePath: source.dataFile, matchedVia: 'link-data-source', reason: 'file-not-found' }); continue; }
+        const conflict = detectConflictMarkers(file.content);
+        if (conflict) { attempted.push({ page, filePath: source.dataFile, matchedVia: 'link-data-source', reason: conflict.reason, error: conflict.error }); continue; }
+        working = { oldContent: file.content, content: file.content, matchedFrom: page };
+        dataFileEdits.set(source.dataFile, working);
+      }
 
-    const stripped = stripLink(file.content, href);
-    if (!stripped.ok) { attempted.push({ page, filePath, matchedVia: 'source-page', reason: stripped.reason, error: stripped.error }); continue; }
+      const result = applyLinkDataSourceEdit(working.content, page, href, source);
+      if (!result.ok) { attempted.push({ page, filePath: source.dataFile, matchedVia: 'link-data-source', reason: result.reason, error: result.error }); continue; }
+      working.content = result.newContent;
+      working.matchedFrom = page;
+    }
+  }
 
+  for (const [filePath, working] of dataFileEdits) {
+    if (working.content === working.oldContent) continue; // configured but no entry actually matched this href
     files.push({
-      filePath, oldContent: file.content, newContent: stripped.newContent,
+      filePath, oldContent: working.oldContent, newContent: working.content,
       changedRegions: [{ field: 'href', before: href, after: null }],
-      matchedVia: 'source-page', matchedFrom: page,
+      matchedVia: 'link-data-source', matchedFrom: working.matchedFrom,
     });
   }
 

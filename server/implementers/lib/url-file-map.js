@@ -183,6 +183,31 @@ export function resolveAdapter(site, pageUrl, actionType) {
   return getMatchingPattern(site, pageUrl)?.adapters?.[actionType] || null;
 }
 
+// Additional candidate files broken-link-fix's Layer 1 should also check for
+// a page, beyond the page's own mapped template file (resolveFile above) —
+// for a link that's rendered by a SHARED layout from a data array, not
+// hardcoded in the page's own file at all (e.g. zunkireelabs-web's product
+// pages: `src/pages/products/<id>.njk` is just front-matter, the real
+// "Resources" links render from `src/_data/productsDetails.json`'s
+// `resources[]`, via the shared `product.njk` layout — confirmed 2026-08-10
+// investigating a stuck broken-link-fix draft where neither the mapped page
+// file nor GitHub code search could find the link). Unlike resolveAdapter,
+// this is never a full replacement for who writes the change — it's purely
+// more places to LOOK, so backend.js's own Layer 1 still tries resolveFile's
+// page-template file first, same file-content-plus-regex verification
+// either way (never trusted on config alone). Shape: [{ dataFile, itemsField,
+// urlField, format? }, ...] — `format` defaults to 'json-array' (see
+// js-data-splice.js's removeArrayItemByField, the only format it supports
+// today). The per-entry id to match within dataFile is always the page URL's
+// own last path segment (same convention as adapters/data-array-content.js's
+// idFromPageUrl) — no separate idField needed since every real case so far
+// is "one entry per page, keyed by its own URL slug."
+export function resolveLinkDataSources(site, pageUrl) {
+  const entry = getPageEntry(site, pageUrl);
+  if (entry?.linkDataSources) return entry.linkDataSources;
+  return getMatchingPattern(site, pageUrl)?.linkDataSources || [];
+}
+
 // Render mode (visible vs. schema-only) is NOT resolved here, and
 // deliberately has no static config surface — see
 // implementers/lib/render-inspector.js. It's decided fresh on every call by
