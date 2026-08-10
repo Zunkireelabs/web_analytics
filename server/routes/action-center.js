@@ -21,8 +21,9 @@ import { validateRendering, checkClientBuildStatus } from '../implementers/lib/r
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
+  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
+import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
@@ -113,7 +114,7 @@ async function buildRenderModeHint(siteId, actionType, page) {
     if (!filePath) return null;
     const file = await getFileContent(site, filePath, baseBranch(site));
     if (!file) return null;
-    const visibleFaqCount = await countVisibleFaqPages(site);
+    const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
     return await inspectRenderMode(file.content, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
   } catch {
     return null;

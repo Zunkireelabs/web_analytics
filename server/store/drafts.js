@@ -295,8 +295,33 @@ export async function countVisibleFaqDrafts(siteId) {
 // "Recalculate FAQ baseline" action). Using countVisibleFaqDrafts alone
 // would let a site's total visible-FAQ pages exceed visible_faq_cap once
 // any pre-existing organic FAQs are counted in.
+//
+// Purely historical — a page counted here forever counts, even if its
+// visible FAQ was later removed (a manual edit, a revert, a redesign
+// outside this tool). implementers/lib/faq-render-mode.js's
+// countCurrentlyVisibleFaqPages is the live-state-verified version of this
+// same total, and is what actually gates new visible-FAQ decisions —
+// this function stays as the cheap/instant hint path and for any caller
+// that only needs the historical figure, not a real-time cap check.
 export async function countVisibleFaqPages(site) {
   return (await countVisibleFaqDrafts(site.id)) + (site.visible_faq_baseline || 0);
+}
+
+// One row per page this tool ever pushed a visible FAQ to (see
+// countVisibleFaqDrafts above for why render_mode = 'visible' alone is
+// enough to mean "a real branch was pushed") — the candidate set
+// faq-render-mode.js's countCurrentlyVisibleFaqPages re-checks against each
+// page's CURRENT live content, since a historical push is not proof the FAQ
+// is still there today.
+export async function distinctVisibleFaqDraftPages(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT COALESCE(content->>'page', input->>'page') AS page
+     FROM drafts
+     WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible'
+       AND COALESCE(content->>'page', input->>'page') IS NOT NULL`,
+    [siteId]
+  );
+  return rows.map((r) => r.page);
 }
 
 // Cross-mechanism duplicate guard for lib/faq-render-mode.js: marker-merge
