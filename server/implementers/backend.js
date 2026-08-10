@@ -6,7 +6,7 @@ import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/inserti
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
-import { rewriteHref, stripLink, getAnchorsForHref } from './lib/href-rewrite-inject.js';
+import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
 import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
@@ -504,12 +504,22 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   // never speculative. GitHub's code search has its own, stricter rate
   // limit than the Contents API, so a failure here degrades to "no
   // candidates" rather than failing the whole preview/apply.
-  let candidates = [];
-  try {
-    candidates = await searchCodeForString(site, href, { maxResults: CODE_SEARCH_MAX_CANDIDATES });
-  } catch (err) {
-    const { message } = safeMessage('backend.computeBrokenLinkFixMerge', err, 'the code search fallback is temporarily unavailable');
-    attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: message });
+  //
+  // GitHub code search is a literal-text search — searching only the
+  // absolute href never surfaces a file that hardcodes the same link
+  // site-relative (the exact form stripLink's own hrefVariants already
+  // knows how to match once a file IS fetched), so every variant gets its
+  // own query, deduped, up to the same overall candidate cap.
+  const candidates = new Set();
+  for (const variant of hrefVariants(href)) {
+    if (candidates.size >= CODE_SEARCH_MAX_CANDIDATES) break;
+    try {
+      const found = await searchCodeForString(site, variant, { maxResults: CODE_SEARCH_MAX_CANDIDATES - candidates.size });
+      found.forEach((f) => candidates.add(f));
+    } catch (err) {
+      const { message } = safeMessage('backend.computeBrokenLinkFixMerge', err, 'the code search fallback is temporarily unavailable');
+      attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: message });
+    }
   }
 
   for (const filePath of candidates) {

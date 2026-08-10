@@ -29,7 +29,7 @@ function anchorRegex(href) {
 // trailing slash. Matching only the exact absolute string misses those and
 // falsely reports the link as absent from a file that plainly contains it —
 // so every caller tries the absolute href first, then its relative forms.
-function hrefVariants(href) {
+export function hrefVariants(href) {
   const variants = [href];
   try {
     const { pathname } = new URL(href);
