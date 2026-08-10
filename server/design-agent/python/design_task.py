@@ -76,6 +76,9 @@ REQUIRED_PLACEHOLDERS = {
     "expand-content": {"wrapper": ["{{ROWS}}"], "row": ["{{HEADING}}", "{{BODY}}"]},
     "internal-links": {"wrapper": ["{{ROWS}}"], "row": ["{{URL}}", "{{ANCHOR_TEXT}}"]},
     "qa-content": {"wrapper": ["{{ROWS}}"], "row": ["{{QUESTION}}", "{{ANSWER}}"]},
+    # Whole-page markdown content (compliance pages) — one {{BODY}} slot,
+    # no repeating "row" the way the others above have.
+    "content-wrapper": {"wrapper": ["{{BODY}}"]},
 }
 
 
@@ -118,23 +121,25 @@ def build_component_templates_task(action_types):
         "before concluding anything.\n",
         "For each of the following content types, find how this site already "
         "renders that kind of content (an existing FAQ section, a related-content/"
-        "internal-links block, an expandable content section, whichever of these "
-        "already exist somewhere in the real site) and derive an HTML template "
-        "with EXACTLY the required placeholder tokens, using ONLY real CSS "
-        "classes/markup patterns you can actually see used in the real repository "
-        "— never invent a class name that doesn't appear anywhere in the real "
-        "source. If this site has no existing real example of a given type, "
-        "derive a template that matches the site's other real components' "
-        "typography/spacing/card style as closely as possible, still using only "
-        "real classes seen elsewhere in the repo.\n",
+        "internal-links block, an expandable content section, the typography "
+        "wrapper around long-form Markdown-sourced body content such as a blog "
+        "post — whichever of these already exist somewhere in the real site) and "
+        "derive an HTML template with EXACTLY the required placeholder tokens, "
+        "using ONLY real CSS classes/markup patterns you can actually see used in "
+        "the real repository — never invent a class name that doesn't appear "
+        "anywhere in the real source. If this site has no existing real example of "
+        "a given type, derive a template that matches the site's other real "
+        "components' typography/spacing/card style as closely as possible, still "
+        "using only real classes seen elsewhere in the repo.\n",
     ]
     for action_type in action_types:
         required = REQUIRED_PLACEHOLDERS.get(action_type)
         if not required:
             continue
+        row = required.get("row")
+        row_clause = f"; row must contain {', '.join(row)}" if row else ""
         lines.append(
-            f"- \"{action_type}\": wrapper must contain {', '.join(required['wrapper'])}; "
-            f"row must contain {', '.join(required['row'])}."
+            f"- \"{action_type}\": wrapper must contain {', '.join(required['wrapper'])}{row_clause}."
         )
     lines.append(
         "\nWhen you are done, respond with ONLY a JSON object (no prose, no code "

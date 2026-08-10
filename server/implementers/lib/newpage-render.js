@@ -148,22 +148,25 @@ export function extractPreservedFrontMatter(rawContent) {
 // extractPreservedFrontMatter, existing-file overwrites only) is written
 // first so a real layout/permalink always wins over nothing.
 //
-// Body is wrapped in a raw `.prose` div, mirroring the one real styled-
-// Markdown convention this platform's sites already have (blog post bodies)
-// rather than inventing new classes — none of this platform's real base
-// layouts apply typography styling to `{{ content | safe }}` on their own,
-// so without this every compliance page ships as bare, unstyled
-// `<h1>/<h2>/<p>` (confirmed live on zunkireelabs-web's own /terms/,
-// /privacy/, /cookies/ before this fix — see fix/legal-page-prose-styling).
-// A blank line right after the opening tag and right before the closing tag
-// keeps them as their own markdown-it HTML blocks, so everything between is
-// still parsed as normal markdown instead of being swallowed verbatim.
-const PROSE_CLASSES = 'prose prose-lg prose-gray max-w-none ' +
-  'prose-headings:font-normal prose-headings:tracking-tight ' +
-  'prose-h2:text-2xl prose-h2:md:text-3xl prose-h2:mt-12 prose-h2:mb-6 ' +
-  'prose-p:leading-relaxed prose-p:text-gray-600 ' +
-  'prose-strong:font-medium prose-strong:text-gray-900 ' +
-  'prose-blockquote:border-l-zunkiree-500 prose-blockquote:bg-gray-50 prose-blockquote:py-1 prose-blockquote:px-6 prose-blockquote:not-italic';
+// Body is wrapped in this SITE's own real typography markup — the same
+// per-tenant componentTemplates mechanism marker-merge.js already uses for
+// faq/expandContent/internalLinks/qaContent (design-drift.js's
+// COMPONENT_TEMPLATE_KEY['content-wrapper'] = 'contentWrapper'), derived by
+// the Design Agent from the site's own real repo, never a class list
+// hardcoded here for one tenant. Without a real base layout applying its
+// own typography to `{{ content | safe }}`, an unconfigured site ships bare,
+// unstyled `<h1>/<h2>/<p>` (confirmed live on zunkireelabs-web's own
+// /terms/, /privacy/, /cookies/ before contentWrapper was captured for it —
+// see fix/legal-page-prose-styling) — that plain-markdown output is this
+// function's deliberate, safe default for any site with no contentWrapper
+// configured yet, same as every other net-new-content renderer above.
+function fillContentWrapper(wrapper, body) {
+  // Blank line right after the opening tag and right before the closing tag
+  // keeps them as their own markdown-it HTML blocks, so everything between
+  // is still parsed as normal markdown instead of being swallowed verbatim.
+  const [open, close] = wrapper.split('{{BODY}}');
+  return `${open.trimEnd()}\n\n${body}\n\n${close.trimStart()}`;
+}
 
 export function renderCompliancePageBody(content, preserved = {}, site) {
   const front = frontMatter([
@@ -178,5 +181,7 @@ export function renderCompliancePageBody(content, preserved = {}, site) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
   const body = parts.join('\n\n');
-  return `${front}\n<div class="${PROSE_CLASSES}">\n\n${body}\n\n</div>\n`;
+  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  const wrapped = wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
+  return `${front}\n${wrapped}\n`;
 }
