@@ -1,5 +1,6 @@
 import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
 import { createDesignAgentHandler } from './openhands-handler.js';
+import { safeMessage } from '../lib/errors.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 
@@ -34,7 +35,8 @@ export async function processOneJob({ handler = notImplementedHandler } = {}) {
     await finishExecutionJob(job.id, { status: 'completed', result: outcome || null });
     return { jobId: job.id, status: 'completed', result: outcome };
   } catch (err) {
-    await appendJobLog(job.id, `Job failed: ${err.message}`);
+    const { message, id } = safeMessage('design-agent.worker.processOneJob', err, 'Design Agent job failed unexpectedly.');
+    await appendJobLog(job.id, `Job failed: ${message} (ref: ${id})`);
     await finishExecutionJob(job.id, { status: 'failed' });
     return { jobId: job.id, status: 'failed', error: err.message };
   }
