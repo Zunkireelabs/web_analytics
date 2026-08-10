@@ -278,10 +278,21 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // ai-visibility. Persist a matching snapshot here, the one shared path
   // cron (job.js's runGeoAuditIfDue), MCP, and this manual route all go
   // through, so all three ways of running it stay in sync automatically.
-  if (generatorId === 'geo-audit' && content?.score) {
+  //
+  // Saved unconditionally (not gated on content?.score being truthy) — the
+  // dashboard's "GEO — Not run yet" reads command-center.js's geoAuditMeta,
+  // which is entirely sourced from whether an agent_runs row exists at all
+  // (hasRun/lastRunAt), not from the score. A real run that happened to
+  // score zero pages (an empty scoredPages set — analyzePageUrl failures,
+  // insufficient content, etc.) used to look identical to "never run" on
+  // the dashboard, permanently, since site.geo_audit_last_done still
+  // advances either way and blocks a re-run for another week (real
+  // incident, 2026-08-10: site #1 showed "Not run yet" despite
+  // geo_audit_last_done proving a real run on 2026-07-26).
+  if (generatorId === 'geo-audit') {
     await saveAgentRun({
       siteId, agentId: 'geo-audit', agentVersion: 1, input: params || {},
-      status: 'ok', facts: { siteScore: content.score, findings: content.findings },
+      status: 'ok', facts: { siteScore: content?.score ?? null, findings: content?.findings ?? [] },
       narrative: null, error: null, tookMs: null,
     }).catch((err) => console.error('[action-center] failed to save geo-audit agent_runs snapshot:', err.message));
   }

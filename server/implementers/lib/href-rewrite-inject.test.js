@@ -39,6 +39,13 @@ describe('rewriteHref', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'no-match');
   });
+
+  test('matches a site-relative anchor when given the absolute URL', () => {
+    const file = '<a href="/solutions/human-resources/">HR</a>';
+    const result = rewriteHref(file, 'https://www.zunkireelabs.com/solutions/human-resources/', '/new-page');
+    assert.equal(result.ok, true);
+    assert.match(result.newContent, /href="\/new-page"/);
+  });
 });
 
 describe('stripLink', () => {
@@ -68,6 +75,20 @@ describe('stripLink', () => {
     const result = stripLink('<a href="/other">x</a>', '/dead');
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'no-match');
+  });
+
+  test('matches a site-relative anchor when given the absolute URL', () => {
+    const file = '<a href="/solutions/human-resources/">HR</a>';
+    const result = stripLink(file, 'https://www.zunkireelabs.com/solutions/human-resources/');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, 'HR');
+  });
+
+  test('matches a relative anchor missing the trailing slash', () => {
+    const file = '<a href="/solutions/human-resources">HR</a>';
+    const result = stripLink(file, 'https://www.zunkireelabs.com/solutions/human-resources/');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, 'HR');
   });
 });
 

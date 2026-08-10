@@ -61,3 +61,27 @@ test('the same nav-leakage text still fails the gate for a real content generato
   assert.equal(result.clean, false);
   assert.ok(result.issues.some((i) => i.patternId === 'nav-leakage'));
 });
+
+// Real incident, 2026-08-10: geo-audit.js aggregates findings across every
+// page on a site, and each finding's recommendedAction.label is one of a
+// handful of fixed strings from geo-signals.js's GEO_SIGNAL_RULES — legitimately
+// identical across every page sharing that issue, not an LLM restating
+// itself. A real full-site audit against Zunkiree Labs failed this gate on
+// every attempt once enough pages shared a finding type (dozens of
+// duplicate-paragraph hits on the exact same static label text).
+test('geo-audit is exempt from LLM-misbehavior checks — repeated static finding labels across pages are expected, not an LLM restating itself', () => {
+  const staticLabel = 'Add author/byline markup (schema author field or visible byline) so AI engines attribute the content.';
+  const content = {
+    report: '## Findings',
+    score: { overall: 70, categories: {} },
+    pagesAnalyzed: 3,
+    findings: [
+      { page: '/a/', whyItMatters: 'AI Visibility score 51/100 for this page (26 impressions).', recommendedAction: { label: staticLabel } },
+      { page: '/b/', whyItMatters: 'AI Visibility score 51/100 for this page (26 impressions).', recommendedAction: { label: staticLabel } },
+      { page: '/c/', whyItMatters: 'AI Visibility score 51/100 for this page (26 impressions).', recommendedAction: { label: staticLabel } },
+    ],
+  };
+  const result = runQualityGate(content, 'geo-audit');
+  assert.equal(result.clean, true);
+  assert.deepEqual(result.issues, []);
+});
