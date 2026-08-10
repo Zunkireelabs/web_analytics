@@ -1,5 +1,8 @@
 import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
+import { updateSiteRepoConfig } from '../../db.js';
+import { recordAuditEvent } from '../../store/admin/audit-log.js';
+import { createComponentTemplateHandler } from '../../design-agent/openhands-handler.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -175,6 +178,16 @@ export function validatePlaceholders(actionType, template) {
   return { ok: true };
 }
 
+// Whether actionType's componentTemplate shape has a `row` at all — only
+// 'content-wrapper' doesn't (see REQUIRED_PLACEHOLDERS above). Exported so
+// every caller that used to hard-require `template.row` unconditionally
+// (component-template-proposal.js, routes/clients.js's /confirm route) can
+// stop assuming every action type looks like faq/expand-content/
+// internal-links/qa-content's repeating-row shape.
+export function templateActionRequiresRow(actionType) {
+  return (REQUIRED_PLACEHOLDERS[actionType]?.row || []).length > 0;
+}
+
 // Derives a replacement template from the site's CURRENT real page HTML,
 // grounded the same way faq.js/expand-content.js ground their own content:
 // never invent a class that isn't actually visible in the real fetched
@@ -217,4 +230,87 @@ export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate,
   if (!validated.ok) return validated;
 
   return { ok: true, template: needsRow ? { wrapper: parsed.wrapper, row: parsed.row } : { wrapper: parsed.wrapper } };
+}
+
+// A synthetic req-like shape for recordAuditEvent — this resolver runs
+// during draft GENERATION (generateDraft, called from the manual UI route,
+// the MCP tool, and the unattended execution engine alike), never from one
+// specific staff HTTP request, so there's no real req to pass through.
+// req.userId left null resolves to audit-log.js's own 'system' actor type,
+// which is exactly the right attribution for a template a human never
+// clicked to create.
+function systemActorReq(siteId) {
+  return { userId: null, siteId, ip: null, get: () => null };
+}
+
+// The find-or-create entry point every draft-generation/apply call site
+// should use instead of reading site.url_file_map.siteRoot.componentTemplates
+// directly: returns the site's real template if one is already configured
+// (the fast path — true for every recommendation after the first, on any
+// given site+actionType), or derives one from the site's real repo via the
+// Design Agent and saves it, with NO staff button/manual "seed" step —
+// see the routes/clients.js /seed and /regenerate endpoints this replaces
+// for the automatic path (they remain for a staff member who wants to
+// manually re-check/replace a template on demand).
+//
+// Never throws and never blocks the caller on a Design Agent failure —
+// `ok: false` (site.design_agent_enabled off, no repo configured, the
+// OpenHands session itself failing, or an invalid derived template) means
+// "nothing to use," and every caller of this function already has its own
+// safe, zero-config fallback (marker-merge.js's DEFAULT_* templates,
+// newpage-render.js's plain-markdown output) for exactly this case — a
+// site that hasn't opted into (or can't currently reach) the Design Agent
+// keeps working exactly as it did before this function existed.
+export async function resolveOrCreateComponentTemplate(site, actionType, {
+  createHandler = createComponentTemplateHandler,
+  saveConfig = updateSiteRepoConfig,
+  recordAudit = recordAuditEvent,
+} = {}) {
+  const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+  if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
+
+  const existing = site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
+  if (existing) return { ok: true, template: existing, source: 'existing', componentKey };
+
+  if (!site.design_agent_enabled || !site.repo_owner || !site.repo_name) {
+    return { ok: false, reason: 'not-available', template: null, componentKey };
+  }
+
+  let result;
+  try {
+    const handler = createHandler();
+    result = await handler({ id: null, site_id: site.id, params: { componentKeys: [actionType] } });
+  } catch (err) {
+    const { message } = safeMessage('design-drift.resolveOrCreateComponentTemplate', err, 'Design Agent could not derive a template right now.');
+    return { ok: false, reason: 'design-agent-error', error: message, template: null, componentKey };
+  }
+
+  const derived = result?.componentTemplates?.[actionType];
+  if (!derived?.wrapper) return { ok: false, reason: 'not-derived', template: null, componentKey };
+
+  const check = validatePlaceholders(actionType, derived);
+  if (!check.ok) return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: {
+      ...site.url_file_map?.siteRoot,
+      componentTemplates: {
+        ...site.url_file_map?.siteRoot?.componentTemplates,
+        [componentKey]: derived,
+      },
+    },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap });
+  await recordAudit(systemActorReq(site.id), {
+    action: 'tenant.component_template_auto_created',
+    targetType: 'site',
+    targetId: String(site.id),
+    tenantSiteId: site.id,
+    tenantName: site.name,
+    metadata: { actionType, componentKey, source: 'design-agent-auto' },
+    success: true,
+  });
+
+  return { ok: true, template: derived, source: 'design-agent', justCreated: true, componentKey };
 }

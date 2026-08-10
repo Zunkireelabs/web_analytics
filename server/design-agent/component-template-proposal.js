@@ -1,4 +1,4 @@
-import { validatePlaceholders, checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from '../implementers/lib/design-drift.js';
+import { validatePlaceholders, checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, templateActionRequiresRow } from '../implementers/lib/design-drift.js';
 
 // Shapes one Design Agent-derived {wrapper, row} template (keyed by the
 // same design-drift.js/marker-merge.js action-type strings, e.g. 'faq',
@@ -21,7 +21,7 @@ export async function buildComponentTemplateProposal({ actionType, template, pag
   if (!COMPONENT_TEMPLATE_KEY[actionType]) {
     return { ok: false, error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` };
   }
-  if (!template?.wrapper || !template?.row) {
+  if (!template?.wrapper || (templateActionRequiresRow(actionType) && !template?.row)) {
     return { ok: false, error: 'Design Agent did not report a template for this action type.' };
   }
 

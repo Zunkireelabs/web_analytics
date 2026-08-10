@@ -2,7 +2,108 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness, proposeUpdatedTemplate,
+  templateActionRequiresRow, resolveOrCreateComponentTemplate,
 } from './design-drift.js';
+
+describe('templateActionRequiresRow', () => {
+  test('true for the repeating-row action types', () => {
+    assert.equal(templateActionRequiresRow('faq'), true);
+    assert.equal(templateActionRequiresRow('expand-content'), true);
+    assert.equal(templateActionRequiresRow('internal-links'), true);
+    assert.equal(templateActionRequiresRow('qa-content'), true);
+  });
+
+  test('false for content-wrapper (one {{BODY}} slot, no row)', () => {
+    assert.equal(templateActionRequiresRow('content-wrapper'), false);
+  });
+});
+
+describe('resolveOrCreateComponentTemplate', () => {
+  const baseSite = { id: 1, name: 'Test Site', repo_owner: 'acme', repo_name: 'acme-web', design_agent_enabled: true, url_file_map: {} };
+
+  test('returns the existing template immediately without touching the Design Agent', async () => {
+    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
+    const createHandler = () => { throw new Error('should never be called — a template already exists'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'existing');
+    assert.equal(result.template.wrapper, '<div>{{BODY}}</div>');
+  });
+
+  test('action type with no component-template concept short-circuits', async () => {
+    const createHandler = () => { throw new Error('should never be called'); };
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'meta-title', { createHandler });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-concept');
+  });
+
+  test('site without design_agent_enabled cannot auto-create, and never calls the handler', async () => {
+    const site = { ...baseSite, design_agent_enabled: false };
+    const createHandler = () => { throw new Error('should never be called'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'not-available');
+  });
+
+  test('site with no repo configured cannot auto-create', async () => {
+    const site = { ...baseSite, repo_owner: null, repo_name: null };
+    const createHandler = () => { throw new Error('should never be called'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'not-available');
+  });
+
+  test('derives, validates, and auto-saves a new template with no manual confirm step', async () => {
+    const site = { ...baseSite };
+    const derived = { wrapper: '<div class="prose">{{BODY}}</div>' };
+    const createHandler = () => async (job) => {
+      assert.equal(job.site_id, site.id);
+      assert.deepEqual(job.params.componentKeys, ['content-wrapper']);
+      return { componentTemplates: { 'content-wrapper': derived } };
+    };
+    let saved = null;
+    const saveConfig = async ({ siteId, urlFileMap }) => { saved = { siteId, urlFileMap }; return { id: siteId, url_file_map: urlFileMap }; };
+    let audited = null;
+    const recordAudit = async (req, event) => { audited = { req, event }; };
+
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordAudit });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'design-agent');
+    assert.equal(result.justCreated, true);
+    assert.deepEqual(result.template, derived);
+    assert.equal(saved.siteId, site.id);
+    assert.deepEqual(saved.urlFileMap.siteRoot.componentTemplates.contentWrapper, derived);
+    assert.equal(audited.event.action, 'tenant.component_template_auto_created');
+    assert.equal(audited.req.userId, null, 'no human triggered this — system actor, not a staff user');
+  });
+
+  test('a derived template missing its required placeholder is rejected, not saved', async () => {
+    const site = { ...baseSite };
+    const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
+    const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-placeholders');
+  });
+
+  test('a Design Agent failure is reported, never thrown, and nothing is saved', async () => {
+    const site = { ...baseSite };
+    const createHandler = () => async () => { throw new Error('OpenHands task failed: simulated infra error'); };
+    const saveConfig = async () => { throw new Error('should never be called'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'design-agent-error');
+  });
+
+  test('the handler returning nothing for the requested action type is treated as not-derived, not a crash', async () => {
+    const site = { ...baseSite };
+    const createHandler = () => async () => ({ componentTemplates: {} });
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'not-derived');
+  });
+});
 
 describe('extractLiteralClassNames', () => {
   test('collects deduped class tokens from wrapper + row', () => {
