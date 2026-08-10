@@ -37,6 +37,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
           script: |
             # Without this, a failed step (e.g. `docker compose build` running
             # out of disk space) doesn't stop the script — it falls through to
