@@ -8,6 +8,8 @@ import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
 import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate } from '../implementers/lib/design-drift.js';
+import { createComponentTemplateJob, getExecutionJob } from '../store/execution-jobs.js';
+import { buildComponentTemplateProposalsFromJob } from '../design-agent/component-template-proposal.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
@@ -531,10 +533,80 @@ router.post('/internal/clients/:id/component-templates/:actionType/regenerate', 
     if (!freshness.ok) return res.status(502).json({ error: freshness.error });
     if (!freshness.stale) return res.json({ stale: false, message: 'This template still matches the live design on that page — no changes needed.' });
 
+    // Design Agent path (server/design-agent/): real repo checkout + an
+    // isolated OpenHands run, replacing the single-page LLM call below, for
+    // design_agent_enabled sites — real source files instead of one page's
+    // rendered HTML. Docker+agent runs take minutes, not the length of one
+    // HTTP request, so this creates a job and returns immediately; the
+    // result is polled via the design-jobs route below, and still only ever
+    // reaches url_file_map through the same human-reviewed /confirm route —
+    // proposal shape (component-template-proposal.js's
+    // buildComponentTemplateProposal) matches what this route already
+    // returns for the non-Design-Agent path.
+    if (site.design_agent_enabled) {
+      const job = await createComponentTemplateJob(siteId, [actionType], { requestedBy: req.userId, pageUrl });
+      return res.status(202).json({
+        async: true, jobId: job.id, status: job.status,
+        message: `Design Agent job ${job.id} created — poll GET /internal/clients/${siteId}/component-templates/design-jobs/${job.id} for the result.`,
+      });
+    }
+
     const proposal = await proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate, missingClasses: freshness.missingClasses });
     if (!proposal.ok) return res.status(422).json({ error: proposal.error, missingClasses: freshness.missingClasses });
 
     res.json({ stale: true, missingClasses: freshness.missingClasses, oldTemplate, proposedTemplate: proposal.template });
+  } catch (e) { next(e); }
+});
+
+// Polls a Design Agent componentTemplates job created by /regenerate or
+// /seed below. Read-only — returns the job's real current status, and once
+// completed, a proposal per requested action type (built the same way as
+// the synchronous /regenerate response, via buildComponentTemplateProposal)
+// for staff to review before saving through the existing /confirm route.
+router.get('/internal/clients/:id/component-templates/design-jobs/:jobId', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const jobId = Number(req.params.jobId);
+    const job = await getExecutionJob(siteId, jobId);
+    if (!job || job.kind !== 'design_generate') return res.status(404).json({ error: `No Design Agent job ${jobId} found for site ${siteId}.` });
+
+    if (job.status !== 'completed') {
+      return res.json({ jobId: job.id, status: job.status, logs: job.logs });
+    }
+    const pageUrl = job.params?.pageUrl || null;
+    const proposals = await buildComponentTemplateProposalsFromJob(job, { pageUrl });
+    res.json({ jobId: job.id, status: job.status, proposals });
+  } catch (e) { next(e); }
+});
+
+// Seeds componentTemplates for every action type this site has NO stored
+// entry for yet (today: a fully manual, hand-authored onboarding step — see
+// design-drift.js's own comment on componentTemplates being "captured once,
+// at onboarding"). One job requests every missing key at once (one real
+// repo checkout, one agent run, multiple derived templates) rather than one
+// job per key. Same result path as /regenerate above: poll via
+// GET .../design-jobs/:jobId, save via the existing /confirm route — never
+// auto-saved.
+router.post('/internal/clients/:id/component-templates/seed', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const { pageUrl } = req.body || {};
+    const site = await getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    if (!site.design_agent_enabled) return res.status(400).json({ error: 'Design Agent is not enabled for this site.' });
+    if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'Site has no repo_owner/repo_name configured — connect a repo first.' });
+
+    const existing = site.url_file_map?.siteRoot?.componentTemplates || {};
+    const missingActionTypes = Object.keys(COMPONENT_TEMPLATE_KEY).filter((actionType) => !existing[COMPONENT_TEMPLATE_KEY[actionType]]);
+    if (!missingActionTypes.length) {
+      return res.json({ message: 'Every component-template key already has a configured entry — nothing to seed.', missingActionTypes: [] });
+    }
+
+    const job = await createComponentTemplateJob(siteId, missingActionTypes, { requestedBy: req.userId, pageUrl: pageUrl || null });
+    res.status(202).json({
+      async: true, jobId: job.id, status: job.status, missingActionTypes,
+      message: `Design Agent job ${job.id} created — poll GET /internal/clients/${siteId}/component-templates/design-jobs/${job.id} for the result.`,
+    });
   } catch (e) { next(e); }
 });
 

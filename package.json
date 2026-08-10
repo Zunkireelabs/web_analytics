@@ -23,6 +23,8 @@
     "dev:server": "node --watch server/index.js",
     "start:mcp": "node mcp-server/index.js",
     "dev:mcp": "node --watch mcp-server/index.js",
+    "design-agent-worker": "node server/design-agent/worker.js",
+    "verify-design-agent-docker": "node server/scripts/verify-design-agent-docker.js",
     "dev:web": "vite",
     "build:web": "vite build",
     "preview:web": "vite preview",

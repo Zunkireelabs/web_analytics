@@ -152,7 +152,7 @@ const REQUIRED_PLACEHOLDERS = {
   'qa-content': { wrapper: ['{{ROWS}}'], row: ['{{QUESTION}}', '{{ANSWER}}'] },
 };
 
-function validatePlaceholders(actionType, template) {
+export function validatePlaceholders(actionType, template) {
   const required = REQUIRED_PLACEHOLDERS[actionType];
   const missing = [
     ...required.wrapper.filter((p) => !template.wrapper?.includes(p)),
