@@ -106,12 +106,16 @@ jobs:
             # LLM-only reasoning instead of real, SERP-verified competitor
             # discovery. GOOGLE_CSE_API_KEY's project has no billing account
             # linked (Custom Search JSON API requires one even for free-tier
-            # usage), so it's currently non-functional despite passing
-            # configured() — kept here as a fallback should someone link
-            # billing later, but COMPETITOR_PROVIDER stays on google-cse
-            # until a deliberate decision to switch (see SERPAPI_KEY below
-            # for the search-grounding side of this same gap).
-            COMPETITOR_PROVIDER=google-cse
+            # usage), so it silently fails every real call despite passing
+            # configured() — detectCompetitorsFromSerp's per-query
+            # `catch { continue; }` (competitor-analysis.js) meant this had
+            # been falling back to LLM-only guessing on every run, with no
+            # visible error. COMPETITOR_PROVIDER now points at serpapi
+            # (verified working, real position-ordered SERP data returned)
+            # instead — GOOGLE_CSE_API_KEY/CX kept below only as inert
+            # leftover credentials, not read by anything while
+            # COMPETITOR_PROVIDER=serpapi.
+            COMPETITOR_PROVIDER=serpapi
             GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
             GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
 
