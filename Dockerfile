@@ -15,18 +15,20 @@ RUN npm run build:web
 FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package*.json ./
+# chown the (still-empty) dir once, then install/copy as node directly —
+# a trailing `chown -R /app` over a populated node_modules tree got slow
+# enough (300s+) to blow the deploy's SSH command timeout.
+RUN chown node:node /app
+USER node
+COPY --chown=node:node package*.json ./
 RUN npm ci --omit=dev
 # App source + the built web/dist from the build stage. mcp-server/ is
 # included here too — the analytics-mcp compose service overrides CMD to run
 # it (node mcp-server/index.js) from this same image, so both services stay
 # in lockstep without a second Dockerfile.
-COPY server ./server
-COPY mcp-server ./mcp-server
-COPY --from=build /app/web/dist ./web/dist
-
-RUN chown -R node:node /app
-USER node
+COPY --chown=node:node server ./server
+COPY --chown=node:node mcp-server ./mcp-server
+COPY --chown=node:node --from=build /app/web/dist ./web/dist
 
 EXPOSE 3002
 # The Node server serves the dashboard and runs the daily cron in-process.
