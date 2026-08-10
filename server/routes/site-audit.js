@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from './login.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { getAuditRun, listAuditRuns, getAuditPageFindings } from '../store/audit-runs.js';
+import { getAuditRun, listAuditRuns, getAuditPageFindings, requestAuditRunCancel } from '../store/audit-runs.js';
 
 // Full Site Audit — manual trigger + history/report view (Website
 // Intelligence plan, Phase 6). Internal-only, same gate as Action Center/
@@ -22,6 +22,20 @@ router.post('/site-audit/run', async (req, res, next) => {
       ...(maxPages ? { maxPages: Number(maxPages) } : {}),
     });
     res.json({ auditRunId, status: 'running' });
+  } catch (e) { next(e); }
+});
+
+// Stop Audit — cooperative, not forcible (see bulk-audit.js's own comment):
+// flags the run so it stops itself at its next agent/chunk checkpoint,
+// rather than sitting "running" for however long the rest of the crawl
+// would have taken. Site-scoped like every other route here, so one
+// tenant can never cancel another tenant's run by guessing an id.
+router.post('/site-audit/runs/:id/cancel', async (req, res, next) => {
+  try {
+    const run = await getAuditRun(Number(req.params.id));
+    if (!run || run.site_id !== req.siteId) return res.status(404).json({ error: 'not found' });
+    const updated = await requestAuditRunCancel(run.id);
+    res.json(updated || run);
   } catch (e) { next(e); }
 });
 

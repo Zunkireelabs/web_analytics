@@ -9,7 +9,7 @@ import { sanitizeForCustomer } from '../lib/errors.js';
 // dashboard so, the same real-evidence pattern hasDraftSince() already
 // leans on for the Watchlist, one step further along.
 
-export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns }) {
+export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns, renderedBody, targetFilePath }) {
   // original_content (migration 091) is the generator's first output,
   // frozen here and never touched again — updateDraft below only ever
   // writes `content`, so a later diff of the two is how
@@ -18,12 +18,17 @@ export async function createDraft(siteId, { actionType, source, input, content, 
   // (migration 093) is which validation-rule hits this generation needed a
   // self-correction for, if any — see generateDraft's learning-system
   // comment (routes/action-center.js) for how approveAndPublishDraft later
-  // confirms it.
+  // confirms it. renderedBody/targetFilePath (migration 095) are the
+  // generation-time-precomputed, rendering-gate-validated final output for
+  // net-new-content action types — see frontend.js's resolveTargetAndBody
+  // fast path for how they're consumed at apply/preview time. Both null for
+  // an action type this doesn't apply to (marker-merge types, which must
+  // still compute their splice fresh against the live file at apply time).
   const { rows } = await query(
-    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns)
-     VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path)
+     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null]
+    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null, renderedBody ?? null, targetFilePath ?? null]
   );
   return rows[0];
 }
@@ -77,9 +82,15 @@ export async function countSiblingDraftsOnBranch(siteId, branchName, excludeId) 
 // silently force ANY draft (including an already-approved or already-
 // implemented one) back to 'edited', stranding stale approved_at/approved_by/
 // implemented_at values on a row that now claims to be back at square one.
+//
+// rendered_body/target_file_path (migration 095) are always cleared here —
+// a human editing `content` invalidates whatever was precomputed from the
+// OLD content at generation time; frontend.js's resolveTargetAndBody falls
+// through to a fresh, correct recompute the moment either is NULL, so an
+// edited draft is never applied using stale pre-edit output.
 export async function updateDraft(siteId, id, { content }) {
   const { rows } = await query(
-    `UPDATE drafts SET content = $1, status = 'edited', updated_at = now()
+    `UPDATE drafts SET content = $1, status = 'edited', updated_at = now(), rendered_body = NULL, target_file_path = NULL
      WHERE site_id = $2 AND id = $3 AND status IN ('draft', 'edited', 'revision_requested')
      RETURNING *`,
     [JSON.stringify(content), siteId, id]
@@ -295,8 +306,33 @@ export async function countVisibleFaqDrafts(siteId) {
 // "Recalculate FAQ baseline" action). Using countVisibleFaqDrafts alone
 // would let a site's total visible-FAQ pages exceed visible_faq_cap once
 // any pre-existing organic FAQs are counted in.
+//
+// Purely historical — a page counted here forever counts, even if its
+// visible FAQ was later removed (a manual edit, a revert, a redesign
+// outside this tool). implementers/lib/faq-render-mode.js's
+// countCurrentlyVisibleFaqPages is the live-state-verified version of this
+// same total, and is what actually gates new visible-FAQ decisions —
+// this function stays as the cheap/instant hint path and for any caller
+// that only needs the historical figure, not a real-time cap check.
 export async function countVisibleFaqPages(site) {
   return (await countVisibleFaqDrafts(site.id)) + (site.visible_faq_baseline || 0);
+}
+
+// One row per page this tool ever pushed a visible FAQ to (see
+// countVisibleFaqDrafts above for why render_mode = 'visible' alone is
+// enough to mean "a real branch was pushed") — the candidate set
+// faq-render-mode.js's countCurrentlyVisibleFaqPages re-checks against each
+// page's CURRENT live content, since a historical push is not proof the FAQ
+// is still there today.
+export async function distinctVisibleFaqDraftPages(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT COALESCE(content->>'page', input->>'page') AS page
+     FROM drafts
+     WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible'
+       AND COALESCE(content->>'page', input->>'page') IS NOT NULL`,
+    [siteId]
+  );
+  return rows.map((r) => r.page);
 }
 
 // Cross-mechanism duplicate guard for lib/faq-render-mode.js: marker-merge

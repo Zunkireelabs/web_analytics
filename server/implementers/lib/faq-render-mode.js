@@ -1,8 +1,32 @@
 import { getFileContent } from '../../github/client.js';
 import { resolveFile } from './url-file-map.js';
 import { baseBranch } from './github-ops.js';
-import { inspectRenderMode } from './render-inspector.js';
-import { countVisibleFaqPages, hasImplementedVisibleFaqForPage } from '../../store/drafts.js';
+import { inspectRenderMode, hasVisibleFaqSignal } from './render-inspector.js';
+import { hasImplementedVisibleFaqForPage, distinctVisibleFaqDraftPages } from '../../store/drafts.js';
+
+// The sitewide visible-FAQ cap must reflect the CURRENT live/repository
+// state, not a permanent historical record of pages this tool once pushed a
+// visible FAQ to (store/drafts.js's countVisibleFaqDrafts only ever grows —
+// it has no way to notice a page's visible FAQ was later removed by a
+// manual edit, a revert, or an unrelated redesign). Re-fetches each
+// historically-visible page's CURRENT content and only counts it if a
+// visible FAQ signal is still actually there today — a page that dropped
+// its visible FAQ since frees up a cap slot for a future draft, exactly as
+// if the count had never included it. Bounded by the cap itself (a handful
+// of pages at most), so a handful of extra live fetches per FAQ draft's
+// render-mode decision is cheap.
+export async function countCurrentlyVisibleFaqPages(site, { fetchFile = getFileContent, beforeRef = baseBranch(site), listPages = distinctVisibleFaqDraftPages } = {}) {
+  const pages = await listPages(site.id);
+  let count = 0;
+  for (const page of pages) {
+    const filePath = resolveFile(site, page);
+    if (!filePath) continue; // no longer mapped at all — can't still be live
+    const file = await fetchFile(site, filePath, beforeRef);
+    if (!file) continue; // file gone — can't still be live
+    if (hasVisibleFaqSignal(file.content)) count += 1;
+  }
+  return count + (site.visible_faq_baseline || 0);
+}
 
 // Single source of truth for the visible-vs-schema-only decision on a FAQ
 // draft, shared by every writer mechanism this codebase has for FAQ content:
@@ -27,7 +51,7 @@ export async function decideFaqRenderMode(site, page, fileContent) {
       source: 'cross-mechanism',
     };
   }
-  const visibleFaqCount = await countVisibleFaqPages(site);
+  const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
   return inspectRenderMode(fileContent, 'faq', { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
 }
 

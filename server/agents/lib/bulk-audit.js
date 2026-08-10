@@ -10,7 +10,7 @@ import { computeHealthScore } from './health-score.js';
 import { safeMessage } from '../../lib/errors.js';
 import {
   createAuditRun, updateAuditRunProgress, completeAuditRun, saveAuditPageFindingsBatch, updateAuditPageFinding,
-  getAuditPageFindings,
+  getAuditPageFindings, isAuditRunCancelRequested,
 } from '../../store/audit-runs.js';
 
 // The deterministic, non-LLM bulk fan-out engine for Full Site Audit — a
@@ -201,7 +201,20 @@ export async function runFullSiteAudit(siteId, {
     // loop finishes (below) is what actually makes the terminal value
     // correct; mid-run flicker itself is still harmless/cosmetic.
 
+    // Cooperative cancellation ("Stop Audit", migration 096) — checked at
+    // two granularities: once per agentId (cheap, always hit even for a
+    // fast-finishing agent) and once per chunk INSIDE each agent's own
+    // Promise.all (so a slow agent with many chunks — the actual "running
+    // for a long time" case — doesn't have to finish its entire chunk set
+    // before the run notices a stop request). A chunk already in flight
+    // when cancellation is requested still finishes and its findings still
+    // get saved (partial results are real, checkpointed data, same
+    // philosophy as pages_discovered/pages_audited elsewhere in this file)
+    // — only chunks that haven't started their agent call yet are skipped.
+    let cancelled = false;
     for (const agentId of agentIds) {
+      if (await isAuditRunCancelRequested(auditRun.id)) { cancelled = true; break; }
+
       // Everything this agent has had persisted so far in this run, keyed
       // by finding.id — lets each new chunk's reconcileFindings() tell a
       // brand-new finding apart from a repeat of an aggregated-systemic one
@@ -213,6 +226,7 @@ export async function runFullSiteAudit(siteId, {
       // before the earlier chunk's INSERT that created that row.
       let writeChain = Promise.resolve();
       await Promise.all(chunks.map((pageChunk) => limit(async () => {
+        if (cancelled || await isAuditRunCancelRequested(auditRun.id)) { cancelled = true; return; }
         let out;
         try {
           out = await runAgent(agentId, { siteId, start, end, pageCache: ctx.pageCache, params: { pages: pageChunk } }, { persist: false });
@@ -235,6 +249,14 @@ export async function runFullSiteAudit(siteId, {
         await updateAuditRunProgress(auditRun.id, { pagesAudited: auditedPages.size });
       })));
       await writeChain;
+      if (cancelled) break;
+    }
+
+    if (cancelled) {
+      const pagesAudited = auditedPages.size;
+      await updateAuditRunProgress(auditRun.id, { pagesAudited });
+      await completeAuditRun(auditRun.id, { status: 'cancelled', agentIdsRun: agentIds });
+      return { auditRunId: auditRun.id, pagesDiscovered: pages.length, pagesAudited, findingsWritten, cancelled: true };
     }
 
     const pagesAudited = auditedPages.size;

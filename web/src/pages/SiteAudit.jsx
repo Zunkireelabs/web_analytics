@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api, timeAgo, pagePathFor } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
-import { Radar, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { Radar, Loader2, CheckCircle2, XCircle, Square } from 'lucide-react';
 
 // Minimal Full Site Audit report view (Website Intelligence plan, Phase 6).
 // Deliberately simple — a history list, a trigger button, and one run's
@@ -12,6 +12,7 @@ const STATUS_STYLE = {
   running: { icon: Loader2, cls: 'text-amber-600 bg-amber-500/10', spin: true },
   completed: { icon: CheckCircle2, cls: 'text-emerald-600 bg-emerald-500/10' },
   failed: { icon: XCircle, cls: 'text-red-600 bg-red-500/10' },
+  cancelled: { icon: Square, cls: 'text-slate-500 bg-slate-500/10' },
 };
 
 const PRIORITY_STYLE = {
@@ -31,7 +32,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function RunRow({ run, expanded, onToggle }) {
+function RunRow({ run, expanded, onToggle, onCancel, cancelling }) {
   return (
     <div className="border border-slate-200/70 rounded-2xl overflow-hidden">
       <button type="button" onClick={onToggle}
@@ -50,6 +51,17 @@ function RunRow({ run, expanded, onToggle }) {
           <span>{run.pages_discovered} discovered</span>
           <span>{run.pages_audited} audited</span>
           {run.error_message && <span className="text-red-500">{run.error_message}</span>}
+          {run.status === 'running' && (
+            <button
+              type="button"
+              disabled={cancelling || run.cancel_requested}
+              onClick={(e) => { e.stopPropagation(); onCancel(run.id); }}
+              className="px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider text-red-600 bg-red-500/10
+                         hover:bg-red-500/20 disabled:opacity-50 transition-colors"
+            >
+              {cancelling || run.cancel_requested ? 'Stopping…' : 'Stop Audit'}
+            </button>
+          )}
         </div>
       </button>
       {expanded && <RunFindings runId={run.id} />}
@@ -87,6 +99,7 @@ export default function SiteAudit() {
   const [triggering, setTriggering] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [error, setError] = useState(null);
+  const [cancellingIds, setCancellingIds] = useState(() => new Set());
 
   const load = useCallback(() => api.siteAudit.list().then(setRuns).catch(() => {}), []);
 
@@ -112,6 +125,22 @@ export default function SiteAudit() {
       setError(e.message || 'Failed to start audit');
     } finally {
       setTriggering(false);
+    }
+  };
+
+  // Cooperative stop — the run doesn't flip to 'cancelled' the instant this
+  // resolves (bulk-audit.js only checks the flag at its next agent/chunk
+  // checkpoint), so the button stays disabled ("Stopping…") from the moment
+  // of the click, driven by local state, rather than waiting on the next
+  // 5s poll to even show the button as pressed.
+  const cancel = async (runId) => {
+    setCancellingIds((prev) => new Set(prev).add(runId));
+    setError(null);
+    try {
+      await api.siteAudit.cancel(runId);
+      await load();
+    } catch (e) {
+      setError(e.message || 'Failed to stop audit');
     }
   };
 
@@ -147,7 +176,8 @@ export default function SiteAudit() {
         <div className="space-y-3">
           {runs.map((run) => (
             <RunRow key={run.id} run={run} expanded={expandedId === run.id}
-              onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)} />
+              onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
+              onCancel={cancel} cancelling={cancellingIds.has(run.id)} />
           ))}
         </div>
       )}

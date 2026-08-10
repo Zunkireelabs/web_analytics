@@ -7,7 +7,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
-import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate } from '../implementers/lib/design-drift.js';
+import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate, templateActionRequiresRow } from '../implementers/lib/design-drift.js';
 import { createComponentTemplateJob, getExecutionJob } from '../store/execution-jobs.js';
 import { buildComponentTemplateProposalsFromJob } from '../design-agent/component-template-proposal.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
@@ -665,7 +665,9 @@ router.post('/internal/clients/:id/component-templates/:actionType/confirm', asy
 
     const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
     if (!componentKey) return res.status(400).json({ error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` });
-    if (!template?.wrapper || !template?.row) return res.status(400).json({ error: 'template.wrapper and template.row are both required.' });
+    if (!template?.wrapper || (templateActionRequiresRow(actionType) && !template?.row)) {
+      return res.status(400).json({ error: `template.wrapper is required${templateActionRequiresRow(actionType) ? ', and template.row is required for this action type' : ''}.` });
+    }
 
     const urlFileMap = {
       ...site.url_file_map,

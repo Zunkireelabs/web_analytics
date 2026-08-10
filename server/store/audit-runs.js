@@ -49,6 +49,27 @@ export async function getAuditRun(auditRunId) {
   return rows[0] || null;
 }
 
+// User-triggered "Stop Audit" (migration 096) — only flips the flag on a
+// still-running row; a run that already finished (any other status) has
+// nothing left to cancel, so this is a no-op for it rather than an error.
+// Cooperative only: runFullSiteAudit (bulk-audit.js) polls this flag at its
+// own checkpoints and stops itself at the next one — there's no way to
+// forcibly interrupt an in-flight agent/chunk call from outside the process.
+export async function requestAuditRunCancel(auditRunId) {
+  const { rows } = await query(
+    `UPDATE audit_runs SET cancel_requested = true WHERE id = $1 AND status = 'running' RETURNING *`,
+    [auditRunId]
+  );
+  return rows[0] || null;
+}
+
+// Narrow, cheap poll for bulk-audit.js's own checkpoints — avoids pulling
+// the whole row (including agent_ids_run/health_score/etc.) on every check.
+export async function isAuditRunCancelRequested(auditRunId) {
+  const { rows } = await query('SELECT cancel_requested FROM audit_runs WHERE id = $1', [auditRunId]);
+  return rows[0]?.cancel_requested === true;
+}
+
 export async function listAuditRuns(siteId, limit = 20) {
   const { rows } = await query(
     'SELECT * FROM audit_runs WHERE site_id = $1 ORDER BY started_at DESC LIMIT $2',

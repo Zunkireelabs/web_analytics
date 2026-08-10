@@ -1,6 +1,6 @@
 import { getLatestFindings } from './fresh-runs.js';
 import { getQueriesForPage, getSiteById } from '../../store/read.js';
-import { getDraftedFindingIds, listDrafts } from '../../store/drafts.js';
+import { getDraftedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
@@ -26,19 +26,19 @@ function makeQueryLookup(siteId) {
   };
 }
 
-// The GEO Audit generator (server/generators/geo-audit.js) is a generator,
-// not one of RECOMMENDATION_AGENT_IDS's agents, so its findings never come
-// through getLatestFindings/agent_runs — they're persisted inside its own
-// most recent draft's content.findings instead (built by
-// agents/lib/geo-audit-report.js). Reshaped into a run-shaped object here
-// so the loop below can treat it exactly like every other source, with zero
-// special-casing downstream.
-async function latestGeoAuditRun(siteId) {
-  const [latest] = await listDrafts(siteId, { actionType: 'geo-audit' });
-  const findings = latest?.content?.findings;
-  if (!Array.isArray(findings) || !findings.length) return null;
-  return { agentId: 'geo-audit', findings, start: latest.content.start, end: latest.content.end, createdAt: latest.created_at };
-}
+// GEO Audit (server/generators/geo-audit.js) is deliberately report/score
+// only — its own dashboard surface (agent_runs snapshot read by
+// command-center.js's geoAuditMeta, plus the report body on its own
+// 'geo-audit' draft, both written unconditionally in action-center.js's
+// generateDraft) is complete on its own and never depends on the
+// `recommendations` table. Its findings (content.findings, built by
+// agents/lib/geo-audit-report.js) are NOT fed into buildRecommendations
+// below — confirmed with the user 2026-08-10: GEO Audit's findings must
+// never become actionable Action Center recommendations a human could draft
+// into a PR, only the score/report a human reads. If a future need arises
+// to make GEO Audit findings actionable again, reshape content.findings
+// into a run-shaped object (as this function used to) and merge it into
+// `runs` below — deliberately not done here.
 
 // Every recommendation-bearing agent sets `recommendedAction.generatorId`
 // directly (agents/lib/page-content.js's TAG_TO_GENERATOR/GAP_TYPE_TO_
@@ -49,14 +49,12 @@ async function latestGeoAuditRun(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, geoAuditRun, draftedFindingIds, catByAgent, site] = await Promise.all([
+  const [runs, draftedFindingIds, catByAgent, site] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
-    latestGeoAuditRun(siteId),
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
     getSiteById(siteId),
   ]);
-  const allRuns = geoAuditRun ? [...runs, geoAuditRun] : runs;
   const lookupQuery = makeQueryLookup(siteId);
   // One real GitHub read per unique data file for this whole refresh, no
   // matter how many candidate pages share it (e.g. every /locations/:city/
@@ -94,7 +92,7 @@ export async function buildRecommendations(siteId) {
   const linkCrawlCheckedKeys = new Set(); // broken-link-fix only: narrower than technical-seo's own batch, since crawlInternalLinks caps total hrefs checked independently of which pages are in the batch
   const batchRotatedAgentIds = new Set();
 
-  for (const run of allRuns) {
+  for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
     if (run.checkedPages) {
       batchRotatedAgentIds.add(run.agentId);

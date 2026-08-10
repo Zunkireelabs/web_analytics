@@ -10,7 +10,13 @@ export const meta = {
   handles: ['landing-page', 'blog-outline', 'direct-answer', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service'],
 };
 
-const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
+export const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
+
+// Same set as meta.handles, as a Set — routes/action-center.js's
+// generateDraft uses this to decide which action types get their full
+// design/render/validate pipeline run at generation time (see this file's
+// resolveTargetAndBody).
+export const FRONTEND_ACTION_TYPES = new Set(meta.handles);
 
 // landing-page/blog-outline are net-new content — resolveNewContentTarget
 // gives a deterministic new file path, removing the "don't corrupt an
@@ -18,8 +24,28 @@ const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'ter
 // translation targets a language-suffixed sibling of the real SOURCE page's
 // resolved path (see resolveTranslationTarget). All three then render a
 // real, minimal Markdown-with-front-matter body (lib/newpage-render.js) —
-// shared by preview() and apply() below so they can never diverge.
-async function resolveTargetAndBody(site, draft) {
+// shared by preview() and apply() below so they can never diverge. Also
+// exported for routes/action-center.js's generateDraft — computing this
+// (design/template resolution + render) at generation time, BEFORE a draft
+// ever reaches Action Center for review, is what lets approval become a
+// pure "push the already-prepared bytes" action instead of recomputing.
+export async function resolveTargetAndBody(site, draft) {
+  // Generation-time-prepared fast path: generateDraft (action-center.js)
+  // already computed and rendering-gate-validated this exact output before
+  // the draft was ever created, using the SAME resolveTargetAndBody this
+  // function is. Reusing it verbatim (rather than recomputing — the two
+  // would always produce the same bytes for an unedited draft anyway) is
+  // what makes approval a pure "push the already-prepared thing" action
+  // with no fresh generation/design work happening at click-time.
+  // updateDraft (store/drafts.js) clears these two columns back to NULL the
+  // moment a human edits draft.content, so an edited draft always falls
+  // through to a fresh, correct recompute below — never a stale cached body.
+  if (draft.rendered_body != null && draft.target_file_path != null) {
+    // Every branch below always produces contentFormat: 'markdown' — the
+    // one constant this fast path can safely assume without its own column.
+    return { ok: true, filePath: draft.target_file_path, body: draft.rendered_body, contentFormat: 'markdown' };
+  }
+
   const actionType = draft.action_type;
   const content = draft.content || {};
 
