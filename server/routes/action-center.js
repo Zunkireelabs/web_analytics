@@ -370,11 +370,10 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     renderedBody, targetFilePath,
   });
 
-  // geo-audit is a generator, not an orchestrator-run agent (recommendation-
-  // coordinator.js's own latestGeoAuditRun shim reads its findings straight
-  // out of this draft for exactly that reason), so its score never reached
-  // agent_runs — command-center.js had nothing to read, unlike authority/
-  // ai-visibility. Persist a matching snapshot here, the one shared path
+  // geo-audit is a generator, not an orchestrator-run agent, so its score
+  // never reached agent_runs on its own — command-center.js had nothing to
+  // read, unlike authority/ai-visibility. Persist a matching snapshot here,
+  // the one shared path
   // cron (job.js's runGeoAuditIfDue), MCP, and this manual route all go
   // through, so all three ways of running it stay in sync automatically.
   //
