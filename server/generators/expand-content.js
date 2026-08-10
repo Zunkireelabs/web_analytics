@@ -3,7 +3,7 @@ import { callLLMForJson } from '../llm.js';
 import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
 import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
-import { hasAuthorProfile, authorByline } from './lib/author-profile.js';
+import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
 
 // Real citation search is opt-in, separate from any one provider's own
 // credentials being set (e.g. GOOGLE_CSE_API_KEY, already live for
@@ -27,11 +27,6 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
   'invent a feature, price, policy, or fact not present in the excerpt. Respond with ONLY a JSON array: ' +
   '[{"heading": "...", "body": "..."}, ...]';
 
-const SYSTEM_AUTHOR = 'You are a content strategist. Given a page\'s real body text, draft an author/byline section that can be added to the page. ' +
-  'The section should include a plausible author name/role based on the content topic, and schema.org Author markup guidance. ' +
-  'Do NOT invent a specific real person — use a placeholder like "By [Author Name], [Role]" with guidance on where to add real author schema. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
-
 const SYSTEM_FRESHNESS = 'You are a content strategist. Given a page\'s real body text, draft a "Last Updated" or "Published On" section with schema.org datePublished/dateModified markup guidance. ' +
   'Do NOT invent a specific date — use a placeholder with guidance on where to add the real date. ' +
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
@@ -53,7 +48,6 @@ const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
 
 const FOCUS_SYSTEMS = {
-  'author-byline': SYSTEM_AUTHOR,
   'freshness-date': SYSTEM_FRESHNESS,
   'comparison-content': SYSTEM_COMPARISON,
 };
@@ -89,6 +83,22 @@ export async function generate({ siteId, params }) {
       const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
       return { content, summary: `Author byline for ${page}: "${byline}"` };
     }
+    // No individual author configured: fall back to the site's own real
+    // organization name (organizationByline — schema.org's `author` accepts
+    // an Organization as validly as a Person), not an LLM call. This used
+    // to ask the LLM to write "By [Author Name], [Role]" — a fake persona
+    // on a real business's page, which is worse for EEAT than no byline,
+    // not better — and content-scaffolding-guard.js's author-placeholder
+    // pattern exists specifically to reject exactly that bracket text, so
+    // this focus failed the Quality Gate on EVERY attempt, for EVERY site
+    // with no individual author configured — a guaranteed, permanent
+    // failure surfaced as a generic "try again shortly" error, not the
+    // flaky case that message implies. A site can still configure a real
+    // named individual (Settings) later to get authorByline() above
+    // instead; this is fully automatic in the meantime, zero manual step.
+    const byline = organizationByline(site);
+    const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
+    return { content, summary: `Author byline for ${page}: "${byline}"` };
   }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;

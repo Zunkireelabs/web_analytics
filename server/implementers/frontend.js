@@ -28,7 +28,7 @@ async function resolveTargetAndBody(site, draft) {
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["landing-page"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderLandingPageBody(content), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderLandingPageBody(content, site), contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
@@ -36,7 +36,7 @@ async function resolveTargetAndBody(site, draft) {
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderBlogOutlineBody(content), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderBlogOutlineBody(content, site), contentFormat: 'markdown' };
   }
 
   if (actionType === 'direct-answer') {
@@ -44,7 +44,7 @@ async function resolveTargetAndBody(site, draft) {
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderDirectAnswerBody(content), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderDirectAnswerBody(content, site), contentFormat: 'markdown' };
   }
 
   if (actionType === 'translation') {
@@ -53,7 +53,7 @@ async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches the source page "${content.page || '(none)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
-    return { ok: true, filePath, body: renderTranslationBody(content), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderTranslationBody(content, site), contentFormat: 'markdown' };
   }
 
   if (COMPLIANCE_ACTION_TYPES.has(actionType)) {
@@ -76,7 +76,7 @@ async function resolveTargetAndBody(site, draft) {
     // this doesn't silently orphan the live URL.
     const existing = existingFile ? await getFileContent(site, existingFile, baseBranch(site)) : null;
     const preserved = extractPreservedFrontMatter(existing?.content);
-    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site), contentFormat: 'markdown' };
   }
 
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };

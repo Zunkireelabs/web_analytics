@@ -32,3 +32,18 @@ export function authorByline(site) {
   const roleSuffix = site.author_role ? `, ${site.author_role.trim()}` : '';
   return `By ${site.author_name.trim()}${roleSuffix}`;
 }
+
+// Organization-level fallback byline for a site with no individual author
+// configured — schema.org's `author` field accepts an Organization just as
+// validly as a Person (https://schema.org/author), and sites.name is a
+// real, already-verified fact (NOT NULL for every real site row), not an
+// invented one. This is what lets the author-byline recommendation
+// auto-ship with zero manual setup: the alternative (an LLM inventing "By
+// [Author Name], [Role]") was a fake persona on a real business's page,
+// which is worse for EEAT than no byline, not better — see expand-content.js
+// for the fuller incident history. A site that later configures a real
+// individual author (sites.author_name) gets authorByline() above instead;
+// this is only ever the fallback for "nobody's said who wrote this yet."
+export function organizationByline(site) {
+  return `By the ${site.name.trim()} Team`;
+}
