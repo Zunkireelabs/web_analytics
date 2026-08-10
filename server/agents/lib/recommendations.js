@@ -5,7 +5,7 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
-import { isPageMapped, resolveAdapter } from '../../implementers/lib/url-file-map.js';
+import { isPageMapped, resolveAdapter, resolveFile } from '../../implementers/lib/url-file-map.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { getFileContent } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
@@ -122,6 +122,30 @@ export async function buildRecommendations(siteId) {
       // way it is for every other generatorId here.
       if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
         && !isPageMapped(site, action.params.page, action.generatorId)) continue;
+      // isPageMapped above only proves url_file_map SYNTACTICALLY resolves a
+      // path (an exact `pages[]` entry, or a `patterns[]` regex match) — it
+      // never confirms that resolved file genuinely exists in the repo. A
+      // generic catch-all pattern (e.g. `^/([a-z0-9-]+)/?$` -> "src/pages/
+      // $1.njk") matches any URL that merely LOOKS like a real page, and
+      // many static-site nginx configs make that trivially true for URLs
+      // that were never real: a `try_files ... /index.html` SPA fallback
+      // (this codebase's own nginx/static.conf, and a common Eleventy/Vite
+      // deploy pattern) returns HTTP 200 for literally any path, so a
+      // crawl/GSC-discovered URL for a renamed or nonexistent page still
+      // looks "live." Real incident: zunkireelabs.com/ai-agents/ (a soft-404
+      // — no template anywhere sets that permalink) matched the generic
+      // pattern to a nonexistent src/pages/ai-agents.njk, and the resulting
+      // recommendation showed "SAFE — AUTO-ELIGIBLE" right up until someone
+      // approved it. Verified live here, once per unique file per refresh
+      // (cachedFetchFile below already dedupes/caches this exact call for
+      // isDataReady) — skip the same as an unmapped page rather than let an
+      // unverified guess reach the UI as "safe." Adapter-routed pages
+      // (resolveFile returns null for those) are unaffected; their own
+      // adapter validates itself below.
+      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site) {
+        const filePath = resolveFile(site, action.params.page);
+        if (filePath && !(await cachedFetchFile(site, filePath, baseBranch(site)))) continue;
+      }
       // isPageMapped above only confirms a ROUTE exists (a file, or an
       // adapter configured for this actionType) — for data-array-content
       // specifically, that route can be configured while the adapter's own

@@ -4,6 +4,7 @@ import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile } from '../implementers/lib/url-file-map.js';
 import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
+import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
@@ -257,7 +258,11 @@ export async function auditSite(siteId) {
   if (nginxPath) {
     try {
       const file = await getFileContent(site, nginxPath, baseBranch(site));
-      nginxMarkerOk = !!file && hasMarker(file.content, 'SECURITY-HEADERS');
+      // nginx uses `#`-comment markers, not marker-merge.js's `<!-- -->`
+      // convention (see backend.js's applySecurityHeaders/hash-marker-merge.js)
+      // — hasMarker() here always reports MISSING even when the real,
+      // apply-path-relevant marker is present.
+      nginxMarkerOk = !!file && hasHashMarker(file.content, 'SECURITY-HEADERS');
       console.log(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- ${nginxMarkerOk ? 'present' : 'MISSING (fatal — must be hand-placed; see generators/security-headers.js)'}`);
     } catch (err) {
       console.warn(`\n-- NGINX SECURITY-HEADERS MARKER (${nginxPath}) -- could not check: ${err.message}`);
