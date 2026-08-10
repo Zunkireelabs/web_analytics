@@ -47,16 +47,19 @@ describe('expand-content generator — thin-extraction guard', () => {
 // content-scaffolding-guard.js's author-placeholder pattern (deliberately
 // built to reject exactly that bracket text) rejected it on every single
 // attempt — a permanent, deterministic failure surfaced to the user as a
-// generic "try again shortly" error. Uses a real, throwaway site row (this
-// repo's own real-DB convention — see strategy-registry.test.js) since
-// hasAuthorProfile() reads real site columns, not a mock.
+// generic "try again shortly" error. Fixed by auto-filling an Organization-
+// level byline from the site's own real name (organizationByline) instead
+// of an LLM-invented placeholder — fully automatic, zero manual step, never
+// a fabricated person. Uses a real, throwaway site row (this repo's own
+// real-DB convention — see strategy-registry.test.js) since
+// hasAuthorProfile()/organizationByline() read real site columns, not a mock.
 describe('expand-content generator — author-byline with no configured author profile', () => {
   let site;
 
   before(async () => {
     const { rows } = await query(
       `INSERT INTO sites (name, gsc_property, ga4_property_id)
-       VALUES ('expand-content-author-byline-test-site', 'sc-domain:expand-content-author-test.example', 'test-ga4')
+       VALUES ('Expand Content Author Byline Test Site', 'sc-domain:expand-content-author-test.example', 'test-ga4')
        RETURNING *`
     );
     site = rows[0];
@@ -67,7 +70,7 @@ describe('expand-content generator — author-byline with no configured author p
     await pool.end();
   });
 
-  test('drafts a deterministic placeholder that passes the Quality Gate, without calling the LLM', async () => {
+  test('auto-fills an Organization byline from the site\'s real name and passes the Quality Gate, without calling the LLM', async () => {
     const original = globalThis.fetch;
     let llmWasCalled = false;
     globalThis.fetch = async (url) => {
@@ -84,7 +87,7 @@ describe('expand-content generator — author-byline with no configured author p
     try {
       const { content } = await generate({ siteId: site.id, params: { page: 'https://example.com/real-page', focus: 'author-byline' } });
       assert.equal(llmWasCalled, false);
-      assert.match(content.sections[0].body, /NEEDS INPUT/);
+      assert.equal(content.sections[0].body, 'By the Expand Content Author Byline Test Site Team');
       const gate = runQualityGate(content, meta.id);
       assert.deepEqual(gate.issues, []);
       assert.equal(gate.clean, true);
