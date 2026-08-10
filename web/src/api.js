@@ -288,6 +288,7 @@ export const api = {
     trigger: (maxPages) => req('/site-audit/run', { method: 'POST', body: JSON.stringify(maxPages ? { maxPages } : {}) }),
     list: () => req('/site-audit/runs'),
     get: (id) => req(`/site-audit/runs/${id}`),
+    cancel: (id) => req(`/site-audit/runs/${id}/cancel`, { method: 'POST' }),
   },
 
   mcpTokens: {
