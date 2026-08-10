@@ -2,20 +2,59 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 
+// Was an outline-only generator (sections of heading+notes, no real prose) —
+// changed 2026-08-07 because that shape was shipping straight into a real PR
+// via implementers/frontend.js with no completeness check, i.e. an
+// intentionally unfinished draft was reaching production as if it were a
+// real blog post. Now produces a complete, publication-ready article
+// (sections of heading+body prose) and is no longer exempt from
+// lib/content-scaffolding-guard.js. Kept generatorId 'blog-outline' —
+// renaming would break existing recommendations/drafts rows, url_file_map
+// newContentTargets config, and risk-tiers/execution-jobs lookups keyed on
+// it — the id is legacy, the output shape is not.
 export const meta = {
   id: 'blog-outline',
-  name: 'Blog Outline Generator',
-  description: 'Drafts a structured outline for a new post covering a topic the site doesn\'t yet serve, with real internal-link suggestions.',
+  name: 'Blog Post Generator',
+  description: 'Drafts a complete, publication-ready blog post covering a topic the site doesn\'t yet serve, with real internal-link suggestions.',
   recommendationTags: [], // sourced from content-gap's aiSuggestions, not a deterministic gap tag
 };
 
 const CANDIDATE_LIMIT = 20;
 const DEFAULT_WINDOW_DAYS = 90;
+// Floor for a real SEO blog post, not a thin/stub page. Below this after one
+// bounded expand attempt, generation is rejected outright (see generate()
+// below) rather than shipped as a draft — matches this repo's "regenerate
+// until complete, never publish a stub" rule for net-new content.
+const MIN_TOTAL_WORDS = 800;
 
 function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
   const start = new Date(Date.now() - DEFAULT_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
   return { start, end };
+}
+
+function wordCount(text) {
+  return (text || '').trim().split(/\s+/).filter(Boolean).length;
+}
+
+function totalWords(sections) {
+  return sections.reduce((sum, s) => sum + wordCount(s?.body), 0);
+}
+
+// One bounded expand pass, same "one bounded retry" convention as
+// direct-answer.js's rewriteToWordCount/meta-title.js's rewriteToLength —
+// asks the model to flesh out thin sections with more real prose using only
+// facts already established, never inventing new ones.
+async function expandSections(sections, topic) {
+  const system = 'You are expanding a draft blog post that is too short to be a complete, publication-ready article. ' +
+    'Rewrite it so every section has substantive, complete prose paragraphs (not notes or bullet fragments) — expand ' +
+    'thin sections with more real detail and explanation, using ONLY facts already present in the given draft, never ' +
+    'inventing a new fact, statistic, or offering. Respond with ONLY a JSON array matching the input shape: ' +
+    '[{"heading": "...", "body": "..."}].';
+  const user = `Topic: ${topic}\n\nCurrent draft (${totalWords(sections)} words total):\n${JSON.stringify(sections)}`;
+  const expanded = await callLLMForJson(system, user, { maxTokens: 2000 }).catch(() => null);
+  if (!Array.isArray(expanded) || !expanded.length) return sections;
+  return expanded.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 }
 
 // params: { topic: string, context?: string, start?: string, end?: string }
@@ -33,30 +72,49 @@ export async function generate({ siteId, params }) {
   const candidates = otherPages.map((p) => p.dim_value);
   const candidateSet = new Set(candidates);
 
-  const system = 'You are a content strategist. Draft a structured outline for a NEW blog post covering the ' +
-    'given topic — this is a fresh piece, not based on an existing page, so treat it as a creative draft, not a ' +
-    'fact-check. If internal-link candidate URLs are given, you may suggest linking to them where topically ' +
-    'relevant (choosing ONLY from that list — never invent a URL). Respond with ONLY a JSON object: ' +
-    '{"title": "...", "metaDescription": "...", "sections": [{"heading": "...", "notes": "..."}], ' +
-    '"suggestedFaqTopics": ["...", "..."], "suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+  const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
+    `topic — this is a fresh piece, not based on an existing page, so treat it as a creative draft, not a fact-check. ` +
+    `This must be a finished article a reader could publish as-is: at least ${MIN_TOTAL_WORDS} words total across ` +
+    'all sections, each section a real paragraph (or several) of substantive prose — never headings with bullet ' +
+    'notes, placeholder text, or "write about X here" instructions in place of the actual writing. If internal-link ' +
+    'candidate URLs are given, you may suggest linking to them where topically relevant (choosing ONLY from that ' +
+    'list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
+    '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
+    '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
   let parsed;
   try {
-    parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
+    parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });
   } catch {
-    throw Object.assign(new Error('Blog outline generation failed: model did not return valid JSON'), { status: 400 });
+    throw Object.assign(new Error('Blog post generation failed: model did not return valid JSON'), { status: 400 });
   }
 
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])
     .filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
 
+  let sections = (Array.isArray(parsed.sections) ? parsed.sections : [])
+    .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
+
+  // Treat a too-short draft as a generation failure, not a shippable
+  // shorter article: one bounded expand attempt, then reject outright
+  // rather than let a thin/stub page reach a PR — see MIN_TOTAL_WORDS.
+  if (totalWords(sections) < MIN_TOTAL_WORDS) {
+    sections = await expandSections(sections, topic);
+  }
+  if (totalWords(sections) < MIN_TOTAL_WORDS) {
+    throw Object.assign(
+      new Error(`Blog post generation produced only ${totalWords(sections)} words after expansion (need ${MIN_TOTAL_WORDS}+) — try again.`),
+      { status: 502, userFacing: true },
+    );
+  }
+
   const content = {
     topic,
     title: parsed.title || '',
     metaDescription: parsed.metaDescription || '',
-    sections: Array.isArray(parsed.sections) ? parsed.sections : [],
+    sections,
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
   };
-  return { content, summary: `Outline draft for "${topic}" (${content.sections.length} section(s))` };
+  return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))` };
 }

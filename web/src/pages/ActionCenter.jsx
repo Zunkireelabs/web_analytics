@@ -36,7 +36,7 @@ const GENERATOR_META = {
   faq: { label: 'FAQ Blocks', icon: '❓', color: '#0ea5e9' },
   schema: { label: 'Schema Markup', icon: '🧩', color: '#8b5cf6' },
   'internal-links': { label: 'Internal Links', icon: '🔗', color: '#14b8a6' },
-  'blog-outline': { label: 'Blog Outlines', icon: '📝', color: '#ec4899' },
+  'blog-outline': { label: 'Blog Posts', icon: '📝', color: '#ec4899' },
   'landing-page': { label: 'Landing Pages', icon: '🚀', color: '#c2410c' },
   translation: { label: 'Translations', icon: '🌐', color: '#06b6d4' },
   'llms-txt': { label: 'llms.txt Files', icon: '🤖', color: '#10b981' },
@@ -59,6 +59,9 @@ const GENERATOR_META = {
   'terms-of-service': { label: 'Terms of Service', icon: '📜', color: '#b45309' },
 
   'duplicate-id-fix': { label: 'Duplicate ID Fix Plans', icon: '🆔', color: '#f97316' },
+  breadcrumbs: { label: 'Breadcrumbs Schema', icon: '🍞', color: '#84cc16' },
+  'schema-repair': { label: 'Structured Data Repairs', icon: '🔧', color: '#a855f7' },
+  'alt-text': { label: 'Image Alt Text', icon: '🖼️', color: '#f472b6' },
 };
 
 // Source filter (decision: redesign the existing Action Center into a

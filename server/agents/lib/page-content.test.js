@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, MAX_INLINE_STYLE_COUNT } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -193,6 +193,19 @@ describe('analyzePage — GEO signals', () => {
     assert.equal(a.externalCitationDomainCount, 1);
     assert.equal(a.hasExternalCitations, false);
   });
+
+  // Regression coverage: only the DOMAIN set was ever kept, so nothing
+  // could liveness-check a specific citation later — technical-seo-
+  // analysis.js's crawlExternalCitations needs the real hrefs themselves.
+  test('externalCitationLinks captures the real hrefs, not just their domains, self-links excluded', () => {
+    const html = `<html><body>
+      <a href="https://example.com/other-page">self</a>
+      <a href="https://wikipedia.org/x">source 1</a>
+      <a href="https://nytimes.com/z">source 2</a>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.externalCitationLinks.sort(), ['https://nytimes.com/z', 'https://wikipedia.org/x']);
+  });
 });
 
 describe('isCompressedEncoding', () => {
@@ -301,5 +314,168 @@ describe('analyzePage — page-weight signals', () => {
 
   test('MAX_INLINE_STYLE_COUNT is a positive threshold', () => {
     assert.ok(MAX_INLINE_STYLE_COUNT > 0);
+  });
+});
+
+// Regression coverage for a real systemic bug: analyzePage()'s bodyText
+// used to be a raw `$('body').text()` with no boilerplate stripping and no
+// content-container targeting, so it always included nav/header/footer
+// text verbatim — every LLM generator that grounds itself in bodyText
+// (schema, faq, qa-content, meta-title, expand-content, internal-links,
+// translation, open-graph) inherited that risk. These tests pin the fixed
+// behavior directly, since analyzePage() is pure (takes an html string, no
+// network) and every consuming generator's own test just stubs fetch to
+// reach this same code path.
+describe('analyzePage — main content extraction', () => {
+  const REAL_PARAGRAPH = 'This is a real, substantial paragraph of genuine article content about the topic at hand, '
+    + 'written with enough real words to clear the grounding floor for a realistic test of extraction behavior. '.repeat(3);
+  const NAV = '<nav><a href="/">Home</a><a href="/about">About</a><a href="/contact">Contact</a><a href="/pricing">Pricing</a></nav>';
+  const FOOTER = '<footer>Copyright 2026 Example Co. All rights reserved. Privacy Policy | Terms of Service</footer>';
+
+  test('bodyText excludes nav/header/footer text even when a real <article> exists', () => {
+    const html = `<html><head><title>T</title></head><body>${NAV}` +
+      `<header><div class="site-header">Example Co</div></header>` +
+      `<article><h1>Real Article</h1><p>${REAL_PARAGRAPH}</p></article>${FOOTER}</body></html>`;
+    const { bodyText, mainContentSelector } = analyzePage(html, 'https://example.com/page');
+    assert.ok(!/Home|About|Contact|Pricing/.test(bodyText), 'nav links leaked into bodyText');
+    assert.ok(!/Copyright|Privacy Policy|Terms of Service/.test(bodyText), 'footer text leaked into bodyText');
+    assert.ok(!/Example Co/.test(bodyText) || bodyText.includes('Real Article'), 'site-header leaked into bodyText');
+    assert.ok(bodyText.includes('Real Article'));
+    assert.equal(mainContentSelector, 'article');
+  });
+
+  test('prefers a real content container (main/article) over sibling boilerplate', () => {
+    const html = `<html><head><title>T</title></head><body>${NAV}` +
+      `<main><h1>Main Heading</h1><p>${REAL_PARAGRAPH}</p></main>${FOOTER}</body></html>`;
+    const { bodyText, mainContentSelector, wordCount } = analyzePage(html, 'https://example.com/page');
+    assert.equal(mainContentSelector, 'main');
+    assert.ok(bodyText.includes('Main Heading'));
+    assert.ok(wordCount >= MIN_GROUNDING_WORDS);
+  });
+
+  test('falls back to the stripped whole body (still boilerplate-free) when no content container matches', () => {
+    const html = `<html><head><title>T</title></head><body>${NAV}` +
+      `<div><p>${REAL_PARAGRAPH}</p></div>${FOOTER}</body></html>`;
+    const { bodyText, mainContentSelector } = analyzePage(html, 'https://example.com/page');
+    assert.equal(mainContentSelector, null);
+    assert.ok(bodyText.includes('substantial paragraph'));
+    assert.ok(!/Copyright|Home.*About.*Contact/.test(bodyText));
+  });
+
+  test('a genuinely nav/footer-only page (no real content anywhere) produces a thin bodyText, not boilerplate text', () => {
+    const html = `<html><head><title>T</title></head><body>${NAV}${FOOTER}</body></html>`;
+    const { bodyText, wordCount } = analyzePage(html, 'https://example.com/page');
+    assert.ok(!/Home|Copyright/.test(bodyText));
+    assert.ok(wordCount < MIN_GROUNDING_WORDS);
+  });
+});
+
+describe('hasSufficientGroundingContent / requireGroundedContent', () => {
+  test('false/throws below MIN_GROUNDING_WORDS', () => {
+    assert.equal(hasSufficientGroundingContent({ wordCount: MIN_GROUNDING_WORDS - 1 }), false);
+    assert.throws(() => requireGroundedContent({ wordCount: 5 }, { generatorId: 'schema' }), /not enough real page content/i);
+  });
+
+  test('true/does not throw at or above MIN_GROUNDING_WORDS', () => {
+    assert.equal(hasSufficientGroundingContent({ wordCount: MIN_GROUNDING_WORDS }), true);
+    assert.doesNotThrow(() => requireGroundedContent({ wordCount: MIN_GROUNDING_WORDS + 10 }, { generatorId: 'schema' }));
+  });
+
+  test('null/undefined analysis is treated as insufficient, not a crash', () => {
+    assert.equal(hasSufficientGroundingContent(null), false);
+    assert.throws(() => requireGroundedContent(null, { generatorId: 'faq' }));
+  });
+});
+
+describe('analyzePage — duplicate/invalid structured data (Phase 3 technical checks)', () => {
+  const PAGE_URL = 'https://example.com/product';
+
+  test('two independent blocks of the same @type are flagged as duplicates', () => {
+    const html = `<html><body>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"A"}</script>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"B"}</script>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.duplicateSchemaTypes, ['Product']);
+  });
+
+  test('two different @types are not flagged as duplicates', () => {
+    const html = `<html><body>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"A"}</script>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"B"}</script>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.duplicateSchemaTypes, []);
+  });
+
+  test('malformed JSON-LD is counted, not thrown, and does not poison other blocks', () => {
+    const html = `<html><body>
+      <script type="application/ld+json">{ not valid json </script>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Real"}</script>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.malformedJsonLdBlocks, 1);
+    assert.ok(a.schemaTypes.includes('Organization'));
+  });
+});
+
+describe('analyzePage — imagesMissingAlt (alt-text.js grounding)', () => {
+  const PAGE_URL = 'https://example.com/gallery';
+
+  test('images with real alt text are excluded', () => {
+    const html = '<html><body><img src="/a.jpg" alt="A real description"></body></html>';
+    assert.deepEqual(analyzePage(html, PAGE_URL).imagesMissingAlt, []);
+  });
+
+  test('an image missing alt captures its src and nearest heading as context', () => {
+    const html = '<html><body><h2>Product Gallery</h2><img src="/shoe.jpg"></body></html>';
+    const images = analyzePage(html, PAGE_URL).imagesMissingAlt;
+    assert.equal(images.length, 1);
+    assert.equal(images[0].src, '/shoe.jpg');
+    assert.equal(images[0].nearbyText, 'Product Gallery');
+  });
+
+  test('a figcaption takes priority over a page heading', () => {
+    const html = '<html><body><h2>Gallery</h2><figure><img src="/x.jpg"><figcaption>Real caption text</figcaption></figure></body></html>';
+    const images = analyzePage(html, PAGE_URL).imagesMissingAlt;
+    assert.equal(images[0].nearbyText, 'Real caption text');
+  });
+});
+
+// Regression coverage: page-content.js used to only COUNT malformed JSON-LD
+// blocks (malformedJsonLdBlocks) and detect duplicate @types
+// (duplicateSchemaTypes) with no generator able to act on either — the real
+// raw text captured here (malformedSchemaBlocks/schemaScriptBlocks) is what
+// generators/schema-repair.js needs to both feed an LLM correction and
+// later find verbatim in the site's real source to patch.
+describe('analyzePage — structured-data repair signals', () => {
+  const PAGE_URL = 'https://example.com/blog/post';
+
+  test('a malformed JSON-LD block is counted and its raw text captured', () => {
+    const html = '<html><head><script type="application/ld+json">{"@type": "Article", headline: "missing quotes"}</script></head><body></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.malformedJsonLdBlocks, 1);
+    assert.equal(a.malformedSchemaBlocks.length, 1);
+    assert.match(a.malformedSchemaBlocks[0], /missing quotes/);
+  });
+
+  test('schemaScriptBlocks captures one entry per real script tag, in document order, with its real types', () => {
+    const html = '<html><head>'
+      + '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"First"}</script>'
+      + '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Second"}</script>'
+      + '</head><body></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.schemaScriptBlocks.length, 2);
+    assert.deepEqual(a.schemaScriptBlocks[0].types, ['Article']);
+    assert.match(a.schemaScriptBlocks[1].raw, /"headline":"Second"/);
+    assert.deepEqual(a.duplicateSchemaTypes, ['Article']);
+  });
+
+  test('no false positives on a page with clean, non-duplicate schema', () => {
+    const html = '<html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"Real"}</script></head><body></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.malformedJsonLdBlocks, 0);
+    assert.deepEqual(a.malformedSchemaBlocks, []);
+    assert.deepEqual(a.duplicateSchemaTypes, []);
   });
 });

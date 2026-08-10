@@ -112,6 +112,31 @@ function resolveNestedObjectRange(content, objRange, config, nestedId) {
   return findObjectFieldRange(content, nestedFieldRange, nestedId, config.format || 'js-export-array');
 }
 
+// Cheap, read-only readiness check: does this adapter's own data actually
+// have the entry (or nested entry) this page needs, or would every draft
+// for it be doomed to fail the same "has no ... entry" error computeChange/
+// computeScalarFieldChange discover only at apply time? Exposed so
+// agents/lib/recommendations.js's pre-flight filter (isPageMapped today
+// only confirms a ROUTE exists, not that the routed adapter's DATA is
+// actually there) can stop resurfacing a recommendation that can never
+// succeed, instead of it reappearing every refresh until someone notices
+// the same failed draft repeatedly. Reuses the exact same lookup helpers
+// apply() itself uses — one evidence path, not a second guess at it.
+export async function isDataReady(site, page, config, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
+  const idField = config.idField || 'id';
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  if (!id || (config.nestedField && !nestedId)) return false;
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return false;
+
+  const format = config.format || 'js-export-array';
+  const objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) return false;
+  if (config.nestedField) return !!resolveNestedObjectRange(file.content, objRange, config, nestedId);
+  return true;
+}
+
 // The meta-title draft value keys this adapter knows how to write, and
 // where each one comes from on the draft — kept in exact sync with
 // marker-merge.js's buildMergeValues (the equivalent mapping for the

@@ -22,6 +22,8 @@
 //   instead and rewrites the quoted value on that same line:
 //     title: "current value" # SEOAI:NAME
 
+import { isJsxFile } from './structural-detect.js';
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -32,6 +34,22 @@ function blockRegex(name) {
   // [\s\S] (not .) so this matches across newlines. Captures the start/end
   // tags too, so a replacement can re-wrap them exactly, preserving the
   // marker for the next real merge.
+  return new RegExp(`(${escapeRegExp(start)})([\\s\\S]*?)(${escapeRegExp(end)})`);
+}
+
+// JSX/TSX's own comment convention — `<!-- -->` is NOT a comment inside JSX
+// (JSX has no HTML-comment syntax; that literal text would render as
+// visible garbage on the live page), so a `.jsx`/`.tsx` file needs its own
+// marker form, `{/* SEOAI:NAME:START */}`, which Babel/React strip like any
+// other JS comment. Same start/end capture shape as blockRegex so
+// findMarker/applyMarker can treat both conventions uniformly aside from
+// the wrapper syntax itself. Written and consumed only by
+// structural-detect.js's bootstrap flow and this module — never hand-placed
+// by a human, since JSX file structure makes a plain-text instruction less
+// obvious to place correctly than the HTML comment form.
+function jsxBlockRegex(name) {
+  const start = `{/* SEOAI:${name}:START */}`;
+  const end = `{/* SEOAI:${name}:END */}`;
   return new RegExp(`(${escapeRegExp(start)})([\\s\\S]*?)(${escapeRegExp(end)})`);
 }
 
@@ -46,6 +64,8 @@ function lineRegex(name) {
 function findMarker(fileContent, name) {
   const block = blockRegex(name).exec(fileContent);
   if (block) return { kind: 'block', old: block[2] };
+  const jsx = jsxBlockRegex(name).exec(fileContent);
+  if (jsx) return { kind: 'jsx', old: jsx[2] };
   const line = lineRegex(name).exec(fileContent);
   if (line) return { kind: 'line', old: line[3] };
   return null;
@@ -98,50 +118,70 @@ export function isHeadScopedField(field) {
   return HEAD_SCOPED_FIELDS.has(field);
 }
 
-// Fields whose real render location can't be assumed to be "wherever the
-// file happens to end" the way flat HTML/Markdown body content can. A
-// component-based page (React/Next/Astro/.jsx/.tsx) has real markup after
-// its last line of source — outside the rendered component tree entirely —
-// so the default BLOCK convention's EOF auto-insert (insertBlockMarker
-// below) would "succeed" (marker created, PR merges, build passes) while
-// producing a marker that never renders on the live page. Same hazard
-// HEAD_SCOPED_FIELDS already guards against for <head> tags; this is the
-// body-content equivalent. These fields are therefore never auto-inserted
-// at EOF — only ever spliced into a marker a human has already placed
-// somewhere genuinely inside the page's real rendered body. If that marker
-// doesn't exist yet, this fails honestly (no draft applied) rather than
-// drafting content that will never actually be visible.
-const NO_EOF_INSERT_FIELDS = new Set(['expandedContent', 'qaContent']);
-
+// Every field that isn't LINE-convention or HEAD-scoped is a generic
+// body-content BLOCK field (faq, schema, internal-links, breadcrumbSchema,
+// expandedContent, qaContent, and any future one) — and NONE of them can
+// safely assume "wherever the file happens to end" is inside the rendered
+// body. A component-based page (React/Next/Astro/.jsx/.tsx) has real markup
+// after its last line of source — outside the rendered component tree
+// entirely — so a blind EOF auto-insert would "succeed" (marker created, PR
+// merges, build passes) while producing a marker that never renders on the
+// live page. Same hazard HEAD_SCOPED_FIELDS already guards against for
+// <head> tags; this is the body-content equivalent. `ensureMarkers` below
+// therefore only auto-inserts a body-scoped marker at EOF on a plain
+// Markdown/MDX file (isPlainMarkdownFile — the one shape where EOF really
+// is inside the rendered body); everywhere else, real structural detection
+// is required — see insertion-engine.js's `resolveInsertion`, which
+// `ensureMarkers` here defers to via its caller (backend.js) rather than
+// ever guessing an EOF position itself.
+//
 // Exposed so callers can give a more specific "marker not found" error for
 // a body-scoped field — same spirit as isHeadScopedField above.
 export function isNoEofInsertField(field) {
-  return NO_EOF_INSERT_FIELDS.has(field);
+  return !LINE_CONVENTION_FIELDS.has(field) && !HEAD_SCOPED_FIELDS.has(field);
 }
 
-// Single source of truth for "will ensureMarkers actually be able to create
-// this marker automatically, or does it need a real human-placed anchor
-// first" — used by BOTH ensureMarkers below (the apply-time behavior) and
-// audit-url-file-map.js (the diagnostic script), so the two can never
-// silently disagree about what counts as a real gap. Before this existed,
-// the audit script counted every missing marker equally, even ones
-// ensureMarkers heals automatically at apply time — inflating its gap count
-// with noise and burying the marker gaps that actually need a person.
+// Exposed so insertion-engine.js's resolveInsertion can tell a LINE field
+// (front-matter value — its own safe, narrow auto-heal path in ensureMarkers
+// below, never structural detection) apart from a generic body-scoped BLOCK
+// field, the same way isHeadScopedField already lets it distinguish that
+// third category.
+export function isLineConventionField(field) {
+  return LINE_CONVENTION_FIELDS.has(field);
+}
+
+// Single source of truth for "will the marker-existence pipeline actually be
+// able to create this marker automatically, or is there genuinely no safe
+// anchor" — used by BOTH ensureMarkers/insertion-engine.js (the apply-time
+// behavior) and audit-url-file-map.js (the diagnostic script), so the two
+// can never silently disagree about what counts as a real gap. Before this
+// existed, the audit script counted every missing marker equally, even ones
+// that self-heal automatically at apply time — inflating its gap count with
+// noise and burying the marker gaps that actually need attention.
 //
-// Returns 'self-heals' (ensureMarkers will create it, no action needed) or a
-// specific 'fatal-*' reason naming the missing anchor a human must place
-// once, matching the guard clauses in ensureMarkers exactly.
-export function classifyMarkerGap(field, filePath, fileContent) {
+// Returns 'self-heals' (no action needed — either ensureMarkers' own
+// LINE/HEAD-nested paths, or real structural detection, will resolve it) or
+// a specific 'fatal-*' reason naming the missing anchor. `detectors` (both
+// optional) are structural-detect.js's real detection functions —
+// `detectBody` (`detectInsertionPoint`) and `detectHead` (`detectHeadRegion`)
+// — injected rather than imported directly so this module (already the
+// lowest-level, most-imported implementer lib) never needs a static
+// dependency on the AST/DOM parsing stack. Omitting them falls back to the
+// conservative pre-structural-detection answer (matches this function's
+// contract before the universal insertion engine existed) rather than
+// silently claiming something self-heals that was never actually checked.
+export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) {
   if (LINE_CONVENTION_FIELDS.has(field)) {
     return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
-    return blockRegex(HEAD_MARKER_NAME).test(fileContent) ? 'self-heals' : 'fatal-no-head-region';
+    if (blockRegex(HEAD_MARKER_NAME).test(fileContent)) return 'self-heals';
+    if (!detectors.detectHead) return 'fatal-no-head-region';
+    return detectors.detectHead(fileContent).ok ? 'self-heals' : 'fatal-no-head-region';
   }
-  if (NO_EOF_INSERT_FIELDS.has(field)) {
-    return isPlainMarkdownFile(filePath) ? 'self-heals' : 'fatal-no-safe-anchor';
-  }
-  return 'self-heals'; // default BLOCK convention — always EOF-safe
+  if (isPlainMarkdownFile(filePath)) return 'self-heals';
+  if (!detectors.detectBody) return 'fatal-no-safe-anchor';
+  return detectors.detectBody(fileContent, filePath).ok ? 'self-heals' : 'fatal-no-safe-anchor';
 }
 
 // The one case where EOF genuinely IS inside the rendered body: a pure
@@ -151,7 +191,7 @@ export function classifyMarkerGap(field, filePath, fileContent) {
 // a markdown renderer as the article. There's no markup "after the last
 // line" the way a .jsx/.tsx/.astro component has — the last line of the
 // file IS the end of the rendered article. So for these extensions only,
-// the EOF fallback below is safe and NO_EOF_INSERT_FIELDS's guard doesn't
+// the EOF fallback below is safe and isNoEofInsertField's guard doesn't
 // apply. Anything else (component templates, unknown extensions) keeps the
 // conservative "fail honestly" behavior.
 function isPlainMarkdownFile(filePath) {
@@ -232,9 +272,15 @@ function insertLineMarker(fileContent, field, markerName) {
 // additive, so it can never disturb existing template syntax, front
 // matter, or layout regardless of framework. The same position every
 // block marker has been manually placed at by hand this session.
-function insertBlockMarker(fileContent, markerName) {
+// `filePath`-aware: a .jsx/.tsx file gets the JSX comment convention (see
+// jsxBlockRegex above) since `<!-- -->` isn't a real comment in JSX and
+// would otherwise render as literal visible text.
+function insertBlockMarker(fileContent, markerName, filePath) {
   const sep = fileContent.length > 0 && !fileContent.endsWith('\n') ? '\n' : '';
-  return `${fileContent}${sep}<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->\n`;
+  const marker = isJsxFile(filePath)
+    ? `{/* SEOAI:${markerName}:START */}{/* SEOAI:${markerName}:END */}`
+    : `<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  return `${fileContent}${sep}${marker}\n`;
 }
 
 // Auto-creates any marker referenced in markerMap that isn't already
@@ -259,8 +305,8 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
-    if (NO_EOF_INSERT_FIELDS.has(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see NO_EOF_INSERT_FIELDS comment above
-    content = insertBlockMarker(content, markerName);
+    if (isNoEofInsertField(field) && !isPlainMarkdownFile(filePath)) continue; // no EOF fallback — see isNoEofInsertField's comment above; insertion-engine.js's resolveInsertion handles this case via real structural detection
+    content = insertBlockMarker(content, markerName, filePath);
     inserted.push(markerName);
   }
   return { content, inserted };
@@ -275,10 +321,31 @@ export function getMarkerContent(fileContent, name) {
   return findMarker(fileContent, name)?.old ?? null;
 }
 
+// Raw HTML (renderFaqHtml/renderQaHtml/... output below) is not valid JSX
+// source — unquoted attributes like `class="faq"`, void elements, and any
+// literal `{`/`}` in generated text would all be JS/JSX syntax errors if
+// spliced in as literal JSX children. Wrapping it as a single
+// dangerouslySetInnerHTML expression is the one form that's simultaneously
+// (a) valid JSX regardless of what the HTML inside contains, since it's a
+// JS string literal, not parsed markup, and (b) renders the exact same
+// visible HTML a non-JSX template would get via a literal splice.
+// suppressHydrationWarning is a real, standard React DOM prop (harmless
+// even outside Next.js) — without it, a Next.js SSR build can log a
+// hydration-mismatch warning here even though the content itself is correct
+// and static, because this div's children are set via __html/injected
+// after the fact rather than usual JSX-rendered markup.
+function jsxSafeWrap(rawHtml) {
+  return `<div suppressHydrationWarning dangerouslySetInnerHTML={{ __html: ${JSON.stringify(String(rawHtml))} }} />`;
+}
+
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
   if (block.test(fileContent)) {
     return fileContent.replace(block, (_m, start, _old, end) => `${start}${newValue}${end}`);
+  }
+  const jsx = jsxBlockRegex(name);
+  if (jsx.test(fileContent)) {
+    return fileContent.replace(jsx, (_m, start, _old, end) => `${start}${jsxSafeWrap(newValue)}${end}`);
   }
   const line = lineRegex(name);
   const match = line.exec(fileContent);
@@ -497,6 +564,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     return { ok: true, values: { schema: `<script type="application/ld+json">${JSON.stringify(content.jsonLd)}</script>` } };
   }
 
+  if (actionType === 'breadcrumbs') {
+    if (mode === 'schema-only') return { ok: false, error: '"breadcrumbs" has no schema-only representation — it is already schema-only by nature.' };
+    if (!content.jsonLd) return { ok: false, error: 'This breadcrumbs draft has no JSON-LD to apply.' };
+    // Its own field, distinct from 'schema' — a page can have real Article/
+    // Product/etc. schema (schema.js) AND a BreadcrumbList at the same time,
+    // and marker-merge's splice is a wholesale replace, not an append (see
+    // spliceMarkers below), so sharing one field/marker would mean whichever
+    // of schema.js/breadcrumbs.js applies second silently destroys the
+    // other's JSON-LD. Same reasoning faq.js's schemaJsonLd already gets its
+    // own 'faq' field instead of also using 'schema'.
+    return { ok: true, values: { breadcrumbSchema: `<script type="application/ld+json">${JSON.stringify(content.jsonLd)}</script>` } };
+  }
+
   if (actionType === 'internal-links') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
@@ -515,7 +595,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (content.placeholderFields?.length) {
       return { ok: false, error: `This Open Graph draft has ${content.placeholderFields.length} unverified placeholder field(s) (${content.placeholderFields.join(', ')}) — the page had no real title/description to draft from. Fill them in manually (edit the draft) before this can be applied.` };
     }
-    const tags = `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">\n<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`;
+    const tags = [
+      `<meta property="og:title" content="${escapeHtml(content.ogTitle)}">`,
+      `<meta property="og:description" content="${escapeHtml(content.ogDescription || '')}">`,
+      // Twitter Card tags — deterministic mirror of the same real og:title/
+      // description (see generators/open-graph.js), under the SAME
+      // 'openGraph' field/marker rather than a new one: one generator, one
+      // draft, one PR already covers both, so there's no coexistence
+      // conflict the way schema.js/breadcrumbs.js has (nothing else ever
+      // writes into this same marker).
+      `<meta name="twitter:card" content="${escapeHtml(content.twitterCard || 'summary_large_image')}">`,
+      `<meta name="twitter:title" content="${escapeHtml(content.twitterTitle || content.ogTitle)}">`,
+      `<meta name="twitter:description" content="${escapeHtml(content.twitterDescription || content.ogDescription || '')}">`,
+    ].join('\n');
     return { ok: true, values: { openGraph: tags } };
   }
 

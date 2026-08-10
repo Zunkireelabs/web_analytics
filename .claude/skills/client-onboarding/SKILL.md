@@ -17,6 +17,11 @@ Growth Platform (master-product Part 2) is company-only, gated by
 build — a new client's login is automatically denied access to it (verified
 end-to-end during onboarding, §8 below).
 
+If this client (or the company's own site) also needs the Action Center's
+"apply approved draft as a real PR" capability, that's a separate runbook —
+see the **action-center-onboarding** skill. Nothing below (`connect-repo`,
+`url_file_map`, markers) is part of this Core Dashboard flow.
+
 ## 0. The one thing to understand before starting
 
 **This is one shared instance serving every client** — one Express process,

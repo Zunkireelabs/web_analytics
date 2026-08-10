@@ -1,4 +1,4 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
 
 export const meta = {
@@ -22,6 +22,7 @@ export async function generate({ siteId, params }) {
   if (page) {
     const fetched = await analyzePageUrl(page);
     if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
+    requireGroundedContent(fetched.analysis, { generatorId: meta.id });
     title = fetched.analysis.title;
     metaDescription = fetched.analysis.metaDescription;
     keyContent = fetched.analysis.bodyText.slice(0, KEY_CONTENT_CHARS);

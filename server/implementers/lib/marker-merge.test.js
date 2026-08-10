@@ -45,20 +45,34 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/">/);
   });
 
-  test('a normal BLOCK field (faq) is unaffected — still auto-inserts at EOF', () => {
-    const file = 'plain body content';
-    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' });
+  // Plain Markdown/MDX is the one shape where EOF really is inside the
+  // rendered body (see isNoEofInsertField's comment) — every OTHER body
+  // field, including faq, now needs real structural detection
+  // (insertion-engine.js's resolveInsertion) rather than a blind EOF guess.
+  test('a normal BLOCK field (faq) still auto-inserts at EOF on a plain Markdown file', () => {
+    const file = '# Post\n\nplain body content';
+    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' }, 'content/post.md');
     assert.deepEqual(inserted, ['FAQ']);
     assert.match(content, /<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->/);
+  });
+
+  test('a normal BLOCK field (faq) does NOT auto-insert at EOF on a non-Markdown file — real structural detection is required instead', () => {
+    const file = 'plain body content';
+    const { content, inserted } = ensureMarkers(file, { faq: 'FAQ' }, 'src/pages/about.astro');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file); // untouched
   });
 });
 
 describe('body-scoped fields (expand-content)', () => {
-  test('isNoEofInsertField identifies expandedContent and qaContent only', () => {
+  test('isNoEofInsertField identifies every body-scoped BLOCK field, not just expandedContent/qaContent — LINE and HEAD-scoped fields are the only exceptions', () => {
     assert.equal(isNoEofInsertField('expandedContent'), true);
     assert.equal(isNoEofInsertField('qaContent'), true);
-    assert.equal(isNoEofInsertField('faq'), false);
+    assert.equal(isNoEofInsertField('faq'), true);
+    assert.equal(isNoEofInsertField('schema'), true);
+    assert.equal(isNoEofInsertField('links'), true);
     assert.equal(isNoEofInsertField('canonical'), false);
+    assert.equal(isNoEofInsertField('title'), false);
   });
 
   // Regression test: a component-based page (.jsx/.tsx/.astro) has real
@@ -135,6 +149,16 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, true);
     assert.match(result.values.openGraph, /og:title" content="Title"/);
     assert.match(result.values.openGraph, /og:description" content="Desc"/);
+  });
+
+  test('open-graph also emits matching Twitter Card tags under the same field', () => {
+    const result = buildMergeValues('open-graph', {
+      ogTitle: 'Title', ogDescription: 'Desc', twitterCard: 'summary_large_image', twitterTitle: 'Title', twitterDescription: 'Desc',
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.openGraph, /twitter:card" content="summary_large_image"/);
+    assert.match(result.values.openGraph, /twitter:title" content="Title"/);
+    assert.match(result.values.openGraph, /twitter:description" content="Desc"/);
   });
 
   test('open-graph escapes untrusted content', () => {
@@ -313,6 +337,42 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
   });
 });
 
+// Regression coverage for a real bug: breadcrumbs.js (generators/) and
+// risk-tiers.js both already treated 'breadcrumbs' as a real, safe-tier
+// generator, but buildMergeValues had no case for it at all — every
+// breadcrumbs draft would fail at apply time with "No merge strategy for
+// action type." These pin the fix, including the field name: breadcrumbs
+// must NOT share schema.js's 'schema' field, since a page can carry real
+// Article/Product/etc. schema AND a BreadcrumbList at once, and
+// spliceMarkers is a wholesale replace, not an append — sharing one field
+// would mean whichever of the two generators applies second destroys the
+// other's JSON-LD.
+describe('buildMergeValues — breadcrumbs', () => {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [{ '@type': 'ListItem', position: 1, name: 'Home', item: 'https://example.com/' }],
+  };
+
+  test('produces a JSON-LD script tag under its own breadcrumbSchema field, not schema', () => {
+    const result = buildMergeValues('breadcrumbs', { jsonLd });
+    assert.equal(result.ok, true);
+    assert.deepEqual(Object.keys(result.values), ['breadcrumbSchema']);
+    assert.match(result.values.breadcrumbSchema, /<script type="application\/ld\+json">/);
+    assert.match(result.values.breadcrumbSchema, /"@type":"BreadcrumbList"/);
+  });
+
+  test('fails honestly with no JSON-LD', () => {
+    const result = buildMergeValues('breadcrumbs', {});
+    assert.equal(result.ok, false);
+  });
+
+  test('has no schema-only representation (already schema-only by nature)', () => {
+    const result = buildMergeValues('breadcrumbs', { jsonLd }, 'schema-only');
+    assert.equal(result.ok, false);
+  });
+});
+
 describe('buildMergeValues — faq (per-site template, not one tenant\'s markup hardcoded for everyone)', () => {
   const items = [
     { question: 'How do I get in touch?', answer: 'Email or call us.' },
@@ -356,5 +416,33 @@ describe('buildMergeValues — faq (per-site template, not one tenant\'s markup 
   test('fails honestly with no items', () => {
     const result = buildMergeValues('faq', { items: [] });
     assert.equal(result.ok, false);
+  });
+});
+
+describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
+  // ensureMarkers itself no longer creates a body-scoped marker on a .tsx
+  // file at all (see isNoEofInsertField above) — that's now
+  // insertion-engine.js's job, via real structural detection, and it's the
+  // one that uses the {/* */} JSX comment convention (see its own tests).
+  test('ensureMarkers refuses a body-scoped marker on a .tsx file, leaving it for real structural detection', () => {
+    const file = 'export default function Page() {\n  return <main>hi</main>;\n}\n';
+    const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'src/pages/about.tsx');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file);
+  });
+
+  test('spliceMarkers wraps the value in dangerouslySetInnerHTML for a JSX marker, never splices raw HTML as JSX children', () => {
+    const file = 'function Page() {\n  return (\n    <main>\n      {/* SEOAI:QACONTENT:START */}{/* SEOAI:QACONTENT:END */}\n    </main>\n  );\n}\n';
+    const spliced = spliceMarkers(file, { qaContent: 'QACONTENT' }, { qaContent: '<div class="qa"><p>Q</p></div>' });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /dangerouslySetInnerHTML=\{\{ __html: "<div class=\\"qa\\"><p>Q<\/p><\/div>" \}\}/);
+    assert.doesNotMatch(spliced.newContent, /<main>\s*<div class="qa">/); // never a raw, invalid-JSX splice
+  });
+
+  test('a marker already present on a JSX file round-trips through ensureMarkers unchanged', () => {
+    const file = 'function Page() {\n  return <main>{/* SEOAI:LINKS:START */}{/* SEOAI:LINKS:END */}</main>;\n}\n';
+    const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'page.jsx');
+    assert.deepEqual(inserted, []);
+    assert.equal(content, file);
   });
 });

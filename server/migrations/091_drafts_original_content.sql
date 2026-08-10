@@ -1,0 +1,12 @@
+-- Phase 4 of the Quality Gate work (089/090): preserves the generator's
+-- FIRST output, untouched by any later human edit (updateDraft overwrites
+-- `content` in place, see store/drafts.js) — the only way to later detect
+-- "a human corrected this before approving" and turn that correction into a
+-- reusable fix_lessons row (migration 086) instead of the same class of
+-- mistake getting drafted, edited, and silently re-drafted forever.
+--
+-- Nullable/defaulted so every existing draft row (created before this
+-- column existed) simply has no learning signal available for it — never
+-- backfilled from `content`, since for those rows we genuinely don't know
+-- whether `content` is the original or an already-edited value.
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS original_content JSONB;

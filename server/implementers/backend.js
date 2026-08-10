@@ -1,7 +1,8 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
-import { buildMergeValues, spliceMarkers, getMarkerContent, ensureMarkers, isHeadScopedField, isNoEofInsertField, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
+import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
+import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
@@ -12,13 +13,15 @@ import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-dri
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
+import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
+import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
 
 
 export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -28,7 +31,11 @@ export const meta = {
 // shape as faq's; internal-links renders its suggestion list to a
 // deterministic <ul> first (see marker-merge.js's renderLinksHtml) — neither
 // needs a different mechanism, just its own marker name and value-builder.
-const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install']);
+// Exported so server/scripts/bootstrap-structural-markers.js (the
+// onboarding/migration warm-cache tool) iterates the SAME real set of
+// marker-merge action types this implementer actually handles, rather than
+// keeping its own independent, driftable copy of the list.
+export const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
 
 // The real field name buildMergeValues() (lib/marker-merge.js) expects for
 // each action type — used only to build an accurate, type-specific example
@@ -677,34 +684,30 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
-  // Auto-creates any marker in markerMap that isn't already in the live
-  // file — see lib/marker-merge.js's ensureMarkers for the two placement
-  // strategies. `oldContent` below stays the true original fetch, so the
-  // diff a reviewer sees includes the marker's own creation alongside the
-  // content splice, not just the content — nothing here skips review, it
-  // only removes the separate manual "push an empty marker first" step
-  // that used to have to happen before a draft could even reach preview.
-  const ensured = ensureMarkers(file.content, markerMap, filePath);
+  // Resolves any marker in markerMap that isn't already in the live file —
+  // the universal insertion engine (insertion-engine.js's resolveInsertion):
+  // learned-strategy-first (strategy-registry.js), then real structural
+  // detection, creating whatever's missing inline. `oldContent` below stays
+  // the true original fetch, so the diff a reviewer sees includes any
+  // marker's own creation alongside the content splice, not just the
+  // content — nothing here skips review (this is still the same daily batch
+  // PR every other draft goes through), it only removes the separate manual
+  // "push an empty marker first" step that used to have to happen before a
+  // draft could even reach preview, and the separate stand-alone bootstrap
+  // PR that used to have to be merged first.
+  const { content: ensuredContent, unresolved } = await resolveInsertion(site, file.content, filePath, markerMap);
 
-  const spliced = spliceMarkers(ensured.content, markerMap, built.values);
-  if (!spliced.ok) {
-    const names = spliced.missingMarkers.map((m) => `SEOAI:${m}`).join(', ');
-    // A head-scoped field (canonical, open-graph, ...) is never auto-inserted
-    // at EOF — it can only be auto-created nested inside a human-placed
-    // SEOAI:HEAD region (see marker-merge.js). If its own marker is still
-    // missing after ensureMarkers ran, that region doesn't exist yet — tell
-    // the operator exactly what one-time step to do, not just which marker
-    // name is missing.
-    const missingEntries = Object.entries(markerMap).filter(([, markerName]) => spliced.missingMarkers.includes(markerName));
-    const headHint = missingEntries.some(([field]) => isHeadScopedField(field))
-      ? ` This field must be placed inside a <!-- SEOAI:HEAD:START -->...<!-- SEOAI:HEAD:END --> region within <head> — add that region to ${filePath} first (a one-time step per template), then this field's own marker is created automatically.`
-      : '';
-    const bodyScopedMarker = missingEntries.find(([field]) => isNoEofInsertField(field))?.[1];
-    const bodyHint = bodyScopedMarker
-      ? ` This field renders as real page-body content, so its marker can't be safely auto-placed at end-of-file (that position is outside the rendered component tree on most React/Next/Astro templates) — add <!-- SEOAI:${bodyScopedMarker}:START --><!-- SEOAI:${bodyScopedMarker}:END --> by hand at the real spot in ${filePath} where this content should appear, then re-apply.`
-      : '';
-    return { ok: false, reason: 'no-insertion-marker', error: `Marker(s) not found in the live file: ${names}. Add them to ${filePath} before this can be applied.${headHint}${bodyHint}` };
-  }
+  const spliced = spliceMarkers(ensuredContent, markerMap, built.values);
+  // Per this platform's daily-batch contract: a field that couldn't be
+  // safely resolved must never be spliced with real content and must never
+  // reach a PR — reported honestly, by name, with its real reason, rather
+  // than a generic "add this marker manually" message. This draft alone is
+  // unresolved; nothing here prevents any OTHER draft in the same batch from
+  // applying and reaching the PR normally. See insertion-engine.js's
+  // buildUnresolvedInsertionFailure for the (independently unit-tested)
+  // contract this enforces.
+  const failure = buildUnresolvedInsertionFailure(filePath, spliced, unresolved);
+  if (failure) return failure;
 
   return {
     ok: true, filePath, oldContent: file.content, newContent: spliced.newContent, changedRegions: spliced.changedRegions,
@@ -769,6 +772,8 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
@@ -816,6 +821,8 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
+    if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
+    if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
     if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
@@ -843,6 +850,8 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
+  if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);

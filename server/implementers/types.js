@@ -111,6 +111,85 @@
  */
 
 /**
+ * Render capability: whether a given file target actually gets a Markdown
+ * pass run on it by the site's own static-site generator BEFORE this app
+ * commits a fresh Markdown-with-front-matter body to it (see
+ * lib/newpage-render.js) — checked by lib/rendering-gate.js, the generic
+ * pre-PR Rendering Validation Gate wired into lib/github-ops.js's
+ * pushDraftBranch (the one choke point every implementer's apply() shares,
+ * so this fires for landing pages, blog posts, direct-answer pages,
+ * translations, legal/compliance pages, and any future generator that
+ * reuses newpage-render.js's shape — never anything page-specific).
+ *
+ * This app never runs the target repo's own build (each client site is a
+ * separate repo with its own Eleventy/Hugo/Astro/etc. pipeline — see the
+ * action-center-onboarding skill), so whether a `.njk`/`.html` file actually
+ * gets Markdown-processed can't be inferred from the extension string alone
+ * — it depends on that specific repo's own template-engine config. This is
+ * therefore explicit, human-recorded metadata, not a guess:
+ *
+ *   url_file_map.renderCapabilities = {
+ *     generator: 'eleventy',            // free-text, informational only — any static-site generator/framework
+ *     extensions: {
+ *       '.md':      { markdown: true },
+ *       '.11ty.md': { markdown: true },
+ *       '.njk':     { markdown: false }, // Nunjucks alone does not run a Markdown pass
+ *       '.html':    { markdown: false },
+ *     },
+ *     overrides: {                      // per action_type, takes priority over the extensions table
+ *       'landing-page': { markdown: true }, // e.g. this target's specific file is known to carry templateEngineOverride: "njk,md"
+ *     },
+ *   }
+ *
+ * Recorded once per site via `npm run connect-repo` (server/scripts/connect-repo.js),
+ * the same file/step that already records pages/patterns/newContentTargets/
+ * siteRoot. `npm run audit-url-file-map` reports any newContentTargets entry
+ * with no matching (or unsafe) renderCapabilities entry as a config gap,
+ * surfaced the same way as every other onboarding gap (Integration Health —
+ * server/integrations/github.js).
+ *
+ * Fails closed: no recorded renderCapabilities at all, or no entry matching
+ * a specific target, is treated exactly like an explicit `markdown: false`
+ * — lib/rendering-gate.js will never let a real PR be opened for a file it
+ * can't positively vouch for. This is Phase 1 (config-level proof, checked
+ * synchronously before a single byte is committed) of a two-layer design.
+ *
+ * Phase 2 — an actual client-repo build, verifying the real rendered HTML
+ * output rather than just config — is also implemented, as
+ * `checkClientBuildStatus` in the same module. It runs in GitHub Actions,
+ * IN THE CLIENT REPO, never on this app's own infrastructure (see the
+ * action-center-onboarding skill's "Build location" decision — running
+ * `npm install`/build from an arbitrary client repo is real remote-code-
+ * execution risk this app deliberately never takes on itself). Installed
+ * once per site via `node server/scripts/install-rendering-workflow.js`,
+ * which opens a PR adding `.github/workflows/rendering-validation.yml` +
+ * `scripts/check-rendered-output.mjs` (templates at
+ * implementers/lib/rendering-validation-templates/) to the CLIENT repo.
+ * That workflow builds the site and runs the checker script against the
+ * real output directory, reporting back as a GitHub Check Run named
+ * exactly `rendering-gate.js`'s `CLIENT_BUILD_CHECK_NAME`
+ * ("rendering-validation"). `checkClientBuildStatus(site, ref)` reads that
+ * check back via the GitHub API — same `{ok, reason, error}` contract as
+ * Phase 1, so a caller can treat both uniformly.
+ *
+ * Optional `renderCapabilities.build` config feeds the generated workflow:
+ *
+ *   url_file_map.renderCapabilities.build = {
+ *     installCommand: "npm ci",
+ *     buildCommand: "npm run build",
+ *     outputDir: "_site",
+ *   }
+ *
+ * Phase 2 is intentionally NOT in lib/rendering-gate.js's synchronous
+ * `CHECKS` array (see that array's own comment) — it needs a real build of
+ * a real committed ref, which can only exist once a branch/PR is already
+ * out there, so it can't block the initial commit the way Phase 1 does.
+ * Its result becomes available to check (e.g. before staff marks a draft
+ * "approved/published," or as a merge-readiness badge) only after the PR
+ * exists and the workflow has run.
+ */
+
+/**
  * Placement: WHERE an approved draft's content lands on a page, decoupled
  * from both WHAT the generator produced and HOW it renders (render strategy,
  * above). Resolved by lib/url-file-map.js's resolvePlacement(site, pageUrl,

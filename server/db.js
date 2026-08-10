@@ -222,6 +222,21 @@ export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   return rows[0];
 }
 
+// The site's real author/byline identity (migration 090) — read by
+// generators/schema.js (populates Article/BlogPosting/NewsArticle's
+// `author` field) and generators/expand-content.js (drafts a real, on-page
+// byline for the `author-byline` GEO-signal focus instead of a
+// "[Author Name]" placeholder) whenever author_name is set. Passing null for
+// a field clears it — same semantics as updateSiteRepoConfig.
+export async function updateSiteAuthorProfile({ siteId, authorName, authorRole, authorUrl, requireVisibleByline }) {
+  const { rows } = await query(
+    `UPDATE sites SET author_name = $1, author_role = $2, author_url = $3, require_visible_byline = $4 WHERE id = $5 RETURNING *`,
+    [authorName || null, authorRole || null, authorUrl || null, !!requireVisibleByline, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 // Count of pages that already had a visible, organic FAQ before this tool
 // ever ran (migration 074) — combined with countVisibleFaqDrafts to make
 // visible_faq_cap a true sitewide ceiling. Set only via the staff-triggered

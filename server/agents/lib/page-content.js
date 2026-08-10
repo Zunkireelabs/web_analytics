@@ -11,6 +11,30 @@ const MIN_META_DESCRIPTION_LEN = 50;
 const MAX_META_DESCRIPTION_LEN = 160;
 const MIN_INTERNAL_LINKS = 3;
 const MIN_WORD_COUNT = 300;
+// Rock-bottom sanity floor for grounding an LLM call in real page content —
+// deliberately much lower than MIN_WORD_COUNT (that one's an SEO "this page
+// needs more content" heuristic for a genuinely published page; this one
+// just answers "did extraction actually find real content at all," so a
+// generator can refuse to run rather than draft schema/FAQ/copy off of
+// whatever nav/footer text is all that's left after boilerplate stripping —
+// see extractMainText/requireGroundedContent below).
+export const MIN_GROUNDING_WORDS = 40;
+// Real content containers, checked in priority order against the ALREADY
+// boilerplate-stripped document (see extractMainText) — common semantic tag
+// first, then common CMS/theme content-div conventions. First match with
+// enough real text wins; a match with almost no text (e.g. an empty <main>
+// wrapper around a client-rendered app) is treated as no match at all so it
+// doesn't preempt a better-populated fallback.
+const MAIN_CONTENT_SELECTORS = ['main', 'article', '[role="main"]', '#content', '.content', '#main-content', '.main-content', '.post-content', '.entry-content', '.article-body', '.article-content'];
+// Removed from a CLONE of the loaded document before any text extraction —
+// nav/header/footer/script/style/etc. must never contribute to the text an
+// LLM generator grounds itself in, whether or not a MAIN_CONTENT_SELECTORS
+// match is found. Applied even on the whole-body fallback path, so "no
+// dedicated content container found" still never means "raw, unstripped
+// document.body" — only ever "stripped body, best effort."
+const BOILERPLATE_SELECTORS = 'nav, header, footer, script, style, noscript, aside, form, ' +
+  '[role="navigation"], [role="banner"], [role="contentinfo"], ' +
+  '.nav, .navbar, .menu, .site-header, .site-footer, .cookie-banner, .cookie-consent';
 // Standard SERP-snippet-width-derived range — below this a title is usually
 // thin/generic, above it Google truncates the displayed title in results.
 const MIN_TITLE_LEN = 30;
@@ -90,6 +114,54 @@ export async function fetchHtml(url) {
   }
 }
 
+// Extracts the real, LLM-groundable text of a page — a dedicated content
+// container when one can be found (never nav/header/footer/script/style,
+// which are stripped first), falling back to the rest of the stripped
+// document only when no container matches. This is deliberately a SEPARATE
+// cheerio.load() from the `$` used by the rest of analyzePage() below: every
+// other signal in this file (internal links, images, forms, schema
+// detection, accordion detection, ...) legitimately needs the WHOLE,
+// unmodified document, so boilerplate-stripping must never touch that `$`.
+function extractMainText(html) {
+  const $clean = cheerio.load(html);
+  $clean(BOILERPLATE_SELECTORS).remove();
+  for (const selector of MAIN_CONTENT_SELECTORS) {
+    const text = $clean(selector).first().text().replace(/\s+/g, ' ').trim();
+    if (text.split(' ').filter(Boolean).length >= MIN_GROUNDING_WORDS) return { text, selector };
+  }
+  return { text: $clean('body').text().replace(/\s+/g, ' ').trim(), selector: null };
+}
+
+// Shared by every generator that grounds an LLM prompt in a live page's real
+// content (schema.js, faq.js, qa-content.js, meta-title.js,
+// expand-content.js) — a fetch can succeed (200, real HTML) while the real
+// content extraction still comes up empty/thin (client-side-rendered
+// content the static fetch never sees, or the page genuinely is just a nav
+// shell), which must never silently ground an LLM call in whatever
+// boilerplate is left. Pure predicate, no throw — see requireGroundedContent
+// for the throwing variant mandatory-page generators use.
+export function hasSufficientGroundingContent(analysis) {
+  return !!analysis && (analysis.wordCount || 0) >= MIN_GROUNDING_WORDS;
+}
+
+// Throwing variant for generators that treat a page as mandatory (schema,
+// qa-content, expand-content — all already throw on `!fetched.ok`, this is
+// the same "refuse rather than draft on bad input" contract extended to
+// "fetch succeeded but real content didn't"). Generators that treat page
+// content as optional (faq, meta-title) should use
+// hasSufficientGroundingContent instead and degrade to their existing
+// no-page-content mode rather than hard-failing.
+export function requireGroundedContent(analysis, { generatorId } = {}) {
+  if (hasSufficientGroundingContent(analysis)) return;
+  const words = analysis?.wordCount || 0;
+  throw Object.assign(
+    new Error(`Not enough real page content could be extracted to ground ${generatorId || 'this generator'} ` +
+      `(found ${words} word(s) after stripping nav/header/footer/script/style — need ${MIN_GROUNDING_WORDS}+). ` +
+      'The page may be thin, client-side-rendered, or nav/template-only — try again once it has real content.'),
+    { status: 502, userFacing: true },
+  );
+}
+
 export function analyzePage(html, pageUrl) {
   const $ = cheerio.load(html);
   const title = $('title').first().text().trim();
@@ -107,9 +179,32 @@ export function analyzePage(html, pageUrl) {
   let hasAuthorSchema = false;
   let hasFreshnessSchema = false;
   let hasReviewSchema = false;
+  // Duplicate-schema and invalid-JSON-LD are real, technical issues a
+  // generator now DOES auto-fix, exact-match-or-refuse only — see
+  // generators/schema-repair.js + implementers/lib/schema-repair-inject.js.
+  // schemaTypes itself is a Set (dedupes types by design, for every other
+  // check in this file that just needs presence), so a separate per-type
+  // occurrence count is needed to notice a real page shipping the same
+  // @type twice.
+  const schemaTypeCounts = new Map();
+  let malformedJsonLdBlocks = 0;
+  // Raw script inner text of each block that fails to parse — kept
+  // alongside the count above (which existing callers already read) so a
+  // repair generator (generators/schema-repair.js) has the real broken text
+  // to both feed an LLM correction and later find verbatim in the site's
+  // own source file to patch (implementers/lib/exact-match-patch.js) —
+  // never a guess at what the block "probably" contained.
+  const malformedSchemaBlocks = [];
+  // One entry per real <script> tag (not per flattened block — @graph/array
+  // shapes put several blocks in one script tag, but the removal unit for a
+  // duplicate is the whole tag), so schema-repair.js's duplicate-removal fix
+  // has the real raw text of each occurrence to anchor an exact-match patch
+  // against, in document order.
+  const schemaScriptBlocks = [];
   $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).text();
     try {
-      const data = JSON.parse($(el).text());
+      const data = JSON.parse(raw);
       const items = Array.isArray(data) ? data : [data];
       const blocks = [];
       for (const item of items) {
@@ -118,9 +213,10 @@ export function analyzePage(html, pageUrl) {
           for (const g of item['@graph']) if (g && typeof g === 'object') blocks.push(g);
         }
       }
+      const tagTypes = [];
       for (const block of blocks) {
         const types = [].concat(block['@type'] || []).flat();
-        types.forEach((t) => t && schemaTypes.add(t));
+        types.forEach((t) => { if (t) { schemaTypes.add(t); schemaTypeCounts.set(t, (schemaTypeCounts.get(t) || 0) + 1); tagTypes.push(t); } });
         if (types.includes('FAQPage')) hasFaqSchema = true;
         if (types.includes('Review') || types.includes('AggregateRating')) hasReviewSchema = true;
         const rating = block.aggregateRating;
@@ -134,8 +230,10 @@ export function analyzePage(html, pageUrl) {
         else if (author && typeof author === 'object' && author.name) hasAuthorSchema = true;
         if (block.datePublished || block.dateModified) hasFreshnessSchema = true;
       }
-    } catch { /* malformed JSON-LD on the page — ignore that block */ }
+      schemaScriptBlocks.push({ raw, types: tagTypes });
+    } catch { malformedJsonLdBlocks++; malformedSchemaBlocks.push(raw); }
   });
+  const duplicateSchemaTypes = [...schemaTypeCounts.entries()].filter(([, count]) => count > 1).map(([t]) => t);
   const hasAnySchema = schemaTypes.size > 0;
   // Heading text alone misses real FAQ sections that don't literally say "FAQ"
   // (e.g. a "Get to know Us" accordion) — so also check for FAQ-labeled markup
@@ -190,22 +288,57 @@ export function analyzePage(html, pageUrl) {
   // Well-sourced content (citing outside authorities) is more likely to be
   // reused/cited by an AI assistant than a page that never links out.
   const externalCitationDomains = new Set();
+  // Real hrefs (not just the domain set above) — technical-seo-analysis.js's
+  // crawlExternalCitations liveness-checks these the same way
+  // crawlInternalLinks already checks internalLinks, so a citation that's
+  // gone dead since this page was written gets flagged/removed the same as
+  // any other broken link, distinct only in its finding label.
+  const externalCitationLinks = [];
   if (host) {
     $('article a[href], main a[href], body a[href]').each((_, el) => {
       const href = ($(el).attr('href') || '').trim();
       if (!/^https?:\/\//i.test(href)) return;
       try {
         const linkHost = new URL(href).hostname.replace(/^www\./, '');
-        if (linkHost !== host.replace(/^www\./, '')) externalCitationDomains.add(linkHost);
+        if (linkHost !== host.replace(/^www\./, '')) { externalCitationDomains.add(linkHost); externalCitationLinks.push(href); }
       } catch { /* ignore malformed href */ }
     });
   }
 
-  const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+  const { text: bodyText, selector: mainContentSelector } = extractMainText(html);
   const wordCount = bodyText ? bodyText.split(' ').filter(Boolean).length : 0;
 
   const images = $('img');
   const imagesWithoutAlt = images.filter((_, el) => !($(el).attr('alt') || '').trim()).length;
+  // Real grounding for alt-text.js — the filename alone is often enough to
+  // draft an honest, generic caption ("Blue running shoes" from
+  // "blue-running-shoes.jpg"), but nearby real page text (a figcaption, or
+  // the closest preceding heading) is the actual fact the generator grounds
+  // in when the filename is uninformative, same "ground in real text, never
+  // guess unseen visual detail" rule every other generator already follows.
+  // Capped — a page with hundreds of images doesn't need all of them in one
+  // draft; alt-text.js can be re-run for the rest.
+  const MAX_IMAGES_MISSING_ALT = 15;
+  const imagesMissingAlt = images
+    .filter((_, el) => !($(el).attr('alt') || '').trim())
+    .slice(0, MAX_IMAGES_MISSING_ALT)
+    .map((_, el) => {
+      const $el = $(el);
+      const src = ($el.attr('src') || $el.attr('data-src') || '').trim();
+      const figcaption = $el.closest('figure').find('figcaption').first().text().trim();
+      const nearbyHeading = $el.prevAll('h1, h2, h3, h4').first().text().trim()
+        || $el.closest('section, article, div').find('h1, h2, h3, h4').first().text().trim();
+      // Real outer markup of this exact tag — same "exact snippet anchor"
+      // convention duplicate-id-fix.js's duplicateIds already uses (see
+      // $.html(el).slice(0,160) there). implementers/lib/alt-text-inject.js
+      // finds this EXACT string, byte-for-byte, in the site's real template
+      // source before patching alt="" into it — never a guess against a
+      // component-based site's rendered-vs-source mismatch.
+      const originalTag = $.html(el) || '';
+      return { src, nearbyText: figcaption || nearbyHeading || '', originalTag };
+    })
+    .get()
+    .filter((img) => img.src);
 
   const hasComparisonTable = $('table').filter((_, el) => /\bvs\.?\b|\bversus\b|\bcomparison\b/i.test($(el).text())).length > 0;
   const hasComparisonHeading = /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b/i.test(headingText);
@@ -296,6 +429,10 @@ export function analyzePage(html, pageUrl) {
     hasMetaDescription: metaDescription.length >= MIN_META_DESCRIPTION_LEN,
     hasSchema: hasAnySchema,
     schemaTypes: [...schemaTypes],
+    duplicateSchemaTypes, // real @types with 2+ independent JSON-LD blocks on this page — detection only, see comment above
+    malformedJsonLdBlocks, // count of <script type="application/ld+json"> blocks that failed to JSON.parse
+    malformedSchemaBlocks, // transient, like bodyText/imagesMissingAlt — real raw text of each block above, for generators/schema-repair.js
+    schemaScriptBlocks, // transient — {raw, types}[] per real <script> tag, document order, for schema-repair.js's duplicate-removal fix to anchor an exact-match patch against
     hasFaq: hasFaqSchema || hasFaqHeading,
     hasFaqSchema, // split out from hasFaq — FAQPage schema is a stronger, machine-readable signal than a heading
     hasFaqHeading,
@@ -305,6 +442,7 @@ export function analyzePage(html, pageUrl) {
     questionHeadingCount: $('h1, h2, h3').filter((_, el) => /\?\s*$/.test($(el).text().trim())).length,
     imagesTotal: images.length,
     imagesWithoutAlt,
+    imagesMissingAlt, // transient, like bodyText/internalLinks — real {src, nearbyText} pairs for alt-text.js, not meant for persisted facts
     hasCanonical: $('link[rel="canonical"]').length > 0,
     canonicalUrl, // real resolved target, null if absent or unparseable — see contentGapChecks' cross-domain check
     pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
@@ -314,7 +452,8 @@ export function analyzePage(html, pageUrl) {
     internalLinkCount,
     internalLinks, // transient, like bodyText — real hrefs for the technical-seo crawler, not meant for persisted facts on other callers
     wordCount,
-    bodyText, // transient — callers should not persist this into stored facts (used only for LLM context)
+    bodyText, // transient — callers should not persist this into stored facts (used only for LLM context); nav/header/footer/script/style already stripped, and sourced from a real content container when one is found — see extractMainText
+    mainContentSelector, // transient — which MAIN_CONTENT_SELECTORS entry bodyText came from, null if it fell back to the whole (stripped) body
     htmlLang, // accessibility.js: null means no <html lang> attribute
     formInputsMissingLabel, // accessibility.js
     emptyInteractiveElements, // accessibility.js
@@ -331,6 +470,7 @@ export function analyzePage(html, pageUrl) {
     hasReviewSchema,
     externalCitationDomainCount: externalCitationDomains.size,
     hasExternalCitations: externalCitationDomains.size >= 2,
+    externalCitationLinks, // transient, like internalLinks — real hrefs for technical-seo-analysis.js's crawlExternalCitations
     inlineStyleCount, // technical-seo.js: elements with a style="" attribute
     htmlByteSize, // technical-seo.js: fetched (decompressed) HTML size in bytes
   };
@@ -578,11 +718,26 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Missing H1': null,
   'Missing H2': null,
   'Missing comparisons': null,
-  'Missing alt text': null,
-  'Missing canonical tag': null,
-  'Canonical points to a different domain': null,
-  'Missing Open Graph tags': null,
+  // alt-text.js exists and drafts real, grounded captions, but stays
+  // 'manual' tier (risk-tiers.js) — there's no implementer capability yet
+  // to splice alt="" back into arbitrary <img> tags across a target repo's
+  // templates (unlike JSON-LD/array-content, which marker-merge.js and
+  // data-array-content.js already know how to publish), so a human applies
+  // this draft by hand today. Still worth auto-routing to for the manual
+  // Generate/Submit/Approve UI instead of leaving the gap unreachable.
+  'Missing alt text': 'alt-text',
+  // canonical.js and open-graph.js are real, safe-tier generators
+  // (risk-tiers.js) that were sitting dormant — reachable manually but never
+  // auto-routed from a detected gap. Connecting them here is what actually
+  // lets the Execution Engine/auto-remediation.js ship them, instead of the
+  // gap only ever showing as a recommendation nothing can act on.
+  'Missing canonical tag': 'canonical',
+  'Canonical points to a different domain': 'canonical',
+  'Missing Open Graph tags': 'open-graph',
   'Missing structured lists': null,
+  // breadcrumbs.js is pure/deterministic (real URL path segments, no LLM),
+  // same "safe" shape as canonical.js — real, safe-tier generator.
+  'Missing breadcrumbs': 'breadcrumbs',
   'Missing question-style headings': 'qa-content',
   'Title length': 'meta-title',
   'Meta description length': 'meta-title',
@@ -597,6 +752,11 @@ export const GAP_TYPE_TO_GENERATOR = {
   'Missing freshness signal': null,
   'Missing review/rating schema': null,
   'Missing external citations': null,
+  // Both now have a real, exact-match-or-refuse auto-fix (schema-repair.js +
+  // implementers/lib/schema-repair-inject.js) — see that generator's own
+  // header comment for why "detection-only" no longer applies here.
+  'Duplicate schema': 'schema-repair',
+  'Invalid structured data': 'schema-repair',
 };
 
 // Effort is a property of the action itself (structural config fix vs
@@ -607,7 +767,7 @@ const GENERATOR_EFFORT = {
   'analytics-install': 'Low',
   'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
-  'broken-link-fix': 'Low', 'redirect-fix': 'Low',
+  'broken-link-fix': 'Low', 'redirect-fix': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
 };
@@ -702,6 +862,22 @@ function contentGapChecks(analysis, queryTexts = []) {
     gaps.push({ type: 'Keyword consistency', detail: `Title's key terms barely appear in the page body (missing: ${keywordConsistency.missingWords.join(', ')}) — the title may no longer reflect what the page actually covers.` });
   }
   if (!analysis.hasOpenGraph) gaps.push({ type: 'Missing Open Graph tags', detail: 'No og:title/og:description found.' });
+  // Deterministic from the real URL path (breadcrumbs.js), not the LLM —
+  // same "pure, safe" shape as canonical.js. A homepage/root URL has no
+  // real trail to draft; breadcrumbs.js refuses that case explicitly rather
+  // than fabricating one, so this gap can fire on it without a special case
+  // here (same as schema.js's own edge-case throws elsewhere).
+  if (!(analysis.schemaTypes || []).includes('BreadcrumbList')) gaps.push({ type: 'Missing breadcrumbs', detail: 'No BreadcrumbList structured data found.' });
+  // Detection only — deciding which of two same-@type blocks is the real
+  // one, or fixing malformed JSON syntax in a live template, requires
+  // knowing the template's actual rendering, not a fact any generator here
+  // can derive. Genuinely needs a human, not a missing generator.
+  if (analysis.duplicateSchemaTypes?.length) {
+    gaps.push({ type: 'Duplicate schema', detail: `This page has more than one JSON-LD block of the same type: ${analysis.duplicateSchemaTypes.join(', ')}.` });
+  }
+  if (analysis.malformedJsonLdBlocks > 0) {
+    gaps.push({ type: 'Invalid structured data', detail: `${analysis.malformedJsonLdBlocks} JSON-LD <script> block(s) on this page failed to parse as valid JSON.` });
+  }
   if (analysis.listCount === 0) gaps.push({ type: 'Missing structured lists', detail: 'No ordered/unordered lists — lists help answer-engine extraction.' });
   if (analysis.questionHeadingCount === 0) gaps.push({ type: 'Missing question-style headings', detail: 'No headings phrased as questions — reduces AEO/featured-snippet eligibility.' });
 

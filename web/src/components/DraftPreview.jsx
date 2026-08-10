@@ -163,13 +163,13 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Field label="Blog Title" icon={Sparkles}>{content.title}</Field>
-            <Field label="Outline Meta Description" icon={FileCode}>{content.metaDescription}</Field>
+            <Field label="Meta Description" icon={FileCode}>{content.metaDescription}</Field>
           </div>
-          
+
           <div className="space-y-2">
             <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
               <ListOrdered size={12} />
-              <span>Section Hierarchy</span>
+              <span>Article Sections</span>
             </div>
             <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm space-y-4">
               {content.sections.map((s, i) => (
@@ -179,7 +179,7 @@ export default function DraftPreview({ actionType, content, onSelectTitle }) {
                   </span>
                   <div className="min-w-0 flex-1">
                     <h5 className="text-xs font-black text-slate-900 group-hover:text-indigo-600 transition-colors leading-tight">{s.heading}</h5>
-                    <p className="text-[11px] font-medium text-slate-500 mt-1 leading-relaxed">{s.notes}</p>
+                    <p className="text-[11px] font-medium text-slate-600 mt-1 leading-relaxed whitespace-pre-wrap">{s.body}</p>
                   </div>
                 </div>
               ))}

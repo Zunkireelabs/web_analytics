@@ -1,12 +1,22 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { getSiteById } from '../store/read.js';
+import { hasAuthorProfile, authorJsonLd } from './lib/author-profile.js';
 
 export const meta = {
   id: 'schema',
   name: 'Schema Markup Generator',
-  description: 'Drafts JSON-LD structured data for a page, populated only from fields verifiable in the real page content.',
+  description: 'Drafts JSON-LD structured data for a page, populated only from fields verifiable in the real page content, plus the site\'s real configured author for Article-like types.',
   recommendationTags: ['Add schema', 'Missing schema'],
 };
+
+// EEAT — the site's own configured author (sites.author_name, migration 090)
+// is a real, staff-confirmed fact, unlike price/rating/other page-specific
+// facts, so it's always safe to populate for the article-shaped types where
+// Google's guidelines actually look for an author. Never applied to
+// Product/Organization/etc. — an "author" on those types isn't a real
+// schema.org concept in the same sense.
+const ARTICLE_LIKE_TYPES = new Set(['Article', 'BlogPosting', 'NewsArticle']);
 
 // inferSchemaType() (page-content.js) deliberately passes through whatever
 // real @type is already on the page (e.g. "EducationalOrganization",
@@ -91,15 +101,41 @@ export async function generate({ siteId, params }) {
 
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
-  const { title, bodyText } = fetched.analysis;
+  requireGroundedContent(fetched.analysis, { generatorId: meta.id });
+  const { title, bodyText, schemaTypes: existingSchemaTypes } = fetched.analysis;
+
+  // The page already carries real schema of this exact type — drafting
+  // another one would produce a second, duplicate JSON-LD block describing
+  // the same entity rather than filling a real gap (schema is only ever
+  // recommended for pages page-content.js/technical-seo.js found with NO
+  // schema at all, but this generator can also be triggered manually or
+  // against stale recommendation state, so it re-checks live rather than
+  // trusting the caller). Fail outright — regenerating the LLM call can't
+  // change the fact the type is already there.
+  if (existingSchemaTypes.includes(schemaType)) {
+    throw Object.assign(
+      new Error(`This page already has real "${schemaType}" schema — drafting another would duplicate it, not fix a gap.`),
+      { status: 400, userFacing: true },
+    );
+  }
+
+  const site = await getSiteById(siteId);
 
   let effectiveType = schemaType;
   let jsonLd = await draftJsonLd(effectiveType, title, bodyText, siteId);
+  if (ARTICLE_LIKE_TYPES.has(effectiveType) && hasAuthorProfile(site)) jsonLd.author = authorJsonLd(site);
   let placeholderFields = resolvePlaceholders(jsonLd);
 
   if (needsArticleFallback(schemaType, placeholderFields)) {
+    if (existingSchemaTypes.includes('Article')) {
+      throw Object.assign(
+        new Error(`"${schemaType}" schema had no real data on the page, and the Article fallback would duplicate the page's existing real Article schema — refusing to draft either.`),
+        { status: 400, userFacing: true },
+      );
+    }
     effectiveType = 'Article';
     jsonLd = await draftJsonLd(effectiveType, title, bodyText, siteId);
+    if (hasAuthorProfile(site)) jsonLd.author = authorJsonLd(site);
     placeholderFields = resolvePlaceholders(jsonLd);
   }
 

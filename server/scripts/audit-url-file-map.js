@@ -4,6 +4,8 @@ import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile } from '../implementers/lib/url-file-map.js';
 import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
+import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
+import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
@@ -34,6 +36,12 @@ import { getLessons } from '../lessons.js';
 // only what genuinely needs a person: no file mapping, no markers
 // configured at all, a missing file, or a marker gap classifyMarkerGap
 // calls fatal (no front matter / no HEAD region / no safe body anchor).
+// classifyMarkerGap now runs the same real structural detectors
+// (structural-detect.js) the insertion engine itself uses (passed in as
+// DETECTORS below) rather than a static field allowlist, so this script's
+// "self-heals" count can never silently drift from what actually self-heals
+// at apply time.
+const DETECTORS = { detectBody: detectInsertionPoint, detectHead: detectHeadRegion };
 //
 // The nginx security-headers marker gets its own dedicated check (below,
 // separate from ACTION_TYPES) since it's a site-root marker, not a
@@ -176,7 +184,7 @@ export async function auditSite(siteId) {
     return cached && cached !== 'error' && !hasMarker(cached.content, markerName);
   });
   const markersMissing = markersMissingRaw.map((m) => ({
-    ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content),
+    ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content, DETECTORS),
   }));
   const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
   const markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
@@ -206,6 +214,38 @@ export async function auditSite(siteId) {
   const byAdapter = adapterRouted.reduce((acc, r) => { (acc[r.adapterId] ||= []).push(`[${r.actionType}] ${r.page}`); return acc; }, {});
   for (const [adapterId, entries] of Object.entries(byAdapter)) {
     console.log(`  ${adapterId}: ${entries.length} page/type combination(s)`);
+  }
+
+  // Rendering Validation Gate completeness (lib/rendering-gate.js) — every
+  // newContentTargets entry (landing-page, blog-outline, direct-answer,
+  // translation, legal/compliance pages, and any future net-new-content
+  // generator) writes a fresh Markdown body via newpage-render.js, which
+  // the real gate blocks at apply time unless url_file_map.renderCapabilities
+  // proves that target's extension actually gets Markdown-processed. Checked
+  // here too, at onboarding-audit time, using the exact same resolution
+  // (resolveCapability) the real gate uses — so this class of gap is caught
+  // BEFORE a staff member approves a draft that can never actually apply,
+  // the same principle every other section of this audit already follows.
+  const newContentTargets = site.url_file_map?.newContentTargets || {};
+  const renderCapabilityGaps = []; // { actionType, extension, reason }
+  for (const [actionType, target] of Object.entries(newContentTargets)) {
+    if (!target?.extension) continue;
+    const syntheticPath = `${target.dir || ''}/example${target.extension}`;
+    const { caps, capability } = resolveCapability(site, { path: syntheticPath, actionType });
+    if (!caps) {
+      renderCapabilityGaps.push({ actionType, extension: extensionOf(syntheticPath), reason: 'no-render-capabilities-configured' });
+    } else if (!capability) {
+      renderCapabilityGaps.push({ actionType, extension: extensionOf(syntheticPath), reason: 'extension-not-recorded' });
+    } else if (!capability.markdown) {
+      renderCapabilityGaps.push({ actionType, extension: extensionOf(syntheticPath), reason: 'recorded-not-markdown-safe' });
+    }
+  }
+  console.log(`\n-- RENDER CAPABILITY GAPS (${renderCapabilityGaps.length}) -- (net-new pages this site can generate but the gate will block at apply time)`);
+  for (const { actionType, extension, reason } of renderCapabilityGaps) {
+    console.log(`  [${actionType}] extension "${extension}" — ${reason}`);
+  }
+  if (Object.keys(newContentTargets).length && !renderCapabilityGaps.length) {
+    console.log('  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.');
   }
 
   // Dedicated nginx security-headers marker check — a site-root marker, not
@@ -257,7 +297,7 @@ export async function auditSite(siteId) {
             console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- OK, marker(s) present.`);
           } else {
             const [field, markerName] = missing[0];
-            const gap = classifyMarkerGap(field, layoutPath, file.content);
+            const gap = classifyMarkerGap(field, layoutPath, file.content, DETECTORS);
             if (gap === 'self-heals') {
               console.log(`\n-- ANALYTICS-INSTALL (sitewide, ${layoutPath}) -- marker missing but self-healing (will auto-create SEOAI:${markerName} at apply time).`);
             } else {
@@ -273,12 +313,14 @@ export async function auditSite(siteId) {
   }
 
   const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
-    && nginxMarkerOk !== false && analyticsInstallGap === null && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
+    && nginxMarkerOk !== false && analyticsInstallGap === null && renderCapabilityGaps.length === 0
+    && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
   console.log(`\nSite #${siteId}: ${clean ? 'CLEAN — no gaps found.' : 'gaps found — see above.'}`);
 
   const gapCount = noFileMapping.length + missingFiles.length + markersFatal.length
     + (nginxMarkerOk === false ? 1 : 0)
     + (analyticsInstallGap !== null ? 1 : 0)
+    + renderCapabilityGaps.length
     + ACTION_TYPES.reduce((sum, t) => sum + noMarkers[t].length, 0);
   await recordActionCenterConfigCheck(siteId, gapCount);
 }

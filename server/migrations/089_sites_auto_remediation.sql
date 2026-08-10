@@ -1,0 +1,14 @@
+-- Opt-in switch for auto-remediation.js's unattended chain: when true, a
+-- newly-detected 'safe'-tier recommendation (risk-tiers.js) is generated,
+-- validated through the Quality Gate (generators/lib/quality-gate.js), and
+-- shipped as a real PR immediately, with no human ever seeing a
+-- recommendation card for it at all (getRecommendations already hides any
+-- recommendation once a draft exists for one of its findings).
+--
+-- Defaults false deliberately, same reasoning as every other consequential
+-- opt-in flag in this codebase (e.g. expand-content.js's
+-- ENABLE_CONTENT_CITATION_SEARCH): this opens real PRs against a customer's
+-- real repo with zero review, for every existing site the moment this column
+-- existed would be the wrong default. A site's team should watch it once
+-- before trusting it unattended — enabled per site, not globally.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS auto_remediation_enabled BOOLEAN NOT NULL DEFAULT false;

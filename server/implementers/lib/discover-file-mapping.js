@@ -11,7 +11,13 @@ import { updateSiteRepoConfig } from '../../db.js';
 // the repo whose name matches this URL" is generic and now shared by both
 // the manual CLI and autoHealFileMapping below.
 
-const TEMPLATE_EXTENSIONS = ['njk', 'html', 'liquid', 'hbs', 'ejs', 'md'];
+// jsx/tsx/astro/vue added alongside the original template-engine extensions
+// now that structural-detect.js + insertion-engine.js give this app a real,
+// non-guessing way to find (and create) a safe insertion point on those
+// component-based formats too — before that existed, auto-mapping a page to
+// one of these files would have been a dead end anyway (no safe way to ever
+// splice content into it), so they were deliberately left out.
+const TEMPLATE_EXTENSIONS = ['njk', 'html', 'liquid', 'hbs', 'ejs', 'md', 'jsx', 'tsx', 'astro', 'vue'];
 
 export function normalizedPath(pageUrl) {
   let path;

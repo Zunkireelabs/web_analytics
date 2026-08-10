@@ -1,4 +1,4 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
+import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 
 export const meta = {
@@ -43,7 +43,12 @@ export async function generate({ siteId, params }) {
   let pageContext = null;
   if (page) {
     const fetched = await analyzePageUrl(page);
-    if (fetched.ok) pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
+    // Same "thin extraction treated as failed fetch" rule as faq.js — falls
+    // through to this generator's existing "no page content given" mode
+    // rather than grounding the title/description in leftover boilerplate.
+    if (fetched.ok && hasSufficientGroundingContent(fetched.analysis)) {
+      pageContext = { currentTitle: fetched.analysis.title, bodyExcerpt: fetched.analysis.bodyText.slice(0, 1500) };
+    }
   }
 
   const system = 'You are a technical SEO specialist who treats title tags and meta descriptions as data-driven, ' +

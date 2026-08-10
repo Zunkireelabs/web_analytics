@@ -49,8 +49,7 @@ export function renderBlogOutlineBody(content) {
   const parts = [];
   for (const s of content.sections || []) {
     if (!s?.heading) continue;
-    const notes = Array.isArray(s.notes) ? s.notes.map((n) => `- ${n}`).join('\n') : (s.notes || '');
-    parts.push(`## ${s.heading}\n\n${notes}`);
+    parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
   if (content.suggestedFaqTopics?.length) {
     parts.push(`## FAQ topics to cover\n\n${content.suggestedFaqTopics.map((t) => `- ${t}`).join('\n')}`);
