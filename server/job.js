@@ -670,6 +670,17 @@ export async function runHourlyCatchupForAllSites(tz) {
       console.log(`[job] hourly guard: catch-up done for site ${site.id} — report date ${done}`);
       await runWeeklyIfDue(site);
       await runExecutiveIfDue(site);
+      // GEO Audit shares the same Thursday-8am cron trigger as the two
+      // calls above (cron.js) but had no catch-up here — if the process
+      // wasn't up at that exact moment (a real risk: this app redeploys
+      // often, e.g. multiple times in one day during active development),
+      // every other weekly job on that trigger self-heals within the hour
+      // via this guard, but GEO Audit silently skipped the whole week with
+      // no backstop. Real incident: site #1's geo_audit_last_done shows a
+      // real run on 2026-07-26, then nothing for 2 weeks despite the
+      // weekly cadence, with the Thursday cron plausibly missed during one
+      // of several same-day staging redeploys.
+      await runGeoAuditIfDue(site);
       await noteGoogleAuthOutcome(true);
     } catch (err) {
       console.error(`[job] hourly guard failed for site ${site.id} "${site.name}":`, err.message);
