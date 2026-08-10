@@ -16,8 +16,29 @@ function escapeYaml(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-function frontMatter(fields) {
+// Every renderXBody() below always writes a real Markdown-syntax body
+// (#, ##, > blockquote — see module comment). Eleventy only runs its
+// Markdown pass on the `.md` template format by default; a `.njk`/`.html`
+// target gets none, so that raw syntax would ship unrendered to visitors
+// (confirmed live on zunkireelabs-web's /terms/, /privacy/, /cookies/ before
+// this was added — see fix/legal-page-unrendered-markdown). Eleventy's own
+// `templateEngineOverride` front-matter field runs a file through Nunjucks
+// then Markdown regardless of its extension, with zero build-config change,
+// so this is added unconditionally for any Eleventy site — harmless on
+// `.md` targets that already get a native Markdown pass. `site` is optional
+// (some callers, e.g. tests, don't have one) — no site/no generator match
+// means no override, same as today's behavior for non-Eleventy stacks,
+// which this function has no evidence about and must not guess for.
+function templateEngineOverrideField(site) {
+  return site?.url_file_map?.renderCapabilities?.generator === 'eleventy'
+    ? ['templateEngineOverride', 'njk, md']
+    : null;
+}
+
+function frontMatter(fields, site) {
   const lines = ['---'];
+  const override = templateEngineOverrideField(site);
+  if (override) fields = [override, ...fields];
   for (const [key, value] of fields) {
     if (value == null || value === '') continue;
     lines.push(`${key}: "${escapeYaml(value)}"`);
@@ -26,11 +47,11 @@ function frontMatter(fields) {
   return lines.join('\n');
 }
 
-export function renderLandingPageBody(content) {
+export function renderLandingPageBody(content, site) {
   const front = frontMatter([
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
-  ]);
+  ], site);
   const parts = [`# ${content.headline || content.target}`];
   if (content.subheadline) parts.push(content.subheadline);
   for (const s of content.sections || []) {
@@ -40,12 +61,12 @@ export function renderLandingPageBody(content) {
   return `${front}\n${parts.join('\n\n')}\n`;
 }
 
-export function renderBlogOutlineBody(content) {
+export function renderBlogOutlineBody(content, site) {
   const front = frontMatter([
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
-  ]);
+  ], site);
   const parts = [];
   for (const s of content.sections || []) {
     if (!s?.heading) continue;
@@ -64,12 +85,12 @@ export function renderBlogOutlineBody(content) {
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content) {
+export function renderDirectAnswerBody(content, site) {
   const front = frontMatter([
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
-  ]);
+  ], site);
   const parts = [`# ${content.heading || content.query}`, content.directAnswer || ''];
   for (const s of content.supportingSections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
@@ -88,11 +109,11 @@ export function renderDirectAnswerBody(content) {
 // generators/translation.js) — a minimal new page with the real translated
 // title/description/content. A reviewer adapts layout/includes on the real
 // PR as needed, same as landing-page/blog-outline.
-export function renderTranslationBody(content) {
+export function renderTranslationBody(content, site) {
   const front = frontMatter([
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
-  ]);
+  ], site);
   return `${front}\n${content.translatedContent || ''}\n`;
 }
 
@@ -126,13 +147,13 @@ export function extractPreservedFrontMatter(rawContent) {
 // diff a human reviews before merging. `preserved` (from
 // extractPreservedFrontMatter, existing-file overwrites only) is written
 // first so a real layout/permalink always wins over nothing.
-export function renderCompliancePageBody(content, preserved = {}) {
+export function renderCompliancePageBody(content, preserved = {}, site) {
   const front = frontMatter([
     ['layout', preserved.layout],
     ['permalink', preserved.permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription],
-  ]);
+  ], site);
   const parts = [`# ${content.headline}`];
   if (content.disclaimer) parts.push(`> **${content.disclaimer}**`);
   for (const s of content.sections || []) {
