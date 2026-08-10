@@ -53,7 +53,7 @@ export default function CriticalIssueCard({ finding, generating, onGenerate }) {
         </div>
       </div>
 
-      {action && (
+      {action?.generatorId ? (
         <button
           type="button"
           onClick={() => onGenerate(finding)}
@@ -63,6 +63,10 @@ export default function CriticalIssueCard({ finding, generating, onGenerate }) {
         >
           {generating ? 'Generating Fix…' : 'Generate Fix →'}
         </button>
+      ) : action?.unavailableReason && (
+        <p className="mt-3.5 text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+          {action.unavailableReason}
+        </p>
       )}
     </div>
   );
