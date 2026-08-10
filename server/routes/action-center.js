@@ -23,6 +23,8 @@ import {
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, countVisibleFaqPages, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
+import { resolveOrCreateComponentTemplate } from '../implementers/lib/design-drift.js';
+import { COMPLIANCE_ACTION_TYPES, FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
@@ -118,6 +120,17 @@ async function buildRenderModeHint(siteId, actionType, page) {
   } catch {
     return null;
   }
+}
+
+// Which componentTemplates key (design-drift.js's COMPONENT_TEMPLATE_KEY)
+// a generator's own output actually needs styled — 1:1 with generatorId for
+// faq/expand-content/internal-links/qa-content, but the 3 compliance
+// generators (cookie-policy/privacy-policy/terms-of-service) all share the
+// single generic 'content-wrapper' key (see frontend.js's
+// COMPLIANCE_ACTION_TYPES and newpage-render.js's renderCompliancePageBody)
+// rather than each having their own.
+function componentTemplateActionTypeFor(generatorId) {
+  return COMPLIANCE_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
 }
 
 const router = Router();
@@ -267,8 +280,93 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }).catch((err) => console.error(`[action-center] failed to record auto-fix lesson for ${generatorId}/${patternId}:`, err.message))));
   }
 
+  // Design Agent, stage — find-or-create the real, site-specific
+  // componentTemplate this generator's output needs to render styled,
+  // BEFORE this recommendation ever becomes a reviewable draft. Replaces
+  // the old manual "Seed missing templates" staff step entirely: the first
+  // recommendation of a new content type on a given site pays the one-time
+  // cost of a real Design Agent (Docker/OpenHands) session against that
+  // site's actual repo, right here; every recommendation after that for the
+  // same site+type reuses the saved template instantly (resolveOrCreate...'s
+  // own fast path). Best-effort and never blocks draft creation — a site
+  // with design_agent_enabled off, no repo configured, or a failed Design
+  // Agent run still gets a draft, just with the safe zero-config fallback
+  // marker-merge.js/newpage-render.js already have for "no template
+  // configured" (this is nothing new for those callers; it's the exact
+  // same fallback path a site with no componentTemplates at all already
+  // takes today).
+  // resolveOrCreateComponentTemplate itself already no-ops safely (reason:
+  // 'no-concept') for any generatorId with no componentTemplates key at
+  // all — no need to pre-filter which ones apply here. The resolved
+  // template is merged into a local `effectiveSite` snapshot (rather than
+  // re-fetching from the DB) so the render step right below sees it
+  // immediately, even on the very same call that just derived+saved it.
+  let effectiveSite = await getSiteById(siteId);
+  if (effectiveSite) {
+    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId))
+      .catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
+    if (templateResult?.ok && templateResult.template) {
+      effectiveSite = {
+        ...effectiveSite,
+        url_file_map: {
+          ...effectiveSite.url_file_map,
+          siteRoot: {
+            ...effectiveSite.url_file_map?.siteRoot,
+            componentTemplates: {
+              ...effectiveSite.url_file_map?.siteRoot?.componentTemplates,
+              [templateResult.componentKey]: templateResult.template,
+            },
+          },
+        },
+      };
+    }
+  }
+
+  // Rendering Validation Gate, stage — for the net-new-content action types
+  // (frontend.js's FRONTEND_ACTION_TYPES: compliance pages, landing pages,
+  // blog outlines, translations, direct answers), the FULL final output —
+  // design/template already resolved above, real body rendered, target file
+  // resolved — is computed and validated right here, at generation time,
+  // not deferred to the approval click. A generation-time failure here (a
+  // genuinely unfixable site-onboarding gap, e.g. no renderCapabilities
+  // recorded — see rendering-gate.js) means this recommendation doesn't
+  // become an approvable draft this pass, same as a Quality Gate failure
+  // above: an honest error, not a silently-broken draft sitting in the
+  // queue. A successful check's output is cached on the draft row
+  // (rendered_body/target_file_path, migration 095) so approveAndPublishDraft
+  // never has to recompute or re-derive anything — see frontend.js's
+  // resolveTargetAndBody fast path. Marker-merge action types (FAQ,
+  // expand-content, internal-links, ...) are deliberately NOT included
+  // here — their real output depends on the live page's CURRENT content at
+  // apply time (backend.js's computeMarkerMerge), which this generation
+  // step has no way to know yet and must not guess.
+  let renderedBody = null;
+  let targetFilePath = null;
+  if (FRONTEND_ACTION_TYPES.has(generatorId) && effectiveSite?.repo_owner && effectiveSite?.repo_name) {
+    const draftLike = { action_type: generatorId, content, input: params || {} };
+    const resolved = await resolveTargetAndBody(effectiveSite, draftLike);
+    if (!resolved.ok) {
+      const err = new Error(`This recommendation could not be prepared yet — ${resolved.error}`);
+      err.status = 422;
+      err.userFacing = true;
+      throw err;
+    }
+    const renderingCheck = await validateRendering(effectiveSite, {
+      path: resolved.filePath, content: resolved.body, contentFormat: resolved.contentFormat, actionType: generatorId,
+    });
+    if (!renderingCheck.ok) {
+      const err = new Error(`This recommendation could not be prepared yet — ${renderingCheck.error}`);
+      err.status = 422;
+      err.userFacing = true;
+      throw err;
+    }
+    renderedBody = resolved.body;
+    targetFilePath = resolved.filePath;
+  }
+
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId, gateResolvedPatterns,
+    renderedBody, targetFilePath,
   });
 
   // geo-audit is a generator, not an orchestrator-run agent (recommendation-
