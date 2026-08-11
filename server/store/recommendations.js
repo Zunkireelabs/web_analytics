@@ -144,7 +144,11 @@ export async function closeStaleRecommendations(siteId, stillDetectedKeys, check
       const key = `${r.recommendation_type}::${r.page}`;
       if (stillDetectedKeys.has(key)) return false;
       if (!r.page) return true;
-      if (r.recommendation_type === 'broken-link-fix') return !!linkCrawlCheckedKeys?.has(r.page);
+      // r.page is recommendationPageKey()'s `${sourcePage}::${href}` compound for this
+      // type (see recommendation-coordinator.js), but linkCrawlCheckedKeys holds bare
+      // source-page URLs from this run's link crawl — compare against the source-page
+      // half, not the whole compound key, or this branch can never match.
+      if (r.recommendation_type === 'broken-link-fix') return !!linkCrawlCheckedKeys?.has(r.page.split('::')[0]);
       return (r.detecting_agents || []).every((agentId) => (
         !batchRotatedAgentIds?.has(agentId) || !!agentCheckedKeys?.has(`${agentId}::${r.page}`)
       ));
