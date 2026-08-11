@@ -7,15 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ConfidenceScore
 
-# The five named factors from the spec. Not every engine has signal for
-# every factor (e.g. Effort Estimation has no anomaly_strength concept) —
-# callers pass None for any factor that doesn't apply to them.
+# The five named factors from the spec, plus one Phase 4 addition. Not
+# every engine has signal for every factor (e.g. Effort Estimation has no
+# anomaly_strength concept) — callers pass None for any factor that doesn't
+# apply to them, or simply omit it from `components` entirely.
 CONFIDENCE_FACTORS = (
     "data_completeness",
     "historical_coverage",
     "statistical_significance",
     "model_certainty",
     "anomaly_strength",
+    # Phase 4 (prediction -> outcome -> learning loop) — a metric's own real
+    # predicted-vs-actual track record (app/forecast/accuracy.py), used only
+    # by app/forecast/confidence.py today. Distinct from model_certainty,
+    # which is an in-sample backtest error rather than a real-world record.
+    "historical_forecast_accuracy",
 )
 
 

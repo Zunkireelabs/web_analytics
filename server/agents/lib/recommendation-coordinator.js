@@ -72,10 +72,20 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // were tracked in finding_ids (so they never re-opened) but had no row of
 // their own to generate a fix from. `href` is the actual identity of a
 // broken-link-fix recommendation, not the page it was first seen on.
+// blog-outline has the same shape of bug as the three cases above it: it has
+// no `params.page` at all (it drafts net-new content, not tied to an
+// existing page — see generators/blog-outline.js), only `params.topic`. Both
+// content-gap.js and ai-recommendation.js already raise blog-outline
+// findings today, and without a discriminator here every one of them
+// collapses to the same page='' key, so a second distinct topic never gets
+// its own row — it silently disappears into finding_ids on whichever topic
+// synced first. `topic` is the real identity of a blog-outline
+// recommendation, the same way `href` is for broken-link-fix.
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
   if (item.generatorId === 'broken-link-fix') return `${item.params?.page || ''}::${item.params?.href || ''}`;
+  if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }

@@ -13,3 +13,7 @@ python-dateutil>=2.8.2
 cryptography>=43.0
 openai>=1.50
 apscheduler>=3.10
+# Keyword-clustering collector's semantic embeddings — ported from the
+# retired standalone agents/clustering.py script (Node repo root), which
+# used the same model/library.
+sentence-transformers>=3.0

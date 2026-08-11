@@ -25,7 +25,12 @@ Estimation's output. Forecast Accuracy Evaluation (Phase 3 AI memory — see
 app/forecast/accuracy.py) runs right after Forecasts, since it only needs
 ForecastRun/ForecastPoint plus whatever MetricObservations already landed —
 independent of everything else, placed here so it's evaluated early and
-available to any later stage. The Investigation Engine (Phase 3 — see
+available to any later stage. Investigation Outcome Evaluation (Phase 4 —
+see app/investigations/outcome.py) runs right after that, for the same
+reason: it only needs an already-approved Investigation's own captured
+forecast_outlook plus whatever MetricObservations already landed today,
+closing the 'approved' -> 'completed' transition the Investigation lifecycle
+always allowed but nothing wrote until this stage existed. The Investigation Engine (Phase 3 — see
 app/investigations/engine.py) runs after the Prioritizer, since it
 summarizes ALL of the above into one persistent Investigation row per
 (client, metric, dimension, insight_type) — it needs every upstream
@@ -70,6 +75,7 @@ from app.intelligence.prioritizer import run_recommendation_prioritizer
 from app.intelligence.root_cause import run_root_cause_analysis
 from app.investigations.drafts import run_draft_trigger
 from app.investigations.engine import run_investigation_engine
+from app.investigations.outcome import run_investigation_outcome_evaluation
 from app.investigations.reasoning import run_investigation_reasoning
 from app.ml.feature_importance import run_feature_importance
 from app.opportunities.rollup import run_opportunity_rollup
@@ -85,6 +91,7 @@ async def main() -> None:
     async with track("forecasting"):
         await run_forecasts()
         await run_forecast_accuracy_evaluation()
+        await run_investigation_outcome_evaluation()
     async with track("investigating"):
         await run_feature_importance()
         await run_insight_engine()

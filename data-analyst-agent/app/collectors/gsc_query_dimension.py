@@ -12,11 +12,12 @@ from app.db.models import PageQueryObservation
 # much smaller admitted set than pages — likely just a site's head/branded
 # terms. That's the correct outcome, not a bug: the whole point of the gate
 # is to keep SARIMAX from being fit to noise, same rationale as the page
-# variant's own docstring. Kept equal to STABILITY_WINDOW_DAYS below and to
-# anomalies.py's BASELINE_WINDOW for the same reason the page variant gives:
-# a query that clears this gate has an immediately usable anomaly baseline
-# and enough history for a WoW trend-shift on day one.
-STABILITY_WINDOW_DAYS = 30
+# variant's own docstring.
+#
+# Phase 3 (page/query risk surfacing): lowered from 30 to 14, same rationale
+# and same unchanged zero-gap-tolerance rule as the page variant's own
+# comment — a shorter qualifying streak, not a looser one.
+STABILITY_WINDOW_DAYS = 14
 
 _METRIC_COLUMNS = {
     "gsc_clicks": "clicks",

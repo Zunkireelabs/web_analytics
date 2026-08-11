@@ -159,6 +159,18 @@ async def _trend_shift_insights(session: AsyncSession, client_id: int) -> None:
 
 
 async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None:
+    """Dimension-aware since Phase 3 (page/query risk surfacing) — was
+    keyed by metric_key alone, so once ForecastRun started covering more
+    than one dimension_value per metric (site + any admitted page/query —
+    see app/forecast/run.py, which already iterates every enabled
+    dimension), this silently kept only whichever run happened to have the
+    latest generated_at and always wrote the resulting insight hardcoded as
+    dimension_type='site'/dimension_value='__site__' — mislabeling a page's
+    or query's own forecast as a site-level one, or dropping it outright if
+    a same-run-timestamp site forecast won the tiebreak. Now keyed by
+    (metric_key, dimension_type, dimension_value), matching how
+    _anomaly_insights/_trend_shift_insights already treat their own source
+    rows, and last_actual is looked up in that same real dimension."""
     from app.db.models import ForecastPoint, ForecastRun
 
     runs = (
@@ -166,12 +178,13 @@ async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None
             select(ForecastRun).where(ForecastRun.client_id == client_id, ForecastRun.status == "ok")
         )
     ).scalars().all()
-    latest_per_metric: dict[str, ForecastRun] = {}
+    latest_per_dim: dict[tuple[str, str, str], ForecastRun] = {}
     for run in runs:
-        if run.metric_key not in latest_per_metric or run.generated_at > latest_per_metric[run.metric_key].generated_at:
-            latest_per_metric[run.metric_key] = run
+        key = (run.metric_key, run.dimension_type, run.dimension_value)
+        if key not in latest_per_dim or run.generated_at > latest_per_dim[key].generated_at:
+            latest_per_dim[key] = run
 
-    for run in latest_per_metric.values():
+    for run in latest_per_dim.values():
         points = (
             await session.execute(
                 select(ForecastPoint).where(ForecastPoint.forecast_run_id == run.id).order_by(ForecastPoint.target_period)
@@ -182,7 +195,7 @@ async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None
         last_actual = await session.scalar(
             select(MetricObservation.value).where(
                 MetricObservation.client_id == client_id, MetricObservation.metric_key == run.metric_key,
-                MetricObservation.dimension_type == "site", MetricObservation.dimension_value == "__site__",
+                MetricObservation.dimension_type == run.dimension_type, MetricObservation.dimension_value == run.dimension_value,
             ).order_by(MetricObservation.period_start.desc()).limit(1)
         )
         if last_actual is None or float(last_actual) == 0:
@@ -206,7 +219,8 @@ async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None
         days_until_drop = (breach_point.target_period - date.today()).days
         severity = "high" if pct_projected_change < -2 * FORECAST_RISK_DECLINE_PCT else "medium"
         await _replace_insight(
-            session, client_id=client_id, metric_key=run.metric_key, dimension_type="site", dimension_value="__site__",
+            session, client_id=client_id, metric_key=run.metric_key,
+            dimension_type=run.dimension_type, dimension_value=run.dimension_value,
             period_start=breach_point.target_period, insight_type="forecast_risk", severity=severity,
             evidence={"model": run.model, "horizon_periods": run.horizon_periods,
                       "last_actual": float(last_actual), "projected_last_point": float(points[-1].point_estimate),

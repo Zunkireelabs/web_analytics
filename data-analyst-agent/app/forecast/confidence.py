@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import ForecastRun
+from app.forecast.accuracy import get_rolling_accuracy
 from app.forecast.daily import SARIMAX_MIN_HISTORY_DAYS
 from app.scoring.confidence import ConfidenceResult, compute_confidence
 from app.stats.diagnostics import compute_prediction_error
@@ -52,6 +53,21 @@ async def compute_forecast_confidence(
     error = await compute_prediction_error(session, client_id=client_id, metric_key=forecast_run.metric_key)
     model_certainty = max(0.0, 1.0 - min(error.value, 1.0)) if error.status == "ok" and error.value is not None else None
 
+    # Phase 4 (prediction -> outcome -> learning loop): this metric's own
+    # real track record of past forecast_points vs what actually landed
+    # (app/forecast/accuracy.py — previously computed nightly but never
+    # read by anything, per that module's own "not yet wired into
+    # prioritizer.py/opportunity_scoring.py" note). Distinct from
+    # model_certainty above, which is an in-sample backtest error, not a
+    # real-world track record. None (never a fabricated 0) below
+    # MIN_EVALUATED_POINTS_FOR_SIGNAL — a metric with no evaluated history
+    # yet gets no opinion from this factor rather than a penalized one.
+    rolling_accuracy = await get_rolling_accuracy(session, client_id, forecast_run.metric_key)
+    historical_forecast_accuracy = (
+        max(0.0, 1.0 - min(rolling_accuracy["avg_abs_pct_error"] / 100, 1.0))
+        if rolling_accuracy["status"] == "ok" else None
+    )
+
     return await compute_confidence(
         session, client_id=client_id, subject_type="forecast_confidence", subject_id=forecast_run.id,
         components={
@@ -60,5 +76,6 @@ async def compute_forecast_confidence(
             "statistical_significance": None,  # no hypothesis test here — see model_certainty instead
             "model_certainty": model_certainty,
             "anomaly_strength": None,  # not applicable to this engine
+            "historical_forecast_accuracy": historical_forecast_accuracy,
         },
     )

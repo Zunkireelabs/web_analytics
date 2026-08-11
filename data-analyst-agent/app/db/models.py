@@ -383,6 +383,40 @@ class InvestigationEvent(Base):
     )
 
 
+class InvestigationOutcome(Base):
+    """Phase 4 (prediction -> outcome -> learning loop). One row per
+    Investigation, written once the investigation's own forecast_outlook
+    predicted_date has passed and a real actual value has landed for it —
+    see app/investigations/outcome.py. Deliberately does NOT claim
+    causality: outcome_status describes what happened relative to what was
+    predicted, never "the fix caused this", since a real controlled
+    counterfactual (what would have happened without the fix) doesn't
+    exist here — see that module's own docstring."""
+
+    __tablename__ = "investigation_outcomes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    investigation_id: Mapped[int] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    baseline_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    predicted_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    actual_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    pct_projected_change: Mapped[float] = mapped_column(Numeric, nullable=False)
+    pct_actual_change: Mapped[float] = mapped_column(Numeric, nullable=False)
+    outcome_status: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome_status IN ('no_decline_occurred','decline_smaller_than_predicted','decline_as_predicted_or_worse')",
+            name="investigation_outcomes_status_check",
+        ),
+        Index("idx_investigation_outcomes_client", "client_id", "evaluated_at"),
+    )
+
+
 class Opportunity(Base):
     """Phase 3 — one row per Investigation, rolling up the existing
     OpportunityScore/ImpactProjectionRun engine output (app/opportunities/

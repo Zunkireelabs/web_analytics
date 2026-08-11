@@ -71,6 +71,45 @@ async def push_predictive_alert(mcp: McpClient, alerts: list[dict]) -> dict:
     return await mcp.call_tool("push_predictive_alert", {"alerts": alerts})
 
 
+async def get_gsc_breakdown(mcp: McpClient, start: str, end: str, dim: str, limit: int = 10) -> list[dict]:
+    """[{dim_value, clicks, impressions, ctr, avg_position}] — one row per
+    dim_value, summed over the whole range and ordered by clicks desc.
+    limit accepts up to 2000 for dim='query'/'page' (raised specifically for
+    the keyword-clustering collector — see mcp-server/tools/read-only.js's
+    own comment on this tool)."""
+    return await mcp.call_tool("get_gsc_breakdown", {"start": start, "end": end, "dim": dim, "limit": limit})
+
+
+async def get_site_profile(mcp: McpClient) -> dict | None:
+    """{industry, main_topics, site_type, profiled_at} or null if this site
+    has never been profiled yet."""
+    return await mcp.call_tool("get_site_profile")
+
+
+async def get_keyword_gaps(mcp: McpClient, status: str | None = None) -> list[dict]:
+    """[{id, topic, reason, priority, status, source, created_at}], newest
+    first. Optionally filtered by review status."""
+    args = {"status": status} if status else {}
+    return await mcp.call_tool("get_keyword_gaps", args)
+
+
+async def save_site_profile(mcp: McpClient, *, industry: str, main_topics: list[str], site_type: str | None) -> dict:
+    """Upserts the current-state site profile row. Requires 'ai_actions'."""
+    return await mcp.call_tool("save_site_profile", {"industry": industry, "mainTopics": main_topics, "siteType": site_type})
+
+
+async def save_keyword_clusters(mcp: McpClient, clusters: list[dict]) -> dict:
+    """clusters: [{clusterName, clusterType, keywords: [{keyword, impressions,
+    avgPosition}], avgImpressions, avgPosition, gapScore}]. Append-only per
+    run. Requires 'ai_actions'."""
+    return await mcp.call_tool("save_keyword_clusters", {"clusters": clusters})
+
+
+async def save_keyword_gaps(mcp: McpClient, gaps: list[dict], source: str = "internal_analysis") -> dict:
+    """gaps: [{topic, reason, priority}]. Requires 'ai_actions'."""
+    return await mcp.call_tool("save_keyword_gaps", {"gaps": gaps, "source": source})
+
+
 async def generate_draft(mcp: McpClient, *, generator_id: str, params: dict, finding_id: str) -> dict:
     """Runs one Action Center generator and persists the result as a new
     draft (mcp-server/tools/ai-actions.js — the same tool the manual
