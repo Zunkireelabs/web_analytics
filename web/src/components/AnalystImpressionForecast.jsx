@@ -15,13 +15,24 @@ import {
 // claims otherwise.
 const HEADLINE_METRIC_KEYS = ['gsc_impressions', 'gsc_clicks'];
 
+// A metric can have a perfectly good forecast while latest_value is null —
+// latest_value is the most recent observation row, and the collectors write a
+// NULL-valued row for a day the upstream API returned nothing. Confirmed real
+// on this data: gsc_impressions forecasts fine with 14 points yet reports
+// latest_value null. Treating that as "no forecast" would hide a working
+// prediction behind an "insufficient history" message, so the forecast still
+// renders — only the percentage change, which genuinely needs a baseline to
+// compare against, is withheld.
 function horizonChange(metric) {
   const f = metric?.forecast;
   const last = f?.status === 'ok' && f.points?.length ? f.points[f.points.length - 1] : null;
-  if (!last || !metric?.latest_value) return null;
+  if (!last) return null;
+  const baseline = metric?.latest_value;
+  const hasBaseline = typeof baseline === 'number' && baseline !== 0;
   return {
     endValue: last.point_estimate,
-    deltaPct: ((last.point_estimate - metric.latest_value) / Math.abs(metric.latest_value)) * 100,
+    baseline: hasBaseline ? baseline : null,
+    deltaPct: hasBaseline ? ((last.point_estimate - baseline) / Math.abs(baseline)) * 100 : null,
     horizon: f.horizon_periods,
   };
 }
@@ -137,12 +148,12 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {headline.map(({ metric, change }) => {
-              const falling = change && change.deltaPct < 0;
+              const falling = change?.deltaPct != null && change.deltaPct < 0;
               return (
                 <div
                   key={metric.metric_key}
                   className={`rounded-xl border p-4 ${
-                    !change
+                    !change || change.deltaPct == null
                       ? 'bg-slate-100/50 border-slate-200'
                       : falling
                       ? 'bg-rose-500/[0.06] border-rose-500/25'
@@ -157,25 +168,35 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
                   ) : (
                     <>
                       <div className="flex items-baseline gap-2 mt-1.5">
-                        <span className="text-xl font-black text-slate-900 tabular-nums">
-                          {formatByUnit(metric.latest_value, metric.unit)}
-                        </span>
-                        <span className="text-slate-400 text-xs font-bold">→</span>
+                        {change.baseline != null && (
+                          <>
+                            <span className="text-xl font-black text-slate-900 tabular-nums">
+                              {formatByUnit(change.baseline, metric.unit)}
+                            </span>
+                            <span className="text-slate-400 text-xs font-bold">→</span>
+                          </>
+                        )}
                         <span className="text-xl font-black text-slate-900 tabular-nums">
                           {formatByUnit(change.endValue, metric.unit)}
                         </span>
                       </div>
-                      <div
-                        className={`flex items-center gap-1 text-xs font-black mt-1.5 ${
-                          falling ? 'text-rose-600' : 'text-emerald-600'
-                        }`}
-                      >
-                        {falling ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
-                        {pct(change.deltaPct)}
-                        <span className="text-slate-400 font-semibold ml-1">
-                          over {change.horizon} days
-                        </span>
-                      </div>
+                      {change.deltaPct != null ? (
+                        <div
+                          className={`flex items-center gap-1 text-xs font-black mt-1.5 ${
+                            falling ? 'text-rose-600' : 'text-emerald-600'
+                          }`}
+                        >
+                          {falling ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
+                          {pct(change.deltaPct)}
+                          <span className="text-slate-400 font-semibold ml-1">
+                            over {change.horizon} days
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-semibold text-slate-500 mt-1.5">
+                          projected {change.horizon} days out · no recent reading to compare against
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -220,10 +241,16 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs font-black text-slate-800">{finding(insight, metric)}</span>
+                      {/* days_until_drop is measured from the forecast's own
+                          start date, and observations lag by a few days, so a
+                          predicted drop can already be in the past by the time
+                          it's read — values like -10 are real in this data.
+                          Printing that literally ("-10 days out") reads as
+                          broken, so a past-due drop says so in words. */}
                       {days != null && (
                         <span className="an-chip an-chip-rose">
                           <Clock size={9} />
-                          {days} days out
+                          {days > 0 ? `${days} days out` : days === 0 ? 'today' : 'already underway'}
                         </span>
                       )}
                     </div>
