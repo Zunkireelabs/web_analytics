@@ -49,16 +49,24 @@ export async function createComponentTemplateJob(siteId, componentKeys, { reques
 // never both claim the same job. Returns null (not a rejected promise) when
 // the queue is empty, same "empty is a normal outcome" convention as the
 // rest of this file's read helpers.
-export async function claimNextDesignAgentJob() {
+//
+// siteId is optional and defaults to unscoped (every real worker.js
+// deployment polls globally, across every tenant, by design). It exists so
+// a caller that already knows it only ever wants ITS OWN site's jobs — in
+// practice, worker.test.js's fixtures — can't accidentally claim (and
+// fake-complete with a mock handler) some other site's real queued job.
+export async function claimNextDesignAgentJob(siteId = null) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows: candidates } = await client.query(
       `SELECT id FROM execution_jobs
        WHERE kind = 'design_generate' AND status = 'queued'
+         AND ($1::int IS NULL OR site_id = $1)
        ORDER BY id
        FOR UPDATE SKIP LOCKED
-       LIMIT 1`
+       LIMIT 1`,
+      [siteId]
     );
     if (!candidates[0]) {
       await client.query('COMMIT');

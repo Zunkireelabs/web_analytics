@@ -19,9 +19,13 @@ async function notImplementedHandler() {
 // `handler(job)`, then transitions the job to completed/failed and records
 // why. Returns null when the queue was empty (nothing to report), otherwise
 // a summary of what happened — used directly by tests and by the poll loop
-// below.
-export async function processOneJob({ handler = notImplementedHandler } = {}) {
-  const job = await claimNextDesignAgentJob();
+// below. `siteId` is optional and passed straight through to
+// claimNextDesignAgentJob — production (main() below) never sets it, so the
+// real worker keeps polling globally across every tenant; it exists for
+// callers (worker.test.js's fixtures) that need to claim only their own
+// site's jobs.
+export async function processOneJob({ handler = notImplementedHandler, siteId = null } = {}) {
+  const job = await claimNextDesignAgentJob(siteId);
   if (!job) return null;
 
   await appendJobLog(job.id, `Claimed by worker pid ${process.pid}`);
@@ -48,14 +52,14 @@ export async function processOneJob({ handler = notImplementedHandler } = {}) {
 // whatever job it claimed) has fully settled, no matter how long that took.
 // `onPoll(result)` is optional, mainly for tests to observe each cycle
 // without polling worker internals.
-export function createWorker({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, handler, onPoll } = {}) {
+export function createWorker({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, handler, onPoll, siteId = null } = {}) {
   let timer = null;
   let started = false;
   let stopped = false;
   let currentPoll = null;
 
   async function pollLoop() {
-    currentPoll = processOneJob({ handler })
+    currentPoll = processOneJob({ handler, siteId })
       .then((result) => { if (onPoll) onPoll(result); })
       .catch((err) => console.error('[design-agent-worker] poll error:', err.message))
       .finally(() => { currentPoll = null; });
