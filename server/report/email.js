@@ -1,17 +1,67 @@
 import nodemailer from 'nodemailer';
 
+// Catch-all redirect. When EMAIL_REDIRECT_TO is set, every outbound message
+// from this file goes to that address INSTEAD of its real recipient.
+//
+// This exists because the staging VPS is currently the live automation host
+// (see .github/workflows/deploy-staging.yml — "production (main) has never
+// actually been deployed"), its 07:00/Thursday cron is deliberately live, and
+// real client sites now share that database. Without this, the daily pipeline
+// emails real clients from an environment that is still being changed daily.
+//
+// Applied by wrapping the shared transporter rather than at the five call
+// sites below, so it is structurally impossible for a sender to miss it —
+// including one added later. A sender that forgets a redirect is exactly the
+// failure this is meant to prevent, so it must not be something a sender can
+// forget.
+//
+// Unset in production, where mail must reach its real recipient.
+export function redirectTarget() {
+  const to = (process.env.EMAIL_REDIRECT_TO || '').trim();
+  return to || null;
+}
+
+// Rewrites one message for redirect mode. The original recipients are never
+// silently discarded — they move into the subject and an X-Original-To
+// header, so a redirected inbox can still tell who each mail was FOR. Without
+// that, a morning's worth of redirected client reports is indistinguishable
+// from a morning of one's own.
+export function applyRedirect(message, target) {
+  const original = [message.to, message.cc, message.bcc].filter(Boolean).join(', ') || '(none)';
+  return {
+    ...message,
+    to: target,
+    cc: undefined,
+    bcc: undefined,
+    subject: `[REDIRECTED → ${original}] ${message.subject || ''}`.trim(),
+    headers: { ...(message.headers || {}), 'X-Original-To': original },
+  };
+}
+
 // Shared by every email sender below — null if SMTP isn't configured, so
 // each caller can skip silently rather than throw.
 function getTransporter() {
   const { SMTP_HOST, SMTP_USER, SMTP_PASS } = process.env;
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
 
-  return nodemailer.createTransport({
+  const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 465),
     secure: String(process.env.SMTP_SECURE ?? 'true') === 'true',
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
+
+  const target = redirectTarget();
+  if (!target) return transporter;
+
+  return {
+    ...transporter,
+    sendMail: (message) => {
+      const redirected = applyRedirect(message, target);
+      console.log(`[email] REDIRECT ACTIVE — "${message.subject}" for ${redirected.headers['X-Original-To']} sent to ${target} instead.`);
+      return transporter.sendMail(redirected);
+    },
+  };
 }
 
 // Builds a small HTML morning email from the day's metrics + AI narrative.
