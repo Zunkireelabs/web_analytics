@@ -244,7 +244,7 @@ jobs:
 
             echo "Waiting for containers to be healthy..."
             sleep 10
-            for CONTAINER in analytics-app-stage analytics-mcp-stage data-analyst-agent-stage; do
+            for CONTAINER in analytics-app-stage analytics-mcp-stage data-analyst-agent-stage design-agent-worker-stage; do
               HEALTHY=0
               for i in $(seq 1 12); do
                 STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")

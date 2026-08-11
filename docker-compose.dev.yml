@@ -75,6 +75,30 @@ services:
       - "traefik.http.middlewares.analytics-mcp-stage-redirect.redirectscheme.scheme=https"
       - "traefik.http.services.analytics-mcp-stage.loadbalancer.server.port=3003"
 
+  # Design Agent worker, staging — see docker-compose.yml's design-agent-worker
+  # service for the full explanation (Docker-outside-of-Docker, no public
+  # endpoint, shares this deployment's own .env).
+  design-agent-worker:
+    container_name: design-agent-worker-stage
+    build:
+      context: .
+      dockerfile: server/design-agent/Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
 networks:
   hosting:
     external: true
