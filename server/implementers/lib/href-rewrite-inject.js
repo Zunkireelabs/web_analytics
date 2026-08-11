@@ -23,6 +23,22 @@ function anchorRegex(href) {
   return new RegExp(`<a\\b[^>]*href=["']${escaped}["'][^>]*>([\\s\\S]*?)<\\/a>`, 'g');
 }
 
+// Blog posts are stored as Markdown (src/blog/$1.md, per url_file_map), not
+// HTML — anchorRegex/hrefAttrRegex above never match `[text](url)` syntax at
+// all, which silently fell through to the code-search fallback for every
+// citation link in a .md file. (?<!!) excludes image syntax (`![alt](url)`)
+// — stripping/rewriting those has different semantics (there's no "inner
+// text" to keep) and isn't what a broken citation link fix means.
+function markdownLinkRegex(href) {
+  const escaped = escapeRegExp(href);
+  return new RegExp(`(?<!!)\\[([^\\]]*)\\]\\(${escaped}(?:\\s+"[^"]*")?\\)`, 'g');
+}
+
+function markdownLinkUrlRegex(href) {
+  const escaped = escapeRegExp(href);
+  return new RegExp(`(?<!!)(\\[[^\\]]*\\]\\()${escaped}(\\s+"[^"]*")?(\\))`, 'g');
+}
+
 // The crawler that records broken links always stores the absolute canonical
 // URL, but the source template commonly hardcodes the same link relative to
 // the site root (e.g. `href="/solutions/x/"`), sometimes with or without a
@@ -53,9 +69,16 @@ export function rewriteHref(fileContent, oldHref, newHref) {
   for (const variant of hrefVariants(oldHref)) {
     const regex = hrefAttrRegex(variant);
     const matches = fileContent.match(regex);
-    if (!matches) continue;
-    const newContent = fileContent.replace(regex, (_m, quote) => `href=${quote}${newHref}${quote}`);
-    return { ok: true, newContent, replaced: matches.length };
+    if (matches) {
+      const newContent = fileContent.replace(regex, (_m, quote) => `href=${quote}${newHref}${quote}`);
+      return { ok: true, newContent, replaced: matches.length };
+    }
+    const mdRegex = markdownLinkUrlRegex(variant);
+    const mdMatches = fileContent.match(mdRegex);
+    if (mdMatches) {
+      const newContent = fileContent.replace(mdRegex, (_m, pre, title, post) => `${pre}${newHref}${title || ''}${post}`);
+      return { ok: true, newContent, replaced: mdMatches.length };
+    }
   }
   return { ok: false, reason: 'no-match', error: `No href="${oldHref}" found in this file.` };
 }
@@ -69,14 +92,23 @@ export function stripLink(fileContent, href) {
   for (const variant of hrefVariants(href)) {
     const regex = anchorRegex(variant);
     const matches = [...fileContent.matchAll(regex)];
-    if (!matches.length) continue;
-    if (matches.some((m) => /<a\b/i.test(m[1]))) {
-      return { ok: false, reason: 'nested-anchor', error: `A matched <a href="${variant}"> contains a nested <a> tag — refusing to risk corrupting the markup.` };
+    if (matches.length) {
+      if (matches.some((m) => /<a\b/i.test(m[1]))) {
+        return { ok: false, reason: 'nested-anchor', error: `A matched <a href="${variant}"> contains a nested <a> tag — refusing to risk corrupting the markup.` };
+      }
+      const newContent = fileContent.replace(regex, (_m, inner) => inner);
+      return { ok: true, newContent, replaced: matches.length };
     }
-    const newContent = fileContent.replace(regex, (_m, inner) => inner);
-    return { ok: true, newContent, replaced: matches.length };
+    // Markdown never nests `[...]` links syntactically, so no nested-link
+    // guard is needed here the way anchorRegex above needs one for HTML.
+    const mdRegex = markdownLinkRegex(variant);
+    const mdMatches = [...fileContent.matchAll(mdRegex)];
+    if (mdMatches.length) {
+      const newContent = fileContent.replace(mdRegex, (_m, text) => text);
+      return { ok: true, newContent, replaced: mdMatches.length };
+    }
   }
-  return { ok: false, reason: 'no-match', error: `No <a href="${href}"> found in this file.` };
+  return { ok: false, reason: 'no-match', error: `No <a href="${href}"> or markdown link to "${href}" found in this file.` };
 }
 
 // Every live anchor matching this href, verbatim — used for an implemented
@@ -85,6 +117,8 @@ export function getAnchorsForHref(fileContent, href) {
   for (const variant of hrefVariants(href)) {
     const matches = [...fileContent.matchAll(anchorRegex(variant))].map((m) => m[0]);
     if (matches.length) return matches;
+    const mdMatches = [...fileContent.matchAll(markdownLinkRegex(variant))].map((m) => m[0]);
+    if (mdMatches.length) return mdMatches;
   }
   return [];
 }
