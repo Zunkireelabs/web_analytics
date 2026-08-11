@@ -748,6 +748,22 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });
 
+    // generateDraft is idempotent on findingId: a prior run (or the manual
+    // UI) may have already carried this exact finding's draft past 'draft'/
+    // 'edited' — including all the way to 'implemented'. That's not a
+    // failure to retry, it's this recommendation already being fully
+    // shipped; walking submitDraftForApproval/approveAndPublishDraft again
+    // would either no-op (correctly refused, "not in a submittable state")
+    // or worse, re-approve/re-publish already-live content. Short-circuit
+    // as success instead, and let the stale `recommendations` row close out
+    // via its normal getDraftedFindingIds-based reopening rather than
+    // retrying it every run.
+    if (draft.status !== 'draft' && draft.status !== 'edited') {
+      await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
+      await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
+      return { ok: true, draft, alreadyShipped: true };
+    }
+
     const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);
     if (autoSelected) {
       const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
