@@ -157,6 +157,12 @@ jobs:
             IQR_MULTIPLIER=1.5
             FORECAST_HORIZON_DAYS=14
             MIN_HISTORY_DAYS_FOR_FORECAST=30
+            # Forecasts/anomalies/insights now run in-process (see
+            # app/ingestion/scheduler.py) instead of via a host crontab line
+            # that this workflow never installed — without this the Analyst
+            # page's early-warning section has no data to render.
+            ANALYSIS_SCHEDULE_ENABLED=true
+            ANALYSIS_SCHEDULE_HOUR_UTC=4
             ENVEOF
 
             docker compose build
