@@ -61,3 +61,37 @@ describe('recommendationPageKey — expand-content keys by focus, not just page'
     assert.equal(new Set(keys).size, keys.length);
   });
 });
+
+// Regression coverage for a real report: `params.page` on a broken-link-fix
+// finding is only the FIRST page a dead href happened to be crawled from
+// (c.sourcePages[0]), so two unrelated dead links first seen on the same
+// page (e.g. a shared footer/nav template) collided into one recommendation
+// row. Confirmed as a real report: a site with 4 distinct verified broken
+// links showed only 1 in the Action Center. `href` is the real identity of
+// a broken-link-fix recommendation, not the page it was first seen on.
+describe('recommendationPageKey — broken-link-fix keys by href, not just page', () => {
+  test('two dead links first crawled from the same page produce distinct keys', () => {
+    const page = 'https://example.com/a';
+    const keyA = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page, href: 'https://example.com/dead-1' } });
+    const keyB = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page, href: 'https://example.com/dead-2' } });
+    assert.notEqual(keyA, keyB);
+  });
+});
+
+// Regression coverage for a real report: blog-outline findings have no
+// params.page at all (net-new content, not tied to an existing page), only
+// params.topic. Both content-gap.js and ai-recommendation.js raise
+// blog-outline findings, so without a discriminator here every one of them
+// collapses to the same page='' key and a second distinct topic silently
+// disappears into finding_ids on whichever topic synced first. `topic` is
+// the real identity of a blog-outline recommendation, the same way `href`
+// is for broken-link-fix above.
+describe('recommendationPageKey — blog-outline keys by topic, not page', () => {
+  test('two distinct topics produce distinct keys, and neither collapses to the site-level empty key', () => {
+    const keyA = recommendationPageKey({ generatorId: 'blog-outline', params: { topic: 'How to choose a moving company' } });
+    const keyB = recommendationPageKey({ generatorId: 'blog-outline', params: { topic: 'Long-distance moving checklist' } });
+    assert.notEqual(keyA, keyB);
+    assert.notEqual(keyA, '');
+    assert.notEqual(keyB, '');
+  });
+});
