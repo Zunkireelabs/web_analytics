@@ -6,9 +6,31 @@
 
 const API_BASE = 'https://api.github.com';
 
-function authHeaders(site) {
+// GitHub's Code Search REST API (/search/code, used by searchCodeForString
+// below) silently returns zero results for a fine-grained PAT (github_pat_...)
+// instead of an auth error — only a classic PAT (ghp_...) with `repo` scope
+// actually works against it. Every other call in this file (Contents API,
+// PRs, branches) works fine with either token type, so this is a
+// search-only concern: a site can optionally set `<envVar>_SEARCH` (or the
+// global GITHUB_SEARCH_PAT fallback) to a classic PAT used ONLY for search,
+// while its main token stays fine-grained/least-privilege for everything
+// else. Confirmed empirically: the same fine-grained token that resolves
+// this repo's own Contents API calls fine returned 0 results searching
+// facebook/react for the literal string "useState" — a definitely-indexed,
+// definitely-present string — via GitHub's own public repo, ruling out a
+// per-repo indexing or visibility explanation.
+function searchToken(site) {
   const envVar = site.github_pat_env_var || 'GITHUB_PAT';
-  const token = process.env[envVar];
+  return process.env[`${envVar}_SEARCH`] || process.env.GITHUB_SEARCH_PAT || null;
+}
+
+function isFineGrainedToken(token) {
+  return typeof token === 'string' && token.startsWith('github_pat_');
+}
+
+function authHeaders(site, { forSearch = false } = {}) {
+  const envVar = site.github_pat_env_var || 'GITHUB_PAT';
+  const token = (forSearch && searchToken(site)) || process.env[envVar];
   if (!token) throw new Error(`No GitHub PAT set in env var "${envVar}"`);
   return {
     Authorization: `token ${token}`,
@@ -22,10 +44,10 @@ function repoPath(site) {
   return `${site.repo_owner}/${site.repo_name}`;
 }
 
-async function githubRequest(site, method, path, body) {
+async function githubRequest(site, method, path, body, { forSearch = false } = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: { ...authHeaders(site), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { ...authHeaders(site, { forSearch }), ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   return res;
@@ -246,8 +268,17 @@ export async function getRepoTarball(site, ref) {
 // repo's default branch, results may miss files that exist there but
 // haven't been indexed yet.
 export async function searchCodeForString(site, literal, { maxResults = 5 } = {}) {
+  const envVar = site.github_pat_env_var || 'GITHUB_PAT';
+  const token = searchToken(site) || process.env[envVar];
+  if (isFineGrainedToken(token)) {
+    throw new Error(
+      `Code search would silently return 0 results with a fine-grained PAT — set ` +
+      `${envVar}_SEARCH (or the global GITHUB_SEARCH_PAT) to a classic PAT with ` +
+      `"repo" scope to enable it.`
+    );
+  }
   const q = `"${literal}" repo:${repoPath(site)}`;
-  const res = await githubRequest(site, 'GET', `/search/code?q=${encodeURIComponent(q)}&per_page=${maxResults}`);
+  const res = await githubRequest(site, 'GET', `/search/code?q=${encodeURIComponent(q)}&per_page=${maxResults}`, undefined, { forSearch: true });
   if (!res.ok) throw new Error(`searchCodeForString failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   const paths = (data.items || []).map((item) => item.path);

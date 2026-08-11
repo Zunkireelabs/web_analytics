@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
+import { reapStaleAuditRuns } from './store/audit-runs.js';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -224,6 +225,25 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
+
+  // Stale audit-run reaper — independent safety net alongside the same
+  // reapStaleAuditRuns() call at server startup (server/index.js). Startup
+  // alone only catches a stuck run on the next deploy/crash-restart; a
+  // process that just stays up for days between deploys would otherwise
+  // leave a run stuck 'running' (and its Stop Audit button stuck
+  // "STOPPING…") until someone restarts it or fixes the row by hand —
+  // real incident, 2026-08-10: Run #17 sat 'running' with
+  // cancel_requested=true for over an hour with no live process left to
+  // notice the flag, fixed manually in the DB.
+  cron.schedule('30 * * * *', async () => {
+    try {
+      const reaped = await reapStaleAuditRuns();
+      if (reaped.length) console.log(`[cron] reaped ${reaped.length} stale audit run(s):`, reaped.map((r) => r.id).join(', '));
+    } catch (err) {
+      console.error('[cron] stale audit-run reap error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] stale audit-run reap scheduled (fires at :30 each hour)');
 
   // Keyword Clustering — standalone Python agent (agents/clustering.py), not
   // a job.js function like the jobs above, so it's spawned as a subprocess

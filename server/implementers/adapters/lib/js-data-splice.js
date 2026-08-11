@@ -153,6 +153,22 @@ export function findObjectRange(content, idField, idValue, format = 'js-export-a
   return matches.length === 1 ? matches[0] : null;
 }
 
+// Root bounds for a data file whose top level is an OBJECT keyed by id
+// (`{ "some-id": {...}, "other-id": {...} }` — e.g. zunkireelabs-web's own
+// productsDetails.json/servicesDetails.json), the object counterpart to
+// findRootArrayBounds's `[...]` above. Once these bounds are known, the
+// per-id entry is just an ordinary findObjectFieldRange lookup (a "root
+// object" is not structurally different from any other object a field
+// lookup already knows how to search inside) — no separate entry-lookup
+// primitive needed.
+export function findRootObjectBounds(content) {
+  const start = content.indexOf('{');
+  if (start === -1) return null;
+  const end = scanBalanced(content, start + 1, '{', '}');
+  if (end === -1) return null;
+  return { start, end };
+}
+
 // Returns the byte offset (relative to the whole file) of `key: [` ONLY if
 // it appears as a direct property of the object at `objRange` — not nested
 // inside some other field's own object/array — or -1 if absent/nested.
@@ -432,6 +448,33 @@ function parseManagedFaqItemsJson(arrayInterior) {
   } catch {
     return [];
   }
+}
+
+// Removes the ONE item from an existing array field whose `fieldName` value
+// is in `matchValues` (a caller-supplied list of acceptable variants — e.g.
+// href-rewrite-inject.js's hrefVariants, so an absolute vs. site-relative
+// URL both match) — the array-of-plain-objects counterpart to
+// findObjectRange's id lookup, but for REMOVAL rather than an in-place
+// field write, used by broken-link-fix's data-array-source layer (see
+// implementers/backend.js) to drop one dead `resources[]`-style entry from
+// a shared data file. Zero or more-than-one matches return null, same
+// "don't guess" posture as every other lookup in this file. Only
+// json-array format is supported (real, current shape of every array this
+// targets) — re-serializes the WHOLE array on removal rather than a
+// byte-preserving splice, same documented tradeoff spliceMarkedArrayJson
+// above already accepts for pure JSON's lack of comment anchors.
+export function removeArrayItemByField(content, arrayRange, fieldName, matchValues, format = 'json-array') {
+  if (format !== 'json-array') return null;
+  const interior = content.slice(arrayRange.start, arrayRange.end);
+  let items;
+  try { items = JSON.parse(`[${interior}]`); } catch { return null; }
+  const matches = items.filter((it) => it && typeof it[fieldName] === 'string' && matchValues.includes(it[fieldName]));
+  if (matches.length !== 1) return null;
+  const remaining = items.filter((it) => it !== matches[0]);
+  const indent = '    ';
+  const body = remaining.map((it) => `${indent}${JSON.stringify(it, null, 2).split('\n').join(`\n${indent}`)}`).join(',\n');
+  const newInterior = remaining.length ? `\n${body}\n${indent.slice(2)}` : '';
+  return content.slice(0, arrayRange.start) + newInterior + content.slice(arrayRange.end);
 }
 
 // ---- format dispatch ----
