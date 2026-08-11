@@ -276,6 +276,7 @@ export const api = {
     previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
     rollback: (id) => req(`/action-center/drafts/${id}/rollback`, { method: 'POST' }),
     executeSafeFixes: (limit) => req('/action-center/execute-safe-fixes', { method: 'POST', body: JSON.stringify({ limit }) }),
+    latestExecutionJob: () => req('/action-center/execution-jobs/latest'),
     approveAndShip: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/approve-and-ship`, { method: 'POST' }),
     recheckRecommendation: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/recheck`, { method: 'POST' }),
     getExecutionJob: (id) => req(`/action-center/execution-jobs/${id}`),

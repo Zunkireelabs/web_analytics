@@ -135,6 +135,23 @@ export async function getTodayExecutionStats(siteId) {
   return { shipped: Number(rows[0].shipped), failed: Number(rows[0].failed) };
 }
 
+// The most recent bulk run for a site, in the same shape getExecutionJob
+// returns. Exists because "Execute Today's Safe Fixes" is a synchronous
+// request that can outlive the browser's own 5-minute fetch ceiling (see
+// web/src/api.js's REQUEST_TIMEOUT_MS) once a batch is large enough — the
+// server finishes the job regardless, but the client that started it never
+// receives the response and so has no job id to ask about. This is how it
+// finds the run it already started.
+export async function getLatestBulkExecutionJob(siteId) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND trigger = 'bulk'
+     ORDER BY id DESC LIMIT 1`,
+    [siteId]
+  );
+  return rows[0] ? getExecutionJob(siteId, rows[0].id) : null;
+}
+
 export async function getExecutionJob(siteId, id) {
   const { rows } = await query('SELECT * FROM execution_jobs WHERE site_id = $1 AND id = $2', [siteId, id]);
   if (!rows[0]) return null;
