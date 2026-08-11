@@ -62,7 +62,17 @@ function resolveUrl(base, href) {
 // causes the "looks mismatched" failure this exists to catch, and reliably
 // parsing arbitrary JS-object-literal syntax out of an attribute isn't worth
 // the complexity for that.
-const CLASS_ATTR_RE = /\bclass="([^"]*)"/g;
+// (?<!:) excludes Alpine's `:class="..."` dynamic binding attribute — a
+// bare \b word boundary alone still matches right after the `:` (a
+// non-word character), so this regex was matching :class="{ 'rotate-45':
+// activeIndex === {{INDEX}} || expandAll }" too despite the comment above
+// already documenting the intent to skip it. Extracted that whole JS
+// object-literal expression as if it were a space-separated class list,
+// then correctly failed to find garbage tokens like "activeIndex"/"==="/
+// "||" in any real stylesheet — a real template (e.g. the FAQ accordion,
+// now also reused for qaContent) was being rejected as stale for a page
+// design mismatch that was never real.
+const CLASS_ATTR_RE = /(?<!:)\bclass="([^"]*)"/g;
 export function extractLiteralClassNames(templateEntry) {
   const source = `${templateEntry?.wrapper || ''}\n${templateEntry?.row || ''}`;
   const classes = new Set();
