@@ -7,7 +7,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
-import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate, templateActionRequiresRow } from '../implementers/lib/design-drift.js';
+import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate, templateActionRequiresRow, stampTemplateVerification, TEMPLATE_VERIFIED_BY } from '../implementers/lib/design-drift.js';
 import { createComponentTemplateJob, getExecutionJob } from '../store/execution-jobs.js';
 import { buildComponentTemplateProposalsFromJob } from '../design-agent/component-template-proposal.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
@@ -669,13 +669,24 @@ router.post('/internal/clients/:id/component-templates/:actionType/confirm', asy
       return res.status(400).json({ error: `template.wrapper is required${templateActionRequiresRow(actionType) ? ', and template.row is required for this action type' : ''}.` });
     }
 
+    // A staff member reviewing and confirming a proposal IS a verification —
+    // stamp it so the design gate (design-drift.js's componentTemplateVerification,
+    // enforced in action-center.js's generateDraft) accepts drafts rendered
+    // through this template. Without the stamp, a template a human explicitly
+    // approved right here would still be treated as unverified and keep
+    // blocking every draft, which would make this route feel broken.
+    const stamped = stampTemplateVerification(template, {
+      verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN,
+      verifiedRef: req.userId ?? null,
+    });
+
     const urlFileMap = {
       ...site.url_file_map,
       siteRoot: {
         ...site.url_file_map?.siteRoot,
         componentTemplates: {
           ...site.url_file_map?.siteRoot?.componentTemplates,
-          [componentKey]: template,
+          [componentKey]: stamped,
         },
       },
     };

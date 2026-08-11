@@ -354,6 +354,18 @@ export default function CopilotPanel({ open, onClose }) {
     });
   }, [open, conversationId]);
 
+  // The opening line, from the server — real current state for this site,
+  // phrased for whoever is reading (site owner vs platform admin). Fetched
+  // rather than hardcoded because the client cannot know either of those
+  // things. `null` means "still loading", so the empty state can avoid
+  // flashing a generic prompt list before the real greeting lands.
+  const [greeting, setGreeting] = useState(null);
+  const [greetingFailed, setGreetingFailed] = useState(false);
+  useEffect(() => {
+    if (!open || greeting || greetingFailed) return;
+    api.copilot.greeting().then(setGreeting).catch(() => setGreetingFailed(true));
+  }, [open, greeting, greetingFailed]);
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, asking]);
@@ -464,11 +476,31 @@ export default function CopilotPanel({ open, onClose }) {
           
           {messages.length === 0 && (
             <div className="space-y-4 pt-2">
+              {/* Greeting: a real opening line from something that has
+                  actually been working on this site, not a generic welcome.
+                  Rendered only once loaded — a brief absence beats a flash of
+                  placeholder copy that then changes under the reader. */}
+              {greeting && (
+                <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 to-white p-4 shadow-sm">
+                  <p className="text-[13px] font-semibold leading-relaxed text-slate-800">{greeting.message}</p>
+                  {greeting.suggestedActions?.length > 0 && (
+                    <ul className="mt-3 space-y-1.5">
+                      {greeting.suggestedActions.map((a) => (
+                        <li key={a} className="text-[11px] font-medium text-slate-600 flex items-start gap-1.5">
+                          <span className="text-indigo-400 mt-px">•</span>
+                          <span>{a}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1">
                 <Compass size={11} className="text-indigo-500" />
                 <span>Select Starter Prompt</span>
               </div>
-              
+
               {/* 2x2 grid for starter questions */}
               <div className="grid grid-cols-2 gap-3">
                 {STARTER_CARDS.map((q) => {

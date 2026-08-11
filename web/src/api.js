@@ -94,6 +94,7 @@ export const api = {
 
   copilot: {
     ask: (conversationId, message) => req('/copilot/ask', { method: 'POST', body: JSON.stringify({ conversationId, message }) }),
+    greeting: () => req('/copilot/greeting'),
     conversations: () => req('/copilot/conversations'),
     messages: (conversationId) => req(`/copilot/conversations/${conversationId}/messages`),
   },

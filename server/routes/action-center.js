@@ -25,8 +25,8 @@ import {
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
-import { resolveOrCreateComponentTemplate } from '../implementers/lib/design-drift.js';
-import { COMPLIANCE_ACTION_TYPES, FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
+import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
+import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
@@ -131,9 +131,10 @@ async function buildRenderModeHint(siteId, actionType, page) {
 // single generic 'content-wrapper' key (see frontend.js's
 // COMPLIANCE_ACTION_TYPES and newpage-render.js's renderCompliancePageBody)
 // rather than each having their own.
-function componentTemplateActionTypeFor(generatorId) {
-  return COMPLIANCE_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
-}
+// (moved to implementers/lib/design-drift.js, next to COMPONENT_TEMPLATE_KEY,
+// so this gate and the recommendation-visibility gate in
+// agents/lib/recommendations.js share one definition and cannot drift apart —
+// re-exported from there, imported at the top of this file.)
 
 const router = Router();
 router.use(requireAuth);
@@ -293,13 +294,18 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // cost of a real Design Agent (Docker/OpenHands) session against that
   // site's actual repo, right here; every recommendation after that for the
   // same site+type reuses the saved template instantly (resolveOrCreate...'s
-  // own fast path). Best-effort and never blocks draft creation — a site
-  // with design_agent_enabled off, no repo configured, or a failed Design
-  // Agent run still gets a draft, just with the safe zero-config fallback
-  // marker-merge.js/newpage-render.js already have for "no template
-  // configured" (this is nothing new for those callers; it's the exact
-  // same fallback path a site with no componentTemplates at all already
-  // takes today).
+  // own fast path).
+  //
+  // This stage USED to be best-effort: a site with design_agent_enabled off,
+  // no repo configured, or a failed Design Agent run still got a draft, just
+  // rendered with marker-merge.js/newpage-render.js's zero-config DEFAULT_*
+  // fallback template. That fail-open behaviour is precisely what let
+  // never-verified templates reach apply time and fail there, and it is now
+  // a HARD GATE (the verification block directly below): for an action type
+  // that HAS a component-template concept, an unverified template means NO
+  // draft. The DEFAULT_* fallbacks still exist and still render — they are
+  // simply no longer considered good enough to publish styled content into
+  // a real customer's live site unreviewed.
   // resolveOrCreateComponentTemplate itself already no-ops safely (reason:
   // 'no-concept') for any generatorId with no componentTemplates key at
   // all — no need to pre-filter which ones apply here. The resolved
@@ -324,6 +330,27 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
           },
         },
       };
+    }
+
+    // The gate. Structural + provenance only (no network call — see
+    // design-drift.js's isTemplateVerified), so this is safe on the hot path
+    // that every manual click, MCP tool call, execution-engine item and
+    // unattended auto-remediation attempt already funnels through. Placing it
+    // HERE rather than at each of those four call sites is deliberate: one
+    // choke point, no way to route around it.
+    //
+    // 'no-concept' action types (meta-title, schema, canonical, sitemap,
+    // robots-fix, ...) return ok:true and are unaffected — they have no CSS
+    // component that can drift, so there is nothing to verify and nothing to
+    // block. Only the five keys in COMPONENT_TEMPLATE_KEY are gated.
+    const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
+    if (!verification.ok) {
+      throw httpError(422, `${verification.detail} Run the Design Agent for this site to verify its "${verification.actionType}" template before ${generatorId} drafts can be generated.`, {
+        reason: 'design-unverified',
+        actionType: verification.actionType,
+        componentKey: verification.componentKey,
+        verificationReason: verification.reason,
+      });
     }
   }
 

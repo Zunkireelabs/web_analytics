@@ -6,6 +6,7 @@ import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { isPageMapped, resolveAdapter, resolveFile } from '../../implementers/lib/url-file-map.js';
+import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { getFileContent } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
@@ -166,6 +167,22 @@ export async function buildRecommendations(siteId) {
         params.query = await lookupQuery(run.start, run.end, params.page);
         if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
+      // Design-verification gate. Unlike the three gates above, this one does
+      // NOT `continue` — a blocked item is a real, correctly-detected issue
+      // we simply aren't allowed to auto-fix yet, so dropping it would lose a
+      // genuine finding and let the recommendation close out as "resolved"
+      // when nothing was resolved. It stays visible, carries its reason, and
+      // recommendation-coordinator.js forces it to the 'manual' risk tier so
+      // it can never enter the unattended safe-fix chain. The real hard block
+      // (a 422) lives in generateDraft — this is the honest UI half of it, so
+      // a user sees "blocked, here's why" instead of clicking Generate and
+      // getting an error.
+      // Pure in-memory check against the already-loaded `site` row — no
+      // network or DB access, safe inside this per-finding loop.
+      const designCheck = site
+        ? componentTemplateVerification(site, componentTemplateActionTypeFor(action.generatorId))
+        : { ok: true };
+
       const { bucket, category } = classify({ source: run.agentId, generatorId: action.generatorId });
       items.push({
         id: f.id, source: run.agentId,
@@ -173,6 +190,7 @@ export async function buildRecommendations(siteId) {
         tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
         bucket, category,
+        designBlockedReason: designCheck.ok ? null : designCheck.detail,
       });
     }
   }
