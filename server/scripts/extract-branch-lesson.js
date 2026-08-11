@@ -1,15 +1,18 @@
 import 'dotenv/config';
 import { execFileSync } from 'node:child_process';
 import { pool } from '../db.js';
-import { addEngineeringLesson, getAllEngineeringLessons, mergeLessonUpdate } from '../engineering-lessons.js';
+import { addCodeLesson, getAllCodeLessons, mergeCodeLesson } from '../agent-memory.js';
 import { classifyBugFix, extractLesson, findDuplicateLesson, truncateDiff } from '../engineering-lesson-extraction.js';
 
-// Phase 5 of engineering_fix_lessons (migration 087): the ongoing, per-PR
-// counterpart to the one-time backfill-engineering-lessons.js. Run this
-// against a fix/* branch right before `gh pr create`, review the extracted
-// lesson (if any), then re-run with --commit --source-ref <PR URL> once the
-// PR exists, so every future bug fix in this repo feeds the same table the
-// backfill seeded — not just the one-time historical scan.
+// The ongoing, per-PR counterpart to the one-time backfill-engineering-
+// lessons.js. Run this against a fix/* branch right before `gh pr create`,
+// review the extracted lesson (if any), then re-run with --commit
+// --source-ref <PR URL> once the PR exists. Writes into the shared
+// agent_fix_memory table (migration 097, category='code', scope='repo') —
+// the same store every runtime agent learns from/writes to — but this
+// script itself remains an OPTIONAL, human-reviewed admin/compatibility
+// path: no agent's runtime learning loop requires it (see agent-memory.js's
+// own top comment).
 //
 //   node server/scripts/extract-branch-lesson.js                          # dry run against current branch vs main
 //   node server/scripts/extract-branch-lesson.js --base stage             # diff against a different base
@@ -103,13 +106,13 @@ async function main() {
   console.log(`  source_ref:   ${flags.sourceRef || '(not set yet — pass --source-ref once the PR exists)'}`);
 
   if (flags.commit) {
-    const existing = await getAllEngineeringLessons();
+    const existing = await getAllCodeLessons();
     const dup = await findDuplicateLesson(lesson, existing);
     if (dup) {
-      await mergeLessonUpdate(dup.existingLesson, { ...dup.merged, sourceRef: flags.sourceRef });
+      await mergeCodeLesson(dup.existingLesson, { ...dup.merged, sourceRef: flags.sourceRef });
       console.log(`  -> merged into existing lesson #${dup.existingLesson.id} (LLM judged same underlying bug; wording updated, source_ref appended)`);
     } else {
-      const id = await addEngineeringLesson({
+      const id = await addCodeLesson({
         bugCategory: lesson.bugCategory,
         symptom: lesson.symptom,
         rootCause: lesson.rootCause,

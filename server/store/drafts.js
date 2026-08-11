@@ -9,7 +9,7 @@ import { sanitizeForCustomer } from '../lib/errors.js';
 // dashboard so, the same real-evidence pattern hasDraftSince() already
 // leans on for the Watchlist, one step further along.
 
-export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns, renderedBody, targetFilePath }) {
+export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns, renderedBody, targetFilePath, memoryRefId }) {
   // original_content (migration 091) is the generator's first output,
   // frozen here and never touched again — updateDraft below only ever
   // writes `content`, so a later diff of the two is how
@@ -25,10 +25,10 @@ export async function createDraft(siteId, { actionType, source, input, content, 
   // an action type this doesn't apply to (marker-merge types, which must
   // still compute their splice fresh against the live file at apply time).
   const { rows } = await query(
-    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path)
-     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)
+    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path, memory_ref_id)
+     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null, renderedBody ?? null, targetFilePath ?? null]
+    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null, renderedBody ?? null, targetFilePath ?? null, memoryRefId ?? null]
   );
   return rows[0];
 }
@@ -427,6 +427,7 @@ export async function markDraftImplemented(siteId, id) {
       generatorId: draft.action_type,
       queryText: draft.input.query ?? null,
       source: draft.source,
+      memoryRefId: draft.memory_ref_id ?? null,
     });
   }
   if (draft) await supersedeLegacyLlmsTxtDrafts(siteId, draft);

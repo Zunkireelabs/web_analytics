@@ -14,8 +14,9 @@ import { listAgentMeta } from '../agents/registry.js';
 import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { runQualityGate } from '../generators/lib/quality-gate.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
-import { addLesson, recordLessonOutcome, getActiveAutoRules } from '../lessons.js';
-import { categoryForPattern, rootCauseForPattern } from '../generators/lib/pattern-categories.js';
+import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
+import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
+import { categoryForPattern, rootCauseForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import {
@@ -261,10 +262,10 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // Learning system, stage 1 — the first attempt failed but a later one
   // didn't: real, deterministic evidence that this generator's output for
   // this class of issue was auto-fixed successfully. Recorded as
-  // fix_lessons rows keyed by the exact validation rule (patternId) that
-  // fired, so server/llm.js's existing withLessons() picks it up on this
-  // generator's very next call — the "before every generation, check for
-  // previously-observed patterns and avoid repeating them" half of the
+  // agent_fix_memory rows keyed by the exact validation rule (patternId)
+  // that fired, so server/llm.js's existing withAgentMemory() picks it up on
+  // this generator's very next call — the "before every generation, check
+  // for previously-observed patterns and avoid repeating them" half of the
   // learning loop needs no new code beyond writing here; the read/inject
   // path already exists. gateResolvedPatterns rides along on the draft row
   // so approveAndPublishDraft can later confirm (or not) that this fix
@@ -272,13 +273,16 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   let gateResolvedPatterns = null;
   if (firstAttemptIssues?.length) {
     gateResolvedPatterns = [...new Set(firstAttemptIssues.map((i) => i.patternId))];
-    await Promise.all(gateResolvedPatterns.map((patternId) => addLesson({
-      generatorId, siteId, validationRuleId: patternId, source: 'auto-fix-success',
-      category: categoryForPattern(patternId), rootCause: rootCauseForPattern(patternId),
-      title: `Regeneration was needed to fix a "${patternId}" issue`,
-      lesson: `Past ${generatorId} drafts have hit "${patternId}" and needed a second attempt to fix it` +
-        `${rootCauseForPattern(patternId) ? ` (${rootCauseForPattern(patternId)})` : ''} — avoid it on the first attempt this time.`,
-    }).catch((err) => console.error(`[action-center] failed to record auto-fix lesson for ${generatorId}/${patternId}:`, err.message))));
+    await Promise.all(gateResolvedPatterns.map((patternId) => recordFixOutcome({
+      category: topLevelCategoryForGenerator(generatorId), scope: 'client', siteId, generatorId,
+      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: patternId,
+      symptoms: `Past ${generatorId} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
+      rootCause: rootCauseForPattern(patternId),
+      affectedPattern: `${generatorId} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
+      fixStrategy: `Avoid "${patternId}" on the first attempt` +
+        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
+    }).catch((err) => console.error(`[action-center] failed to record auto-fix memory for ${generatorId}/${patternId}:`, err.message))));
   }
 
   // Design Agent, stage — find-or-create the real, site-specific
@@ -365,9 +369,25 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     targetFilePath = resolved.filePath;
   }
 
+  // Learning system — REUSE/ADAPT step: which (if any) shared agent_fix_memory
+  // row was the closest known match for this generator/site at generation
+  // time. Recorded on the draft (memory_ref_id, migration 098) so
+  // fix-verification.js's real outcome check can later feed success/failure
+  // back to THIS specific memory (recordFixOutcome), not just "some fix
+  // happened for this generator" — the part of the loop that makes reuse
+  // outcomes (not just first-time learning) measurable. A generator's own
+  // LLM prompt already got the fuller, cached multi-match version of this
+  // same lookup via withAgentMemory (server/llm.js) — this is a second,
+  // uncached call because it needs the specific top match's id, not just
+  // rendered prompt text.
+  const memoryMatch = await findRelevantMemory({
+    category: topLevelCategoryForGenerator(generatorId), scope: 'client', siteId, generatorId, clientFacing: true, limit: 1,
+  }).catch((err) => { console.error(`[action-center] agent_fix_memory lookup failed for ${generatorId}:`, err.message); return []; });
+  const memoryRefId = memoryMatch[0]?.id ?? null;
+
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId, gateResolvedPatterns,
-    renderedBody, targetFilePath,
+    renderedBody, targetFilePath, memoryRefId,
   });
 
   // geo-audit is a generator, not an orchestrator-run agent, so its score
@@ -546,8 +566,13 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   if (humanEdited) {
     const lesson = extractEditLesson(draft.action_type, draft.original_content, draft.content);
     if (lesson) {
-      await addLesson({ generatorId: draft.action_type, siteId, ...lesson, source: 'human-edit' })
-        .catch((err) => console.error(`[action-center] failed to record edit lesson for draft ${draft.id}:`, err.message));
+      await recordFixOutcome({
+        category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
+        validationRuleId: lesson.validationRuleId, outcome: 'success', sourceType: 'human-edit',
+        problemSignature: lesson.validationRuleId || lesson.title,
+        symptoms: lesson.lesson, affectedPattern: `${draft.action_type} output requiring the same correction pattern.`,
+        fixStrategy: lesson.lesson,
+      }).catch((err) => console.error(`[action-center] failed to record edit lesson for draft ${draft.id}:`, err.message));
     }
   }
 
@@ -556,32 +581,38 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   // point means the Quality Gate above already passed on the CURRENT
   // content, so any pattern this draft's generation self-corrected really
   // did hold through to real approval: re-recording the identical lesson
-  // hits addLesson's own dedup-by-validationRuleId path, which increments
-  // occurrence_count/confidence and promotes 'candidate' -> 'auto_rule'
-  // after enough confirmations, instead of a fresh duplicate row.
+  // hits recordFixOutcome's own dedup-by-validationRuleId path, which
+  // increments occurrence_count/confidence and promotes 'candidate' ->
+  // 'trusted' (and 'requires_approval' -> 'auto') after enough
+  // confirmations, instead of a fresh duplicate row.
   if (draft.gate_resolved_patterns?.length) {
-    await Promise.all(draft.gate_resolved_patterns.map((patternId) => addLesson({
-      generatorId: draft.action_type, siteId, validationRuleId: patternId, source: 'auto-fix-success',
-      category: categoryForPattern(patternId), rootCause: rootCauseForPattern(patternId),
-      title: `Regeneration was needed to fix a "${patternId}" issue`,
-      lesson: `Past ${draft.action_type} drafts have hit "${patternId}" and needed a second attempt to fix it` +
-        `${rootCauseForPattern(patternId) ? ` (${rootCauseForPattern(patternId)})` : ''} — avoid it on the first attempt this time.`,
-    }).catch((err) => console.error(`[action-center] failed to confirm auto-fix lesson for draft ${draft.id}/${patternId}:`, err.message))));
+    await Promise.all(draft.gate_resolved_patterns.map((patternId) => recordFixOutcome({
+      category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
+      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: patternId,
+      symptoms: `Past ${draft.action_type} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
+      rootCause: rootCauseForPattern(patternId),
+      affectedPattern: `${draft.action_type} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
+      fixStrategy: `Avoid "${patternId}" on the first attempt` +
+        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
+    }).catch((err) => console.error(`[action-center] failed to confirm auto-fix memory for draft ${draft.id}/${patternId}:`, err.message))));
   }
 
   // A human editing a draft from a generator that already has a trusted,
-  // repeatedly-confirmed rule behind it (status='auto_rule') is a real
-  // signal that rule may no longer hold — this app can't semantically prove
-  // the edit undid THAT specific rule's effect, so this is deliberately a
-  // coarser, honestly-described signal ("humans keep editing this
-  // generator's output despite an active rule"), not a precise per-rule
-  // override match. Enough repeats flips the rule to 'flagged_for_review'
-  // (lessons.js's OVERRIDE_REVIEW_RATIO) instead of it silently continuing
-  // to apply unchanged.
+  // auto-appliable memory behind it (execution_permission='auto') is a real
+  // signal that memory may no longer hold — this app can't semantically
+  // prove the edit undid THAT specific memory's effect, so this is
+  // deliberately a coarser, honestly-described signal ("humans keep editing
+  // this generator's output despite an active auto rule"), recorded as a
+  // failed reuse (recordFixOutcome's memoryRefId + outcome:'failure' path).
+  // Two such overrides in a row flips the memory to 'flagged_for_review'
+  // (see agent-memory.js's recordReuseOutcome) instead of it silently
+  // continuing to auto-apply unchanged.
   if (humanEdited) {
-    const activeRules = await getActiveAutoRules(draft.action_type, siteId).catch(() => []);
-    await Promise.all(activeRules.map((rule) => recordLessonOutcome(rule.id, 'overridden')
-      .catch((err) => console.error(`[action-center] failed to record override for lesson ${rule.id}:`, err.message))));
+    const activeMemories = await getActiveAutoMemories(draft.action_type, siteId).catch(() => []);
+    await Promise.all(activeMemories.map((m) => recordFixOutcome({
+      memoryRefId: m.id, outcome: 'failure', generatorId: draft.action_type, siteId, agentId: 'human-edit-override',
+    }).catch((err) => console.error(`[action-center] failed to record override for memory ${m.id}:`, err.message))));
   }
 
   const site = await getSiteById(siteId);
@@ -1119,6 +1150,32 @@ export async function checkDraftPrStatus(siteId, draftId) {
       mergedDespiteNotPassing: !!pr.merged && buildStatus.ok !== true,
     },
   });
+
+  // Fallback automatic-learning trigger for generator ids with no
+  // fix_verifications coverage (see VERIFIABLE_GENERATOR_IDS) — those get
+  // the strong "real page re-check" signal via fix-verification.js instead;
+  // for everything else, a merged/abandoned PR is the only outcome evidence
+  // this app ever gets. Best-effort — must never block the real PR-status
+  // transition below over a memory-write failure.
+  if (!VERIFIABLE_GENERATOR_IDS.has(draft.action_type)) {
+    const outcome = pr.merged ? 'success' : pr.state === 'closed' ? 'failure' : null;
+    if (outcome) {
+      const learn = draft.memory_ref_id
+        ? recordFixOutcome({ memoryRefId: draft.memory_ref_id, outcome, agentId: 'pr-status', generatorId: draft.action_type, siteId })
+        : outcome === 'success'
+          ? recordFixOutcome({
+              category: topLevelCategoryForGenerator(draft.action_type), scope: 'client', siteId, generatorId: draft.action_type,
+              outcome: 'success', sourceType: 'runtime-auto',
+              problemSignature: `${draft.action_type}:${draft.finding_id || draft.id}`,
+              symptoms: `A ${draft.action_type} draft's PR was merged by a human reviewer, confirming the fix.`,
+              affectedPattern: `${draft.action_type} draft addressing finding "${draft.finding_id || 'n/a'}".`,
+              fixStrategy: `See the merged PR (${draft.pr_url}) for the fix content.`,
+              sourceRef: draft.pr_url,
+            })
+          : Promise.resolve(null);
+      await learn.catch((err) => console.error(`[action-center] agent_fix_memory PR-outcome write failed for draft ${draft.id}:`, err.message));
+    }
+  }
 
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');

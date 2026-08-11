@@ -1,12 +1,15 @@
 import 'dotenv/config';
 import { pool } from '../db.js';
-import { addLesson } from '../lessons.js';
+import { recordFixOutcome } from '../agent-memory.js';
+import { topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 
-// Record a "don't repeat this" lesson (migration 086/fix_lessons) so every
-// future call to the given generator gets it prepended to its system
-// prompt — see server/llm.js's withLessons(). Use this after fixing a real
-// recurring content/schema mistake, instead of only fixing it in code and
-// hoping it doesn't resurface as a differently-shaped instance later.
+// Record a "don't repeat this" lesson into the shared agent_fix_memory
+// table (migration 097) so every future call to the given generator gets it
+// prepended to its system prompt — see server/llm.js's withAgentMemory().
+// Use this after fixing a real recurring content/schema mistake, instead of
+// only fixing it in code and hoping it doesn't resurface as a differently-
+// shaped instance later. This is a manual/optional admin path — no agent's
+// runtime learning loop requires it.
 //
 //   node server/scripts/add-fix-lesson.js --generator schema \
 //     --title "Don't guess aggregateRating" \
@@ -31,12 +34,17 @@ async function main() {
     console.error('Usage: node server/scripts/add-fix-lesson.js --title "..." --lesson "..." [--generator <id>] [--site <id>] [--source manual|regression]');
     process.exit(1);
   }
-  const id = await addLesson({
-    generatorId: flags.generator || null,
+  const id = await recordFixOutcome({
+    category: topLevelCategoryForGenerator(flags.generator || ''),
+    scope: 'client',
     siteId: flags.site ? Number(flags.site) : null,
-    title: flags.title,
-    lesson: flags.lesson,
-    source: flags.source || 'manual',
+    generatorId: flags.generator || null,
+    outcome: 'success',
+    sourceType: flags.source || 'manual',
+    problemSignature: flags.title,
+    symptoms: flags.lesson,
+    affectedPattern: flags.title,
+    fixStrategy: flags.lesson,
   });
   console.log(`Lesson #${id} recorded (generator: ${flags.generator || 'all'}, site: ${flags.site || 'all'}).`);
   await pool.end();

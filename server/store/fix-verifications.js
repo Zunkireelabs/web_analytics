@@ -9,7 +9,11 @@ import { query } from '../db.js';
 // content with no resulting URL — those stay on the existing
 // hasDraftSince() heuristic instead of a faked verification.
 const VERIFIABLE_SOURCES = new Set(['opportunity', 'content-gap']);
-const VERIFIABLE_GENERATOR_IDS = new Set(['meta-title', 'faq', 'schema', 'internal-links']);
+// Exported so routes/action-center.js's checkDraftPrStatus knows which
+// generator ids already get a real fix-verification recheck (and therefore
+// already write to agent_fix_memory via fix-verification.js) — everything
+// else falls back to PR-merge/abandon as its only available outcome signal.
+export const VERIFIABLE_GENERATOR_IDS = new Set(['meta-title', 'faq', 'schema', 'internal-links']);
 
 export function isVerifiableDraft(draft) {
   return VERIFIABLE_SOURCES.has(draft.source)
@@ -20,12 +24,12 @@ export function isVerifiableDraft(draft) {
 
 const DEFAULT_DELAY_HOURS = Number(process.env.FIX_VERIFY_DELAY_HOURS) || 48;
 
-export async function createPendingVerification(siteId, { watchlistItemId, findingId, draftId, pageUrl, generatorId, queryText, source }) {
+export async function createPendingVerification(siteId, { watchlistItemId, findingId, draftId, pageUrl, generatorId, queryText, source, memoryRefId }) {
   const { rows } = await query(
-    `INSERT INTO fix_verifications (site_id, watchlist_item_id, finding_id, draft_id, page_url, generator_id, query, source, verify_after)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + ($9 * interval '1 hour'))
+    `INSERT INTO fix_verifications (site_id, watchlist_item_id, finding_id, draft_id, page_url, generator_id, query, source, memory_ref_id, verify_after)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 * interval '1 hour'))
      RETURNING *`,
-    [siteId, watchlistItemId ?? null, findingId, draftId, pageUrl, generatorId, queryText ?? null, source ?? null, DEFAULT_DELAY_HOURS]
+    [siteId, watchlistItemId ?? null, findingId, draftId, pageUrl, generatorId, queryText ?? null, source ?? null, memoryRefId ?? null, DEFAULT_DELAY_HOURS]
   );
   return rows[0];
 }

@@ -1,13 +1,18 @@
 import 'dotenv/config';
 import path from 'node:path';
 import { pool } from '../db.js';
-import { getAllEngineeringLessons, getEngineeringLessons } from '../engineering-lessons.js';
+import { getAllCodeLessons, getCodeLessons } from '../agent-memory.js';
 
-// Consumer 1 of engineering_fix_lessons (migration 087): a read-only lookup
-// Claude Code runs against the file(s) it's about to modify, before making a
-// fix, so a bug class already fixed once in this repo doesn't get repeated.
-// See CLAUDE.md for the pointer that makes this part of standard workflow
-// instead of something to remember by hand.
+// A read-only lookup Claude Code runs against the file(s) it's about to
+// modify, before making a fix, so a bug class already fixed once in this
+// repo doesn't get repeated. Reads category='code', scope='repo' rows from
+// the shared agent_fix_memory table (migration 097) — the same store every
+// runtime agent learns from/writes to, filtered to the slice that's
+// code-level and human/Claude-consumed rather than auto-appliable by any
+// client-facing agent (see agent-memory.js's getAllCodeLessons/
+// getCodeLessons and its clientFacing retrieval wall). See CLAUDE.md for the
+// pointer that makes this part of standard workflow instead of something to
+// remember by hand.
 //
 //   node server/scripts/engineering-lessons.js --file server/routes/webhooks.js
 //   node server/scripts/engineering-lessons.js --file web/src/pages/Analyst.jsx --keywords "useEffect,hook"
@@ -107,13 +112,13 @@ async function main() {
 
   let lessons;
   if (flags.all) {
-    lessons = await getAllEngineeringLessons();
+    lessons = await getAllCodeLessons();
   } else if (flags.category) {
-    lessons = await getEngineeringLessons(flags.category);
+    lessons = await getCodeLessons(flags.category);
   } else if (flags.files.length) {
     const keywords = new Set(flags.keywords);
     for (const f of flags.files) deriveKeywords(f).forEach((w) => keywords.add(w));
-    const all = await getAllEngineeringLessons();
+    const all = await getAllCodeLessons();
     const scored = all
       .map((l) => ({ ...l, ...scoreLesson(l, keywords) }))
       .filter((l) => l.score > 0)
