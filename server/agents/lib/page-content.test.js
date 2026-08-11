@@ -254,6 +254,32 @@ describe('contentGapsFor — GEO gap types', () => {
   });
 });
 
+describe('contentGapsFor — Missing breadcrumbs gap', () => {
+  const baseAnalysis = {
+    title: 'A perfectly good title for this page', metaDescription: 'A'.repeat(80),
+    hasMetaDescription: true, hasFaq: true, hasSchema: true, h1Count: 1, h2Count: 1,
+    hasComparisonContent: true, imagesTotal: 0, imagesWithoutAlt: 0, hasCanonical: true,
+    canonicalUrl: null, pageHost: null, hasOpenGraph: true, listCount: 1, questionHeadingCount: 1,
+    hasAuthorSignal: true, hasFreshnessSignal: true, hasReviewSchema: true,
+    externalCitationDomainCount: 3, hasExternalCitations: true, schemaTypes: [],
+  };
+
+  test('flags missing breadcrumbs on a non-root page with no BreadcrumbList schema', () => {
+    const gaps = contentGapsFor({ ...baseAnalysis, isRootPage: false }, []).map((g) => g.type);
+    assert.ok(gaps.includes('Missing breadcrumbs'));
+  });
+
+  test('does not flag missing breadcrumbs on the site root — breadcrumbs.js refuses to draft a trail for it', () => {
+    const gaps = contentGapsFor({ ...baseAnalysis, isRootPage: true }, []).map((g) => g.type);
+    assert.ok(!gaps.includes('Missing breadcrumbs'));
+  });
+
+  test('does not flag missing breadcrumbs when BreadcrumbList schema is already present', () => {
+    const gaps = contentGapsFor({ ...baseAnalysis, isRootPage: false, schemaTypes: ['BreadcrumbList'] }, []).map((g) => g.type);
+    assert.ok(!gaps.includes('Missing breadcrumbs'));
+  });
+});
+
 describe('titleKeywordConsistency', () => {
   test('not checked when the title is empty or only stopwords', () => {
     assert.equal(titleKeywordConsistency('', 'some body text').checked, false);
@@ -296,6 +322,19 @@ describe('contentGapsFor — Keyword consistency gap', () => {
     const analysis = { ...baseAnalysis, title: 'Scuba Diving Equipment Reviews', bodyText: 'This page is actually about hiking trails and camping gear.' };
     const gaps = contentGapsFor(analysis, []).map((g) => g.type);
     assert.ok(gaps.includes('Keyword consistency'));
+  });
+});
+
+describe('analyzePage — isRootPage', () => {
+  const html = '<html><body><p>Hello world.</p></body></html>';
+
+  test('true for the bare domain root', () => {
+    assert.equal(analyzePage(html, 'https://example.com/').isRootPage, true);
+    assert.equal(analyzePage(html, 'https://example.com').isRootPage, true);
+  });
+
+  test('false for any real subpath', () => {
+    assert.equal(analyzePage(html, 'https://example.com/about/').isRootPage, false);
   });
 });
 
@@ -439,6 +478,20 @@ describe('analyzePage — imagesMissingAlt (alt-text.js grounding)', () => {
     const html = '<html><body><h2>Gallery</h2><figure><img src="/x.jpg"><figcaption>Real caption text</figcaption></figure></body></html>';
     const images = analyzePage(html, PAGE_URL).imagesMissingAlt;
     assert.equal(images[0].nearbyText, 'Real caption text');
+  });
+
+  // Regression: a lazy-loaded/srcset-only <img> with no src/data-src still
+  // has a real, patchable originalTag — dropping it here (on missing src)
+  // used to make alt-text.js's generator see 0 images while the "Missing
+  // alt text" finding it was drafting for still said N/M, a guaranteed-to-
+  // fail recommendation shown as SAFE — AUTO-ELIGIBLE. src is only a
+  // best-effort filename hint for the LLM prompt, not the patch anchor.
+  test('an image with no extractable src is still included (originalTag is the real anchor)', () => {
+    const html = '<html><body><img srcset="/a-2x.jpg 2x, /a-3x.jpg 3x" data-lazy="/a.jpg"></body></html>';
+    const images = analyzePage(html, PAGE_URL).imagesMissingAlt;
+    assert.equal(images.length, 1);
+    assert.equal(images[0].src, '');
+    assert.ok(images[0].originalTag.includes('srcset='));
   });
 });
 
