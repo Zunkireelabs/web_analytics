@@ -453,9 +453,16 @@ const DEFAULT_QA_TEMPLATE = {
   row: '  <details>\n    <summary><h3>{{QUESTION}}</h3></summary>\n    <p>{{ANSWER}}</p>\n  </details>',
 };
 
+// INDEX mirrors renderFaqHtml's own fill exactly — a captured qaContent
+// template is real site markup that may reuse the same interactive
+// accordion pattern as componentTemplates.faq (activeIndex-keyed toggle
+// state, e.g. Alpine's `x-show="activeIndex === {{INDEX}}"`), so this must
+// substitute the same placeholder faq's own row template does. Harmless
+// no-op for a plain DEFAULT_QA_TEMPLATE/static template with no {{INDEX}}
+// token — fillTemplate only replaces tokens that are actually present.
 function renderQaHtml(items, template = DEFAULT_QA_TEMPLATE) {
-  const rows = items.map((qa) => fillTemplate(template.row, {
-    QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
+  const rows = items.map((qa, i) => fillTemplate(template.row, {
+    INDEX: String(i + 1), QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
   }));
   return renderFromTemplate(template, rows);
 }
