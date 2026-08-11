@@ -78,11 +78,28 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(audited.req.userId, null, 'no human triggered this — system actor, not a staff user');
   });
 
-  test('a derived template missing its required placeholder is rejected, not saved', async () => {
+  test('a derived template missing its required placeholder is rejected, not saved, and recorded to agent_fix_memory', async () => {
     const site = { ...baseSite };
     const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
     const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig });
+    let recorded = null;
+    const recordFixOutcomeFn = async (args) => { recorded = args; return 'memory-id-123'; };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-placeholders');
+    assert.equal(recorded.generatorId, 'design-agent-component-templates');
+    assert.equal(recorded.siteId, site.id);
+    assert.equal(recorded.outcome, 'success');
+    assert.equal(recorded.problemSignature, 'missing-placeholders:content-wrapper');
+    assert.match(recorded.symptoms, /content-wrapper/);
+  });
+
+  test('a memory-write failure while recording a rejected template never blocks the caller', async () => {
+    const site = { ...baseSite };
+    const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
+    const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
+    const recordFixOutcomeFn = async () => { throw new Error('DB is down'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'invalid-placeholders');
   });

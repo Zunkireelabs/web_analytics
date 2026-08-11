@@ -13,8 +13,11 @@ import { findRelevantMemory } from '../agent-memory.js';
 // mode opt into the same shared RETRIEVE step every other generator gets
 // via server/llm.js's withAgentMemory, even though this generator's LLM
 // call happens out-of-process (design_task.py, via the OpenHands SDK) and
-// so can never go through callLLM/withAgentMemory directly.
-const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
+// so can never go through callLLM/withAgentMemory directly. Exported so the
+// LEARN side (design-drift.js's resolveOrCreateComponentTemplate, which
+// records a rejected/invalid derived template) tags its rows with the same
+// id this module's own RETRIEVE lookup filters by.
+export const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));

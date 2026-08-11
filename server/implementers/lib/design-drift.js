@@ -2,7 +2,8 @@ import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
-import { createComponentTemplateHandler } from '../../design-agent/openhands-handler.js';
+import { recordFixOutcome } from '../../agent-memory.js';
+import { createComponentTemplateHandler, DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -275,6 +276,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   createHandler = createComponentTemplateHandler,
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
+  recordFixOutcomeFn = recordFixOutcome,
 } = {}) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
@@ -299,7 +301,29 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   if (!derived?.wrapper) return { ok: false, reason: 'not-derived', template: null, componentKey };
 
   const check = validatePlaceholders(actionType, derived);
-  if (!check.ok) return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+  if (!check.ok) {
+    // LEARN side of the loop this module's RETRIEVE half
+    // (openhands-handler.js's createComponentTemplateHandler) already reads
+    // from. This is a deterministic, ground-truth rejection
+    // (validatePlaceholders is a plain string-contains check, not an LLM
+    // judgment call), so it clears the same "genuinely validated" bar every
+    // other recordFixOutcome call site in this codebase requires — same
+    // shape action-center.js uses to record a Quality Gate hit
+    // (topLevelCategoryForGenerator's default for an unlisted generatorId
+    // is 'content', matching what this agent actually produces). Never
+    // lets a memory-write failure block the caller — same fail-open
+    // discipline as everywhere else this table is touched.
+    recordFixOutcomeFn({
+      category: 'content', scope: 'client', siteId: site.id, generatorId: DESIGN_AGENT_GENERATOR_ID,
+      validationRuleId: `missing-placeholders:${actionType}`, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: `missing-placeholders:${actionType}`,
+      symptoms: `Design Agent derived a "${actionType}" component template missing a required placeholder token.`,
+      rootCause: check.error,
+      affectedPattern: `Design Agent component-templates output for action type "${actionType}".`,
+      fixStrategy: `Every placeholder token required for "${actionType}" must appear verbatim in the derived template — ${check.error}`,
+    }).catch((err) => console.error(`[design-drift] failed to record rejected-template memory for ${actionType}:`, err.message));
+    return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+  }
 
   const urlFileMap = {
     ...site.url_file_map,
