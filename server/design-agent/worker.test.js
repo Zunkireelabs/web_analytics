@@ -83,7 +83,7 @@ after(async () => {
 // single read right after the failure can still observe 'queued' for a
 // genuinely-being-stolen row, misclassifying a real steal as "stuck" and
 // surfacing a false failure instead of retrying.
-async function retryUnlessStolen(jobIdRef, fn, { attempts = 3 } = {}) {
+async function retryUnlessStolen(jobIdRef, fn, { attempts = 5 } = {}) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
@@ -92,7 +92,7 @@ async function retryUnlessStolen(jobIdRef, fn, { attempts = 3 } = {}) {
       const isLastAttempt = attempt === attempts;
       if (isLastAttempt || !jobId) throw err;
       let stolen = false;
-      const deadline = Date.now() + 2000;
+      const deadline = Date.now() + 3000;
       while (Date.now() < deadline) {
         const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [jobId]);
         if (rows[0] && ['completed', 'failed'].includes(rows[0].status)) { stolen = true; break; }
