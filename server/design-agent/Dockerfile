@@ -17,22 +17,25 @@
 # short-lived sibling sandbox container design_task.py starts and removes
 # per job.
 #
-# Debian-slim, not Alpine (unlike the root Dockerfile) — the OpenHands SDK's
-# dependency tree includes compiled binary wheels (e.g. grpcio, via
-# opentelemetry's gRPC exporter) that PyPI ships as manylinux (glibc) wheels.
-# Alpine's musl libc has no matching wheel for packages like that, forcing a
-# from-source compile that's slow at best and a real "missing build toolchain"
-# failure at worst — confirmed real on a first deploy attempt, alongside the
-# backtracking issue below. Debian-slim just uses the prebuilt wheel.
-FROM node:20-bookworm-slim
+# Built FROM the official python:3.12-slim image (Debian bookworm-based,
+# glibc — same manylinux-wheel-compatibility reasoning as before, still
+# true), with Node installed on top via NodeSource, rather than the reverse
+# (node:20-bookworm-slim + apt's python3). Bookworm's own apt repos only
+# carry Python 3.11 by default; openhands-agent-server==1.41.0 requires
+# Python >=3.12, confirmed as a real, fast, deterministic pip failure on a
+# real deploy attempt (not a version this lockfile could have been pinned
+# around — 3.12 is the actual floor). Starting from an image that already
+# has the right Python major version sidesteps needing backports/deadsnakes
+# to get one on top of a Node base image.
+FROM python:3.12-slim-bookworm
 
-# python3/venv/pip for the OpenHands SDK; curl to fetch the static docker CLI
-# below (no dockerd of our own — see docker-compose.yml, this is
-# Docker-outside-of-Docker, not Docker-in-Docker); procps for `pgrep`, used
-# by the compose healthcheck (this container has no HTTP endpoint to curl
-# instead); ca-certificates for pip/https.
+# curl (Node's own install script + the static docker CLI below); procps for
+# `pgrep`, used by the compose healthcheck (this container has no HTTP
+# endpoint to curl instead); ca-certificates/gnupg for the NodeSource repo.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-venv python3-pip procps curl ca-certificates \
+  && apt-get install -y --no-install-recommends curl ca-certificates gnupg procps \
+  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 # Static docker CLI binary (client only, no daemon) — Debian's own docker.io
