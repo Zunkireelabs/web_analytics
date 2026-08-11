@@ -1,17 +1,17 @@
 import 'dotenv/config';
 import { execFileSync } from 'node:child_process';
 import { pool } from '../db.js';
-import { addEngineeringLesson, getAllEngineeringLessons, findSimilarLesson, mergeIntoLesson } from '../engineering-lessons.js';
+import { addCodeLesson, getAllCodeLessons, findSimilarCodeLesson, mergeCodeLessonAppliesTo } from '../agent-memory.js';
 import { classifyBugFix, extractLesson, consolidateDrafts, truncateDiff } from '../engineering-lesson-extraction.js';
 
-// One-time backfill for engineering_fix_lessons (migration 087) from this
-// repo's own git history — the code-bug analog of fix_lessons, which is
-// populated by hand via add-fix-lesson.js. Bug fixes aren't recorded by
-// hand as they happen, so this walks `git log`, finds commits that look
-// like code-bug fixes, and asks the model to generalize each one into a
-// lesson row instead of pasting the diff as the "fix". The classify/extract
-// logic lives in ../engineering-lesson-extraction.js, shared with
-// extract-branch-lesson.js (the ongoing, per-PR version of this same idea).
+// One-time backfill into the shared agent_fix_memory table (migration 097,
+// category='code', scope='repo') from this repo's own git history. Bug
+// fixes aren't recorded by hand as they happen, so this walks `git log`,
+// finds commits that look like code-bug fixes, and asks the model to
+// generalize each one into a lesson row instead of pasting the diff as the
+// "fix". The classify/extract logic lives in ../engineering-lesson-
+// extraction.js, shared with extract-branch-lesson.js (the ongoing, per-PR
+// version of this same idea).
 //
 //   node server/scripts/backfill-engineering-lessons.js              # dry run, prints only
 //   node server/scripts/backfill-engineering-lessons.js --commit      # writes to the DB
@@ -102,7 +102,7 @@ async function main() {
 
   const canonical = await consolidateDrafts(drafts);
 
-  const existing = flags.commit ? await getAllEngineeringLessons() : [];
+  const existing = flags.commit ? await getAllCodeLessons() : [];
   let inserted = 0;
   let mergedIntoExisting = 0;
 
@@ -114,14 +114,14 @@ async function main() {
     console.log(`  applies_to:   ${lesson.appliesTo}`);
     console.log(`  source_ref:   ${lesson.refs.join(', ')}`);
 
-    const dup = findSimilarLesson(existing, { bugCategory: lesson.bugCategory, appliesTo: lesson.appliesTo });
+    const dup = findSimilarCodeLesson(existing, { bugCategory: lesson.bugCategory, appliesTo: lesson.appliesTo });
     if (flags.commit) {
       if (dup) {
-        await mergeIntoLesson(dup, { appliesTo: lesson.appliesTo });
+        await mergeCodeLessonAppliesTo(dup, { appliesTo: lesson.appliesTo });
         console.log(`  -> merged into existing lesson #${dup.id}`);
         mergedIntoExisting++;
       } else {
-        const id = await addEngineeringLesson({
+        const id = await addCodeLesson({
           bugCategory: lesson.bugCategory,
           symptom: lesson.symptom,
           rootCause: lesson.rootCause,

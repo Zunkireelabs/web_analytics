@@ -75,8 +75,18 @@ export default function AnalystKeywordDiscovery({ clientId }) {
     const prevGaps = gapsState?.data || [];
     setGapsState({ data: prevGaps.map((g) => (g.id === gap.id ? { ...g, status } : g)) });
     try {
-      await api.keywords.updateGapStatus(clientId, gap.id, status);
-      setToast({ tone: status === 'approved' ? 'success' : 'neutral', message: `“${gap.topic}” marked ${GAP_STATUS_META[status].label.toLowerCase()}.` });
+      const updated = await api.keywords.updateGapStatus(clientId, gap.id, status);
+      const ac = updated?.actionCenter;
+      const message = status === 'approved'
+        ? (ac?.draftId
+          ? `“${gap.topic}” approved — a proposed draft is ready for review in Action Center.`
+          : ac?.draftError
+            ? `“${gap.topic}” approved — queued in Action Center, but draft generation needs a retry (${ac.draftError}).`
+            : ac?.eligible
+              ? `“${gap.topic}” approved — sent to Action Center.`
+              : `“${gap.topic}” approved.`)
+        : `“${gap.topic}” marked ${GAP_STATUS_META[status].label.toLowerCase()}.`;
+      setToast({ tone: status === 'approved' ? 'success' : 'neutral', message });
     } catch (e) {
       setGapsState({ data: prevGaps });
       setToast({ tone: 'error', message: e.message || 'Failed to update gap status.' });

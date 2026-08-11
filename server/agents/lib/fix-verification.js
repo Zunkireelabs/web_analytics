@@ -1,6 +1,8 @@
 import { getDueVerifications, recordVerificationOutcome } from '../../store/fix-verifications.js';
 import { getWatchlistItemById, setWatchlistStatus } from '../../store/watchlist.js';
 import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, contentGapsFor, GAP_TYPE_TO_GENERATOR } from './page-content.js';
+import { recordFixOutcome } from '../../agent-memory.js';
+import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 
 // Reverse of TAG_TO_GENERATOR / GAP_TYPE_TO_GENERATOR — which real tag(s) a
 // given generatorId's draft was meant to resolve, per source agent (the same
@@ -47,6 +49,45 @@ function currentTagsFor(row, analysis) {
   };
 }
 
+// The primary automatic-LEARN trigger for the shared agent_fix_memory loop —
+// no PR merge, no human, no Claude Code script required: a real re-fetch of
+// the exact flagged page confirming the issue is actually gone (or isn't) is
+// the strongest "did this fix really work" signal this app has, so it's what
+// writes/updates memory. If this verification was checking the reuse of an
+// EXISTING memory (row.memory_ref_id, set at draft-generation time — see
+// routes/action-center.js's generateDraft), the outcome updates that
+// specific row's reuse_history/confidence/status. Otherwise a
+// 'verified-fixed' outcome is a genuinely NEW validated pattern, recorded as
+// a fresh candidate memory for the next agent (any generator, any site) to
+// find. A 'still-present' outcome with no prior memoryRefId has nothing
+// established to downgrade — recordFixOutcome no-ops for that case (see its
+// own comment) — there is no reusable "known bad fix" to warn future agents
+// away from without a memoryRefId already anchoring one.
+async function learnFromOutcome(row, outcome, tags) {
+  try {
+    if (row.memory_ref_id) {
+      await recordFixOutcome({
+        memoryRefId: row.memory_ref_id,
+        outcome: outcome === 'verified-fixed' ? 'success' : 'failure',
+        agentId: 'fix-verification', generatorId: row.generator_id, siteId: row.site_id,
+        notes: `fix_verifications row ${row.id}, source=${row.source}`,
+      });
+      return;
+    }
+    if (outcome !== 'verified-fixed') return;
+    await recordFixOutcome({
+      category: topLevelCategoryForGenerator(row.generator_id), scope: 'client', siteId: row.site_id,
+      generatorId: row.generator_id, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: `${row.generator_id}:${(tags || []).join(',') || row.source}`,
+      symptoms: `A ${row.generator_id} fix (source: ${row.source}) for tag(s) [${(tags || []).join(', ')}] was confirmed resolved on a real re-check of the live page.`,
+      affectedPattern: `${row.generator_id} draft addressing tag(s): ${(tags || []).join(', ')}.`,
+      fixStrategy: `See the implemented draft (id ${row.draft_id}) for the fix content that resolved this — re-run the same generator with the same approach for this tag pattern.`,
+    });
+  } catch (err) {
+    console.warn(`[fix-verification] agent_fix_memory write failed for row ${row.id}:`, err.message);
+  }
+}
+
 async function verifyOne(row) {
   const fetched = await analyzePageUrl(row.page_url);
   if (!fetched.ok) {
@@ -58,6 +99,7 @@ async function verifyOne(row) {
   const stillFlagged = tags.some((t) => tagsNow.includes(t));
   const outcome = stillFlagged ? 'still-present' : 'verified-fixed';
   await recordVerificationOutcome(row.id, outcome, { tagsChecked: tags, tagsNow });
+  await learnFromOutcome(row, outcome, tags);
 
   if (outcome === 'still-present' && row.watchlist_item_id) {
     await reopenIfClosed(row.site_id, row.watchlist_item_id);

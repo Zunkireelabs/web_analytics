@@ -5,10 +5,17 @@ from sqlalchemy import func, select
 from app.collectors.base import Collector, Observation
 from app.db.models import PageQueryObservation
 
-# Matches anomalies.py's BASELINE_WINDOW exactly — a page that clears this
-# gate has a full, immediately usable anomaly baseline the moment it's
-# admitted, and enough history for a WoW trend-shift on day one too.
-STABILITY_WINDOW_DAYS = 30
+# Phase 3 (page/query risk surfacing): lowered from 30 to 14. This changes
+# only how SOON a page can qualify, never how trustworthy an admitted page's
+# series is — the zero-gap-tolerance rule below is completely unchanged, so
+# every admitted day is still real, contiguous, top-50-verified data. A
+# 14-day-admitted page still needs its own separate minimums before
+# anything downstream fires: anomalies.py's MIN_BASELINE_PERIODS (7) is
+# already covered, and settings.min_history_days_for_forecast (30) simply
+# keeps accruing for another 16 days before a daily forecast is attempted —
+# neither engine is weakened by this change, they just start seeing real
+# page-level data sooner instead of almost never.
+STABILITY_WINDOW_DAYS = 14
 
 _METRIC_COLUMNS = {
     "gsc_clicks": "clicks",

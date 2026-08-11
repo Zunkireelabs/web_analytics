@@ -31,3 +31,22 @@ export function categoryForPattern(patternId) {
 export function rootCauseForPattern(patternId) {
   return PATTERN_INFO[patternId]?.rootCause || null;
 }
+
+// Coarse generatorId -> agent_fix_memory top-level category split (migration
+// 097 constrains category to a fixed enum, unlike fix_lessons' free-text
+// category column). 'technical-seo' is generators fixing markup/config
+// correctness (schema validity, headers, redirects, crawlability); anything
+// that's primarily generating on-page written content defaults to
+// 'content'. Shared by generateDraft's self-correction/human-edit lesson
+// recording (server/routes/action-center.js) and the one-time fix_lessons
+// backfill (server/scripts/migrate-fix-lessons-to-memory.js) so both use the
+// exact same split.
+const TECHNICAL_SEO_GENERATORS = new Set([
+  'schema', 'schema-repair', 'security-headers', 'robots-fix', 'redirect-fix',
+  'canonical', 'sitemap', 'html-lang', 'viewport', 'internal-links',
+  'llms-txt', 'broken-link-fix', 'analytics-install', 'duplicate-id-fix', 'open-graph',
+]);
+
+export function topLevelCategoryForGenerator(generatorId) {
+  return TECHNICAL_SEO_GENERATORS.has(generatorId) ? 'technical-seo' : 'content';
+}

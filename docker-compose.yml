@@ -80,6 +80,48 @@ services:
       - "traefik.http.middlewares.analytics-mcp-prod-redirect.redirectscheme.scheme=https"
       - "traefik.http.services.analytics-mcp-prod.loadbalancer.server.port=3003"
 
+  # Design Agent worker (server/design-agent/worker.js) — polls
+  # execution_jobs for kind='design_generate' and runs each one via
+  # design_task.py (real repo checkout + OpenHands). No public endpoint
+  # (a background poller, not an HTTP service) — no Traefik labels, no
+  # exposed port. Runs on THIS same host/compose deployment rather than a
+  # separate VPS, same as analytics-mcp above: shares this app's own .env
+  # (DATABASE_URL, GITHUB_PAT, OPENAI_API_KEY) and the same Neon database
+  # via execution_jobs/sites, no dedicated DB of its own (unlike
+  # data-analyst-agent's docker-compose.yml, which does have one).
+  #
+  # /var/run/docker.sock is mounted so this container can ask the HOST's
+  # own Docker daemon to start a SIBLING container per job
+  # (ghcr.io/openhands/agent-server — see design_task.py's DockerWorkspace)
+  # — this is Docker-outside-of-Docker, not Docker-in-Docker: this
+  # container has no dockerd of its own, it drives the host's. That socket
+  # is effectively host-root-equivalent access, scoped here to exactly the
+  # one container that legitimately needs it.
+  design-agent-worker:
+    container_name: design-agent-worker-prod
+    build:
+      context: .
+      dockerfile: server/design-agent/Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      # No HTTP endpoint to poll (this is a background poller, not a web
+      # service) — liveness is just "is the poll-loop process still
+      # running", same convention as any other worker-style container with
+      # nothing to curl.
+      test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
 networks:
   hosting:
     external: true

@@ -259,7 +259,15 @@ export function analyzePage(html, pageUrl) {
   const hasFreshnessTimeTag = $('time[datetime]').length > 0;
 
   let host = null;
-  try { host = new URL(pageUrl).hostname; } catch { /* leave host null */ }
+  let isRootPage = false;
+  try {
+    const parsed = new URL(pageUrl);
+    host = parsed.hostname;
+    // Same segment check breadcrumbs.js itself refuses on (no real trail to
+    // draft for the homepage) — computed here too so the gap never fires in
+    // the first place, see contentGapChecks below.
+    isRootPage = parsed.pathname.split('/').filter(Boolean).length === 0;
+  } catch { /* leave host/isRootPage at defaults */ }
   // Every real internal href, resolved to an absolute URL — one entry per
   // matching anchor tag (not deduped; a page linking the same URL 5 times
   // still contributes 5 entries here, same as internalLinkCount always
@@ -338,7 +346,16 @@ export function analyzePage(html, pageUrl) {
       return { src, nearbyText: figcaption || nearbyHeading || '', originalTag };
     })
     .get()
-    .filter((img) => img.src);
+    // originalTag (not src) is the real anchor alt-text-inject.js patches
+    // against — src is only a best-effort filename hint for the LLM prompt,
+    // and alt-text.js already handles an empty one honestly ("no real clue"
+    // branch). Filtering on src here silently dropped lazy-loaded/srcset-only
+    // images that were still perfectly patchable, so imagesMissingAlt (what
+    // alt-text.js actually drafts against) came back empty while the
+    // imagesWithoutAlt count (what the finding is worded from) stayed >0 —
+    // a finding that could never be drafted, same guaranteed-to-fail class
+    // fixed for breadcrumbs/freshness-date/author-byline.
+    .filter((img) => img.originalTag);
 
   const hasComparisonTable = $('table').filter((_, el) => /\bvs\.?\b|\bversus\b|\bcomparison\b/i.test($(el).text())).length > 0;
   const hasComparisonHeading = /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b/i.test(headingText);
@@ -446,6 +463,7 @@ export function analyzePage(html, pageUrl) {
     hasCanonical: $('link[rel="canonical"]').length > 0,
     canonicalUrl, // real resolved target, null if absent or unparseable — see contentGapChecks' cross-domain check
     pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
+    isRootPage, // true for the homepage (no path segments) — see contentGapChecks' breadcrumbs check below
     hasOpenGraph: $('meta[property="og:title"]').length > 0 || $('meta[property="og:description"]').length > 0,
     listCount: $('ul, ol').length,
     tableCount: $('table').length,
@@ -863,11 +881,14 @@ function contentGapChecks(analysis, queryTexts = []) {
   }
   if (!analysis.hasOpenGraph) gaps.push({ type: 'Missing Open Graph tags', detail: 'No og:title/og:description found.' });
   // Deterministic from the real URL path (breadcrumbs.js), not the LLM —
-  // same "pure, safe" shape as canonical.js. A homepage/root URL has no
-  // real trail to draft; breadcrumbs.js refuses that case explicitly rather
-  // than fabricating one, so this gap can fire on it without a special case
-  // here (same as schema.js's own edge-case throws elsewhere).
-  if (!(analysis.schemaTypes || []).includes('BreadcrumbList')) gaps.push({ type: 'Missing breadcrumbs', detail: 'No BreadcrumbList structured data found.' });
+  // same "pure, safe" shape as canonical.js. A homepage/root URL has no real
+  // trail to draft, and breadcrumbs.js refuses that case explicitly rather
+  // than fabricating one — so skip the gap here too (same guaranteed-to-fail
+  // class as aff6ef5/8115f21: a recommendation shown "SAFE — AUTO-ELIGIBLE"
+  // that fails on every approval attempt, for every root page, forever).
+  if (!analysis.isRootPage && !(analysis.schemaTypes || []).includes('BreadcrumbList')) {
+    gaps.push({ type: 'Missing breadcrumbs', detail: 'No BreadcrumbList structured data found.' });
+  }
   // Detection only — deciding which of two same-@type blocks is the real
   // one, or fixing malformed JSON syntax in a live template, requires
   // knowing the template's actual rendering, not a fact any generator here

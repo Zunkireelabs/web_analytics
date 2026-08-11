@@ -6,6 +6,7 @@ import {
   getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
   getLatestLayoutSuggestion, saveLayoutSuggestion,
 } from '../store/data-analyst.js';
+import { createActionCenterRecommendationForGap } from '../agents/lib/analyst-seo-mapping.js';
 
 // Keyword Discovery — clusters/gaps/site-profile produced by agents/clustering.py
 // (see server/store/data-analyst.js for the read/write layer). Unlike
@@ -49,7 +50,13 @@ router.put('/internal/keywords/:siteId/gaps/:gapId', async (req, res, next) => {
       err.status = 404;
       throw err;
     }
-    res.json(updated);
+
+    let actionCenter = null;
+    if (status === 'approved') {
+      actionCenter = await createActionCenterRecommendationForGap(req.params.siteId, updated);
+    }
+
+    res.json({ ...updated, actionCenter });
   } catch (e) { next(e); }
 });
 

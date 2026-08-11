@@ -82,7 +82,13 @@ export function registerReadOnlyTools(server, siteId) {
 
   server.registerTool('get_gsc_breakdown', {
     description: 'Search Console breakdown (query, page, device, or country) aggregated over a date range.',
-    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['query', 'page', 'device', 'country']), limit: z.number().int().min(1).max(50).default(10) },
+    // Cap raised from 50 to 2000 for 'query'/'page' specifically — the
+    // keyword-clustering collector (data-analyst-agent/app/collectors/
+    // keyword_clustering.py) needs the real keyword universe over a 90-day
+    // window to cluster meaningfully, not just a top-10/50 dashboard list.
+    // Default stays 10 and every existing caller is unaffected; only a
+    // caller that explicitly asks for more now can get it.
+    inputSchema: { start: dateStr, end: dateStr, dim: z.enum(['query', 'page', 'device', 'country']), limit: z.number().int().min(1).max(2000).default(10) },
   }, withErrorHandling('get_gsc_breakdown', async ({ start, end, dim, limit }) => jsonResult(await getGscBreakdownRange(siteId, start, end, dim, limit))));
 
   server.registerTool('get_ga4_breakdown', {

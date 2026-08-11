@@ -13,6 +13,7 @@ from app.collectors.gsc_daily import GscDailyCollector
 from app.collectors.gsc_page_dimension import GscPageDimensionCollector
 from app.collectors.gsc_query_dimension import GscQueryDimensionCollector
 from app.collectors.health_score import HealthScoreCollector
+from app.collectors.keyword_clustering import KeywordClusteringCollector
 from app.collectors.monthly_metrics import MonthlyMetricsCollector
 from app.collectors.page_query import PageQueryCollector
 from app.db.models import MetricCatalog, MetricDimensionSupport
@@ -40,6 +41,11 @@ COLLECTORS: list[Collector] = [
     PageQueryCollector(),
     GscPageDimensionCollector(),
     GscQueryDimensionCollector(),
+    # Order-independent from everything above — reads real GSC query data
+    # fresh via its own MCP call rather than any other collector's output,
+    # and internally no-ops on nights it isn't actually due (see its own
+    # module docstring for the ~14-day cadence gate).
+    KeywordClusteringCollector(),
 ]
 
 

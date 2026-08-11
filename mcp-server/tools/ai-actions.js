@@ -4,7 +4,8 @@ import { refreshCommandCenter } from '../../server/routes/command-center.js';
 import { refreshRecommendations, generateDraft, markDraftImplementedIfEligible } from '../../server/routes/action-center.js';
 import { updateDraft, deleteDraft, submitDraftForApproval } from '../../server/store/drafts.js';
 import { deliverToAllChannels } from '../../server/notifications/channels/index.js';
-import { updateKeywordGapStatus } from '../../server/store/data-analyst.js';
+import { updateKeywordGapStatus, saveSiteProfile, saveKeywordClusters, saveKeywordGaps } from '../../server/store/data-analyst.js';
+import { createActionCenterRecommendationForGap } from '../../server/agents/lib/analyst-seo-mapping.js';
 import { dateStr, jsonResult, requireLevel, withErrorHandling } from './shared.js';
 
 // "AI Actions" tier tools — spend LLM/API budget and write to this app's own
@@ -127,12 +128,62 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
   }));
 
   server.registerTool('update_keyword_gap_status', {
-    description: 'Staff review action on a keyword gap: approve it (queues it as a real content opportunity) or reject it (not worth pursuing).',
+    description: 'Staff review action on a keyword gap: approve it (queues it as a real content opportunity, entering the Action Center as a recommendation) or reject it (not worth pursuing, no Action Center effect).',
     inputSchema: { gapId: z.number().int(), status: z.enum(['approved', 'rejected']) },
   }, withErrorHandling('update_keyword_gap_status', async ({ gapId, status }) => {
     const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
     const gap = await updateKeywordGapStatus(siteId, gapId, status);
     if (!gap) return { isError: true, content: [{ type: 'text', text: 'Keyword gap not found.' }] };
-    return jsonResult(gap);
+    // Same shared path server/routes/keywords.js's PUT route uses — approval
+    // behaves identically regardless of which entry point (Analyst page or
+    // MCP) a caller used. See createActionCenterRecommendationForGap's own
+    // comment for why this is Gate 1 only, never a merge/publish action.
+    const actionCenter = status === 'approved' ? await createActionCenterRecommendationForGap(siteId, gap) : null;
+    return jsonResult({ ...gap, actionCenter });
+  }));
+
+  server.registerTool('save_site_profile', {
+    description: "Saves the Data Analyst Agent's inferred site profile (industry, main topics, site type) from a fresh clustering run — the current-state row for this site, upserted. Never invents a profile not evidenced by real search queries.",
+    inputSchema: {
+      industry: z.string().min(1),
+      mainTopics: z.array(z.string()).default([]),
+      siteType: z.enum(['service', 'product', 'ecommerce', 'education']).nullable().optional(),
+    },
+  }, withErrorHandling('save_site_profile', async ({ industry, mainTopics, siteType }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    await saveSiteProfile(siteId, { industry, mainTopics, siteType: siteType ?? null });
+    return jsonResult({ ok: true });
+  }));
+
+  server.registerTool('save_keyword_clusters', {
+    description: "Saves a fresh run's semantic keyword clusters (grouped from this site's own real GSC queries). Append-only per run, same convention as forecast_runs — each call adds a new snapshot rather than overwriting the previous one.",
+    inputSchema: {
+      clusters: z.array(z.object({
+        clusterName: z.string().min(1),
+        clusterType: z.enum(['service', 'product', 'general']),
+        keywords: z.array(z.object({ keyword: z.string(), impressions: z.number(), avgPosition: z.number().nullable().optional() })),
+        avgImpressions: z.number(),
+        avgPosition: z.number().nullable().optional(),
+        gapScore: z.number().default(0),
+      })),
+    },
+  }, withErrorHandling('save_keyword_clusters', async ({ clusters }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    await saveKeywordClusters(siteId, clusters.map((c) => ({
+      ...c, keywords: c.keywords.map((k) => ({ keyword: k.keyword, impressions: k.impressions, avg_position: k.avgPosition ?? null })),
+    })));
+    return jsonResult({ saved: clusters.length });
+  }));
+
+  server.registerTool('save_keyword_gaps', {
+    description: "Saves newly identified zero-coverage keyword topics as pending_review gaps — a human-review queue, never auto-applied. 'source' distinguishes the clustering-based pass from external keyword research.",
+    inputSchema: {
+      gaps: z.array(z.object({ topic: z.string().min(1), reason: z.string().nullable().optional(), priority: z.enum(['high', 'medium', 'low']).default('medium') })),
+      source: z.enum(['internal_analysis', 'claude_research']).default('internal_analysis'),
+    },
+  }, withErrorHandling('save_keyword_gaps', async ({ gaps, source }) => {
+    const denied = requireLevel(permissionLevel, 'ai_actions'); if (denied) return denied;
+    await saveKeywordGaps(siteId, gaps, source);
+    return jsonResult({ saved: gaps.length });
   }));
 }
