@@ -1,4 +1,6 @@
-import { validatePlaceholders, checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, templateActionRequiresRow } from '../implementers/lib/design-drift.js';
+import {
+  validatePlaceholders, checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, templateActionRequiresRow, recordRejectedTemplateLesson,
+} from '../implementers/lib/design-drift.js';
 
 // Shapes one Design Agent-derived {wrapper, row} template (keyed by the
 // same design-drift.js/marker-merge.js action-type strings, e.g. 'faq',
@@ -17,7 +19,9 @@ import { validatePlaceholders, checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, t
 // rejection — same fail-open discipline design-drift.js itself already uses
 // for infra failures, since the human /confirm step is still the real gate
 // before anything is saved to url_file_map.
-export async function buildComponentTemplateProposal({ actionType, template, pageUrl, checkTemplateFreshnessFn = checkTemplateFreshness }) {
+export async function buildComponentTemplateProposal({
+  actionType, template, pageUrl, siteId = null, checkTemplateFreshnessFn = checkTemplateFreshness, recordFixOutcomeFn,
+}) {
   if (!COMPONENT_TEMPLATE_KEY[actionType]) {
     return { ok: false, error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` };
   }
@@ -26,7 +30,19 @@ export async function buildComponentTemplateProposal({ actionType, template, pag
   }
 
   const placeholderCheck = validatePlaceholders(actionType, template);
-  if (!placeholderCheck.ok) return placeholderCheck;
+  if (!placeholderCheck.ok) {
+    // Same LEARN write the autonomous path (design-drift.js's
+    // resolveOrCreateComponentTemplate) uses on the identical rejection —
+    // one shared write path, not a fork, so a lesson recorded from a staff
+    // member reviewing this proposal is available to the autonomous path's
+    // next RETRIEVE, and vice versa. This proposal function is reached from
+    // the staff-triggered /design-generate + /confirm inspection route
+    // (routes/clients.js), never a required step for a draft to ship — see
+    // resolveOrCreateComponentTemplate, the sole autonomous entry point
+    // wired into generateDraft.
+    recordRejectedTemplateLesson({ siteId, actionType, error: placeholderCheck.error, recordFixOutcomeFn });
+    return placeholderCheck;
+  }
 
   let missingClasses = [];
   if (pageUrl) {
@@ -42,12 +58,15 @@ export async function buildComponentTemplateProposal({ actionType, template, pag
 // completed design_generate job's stored result.componentTemplates (090,
 // execution_jobs.result) — used by the job-status polling route
 // (routes/clients.js) so staff see one proposal per requested component key
-// in a single response, keyed the same way the request was.
-export async function buildComponentTemplateProposalsFromJob(job, { pageUrl } = {}) {
+// in a single response, keyed the same way the request was. Threads the
+// job's own site_id through as siteId so a rejection recorded here scopes
+// to the same site the autonomous path (resolveOrCreateComponentTemplate)
+// would have hit.
+export async function buildComponentTemplateProposalsFromJob(job, { pageUrl, recordFixOutcomeFn } = {}) {
   const componentTemplates = job?.result?.componentTemplates || {};
   const proposals = {};
   for (const [actionType, template] of Object.entries(componentTemplates)) {
-    proposals[actionType] = await buildComponentTemplateProposal({ actionType, template, pageUrl });
+    proposals[actionType] = await buildComponentTemplateProposal({ actionType, template, pageUrl, siteId: job?.site_id ?? null, recordFixOutcomeFn });
   }
   return proposals;
 }

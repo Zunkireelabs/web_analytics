@@ -2,7 +2,9 @@ import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
-import { createComponentTemplateHandler } from '../../design-agent/openhands-handler.js';
+import { recordFixOutcome } from '../../agent-memory.js';
+import { createComponentTemplateHandler, DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
+import { COMPLIANCE_ACTION_TYPES } from '../frontend.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -40,9 +42,17 @@ export const COMPONENT_TEMPLATE_KEY = {
   'content-wrapper': 'contentWrapper',
 };
 
+// Bounded so a stalled/hanging origin can't wedge a draft-generation request
+// (or the unattended auto-remediation loop) indefinitely — every caller here
+// already treats null as "couldn't check," and a timeout is exactly that: an
+// infra failure, not evidence the template is bad. Callers fail OPEN on null
+// (see checkTemplateFreshness's contract below), so a slow site degrades to
+// "unverified freshness" rather than to a wrong verdict.
+const FETCH_TIMEOUT_MS = Number(process.env.DESIGN_DRIFT_FETCH_TIMEOUT_MS || 10000);
+
 async function fetchText(url) {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
     return await res.text();
   } catch {
@@ -198,6 +208,77 @@ export function templateActionRequiresRow(actionType) {
   return (REQUIRED_PLACEHOLDERS[actionType]?.row || []).length > 0;
 }
 
+// ---------------------------------------------------------------------------
+// Template provenance — "who verified this template, and against what?"
+// ---------------------------------------------------------------------------
+// componentTemplates used to carry no provenance at all: a hand-captured
+// snapshot and a real-repo-grounded Design Agent derivation were byte-identical
+// in storage, so nothing downstream could tell a verified template from a
+// guess someone pasted in months ago. That ambiguity is what let unverified
+// templates reach apply time and fail there (the "looks bigger/different than
+// the rest of the site" class of failure this module already existed to catch,
+// plus a large share of the observed apply-failure rate).
+//
+// The stamp lives INSIDE the template object rather than in a parallel table
+// or column: every existing reader (marker-merge.js's fillTemplate,
+// newpage-render.js, extractLiteralClassNames, validatePlaceholders) reads
+// only `.wrapper`/`.row`, so extra keys are inert to all of them and no
+// migration or backfill is required. An UNSTAMPED template is treated as
+// unverified, which is the correct reading of every template stored before
+// this existed — none of them were ever checked against a live page.
+export const TEMPLATE_VERIFIED_BY = {
+  DESIGN_AGENT: 'design-agent', // derived from the site's real repo by OpenHands
+  HUMAN: 'human',               // a staff member reviewed and confirmed it
+  FRESHNESS_CHECK: 'freshness-check', // backfill: every claimed class proven live
+};
+
+// Attaches provenance without mutating the caller's object. `ref` is whatever
+// identifies the evidence — a design_generate job id, a user id, or the page
+// URL a freshness check ran against — so a later "why is this trusted?" has a
+// real answer instead of a bare boolean.
+export function stampTemplateVerification(template, { verifiedBy, verifiedRef = null, at = new Date() } = {}) {
+  if (!template) return template;
+  return { ...template, verifiedAt: at.toISOString(), verifiedBy, verifiedRef: verifiedRef == null ? null : String(verifiedRef) };
+}
+
+// The single predicate the gate asks. Deliberately structural-only (is there a
+// stamp, and does the template still satisfy its placeholder contract) — it
+// makes NO network call, so it is safe to call on the hot path in
+// generateDraft and inside the per-item loop in buildRecommendations. Live-CSS
+// freshness is the separate, expensive checkTemplateFreshness above, used by
+// the backfill script and the staff regenerate flow.
+export function isTemplateVerified(actionType, template) {
+  if (!template?.wrapper) return { ok: false, reason: 'missing', detail: 'No component template is configured for this site yet.' };
+  if (!template.verifiedAt || !template.verifiedBy) {
+    return { ok: false, reason: 'unverified', detail: 'This site\'s component template has never been verified against the real site design.' };
+  }
+  const placeholders = validatePlaceholders(actionType, template);
+  if (!placeholders.ok) return { ok: false, reason: 'invalid-placeholders', detail: placeholders.error };
+  return { ok: true, verifiedAt: template.verifiedAt, verifiedBy: template.verifiedBy };
+}
+
+// generatorId -> the componentTemplates action type it renders through. The
+// three compliance generators all share the single generic 'content-wrapper'
+// key (see frontend.js's COMPLIANCE_ACTION_TYPES and newpage-render.js's
+// renderCompliancePageBody) rather than each having their own; every other
+// generator maps to itself. Lives here, next to COMPONENT_TEMPLATE_KEY, so
+// the draft-generation gate (routes/action-center.js) and the recommendation
+// gate (agents/lib/recommendations.js) cannot drift apart on which action
+// type a generator is actually checked against.
+export function componentTemplateActionTypeFor(generatorId) {
+  return COMPLIANCE_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
+}
+
+// Convenience read used by both gates: resolves the stored template for a
+// site+actionType and returns its verification verdict in one step. Pure read
+// of the already-loaded `site` row — no DB or network access.
+export function componentTemplateVerification(site, actionType) {
+  const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+  if (!componentKey) return { ok: true, reason: 'no-concept', componentKey: null };
+  const template = site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
+  return { ...isTemplateVerified(actionType, template), componentKey, actionType };
+}
+
 // Derives a replacement template from the site's CURRENT real page HTML,
 // grounded the same way faq.js/expand-content.js ground their own content:
 // never invent a class that isn't actually visible in the real fetched
@@ -242,6 +323,37 @@ export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate,
   return { ok: true, template: needsRow ? { wrapper: parsed.wrapper, row: parsed.row } : { wrapper: parsed.wrapper } };
 }
 
+// LEARN side of the loop this module's RETRIEVE half
+// (openhands-handler.js's createComponentTemplateHandler) already reads
+// from. Single source of truth for what a rejected-template lesson looks
+// like, called from BOTH the autonomous path below
+// (resolveOrCreateComponentTemplate) and the staff-triggered inspection
+// path (component-template-proposal.js's buildComponentTemplateProposal) —
+// same generatorId, same problemSignature shape, so a rejection recorded
+// from either path dedups into the exact same agent_fix_memory row and
+// shows up in the next RETRIEVE regardless of which path is running next.
+// This is deliberately the ONLY write path into agent_fix_memory for a
+// Design Agent placeholder rejection — there is no separate "manual UI"
+// learning path, by construction.
+//
+// validatePlaceholders is a deterministic, ground-truth check (a plain
+// string-contains test, not an LLM judgment call), so a rejection clears
+// the same "genuinely validated" bar every other recordFixOutcome call site
+// in this codebase requires — same shape action-center.js uses to record a
+// Quality Gate hit. Never lets a memory-write failure block the caller —
+// same fail-open discipline as everywhere else this table is touched.
+export function recordRejectedTemplateLesson({ siteId, actionType, error, recordFixOutcomeFn = recordFixOutcome }) {
+  return recordFixOutcomeFn({
+    category: 'content', scope: 'client', siteId, generatorId: DESIGN_AGENT_GENERATOR_ID,
+    validationRuleId: `missing-placeholders:${actionType}`, outcome: 'success', sourceType: 'runtime-auto',
+    problemSignature: `missing-placeholders:${actionType}`,
+    symptoms: `Design Agent derived a "${actionType}" component template missing a required placeholder token.`,
+    rootCause: error,
+    affectedPattern: `Design Agent component-templates output for action type "${actionType}".`,
+    fixStrategy: `Every placeholder token required for "${actionType}" must appear verbatim in the derived template — ${error}`,
+  }).catch((err) => console.error(`[design-drift] failed to record rejected-template memory for ${actionType}:`, err.message));
+}
+
 // A synthetic req-like shape for recordAuditEvent — this resolver runs
 // during draft GENERATION (generateDraft, called from the manual UI route,
 // the MCP tool, and the unattended execution engine alike), never from one
@@ -275,6 +387,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   createHandler = createComponentTemplateHandler,
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
+  recordFixOutcomeFn = recordFixOutcome,
 } = {}) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
@@ -299,7 +412,21 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   if (!derived?.wrapper) return { ok: false, reason: 'not-derived', template: null, componentKey };
 
   const check = validatePlaceholders(actionType, derived);
-  if (!check.ok) return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+  if (!check.ok) {
+    recordRejectedTemplateLesson({ siteId: site.id, actionType, error: check.error, recordFixOutcomeFn });
+    return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+  }
+
+  // Stamped verified-by-design-agent at the moment of derivation: this
+  // template was just read out of the site's REAL repo by an OpenHands
+  // session (openhands-handler.js), which is exactly the grounding the gate
+  // in generateDraft is asking for. `result.jobId` is the evidence trail —
+  // null for the inline (non-job) handler path, which is fine; the stamp's
+  // value is `verifiedBy`, and `verifiedRef` is supporting detail.
+  const stamped = stampTemplateVerification(derived, {
+    verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
+    verifiedRef: result?.jobId ?? null,
+  });
 
   const urlFileMap = {
     ...site.url_file_map,
@@ -307,7 +434,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
       ...site.url_file_map?.siteRoot,
       componentTemplates: {
         ...site.url_file_map?.siteRoot?.componentTemplates,
-        [componentKey]: derived,
+        [componentKey]: stamped,
       },
     },
   };
@@ -318,9 +445,9 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     targetId: String(site.id),
     tenantSiteId: site.id,
     tenantName: site.name,
-    metadata: { actionType, componentKey, source: 'design-agent-auto' },
+    metadata: { actionType, componentKey, source: 'design-agent-auto', verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT },
     success: true,
   });
 
-  return { ok: true, template: derived, source: 'design-agent', justCreated: true, componentKey };
+  return { ok: true, template: stamped, source: 'design-agent', justCreated: true, componentKey };
 }

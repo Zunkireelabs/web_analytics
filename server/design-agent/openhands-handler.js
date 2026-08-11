@@ -7,6 +7,17 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { getSiteById } from '../store/read.js';
 import { checkoutRepoTarball } from './repo-checkout.js';
+import { findRelevantMemory } from '../agent-memory.js';
+
+// Shared generatorId in agent_fix_memory (097) for every Design Agent
+// component-templates write/read, autonomous or staff-triggered alike —
+// this module's own RETRIEVE lookup below, design-drift.js's LEARN write
+// (resolveOrCreateComponentTemplate, the autonomous path), and
+// component-template-proposal.js's LEARN write (the staff-triggered
+// /design-generate + /confirm inspection path) all tag/filter by this same
+// id, so there is exactly one learning history per site, not two forked by
+// which path produced the rejection.
+export const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -148,7 +159,7 @@ export function createOpenHandsHandler({
       };
 
       const { result, code, timedOut, stderrTail } = await runDesignTaskProcess({
-        pythonBin, scriptPath, workspaceDir, extraArgs: buildArgs(job), env, timeoutMs, killGraceMs,
+        pythonBin, scriptPath, workspaceDir, extraArgs: await buildArgs(job), env, timeoutMs, killGraceMs,
         onContainerId: (id) => { containerId = id; },
       });
 
@@ -176,18 +187,42 @@ export function createOpenHandsHandler({
 // spawn/stdout-parsing/timeout/SIGKILL-escalation/backstop cleanup — is the
 // exact same createOpenHandsHandler machinery above, just parameterized
 // differently.
-// getSiteByIdFn/checkoutRepoTarballFn are injectable (default to the real
-// store/read.js + repo-checkout.js implementations) so tests can stub the
-// DB lookup and the real GitHub tarball download independently, same
+// getSiteByIdFn/checkoutRepoTarballFn/findRelevantMemoryFn are injectable
+// (default to the real store/read.js, repo-checkout.js, and
+// agent-memory.js implementations) so tests can stub the DB lookup, the
+// real GitHub tarball download, and the memory lookup independently, same
 // dependency-injection convention as pythonBin/scriptPath/dockerBin above.
-export function createComponentTemplateHandler({ getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, ...options } = {}) {
+export function createComponentTemplateHandler({
+  getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, findRelevantMemoryFn = findRelevantMemory, ...options
+} = {}) {
   return createOpenHandsHandler({
     ...options,
     workspaceSource: async (destDir, job) => {
       const site = await getSiteByIdFn(job.site_id);
       await checkoutRepoTarballFn(site, destDir);
     },
-    buildArgs: (job) => ['component-templates', JSON.stringify(job.params?.componentKeys || [])],
+    // RETRIEVE — same shape as withAgentMemory (agent-memory.js): scope:
+    // 'client', clientFacing: true (category='code' rows structurally
+    // unreachable), no category filter, so any past design-agent lesson —
+    // recorded from EITHER the autonomous path (design-drift.js) or the
+    // staff-triggered inspection path (component-template-proposal.js) —
+    // surfaces here regardless of which one wrote it. Never lets a
+    // memory-table failure block the job — same defensive no-op-on-error
+    // convention withAgentMemory itself uses.
+    buildArgs: async (job) => {
+      const lessons = await findRelevantMemoryFn({
+        scope: 'client', siteId: job.site_id, generatorId: DESIGN_AGENT_GENERATOR_ID, clientFacing: true, limit: 5,
+      }).catch((err) => {
+        console.warn(`[design-agent] memory lookup failed for site ${job.site_id}, continuing without it: ${err.message}`);
+        return [];
+      });
+      const lessonsForPrompt = lessons.map((l) => ({
+        symptoms: l.symptoms,
+        rootCause: l.rootCause,
+        fixPattern: l.executionPermission === 'auto' ? l.fixPattern : null,
+      }));
+      return ['component-templates', JSON.stringify(job.params?.componentKeys || []), JSON.stringify(lessonsForPrompt)];
+    },
   });
 }
 

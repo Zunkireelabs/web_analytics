@@ -20,14 +20,33 @@ describe('buildComponentTemplateProposal', () => {
     assert.match(result.error, /did not report a template/);
   });
 
-  test('rejects a template missing required placeholder tokens', async () => {
+  test('rejects a template missing required placeholder tokens, and records it to agent_fix_memory', async () => {
+    let recorded = null;
+    const recordFixOutcomeFn = async (args) => { recorded = args; return 'memory-id-1'; };
     const result = await buildComponentTemplateProposal({
       actionType: 'faq',
       template: { wrapper: '<div>{{ROWS}}</div>', row: '<p>{{QUESTION}}</p>' }, // missing {{ANSWER}}
+      siteId: 42,
+      recordFixOutcomeFn,
     });
     assert.equal(result.ok, false);
     assert.match(result.error, /missing required placeholder/);
     assert.match(result.error, /ANSWER/);
+    assert.equal(recorded.generatorId, 'design-agent-component-templates');
+    assert.equal(recorded.siteId, 42);
+    assert.equal(recorded.problemSignature, 'missing-placeholders:faq');
+  });
+
+  test('a memory-write failure while recording a rejected proposal never blocks the caller', async () => {
+    const recordFixOutcomeFn = async () => { throw new Error('DB is down'); };
+    const result = await buildComponentTemplateProposal({
+      actionType: 'faq',
+      template: { wrapper: '<div>{{ROWS}}</div>', row: '<p>{{QUESTION}}</p>' }, // missing {{ANSWER}}
+      siteId: 42,
+      recordFixOutcomeFn,
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /missing required placeholder/);
   });
 
   test('accepts a structurally valid template with no pageUrl (no class-freshness check run)', async () => {
@@ -65,8 +84,9 @@ describe('buildComponentTemplateProposal', () => {
 });
 
 describe('buildComponentTemplateProposalsFromJob', () => {
-  test('builds one proposal per action type in job.result.componentTemplates', async () => {
+  test('builds one proposal per action type in job.result.componentTemplates, and threads the job\'s site_id through to the recorded lesson', async () => {
     const job = {
+      site_id: 7,
       result: {
         componentTemplates: {
           faq: { wrapper: '{{ROWS}}', row: '{{QUESTION}}{{ANSWER}}' },
@@ -74,10 +94,14 @@ describe('buildComponentTemplateProposalsFromJob', () => {
         },
       },
     };
-    const proposals = await buildComponentTemplateProposalsFromJob(job);
+    let recorded = null;
+    const recordFixOutcomeFn = async (args) => { recorded = args; return 'memory-id-2'; };
+    const proposals = await buildComponentTemplateProposalsFromJob(job, { recordFixOutcomeFn });
     assert.equal(proposals.faq.ok, true);
     assert.equal(proposals['expand-content'].ok, false);
     assert.match(proposals['expand-content'].error, /BODY/);
+    assert.equal(recorded.siteId, 7);
+    assert.equal(recorded.problemSignature, 'missing-placeholders:expand-content');
   });
 
   test('returns an empty object for a job with no componentTemplates result', async () => {

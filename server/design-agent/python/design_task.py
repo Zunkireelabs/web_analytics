@@ -21,9 +21,17 @@ existing call site/test that only ever passes argv[1]):
   argv[3], a JSON array of design-drift.js/marker-merge.js action-type
   strings (e.g. ["faq", "expand-content"]), inspects the real repo and
   derives a {wrapper, row} HTML template per requested type, using only
-  classes/markup patterns actually present in real source files. The
-  derived templates are the deliverable, not any file edit — captured from
-  the agent's own final message (conversation.state.events, same technique
+  classes/markup patterns actually present in real source files. Optional
+  argv[4] is a JSON array of agent_fix_memory rows (server/agent-memory.js's
+  findRelevantMemory, looked up by openhands-handler.js before spawning this
+  process, from lessons written by EITHER the autonomous path or the
+  staff-triggered inspection path — see openhands-handler.js's
+  DESIGN_AGENT_GENERATOR_ID) appended to the task as advisory "known issues"
+  text — the same RETRIEVE step every other generator gets via
+  server/llm.js's withAgentMemory, wired in here since this generator's LLM
+  call never goes through callLLM. The derived templates are the
+  deliverable, not any file edit — captured from the agent's own final
+  message (conversation.state.events, same technique
   design-agent-poc/run_poc_step4.py validated for extracting a design
   profile) rather than a file on disk, and reported as a
   `componentTemplates` field on the final result line. This is a proposal
@@ -111,7 +119,31 @@ FIXTURE_DEMO_TASK = (
 )
 
 
-def build_component_templates_task(action_types):
+def _lessons_block(lessons):
+    """Formats agent_fix_memory rows the same way server/agent-memory.js's
+    withAgentMemory does for every other generator's system prompt: an
+    'auto' row with a fixPattern is stated as reusable guidance, anything
+    else surfaces as advisory-only ("do not repeat this")."""
+    if not lessons:
+        return ""
+    bullets = []
+    for l in lessons:
+        symptoms = l.get("symptoms") or ""
+        if not symptoms:
+            continue
+        fix_pattern = l.get("fixPattern")
+        if fix_pattern:
+            bullets.append(f"- {symptoms} Fix: {fix_pattern}")
+        else:
+            root_cause = l.get("rootCause")
+            suffix = f" ({root_cause})" if root_cause else ""
+            bullets.append(f"- {symptoms}{suffix} [advisory — do not repeat this]")
+    if not bullets:
+        return ""
+    return "\nKnown issues from past design-agent runs — do not repeat these:\n" + "\n".join(bullets) + "\n"
+
+
+def build_component_templates_task(action_types, lessons=None):
     lines = [
         "This directory is a real, complete checkout of a website's actual source "
         "repository. This is a READ-ONLY analysis task — do not create, edit, or "
@@ -148,6 +180,9 @@ def build_component_templates_task(action_types):
         "One entry per action type listed above that you were able to derive. "
         "Placeholder tokens must appear verbatim in your output."
     )
+    task = "\n".join(lines)
+    block = _lessons_block(lessons)
+    return task + "\n" + block if block else task
     return "\n".join(lines)
 
 
@@ -222,7 +257,8 @@ def main() -> int:
 
         if mode == "component-templates":
             action_types = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
-            task = build_component_templates_task(action_types)
+            lessons = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else []
+            task = build_component_templates_task(action_types, lessons)
         else:
             task = FIXTURE_DEMO_TASK
 

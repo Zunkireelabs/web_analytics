@@ -3,7 +3,122 @@ import assert from 'node:assert/strict';
 import {
   extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness, proposeUpdatedTemplate,
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
+  isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
+  componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
 } from './design-drift.js';
+
+const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
+
+describe('stampTemplateVerification', () => {
+  test('attaches provenance without mutating the original', () => {
+    const stamped = stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN, verifiedRef: 42 });
+    assert.equal(VALID_FAQ.verifiedAt, undefined, 'must not mutate the caller\'s object');
+    assert.equal(stamped.verifiedBy, 'human');
+    assert.equal(stamped.verifiedRef, '42', 'ref is normalised to a string so a user id and a job id read the same');
+    assert.ok(Date.parse(stamped.verifiedAt), 'verifiedAt is a parseable ISO timestamp');
+    assert.equal(stamped.wrapper, VALID_FAQ.wrapper, 'the template itself is carried through untouched');
+  });
+});
+
+describe('isTemplateVerified', () => {
+  test('an unstamped template is unverified — the correct reading of every pre-provenance template', () => {
+    const v = isTemplateVerified('faq', VALID_FAQ);
+    assert.equal(v.ok, false);
+    assert.equal(v.reason, 'unverified');
+  });
+
+  test('a missing template is reported as missing, not merely unverified', () => {
+    assert.equal(isTemplateVerified('faq', undefined).reason, 'missing');
+    assert.equal(isTemplateVerified('faq', { row: '<dd>{{ANSWER}}</dd>' }).reason, 'missing', 'no wrapper means nothing to render');
+  });
+
+  test('a stamped template that satisfies its placeholder contract passes', () => {
+    const stamped = stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT });
+    const v = isTemplateVerified('faq', stamped);
+    assert.equal(v.ok, true);
+    assert.equal(v.verifiedBy, 'design-agent');
+  });
+
+  test('a stamp cannot launder a structurally broken template', () => {
+    const stamped = stampTemplateVerification({ wrapper: '<div>{{ROWS}}</div>', row: '<dd>{{ANSWER}}</dd>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN });
+    const v = isTemplateVerified('faq', stamped);
+    assert.equal(v.ok, false);
+    assert.equal(v.reason, 'invalid-placeholders', 'missing {{QUESTION}} still fails even though it is stamped');
+  });
+
+  test('makes no network call — safe on the hot path in generateDraft and the per-finding loop', () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => { throw new Error('isTemplateVerified must never fetch'); };
+    try {
+      assert.equal(isTemplateVerified('faq', stampTemplateVerification(VALID_FAQ, { verifiedBy: 'human' })).ok, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('componentTemplateActionTypeFor', () => {
+  test('the three compliance generators all share the generic content-wrapper key', () => {
+    assert.equal(componentTemplateActionTypeFor('cookie-policy'), 'content-wrapper');
+    assert.equal(componentTemplateActionTypeFor('privacy-policy'), 'content-wrapper');
+    assert.equal(componentTemplateActionTypeFor('terms-of-service'), 'content-wrapper');
+  });
+
+  test('every other generator maps to itself', () => {
+    assert.equal(componentTemplateActionTypeFor('faq'), 'faq');
+    assert.equal(componentTemplateActionTypeFor('meta-title'), 'meta-title');
+  });
+});
+
+describe('componentTemplateVerification', () => {
+  test('action types with no component-template concept are never blocked', () => {
+    // meta-title/schema/canonical/sitemap are plain values with no CSS
+    // component that can drift — the gate must be invisible to them.
+    for (const generatorId of ['meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix']) {
+      const v = componentTemplateVerification({ url_file_map: {} }, generatorId);
+      assert.equal(v.ok, true, `${generatorId} must pass the gate untouched`);
+      assert.equal(v.reason, 'no-concept');
+    }
+  });
+
+  test('a component-template action type with nothing configured is blocked as missing', () => {
+    const v = componentTemplateVerification({ url_file_map: {} }, 'faq');
+    assert.equal(v.ok, false);
+    assert.equal(v.reason, 'missing');
+    assert.equal(v.componentKey, 'faq');
+    assert.equal(v.actionType, 'faq');
+  });
+
+  test('reads the stamp through the real url_file_map.siteRoot.componentTemplates shape', () => {
+    const site = {
+      url_file_map: {
+        siteRoot: {
+          componentTemplates: {
+            faq: stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK, verifiedRef: 'https://example.com/' }),
+          },
+        },
+      },
+    };
+    const v = componentTemplateVerification(site, 'faq');
+    assert.equal(v.ok, true);
+    assert.equal(v.verifiedBy, 'freshness-check');
+  });
+
+  test('a compliance generator is checked against the contentWrapper entry, not its own name', () => {
+    const site = {
+      url_file_map: {
+        siteRoot: {
+          componentTemplates: {
+            contentWrapper: stampTemplateVerification({ wrapper: '<article>{{BODY}}</article>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN }),
+          },
+        },
+      },
+    };
+    const v = componentTemplateVerification(site, componentTemplateActionTypeFor('privacy-policy'));
+    assert.equal(v.ok, true);
+    assert.equal(v.componentKey, 'contentWrapper');
+  });
+});
 
 describe('templateActionRequiresRow', () => {
   test('true for the repeating-row action types', () => {
@@ -71,18 +186,36 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(result.ok, true);
     assert.equal(result.source, 'design-agent');
     assert.equal(result.justCreated, true);
-    assert.deepEqual(result.template, derived);
+    assert.equal(result.template.wrapper, derived.wrapper);
+    assert.equal(result.template.verifiedBy, 'design-agent');
     assert.equal(saved.siteId, site.id);
-    assert.deepEqual(saved.urlFileMap.siteRoot.componentTemplates.contentWrapper, derived);
+    assert.equal(saved.urlFileMap.siteRoot.componentTemplates.contentWrapper.wrapper, derived.wrapper);
     assert.equal(audited.event.action, 'tenant.component_template_auto_created');
     assert.equal(audited.req.userId, null, 'no human triggered this — system actor, not a staff user');
   });
 
-  test('a derived template missing its required placeholder is rejected, not saved', async () => {
+  test('a derived template missing its required placeholder is rejected, not saved, and recorded to agent_fix_memory', async () => {
     const site = { ...baseSite };
     const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
     const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig });
+    let recorded = null;
+    const recordFixOutcomeFn = async (args) => { recorded = args; return 'memory-id-123'; };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-placeholders');
+    assert.equal(recorded.generatorId, 'design-agent-component-templates');
+    assert.equal(recorded.siteId, site.id);
+    assert.equal(recorded.outcome, 'success');
+    assert.equal(recorded.problemSignature, 'missing-placeholders:content-wrapper');
+    assert.match(recorded.symptoms, /content-wrapper/);
+  });
+
+  test('a memory-write failure while recording a rejected template never blocks the caller', async () => {
+    const site = { ...baseSite };
+    const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
+    const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
+    const recordFixOutcomeFn = async () => { throw new Error('DB is down'); };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'invalid-placeholders');
   });
