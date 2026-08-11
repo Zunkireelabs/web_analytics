@@ -1,318 +1,67 @@
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
-import AnalystHeaderOS from '../components/AnalystHeaderOS.jsx';
-import AnalystPredictiveHero from '../components/AnalystPredictiveHero.jsx';
-import AnalystProactiveActionBoard from '../components/AnalystProactiveActionBoard.jsx';
-import AnalystPredictiveStudio from '../components/AnalystPredictiveStudio.jsx';
-import AnalystCommandPalette from '../components/AnalystCommandPalette.jsx';
-import AnalystCustomizerDrawer from '../components/AnalystCustomizerDrawer.jsx';
-import AnalystKeyboardShortcutsModal from '../components/AnalystKeyboardShortcutsModal.jsx';
-import AnalystExecutiveSummary from '../components/AnalystExecutiveSummary.jsx';
-import AnalystRecommendationPriorityList from '../components/AnalystRecommendationPriorityList.jsx';
-import AnalystInvestigationWorkspace from '../components/AnalystInvestigationWorkspace.jsx';
-import AnalystMetricNavigator from '../components/AnalystMetricNavigator.jsx';
-import AnalystDiagnosticHero from '../components/AnalystDiagnosticHero.jsx';
-import AnalystTrendCard from '../components/AnalystTrendCard.jsx';
-import AnalystForecastSummaryCard from '../components/AnalystForecastSummaryCard.jsx';
-import AnalystAiAnalystCard from '../components/AnalystAiAnalystCard.jsx';
-import AnalystInvestigationTimeline from '../components/AnalystInvestigationTimeline.jsx';
-import AnalystDiagnosticsPanel from '../components/AnalystDiagnosticsPanel.jsx';
-import AnalystFeatureImportanceChart from '../components/AnalystFeatureImportanceChart.jsx';
-import AnalystCorrelationExplorer from '../components/AnalystCorrelationExplorer.jsx';
-import AnalystKeywordDiscovery from '../components/AnalystKeywordDiscovery.jsx';
-import AnalystCopilotDrawer from '../components/AnalystCopilotDrawer.jsx';
+import AnalystKeywordOpportunities from '../components/AnalystKeywordOpportunities.jsx';
+import AnalystImpressionForecast from '../components/AnalystImpressionForecast.jsx';
+import AnalystChatPanel from '../components/AnalystChatPanel.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
-import {
-  LineChart, ListChecks, Sparkles, AlertTriangle, ArrowUp, ArrowDown, Eye, EyeOff, Activity, Layers, Radar, ShieldCheck, Search, X,
-} from 'lucide-react';
+import { Activity, AlertTriangle } from 'lucide-react';
 
-const PRESET_ORDER_MAP = {
-  // Prediction-first command center flow: read the future, see the fixes,
-  // then dive into the evidence. Keyword Discovery is a standalone research
-  // tool (not part of the predictive/investigation flow), so it's appended
-  // last in every preset rather than reordered per-preset.
-  executive: ['hero', 'fixes', 'summary', 'priorities', 'studio', 'workspace', 'diagnostics', 'correlations', 'keyword-discovery'],
-  investigation: ['workspace', 'fixes', 'hero', 'studio', 'summary', 'priorities', 'diagnostics', 'correlations', 'keyword-discovery'],
-  growth: ['hero', 'studio', 'diagnostics', 'priorities', 'fixes', 'summary', 'workspace', 'correlations', 'keyword-discovery'],
-  copilot: ['hero', 'summary', 'diagnostics', 'workspace', 'fixes', 'priorities', 'studio', 'correlations', 'keyword-discovery'],
-};
+// The Analyst agent does two jobs, so this page shows two things:
+//
+//   1. Keyword Opportunities — what people search for that we could rank for,
+//      pushed into Action Center (and from there to a PR on the site) via the
+//      existing keyword-gap approval pipeline.
+//   2. Impression Forecast — where traffic is heading, and which metrics are
+//      predicted to drop while there's still time to fix them.
+//
+// Plus a chat column to ask about either, and to hand the agent a keyword you
+// want to grow for.
+//
+// This page previously rendered nine sections wrapped in a personalization
+// layer (drag-to-reorder, show/hide toggles, four layout presets, theme and
+// density settings, a command palette, a customizer drawer, a shortcuts modal
+// and an AI-layout banner). All of it is gone. The components behind the
+// removed sections are still on disk, just no longer mounted — nothing was
+// deleted, so any of them can be brought back by importing it again.
 
-const DEFAULT_SECTIONS = [
-  { id: 'hero', title: 'Prediction Readout', subtitle: 'What the data says is coming next', icon: Radar, iconColor: '#8b5cf6', visible: true },
-  { id: 'fixes', title: 'Proactive Fix Board', subtitle: 'Predicted issues with generated fixes', icon: ShieldCheck, iconColor: '#34d399', visible: true },
-  { id: 'summary', title: 'AI Executive Summary', subtitle: 'LLM synthesis of current state', icon: Sparkles, iconColor: '#3b82f6', visible: true },
-  { id: 'priorities', title: 'Recommendation Priority', subtitle: 'Ranked work queue of predicted actions', icon: ListChecks, iconColor: '#ea580c', visible: true },
-  { id: 'studio', title: 'Predictive Intelligence Studio', subtitle: 'Generative traffic modeling & future performance curves', icon: Sparkles, iconColor: '#8b5cf6', visible: true },
-  { id: 'workspace', title: 'Investigation Workspace', subtitle: 'Predicted risks and anomalies sorted by severity', icon: Activity, iconColor: '#ef4444', visible: true },
-  { id: 'diagnostics', title: 'Diagnostic Tools & Metric Navigator', subtitle: 'Select a metric to investigate trend, forecast & drivers', icon: LineChart, iconColor: '#6366f1', visible: true },
-  { id: 'correlations', title: 'Correlation & Driver Explorer', subtitle: 'Cross-metric mathematical relationship explorer', icon: Layers, iconColor: '#10b981', visible: true },
-  { id: 'keyword-discovery', title: 'Keyword Discovery', subtitle: 'Semantic clusters, coverage gaps & site profile', icon: Search, iconColor: '#6366f1', visible: true },
-];
-
-function SectionShell({ sec, idx, sectionList, handleMoveSection, handleToggleSection, children }) {
-  const Icon = sec.icon;
-  const visibleCount = sectionList.filter((s) => s.visible).length;
-  return (
-    <div id={`sec-${sec.id}`} className="space-y-2.5 group/sec scroll-mt-4">
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2">
-          <div
-            className="w-6 h-6 rounded-lg grid place-items-center shrink-0 border"
-            style={{ backgroundColor: `${sec.iconColor}14`, borderColor: `${sec.iconColor}28`, color: sec.iconColor }}
-          >
-            <Icon size={13} />
-          </div>
-          <div>
-            <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-800">{sec.title}</h3>
-            {sec.subtitle && (
-              <p className="text-[10px] font-medium text-slate-500 -mt-0.5">{sec.subtitle}</p>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover/sec:opacity-100 transition">
-          <button
-            type="button"
-            disabled={idx === 0}
-            onClick={() => handleMoveSection(idx, -1)}
-            className="p-1 rounded-md bg-slate-200/60 border border-slate-300 text-slate-400 hover:text-slate-900 disabled:opacity-20 transition cursor-pointer"
-            title="Move Section Up"
-          >
-            <ArrowUp size={11} />
-          </button>
-          <button
-            type="button"
-            disabled={idx === visibleCount - 1}
-            onClick={() => handleMoveSection(idx, 1)}
-            className="p-1 rounded-md bg-slate-200/60 border border-slate-300 text-slate-400 hover:text-slate-900 disabled:opacity-20 transition cursor-pointer"
-            title="Move Section Down"
-          >
-            <ArrowDown size={11} />
-          </button>
-          <button
-            type="button"
-            onClick={() => handleToggleSection(sec.id)}
-            className="p-1 rounded-md bg-slate-200/60 border border-slate-300 text-slate-400 hover:text-rose-600 transition cursor-pointer"
-            title="Hide Section"
-          >
-            <EyeOff size={11} />
-          </button>
-        </div>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function AnalystBody({ clientId, onSummary, onRegisterNavigate }) {
+function AnalystBody({ clientId }) {
   const [dashboard, setDashboard] = useState(null);
   const [error, setError] = useState(null);
-  const [selectedMetricKey, setSelectedMetricKey] = useState(null);
-  const [resolvingId, setResolvingId] = useState(null);
-  const [dismissingId, setDismissingId] = useState(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [copilotInitialPrompt, setCopilotInitialPrompt] = useState('');
-  const [selectedWorkspaceFindingId, setSelectedWorkspaceFindingId] = useState(null);
+  // Bumped when the chat queues a new keyword, so the keyword section reloads
+  // its gap list without either component knowing about the other.
+  const [keywordRefreshToken, setKeywordRefreshToken] = useState(0);
 
-  const [preset, setPreset] = useState(() => localStorage.getItem('analyst_preset') || 'executive');
-  const [theme, setTheme] = useState(() => localStorage.getItem('analyst_theme') || 'velvet');
-  const [density, setDensity] = useState(() => localStorage.getItem('analyst_density') || 'standard');
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [customizerOpen, setCustomizerOpen] = useState(false);
-  const [shortcutsModalOpen, setShortcutsModalOpen] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-
-  const [sectionList, setSectionList] = useState(() => {
-    const savedOrder = localStorage.getItem('analyst_section_order');
-    if (savedOrder) {
-      try {
-        const orderIds = JSON.parse(savedOrder);
-        const rebuilt = orderIds
-          .map((id) => DEFAULT_SECTIONS.find((s) => s.id === id))
-          .filter(Boolean);
-        if (rebuilt.length) return rebuilt;
-      } catch (e) {
-        // fallback to defaults
-      }
-    }
-    return DEFAULT_SECTIONS;
-  });
-
-  const [aiLayoutEnabled, setAiLayoutEnabled] = useState(() => {
-    const stored = localStorage.getItem('analyst_ai_layout');
-    return stored === null ? true : stored === 'true';
-  });
-  const [aiLayoutBanner, setAiLayoutBanner] = useState(null); // { reason } | null
-  const aiLayoutRanRef = useRef(false);
-
-  // Runs at most once per page load. Never overrides a manual section
-  // reorder (analyst_section_order in localStorage means the user already
-  // customized their layout) and fails silently — a bad/slow/absent
-  // response just leaves the existing (default or localStorage) order in place.
-  useEffect(() => {
-    if (aiLayoutRanRef.current) return;
-    if (!aiLayoutEnabled) return;
-    if (localStorage.getItem('analyst_section_order')) return;
-    aiLayoutRanRef.current = true;
-    api.keywords.layout(clientId)
-      .then(({ layout, reason }) => {
-        if (!Array.isArray(layout) || layout.length === 0) return;
-        setSectionList((prev) => {
-          const reordered = layout.map((id) => prev.find((s) => s.id === id)).filter(Boolean);
-          const missing = prev.filter((s) => !reordered.some((r) => r.id === s.id));
-          return [...reordered, ...missing];
-        });
-        if (reason) setAiLayoutBanner({ reason });
-      })
-      .catch(() => { /* silently fall back to existing order */ });
-  }, [clientId, aiLayoutEnabled]);
-
-  const handleToggleAILayout = () => {
-    const next = !aiLayoutEnabled;
-    setAiLayoutEnabled(next);
-    localStorage.setItem('analyst_ai_layout', String(next));
-  };
+  // Only the newest request may commit its result — switching clients quickly
+  // otherwise lets a slower earlier response overwrite the current one.
+  const requestRef = useRef(0);
 
   const load = () => {
-    setIsRefreshing(true);
+    const requestId = ++requestRef.current;
     api.analyst.dashboard(clientId)
       .then((d) => {
+        if (requestRef.current !== requestId) return;
         setDashboard(d);
-        const firstMetric = Object.values(d.groups || {}).flat()[0];
-        setSelectedMetricKey((prev) => prev || firstMetric?.metric_key || null);
       })
-      .catch((e) => setError(e.message || 'Failed to load dashboard'))
-      .finally(() => setIsRefreshing(false));
+      .catch((e) => {
+        if (requestRef.current !== requestId) return;
+        setError(e.message || 'Failed to load dashboard');
+      });
   };
 
   useEffect(() => { load(); }, [clientId]);
 
-  const handleSelectPreset = (newPreset) => {
-    setPreset(newPreset);
-    localStorage.setItem('analyst_preset', newPreset);
-    const orderIds = PRESET_ORDER_MAP[newPreset] || PRESET_ORDER_MAP.executive;
-    const newSections = orderIds
-      .map((id) => DEFAULT_SECTIONS.find((s) => s.id === id))
-      .filter(Boolean);
-    setSectionList(newSections);
-    localStorage.setItem('analyst_section_order', JSON.stringify(orderIds));
-  };
-
-  const handleSelectTheme = (newTheme) => {
-    setTheme(newTheme);
-    localStorage.setItem('analyst_theme', newTheme);
-  };
-
-  const handleSelectDensity = (newDensity) => {
-    setDensity(newDensity);
-    localStorage.setItem('analyst_density', newDensity);
-  };
-
-  const handleToggleSection = (id) => {
-    setSectionList((prev) => prev.map((s) => (s.id === id ? { ...s, visible: !s.visible } : s)));
-  };
-
-  // Drives click-through from the header status chips and hero stat tiles:
-  // force the target section visible (it may be hidden via customizer), then
-  // scroll to it once the visibility change has actually painted.
-  const [pendingScrollId, setPendingScrollId] = useState(null);
-  const handleNavigateToSection = (id, metricKey) => {
-    if (metricKey) setSelectedMetricKey(metricKey);
-    setSectionList((prev) => prev.map((s) => (s.id === id ? { ...s, visible: true } : s)));
-    setPendingScrollId(id);
-  };
-  useEffect(() => {
-    if (!pendingScrollId) return;
-    document.getElementById(`sec-${pendingScrollId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setPendingScrollId(null);
-  }, [pendingScrollId, sectionList]);
-
-  useEffect(() => {
-    onRegisterNavigate?.(() => handleNavigateToSection);
-  }, [onRegisterNavigate]);
-
-  const handleMoveSection = (index, direction) => {
-    const targetIndex = index + direction;
-    if (targetIndex < 0 || targetIndex >= sectionList.length) return;
-    const updated = [...sectionList];
-    const [moved] = updated.splice(index, 1);
-    updated.splice(targetIndex, 0, moved);
-    setSectionList(updated);
-    localStorage.setItem('analyst_section_order', JSON.stringify(updated.map((s) => s.id)));
-  };
-
-  const handleResetLayout = () => {
-    setSectionList(DEFAULT_SECTIONS);
-    setPreset('executive');
-    setTheme('velvet');
-    setDensity('standard');
-    setAiLayoutBanner(null);
-    localStorage.removeItem('analyst_section_order');
-    localStorage.removeItem('analyst_preset');
-    localStorage.removeItem('analyst_theme');
-    localStorage.removeItem('analyst_density');
-  };
-
-  // Must run unconditionally, ahead of the `if (error)`/`if (!dashboard)`
-  // early returns below — a hook called only after those returns resolve
-  // would be skipped on the first (loading) render and then called on every
-  // later render once dashboard loads, changing the hook count between
-  // renders (React error #310: hooks order/count must stay identical across
-  // renders). Guarding the effect's own BODY on `dashboard` (not skipping
-  // the hook call itself) is what keeps this legal.
-  useEffect(() => {
-    if (!dashboard) return;
-    const metrics = Object.entries(dashboard.groups || {}).flatMap(([group, ms]) => ms.map((m) => ({ ...m, dashboard_group: group })));
-    const ins = dashboard.insights || [];
-    onSummary?.({
-      openFindings: ins.length,
-      forecastRisks: ins.filter((i) => i.insight_type === 'forecast_risk').length,
-      readyFixes: ins.filter((i) => i.recommendation_id).length,
-      metricsTotal: metrics.length,
-    });
-  }, [dashboard, onSummary]);
-
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setCommandPaletteOpen((prev) => !prev);
-      }
-      if ((e.metaKey || e.ctrlKey) && ['1', '2', '3', '4'].includes(e.key)) {
-        e.preventDefault();
-        const map = { '1': 'executive', '2': 'investigation', '3': 'growth', '4': 'copilot' };
-        handleSelectPreset(map[e.key]);
-      }
-      if (e.key === '?' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
-        e.preventDefault();
-        setShortcutsModalOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleOpenCopilotWithPrompt = (promptText) => {
-    setCopilotInitialPrompt(promptText);
-    setDrawerOpen(true);
-  };
-
-  const handleNavigateSection = (sectionElementId) => {
-    const elem = document.getElementById(sectionElementId);
-    if (elem) elem.scrollIntoView({ behavior: 'smooth' });
-  };
-
   if (error) {
     return (
-      <div className="an-panel p-5 border-rose-500/30 bg-rose-500/[0.06] text-rose-600 font-semibold text-xs flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <AlertTriangle size={16} className="text-rose-600 shrink-0" />
+      <div className="an-panel p-5 border-rose-500/30 bg-rose-500/[0.06] text-rose-600 font-semibold text-xs flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <AlertTriangle size={16} className="shrink-0" />
           <span>{error}</span>
         </div>
         <button
           type="button"
-          onClick={load}
-          className="px-3 py-1 rounded-xl bg-slate-100 border border-rose-400/30 text-rose-600 text-xs font-bold hover:bg-slate-200 transition cursor-pointer"
+          onClick={() => { setError(null); load(); }}
+          className="px-3 py-1 rounded-xl bg-slate-100 border border-rose-400/30 text-rose-600 text-xs font-bold hover:bg-slate-200 transition shrink-0 cursor-pointer"
         >
           Retry
         </button>
@@ -320,264 +69,21 @@ function AnalystBody({ clientId, onSummary, onRegisterNavigate }) {
     );
   }
 
-  if (!dashboard) {
-    return (
-      <div className="space-y-6">
-        <AnalystSkeletonLoader variant="hero" />
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <AnalystSkeletonLoader variant="card" />
-          <AnalystSkeletonLoader variant="list" rows={3} />
-        </div>
-      </div>
-    );
-  }
-
-  const allMetrics = Object.entries(dashboard.groups || {}).flatMap(([group, ms]) =>
-    ms.map((m) => ({ ...m, dashboard_group: group }))
-  );
-  const metricFor = (key) =>
-    allMetrics.find((m) => m.metric_key === key) || { metric_key: key, display_name: key, unit: null };
-
-  const insights = dashboard.insights || [];
-
-  const resolve = async (insight) => {
-    if (!insight.recommendation_id) return;
-    setResolvingId(insight.recommendation_id);
-    try {
-      await api.analyst.resolveRecommendation(clientId, insight.recommendation_id);
-      load();
-    } catch (e) {
-      setError(e.message || 'Failed to resolve');
-    } finally {
-      setResolvingId(null);
-    }
-  };
-
-  const dismiss = async (insight) => {
-    if (!insight.recommendation_id) return;
-    setDismissingId(insight.recommendation_id);
-    try {
-      await api.analyst.dismissRecommendation(clientId, insight.recommendation_id);
-      load();
-    } catch (e) {
-      setError(e.message || 'Failed to dismiss');
-    } finally {
-      setDismissingId(null);
-    }
-  };
-
-  const analyzeMetric = (metricKey) => {
-    setSelectedMetricKey(metricKey);
-    document.getElementById('sec-diagnostics')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  const handleSelectRecommendation = (insightId) => {
-    setSelectedWorkspaceFindingId(insightId);
-    document.getElementById('sec-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  const renderSectionContent = (secId) => {
-    switch (secId) {
-      case 'hero':
-        return <AnalystPredictiveHero dashboard={dashboard} onNavigateToSection={handleNavigateToSection} />;
-      case 'fixes':
-        return (
-          <AnalystProactiveActionBoard
-            clientId={clientId}
-            insights={insights}
-            metricFor={metricFor}
-            onResolve={resolve}
-            resolvingId={resolvingId}
-            onDismiss={dismiss}
-            dismissingId={dismissingId}
-            onAnalyzeFurther={analyzeMetric}
-            onOpenFinding={handleSelectRecommendation}
-          />
-        );
-      case 'studio':
-        return <AnalystPredictiveStudio dashboard={dashboard} />;
-      case 'summary':
-        return <AnalystExecutiveSummary clientId={clientId} />;
-      case 'priorities':
-        return (
-          <AnalystRecommendationPriorityList
-            clientId={clientId}
-            insights={insights}
-            metricFor={metricFor}
-            onSelectRecommendation={handleSelectRecommendation}
-          />
-        );
-      case 'workspace':
-        return (
-          <AnalystInvestigationWorkspace
-            clientId={clientId}
-            insights={insights}
-            metricFor={metricFor}
-            onResolve={resolve}
-            resolvingId={resolvingId}
-            onDismiss={dismiss}
-            dismissingId={dismissingId}
-            onAnalyzeFurther={analyzeMetric}
-            externalSelectedId={selectedWorkspaceFindingId}
-          />
-        );
-      case 'diagnostics':
-        return (
-          <div id="analyst-forecast-center">
-            {allMetrics.length === 0 ? (
-              <AnalystEmptyState
-                icon={LineChart}
-                title="No Diagnostic Metrics Found"
-                description="Ingest search console or website analytics data to analyze diagnostic tools."
-              />
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
-                <AnalystMetricNavigator
-                  metrics={allMetrics}
-                  insights={insights}
-                  selectedMetricKey={selectedMetricKey}
-                  onSelect={setSelectedMetricKey}
-                />
-
-                {selectedMetricKey && (
-                  <div className="space-y-5 min-w-0">
-                    <AnalystDiagnosticHero
-                      metric={metricFor(selectedMetricKey)}
-                      lastIngestedAt={dashboard.last_ingested_at}
-                    />
-
-                    <div className="grid grid-cols-1 lg:grid-cols-[1.85fr_1fr] gap-5 items-start">
-                      <AnalystTrendCard
-                        clientId={clientId}
-                        metrics={allMetrics}
-                        selectedMetricKey={selectedMetricKey}
-                        onSelectMetric={setSelectedMetricKey}
-                        insights={insights}
-                      />
-                      <AnalystForecastSummaryCard clientId={clientId} metric={metricFor(selectedMetricKey)} />
-                    </div>
-
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                      <AnalystAiAnalystCard
-                        clientId={clientId}
-                        metric={metricFor(selectedMetricKey)}
-                        insight={insights.find((i) => i.metric_key === selectedMetricKey)}
-                      />
-                      <AnalystInvestigationTimeline
-                        metric={metricFor(selectedMetricKey)}
-                        insights={insights}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                      <AnalystDiagnosticsPanel clientId={clientId} metricKey={selectedMetricKey} />
-                      <AnalystFeatureImportanceChart clientId={clientId} targetMetricKey={selectedMetricKey} />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      case 'correlations':
-        return <AnalystCorrelationExplorer clientId={clientId} />;
-      case 'keyword-discovery':
-        return <AnalystKeywordDiscovery clientId={clientId} />;
-      default:
-        return null;
-    }
-  };
-
-  const densitySpacing = density === 'compact' ? 'space-y-4' : density === 'spacious' ? 'space-y-8' : 'space-y-6';
-
   return (
-    <div className="space-y-5">
-      {aiLayoutBanner && (
-        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-700">
-          <div className="flex items-center gap-2 min-w-0">
-            <Sparkles size={13} className="shrink-0" />
-            <p className="text-[11px] font-semibold truncate">AI arranged this view: {aiLayoutBanner.reason}</p>
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={() => { setSectionList(DEFAULT_SECTIONS); setAiLayoutBanner(null); }}
-              className="text-[10px] font-bold underline hover:text-indigo-900 transition cursor-pointer"
-            >
-              Reset to default
-            </button>
-            <button
-              type="button"
-              onClick={() => setAiLayoutBanner(null)}
-              className="p-1 rounded-md hover:bg-indigo-100 transition cursor-pointer"
-              title="Dismiss"
-            >
-              <X size={12} />
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div className={densitySpacing}>
-        {sectionList
-          .filter((sec) => sec.visible)
-          .map((sec, idx) => (
-            <SectionShell
-              key={sec.id}
-              sec={sec}
-              idx={idx}
-              sectionList={sectionList}
-              handleMoveSection={handleMoveSection}
-              handleToggleSection={handleToggleSection}
-            >
-              {renderSectionContent(sec.id)}
-            </SectionShell>
-          ))}
+    <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-5 items-start">
+      {/* Content column — on narrow screens this stacks above the chat. */}
+      <div className="space-y-5 min-w-0">
+        <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
+        {dashboard === null ? (
+          <AnalystSkeletonLoader variant="card" />
+        ) : (
+          <AnalystImpressionForecast clientId={clientId} dashboard={dashboard} onChanged={load} />
+        )}
       </div>
 
-      <AnalystCopilotDrawer
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+      <AnalystChatPanel
         clientId={clientId}
-        initialPrompt={copilotInitialPrompt}
-      />
-
-      <AnalystCommandPalette
-        isOpen={commandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
-        onSelectPreset={handleSelectPreset}
-        onSelectTheme={handleSelectTheme}
-        onSelectDensity={handleSelectDensity}
-        onNavigateSection={handleNavigateSection}
-        onOpenCopilot={() => {
-          setCopilotInitialPrompt('');
-          setDrawerOpen(true);
-        }}
-        activePreset={preset}
-        activeTheme={theme}
-        activeDensity={density}
-      />
-
-      <AnalystCustomizerDrawer
-        isOpen={customizerOpen}
-        onClose={() => setCustomizerOpen(false)}
-        sections={sectionList}
-        onToggleSection={handleToggleSection}
-        onMoveSection={handleMoveSection}
-        activePreset={preset}
-        onSelectPreset={handleSelectPreset}
-        activeTheme={theme}
-        onSelectTheme={handleSelectTheme}
-        activeDensity={density}
-        onSelectDensity={handleSelectDensity}
-        onResetLayout={handleResetLayout}
-        aiLayoutEnabled={aiLayoutEnabled}
-        onToggleAILayout={handleToggleAILayout}
-      />
-
-      <AnalystKeyboardShortcutsModal
-        isOpen={shortcutsModalOpen}
-        onClose={() => setShortcutsModalOpen(false)}
+        onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
       />
     </div>
   );
@@ -586,15 +92,6 @@ function AnalystBody({ clientId, onSummary, onRegisterNavigate }) {
 export default function Analyst() {
   const [clients, setClients] = useState(null);
   const [clientId, setClientId] = useState(null);
-  const [summary, setSummary] = useState(null);
-  const [navigateToSection, setNavigateToSection] = useState(null);
-
-  const [activePreset, setActivePreset] = useState(() => localStorage.getItem('analyst_preset') || 'executive');
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [customizerOpen, setCustomizerOpen] = useState(false);
-  const [shortcutsModalOpen, setShortcutsModalOpen] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
-  const [copilotPrompt, setCopilotPrompt] = useState('');
 
   useEffect(() => {
     api.clients.list()
@@ -606,43 +103,42 @@ export default function Analyst() {
       .catch(() => setClients([]));
   }, []);
 
-  const handleSelectPreset = (newPreset) => {
-    setActivePreset(newPreset);
-    localStorage.setItem('analyst_preset', newPreset);
-  };
-
-  const handleOpenCopilotWithPrompt = (promptText) => {
-    setCopilotPrompt(promptText);
-    setCopilotOpen(true);
-  };
-
   return (
     <div className="analyst-root min-h-screen">
-      {/* Page backdrop */}
-<div className="fixed inset-0 pointer-events-none -z-10"
+      <div
+        className="fixed inset-0 pointer-events-none -z-10"
         style={{
           background:
             'radial-gradient(900px 420px at 8% -5%, rgba(108,99,255,0.10), transparent 55%),' +
             'radial-gradient(700px 380px at 95% -8%, rgba(6,182,212,0.07), transparent 55%),' +
-            'radial-gradient(800px 500px at 50% 110%, rgba(236,72,153,0.05), transparent 55%),' +
             'linear-gradient(180deg,#f7f8fc 0%,#eef1f6 55%,#f7f8fc 100%)',
         }}
       />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-5">
-        <AnalystHeaderOS
-          clients={clients || []}
-          selectedClientId={clientId}
-          onSelectClient={setClientId}
-          activePreset={activePreset}
-          onSelectPreset={handleSelectPreset}
-          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-          onOpenCopilotWithPrompt={handleOpenCopilotWithPrompt}
-          onToggleCustomizer={() => setCustomizerOpen(true)}
-          onOpenShortcuts={() => setShortcutsModalOpen(true)}
-          summary={summary}
-          onNavigateToSection={navigateToSection}
-        />
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-lg font-black text-slate-900 tracking-tight">Analyst</h1>
+            <p className="text-xs font-medium text-slate-500 mt-0.5">
+              Keywords worth growing, and what's about to drop
+            </p>
+          </div>
+
+          {clients?.length > 0 && (
+            <label className="flex items-center gap-2">
+              <span className="an-label">Client</span>
+              <select
+                value={clientId ?? ''}
+                onChange={(e) => setClientId(Number(e.target.value))}
+                className="an-input text-xs font-bold py-2 pr-8 cursor-pointer"
+              >
+                {clients.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name || c.domain || `Client #${c.id}`}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
 
         {clients === null ? (
           <div className="py-12">
@@ -653,41 +149,12 @@ export default function Analyst() {
             <AnalystEmptyState
               icon={Activity}
               title="No Active Clients Onboarded"
-              description="Onboard your first site or client tenant in Platform Administration to access the AI Data Analyst Operating System."
+              description="Onboard your first site in Platform Administration to start tracking keywords and forecasts."
             />
           </div>
         ) : clientId ? (
-          <AnalystBody key={clientId} clientId={clientId} onSummary={setSummary} onRegisterNavigate={setNavigateToSection} />
+          <AnalystBody key={clientId} clientId={clientId} />
         ) : null}
-
-        <AnalystCommandPalette
-          isOpen={commandPaletteOpen}
-          onClose={() => setCommandPaletteOpen(false)}
-          onSelectPreset={handleSelectPreset}
-          onSelectTheme={() => {}}
-          onSelectDensity={() => {}}
-          onNavigateSection={(id) => {
-            const el = document.getElementById(id);
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
-          }}
-          onOpenCopilot={() => {
-            setCopilotPrompt('');
-            setCopilotOpen(true);
-          }}
-          activePreset={activePreset}
-        />
-
-        <AnalystKeyboardShortcutsModal
-          isOpen={shortcutsModalOpen}
-          onClose={() => setShortcutsModalOpen(false)}
-        />
-
-        <AnalystCopilotDrawer
-          open={copilotOpen}
-          onClose={() => setCopilotOpen(false)}
-          clientId={clientId}
-          initialPrompt={copilotPrompt}
-        />
       </div>
     </div>
   );

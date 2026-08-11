@@ -4,7 +4,7 @@ import { callLLM } from '../llm.js';
 import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
   getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
-  getLatestLayoutSuggestion, saveLayoutSuggestion,
+  getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
 } from '../store/data-analyst.js';
 import { createActionCenterRecommendationForGap } from '../agents/lib/analyst-seo-mapping.js';
 
@@ -29,6 +29,33 @@ router.get('/internal/keywords/:siteId/gaps', async (req, res, next) => {
   try {
     const { status } = req.query;
     res.json(await getKeywordGaps(req.params.siteId, status));
+  } catch (e) { next(e); }
+});
+
+// A keyword the user typed on the Analyst page as a growth target. It enters
+// the review queue as a normal pending gap (source 'user_request') rather than
+// being acted on immediately — approving it is still the separate, deliberate
+// PUT below, so a typo never reaches Action Center on its own.
+const MAX_TOPIC_LENGTH = 200;
+router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
+  try {
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    if (!topic) {
+      const err = new Error('topic is required.');
+      err.status = 400;
+      throw err;
+    }
+    if (topic.length > MAX_TOPIC_LENGTH) {
+      const err = new Error(`topic must be ${MAX_TOPIC_LENGTH} characters or fewer.`);
+      err.status = 400;
+      throw err;
+    }
+    const gap = await createUserKeywordGap(
+      req.params.siteId,
+      topic,
+      'Requested on the Analyst page as a growth target.'
+    );
+    res.status(gap.alreadyQueued ? 200 : 201).json(gap);
   } catch (e) { next(e); }
 });
 
