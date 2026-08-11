@@ -46,6 +46,28 @@ describe('rewriteHref', () => {
     assert.equal(result.ok, true);
     assert.match(result.newContent, /href="\/new-page"/);
   });
+
+  test('rewrites a markdown link, keeping its text', () => {
+    const file = 'See [old site](https://old.example.com) for details.';
+    const result = rewriteHref(file, 'https://old.example.com', 'https://new.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, 'See [old site](https://new.example.com) for details.');
+  });
+
+  test('rewrites a markdown link with a title, keeping the title', () => {
+    const file = 'See [old site](https://old.example.com "Old Site") for details.';
+    const result = rewriteHref(file, 'https://old.example.com', 'https://new.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, 'See [old site](https://new.example.com "Old Site") for details.');
+  });
+
+  test('never matches a markdown image referencing the same URL', () => {
+    const file = '![logo](https://old.example.com/logo.png)';
+    const result = rewriteHref(file, 'https://old.example.com/logo.png', '/new-logo.png');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-match');
+    assert.equal(file, '![logo](https://old.example.com/logo.png)');
+  });
 });
 
 describe('stripLink', () => {
@@ -89,6 +111,28 @@ describe('stripLink', () => {
     const result = stripLink(file, 'https://www.zunkireelabs.com/solutions/human-resources/');
     assert.equal(result.ok, true);
     assert.equal(result.newContent, 'HR');
+  });
+
+  test('strips a markdown link, keeping its text — blog posts are stored as .md, not HTML', () => {
+    const file = '**Website**: [deerwalk.com](https://deerwalk.com)';
+    const result = stripLink(file, 'https://deerwalk.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, '**Website**: deerwalk.com');
+  });
+
+  test('strips every markdown link occurrence', () => {
+    const file = '[dead](https://dead.example.com) and [dead](https://dead.example.com)';
+    const result = stripLink(file, 'https://dead.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.replaced, 2);
+    assert.equal(result.newContent, 'dead and dead');
+  });
+
+  test('never matches a markdown image referencing the same URL', () => {
+    const file = '![alt text](https://dead.example.com/img.png)';
+    const result = stripLink(file, 'https://dead.example.com/img.png');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-match');
   });
 });
 
