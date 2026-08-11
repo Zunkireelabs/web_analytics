@@ -62,9 +62,18 @@ RUN npm ci --omit=dev
 # workflow's 20-minute SSH timeout on a real attempt. A fully pinned lockfile
 # (generated from server/design-agent/python/.venv, a known-working local
 # resolution) needs zero backtracking — every version is already decided.
+#
+# --no-deps is required, not optional: the lockfile deliberately excludes
+# browser-use and its ~21-package chain (see requirements.txt's own comment
+# for the verification that this is safe for what design_task.py actually
+# imports) even though openhands-tools still declares browser-use as one of
+# its own required dependencies. Without --no-deps, pip checks every
+# installed package's declared requirements and would reinstall browser-use
+# anyway to satisfy that declared-but-unused dependency, silently undoing
+# the whole trim.
 COPY server/design-agent/python/requirements.txt ./server/design-agent/python/requirements.txt
 RUN python3 -m venv server/design-agent/python/.venv \
-  && server/design-agent/python/.venv/bin/pip install --no-cache-dir -r server/design-agent/python/requirements.txt
+  && server/design-agent/python/.venv/bin/pip install --no-cache-dir --no-deps -r server/design-agent/python/requirements.txt
 
 # Whole server/ tree, same as the root Dockerfile's own COPY — worker.js's
 # real import graph (execution-jobs.js, read.js, db.js, lib/errors.js, and
