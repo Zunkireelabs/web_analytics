@@ -10,13 +10,14 @@
 // on sites whose templates are, in fact, perfectly good.
 //
 // This script is the way OUT of that state, and deliberately not a blanket
-// "mark everything verified" switch: it runs the SAME real freshness check
-// the staff regenerate flow uses (checkTemplateFreshness — fetch the live
-// page, fetch its real stylesheets, confirm every class the template claims
-// is actually defined in the shipped CSS) and stamps ONLY the templates that
-// genuinely pass. A template whose classes no longer exist stays unstamped
-// and stays blocked, which is the correct outcome — that is exactly the
-// silently-broken-styling case the gate exists to stop.
+// "mark everything verified" switch: it runs a real, deterministic check
+// (checkTemplateFreshness — fetch the live page, fetch its real
+// stylesheets, confirm every class the template claims is actually defined
+// in the shipped CSS) and stamps ONLY the templates that genuinely pass. A
+// template whose classes no longer exist stays unstamped and stays
+// blocked, which is the correct outcome — that is exactly the
+// silently-broken-styling case the gate exists to stop. There is no human
+// "looks right to me" path into a verified stamp anywhere in this system.
 //
 // Usage:
 //   node server/scripts/verify-component-templates.js --site-id 1
@@ -114,7 +115,7 @@ async function verifySite(site, { apply, pageUrl: pageUrlOverride }) {
     }
     if (freshness.stale) {
       console.log(`  - ${componentKey}: FAIL — ${freshness.missingClasses.length} class(es) no longer defined in the live CSS: ${freshness.missingClasses.slice(0, 8).join(', ')}${freshness.missingClasses.length > 8 ? ', …' : ''}`);
-      console.log('      -> stays blocked. Regenerate it via the Design Agent, then confirm, to unblock.');
+      console.log('      -> stays blocked. Clear url_file_map.siteRoot.componentTemplates for this key so the Design Agent re-derives it on the next draft attempt.');
       failed++;
       continue;
     }

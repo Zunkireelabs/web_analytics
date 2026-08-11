@@ -1,4 +1,3 @@
-import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
@@ -199,11 +198,10 @@ export function validatePlaceholders(actionType, template) {
 }
 
 // Whether actionType's componentTemplate shape has a `row` at all — only
-// 'content-wrapper' doesn't (see REQUIRED_PLACEHOLDERS above). Exported so
-// every caller that used to hard-require `template.row` unconditionally
-// (component-template-proposal.js, routes/clients.js's /confirm route) can
-// stop assuming every action type looks like faq/expand-content/
-// internal-links/qa-content's repeating-row shape.
+// 'content-wrapper' doesn't (see REQUIRED_PLACEHOLDERS above). A caller
+// that needs to know whether a given action type's template is the
+// repeating-row shape (faq/expand-content/internal-links/qa-content) or the
+// single-slot shape (content-wrapper) uses this instead of assuming.
 export function templateActionRequiresRow(actionType) {
   return (REQUIRED_PLACEHOLDERS[actionType]?.row || []).length > 0;
 }
@@ -226,10 +224,16 @@ export function templateActionRequiresRow(actionType) {
 // migration or backfill is required. An UNSTAMPED template is treated as
 // unverified, which is the correct reading of every template stored before
 // this existed — none of them were ever checked against a live page.
+//
+// Deliberately only two, both grounded/deterministic — there is no HUMAN
+// entry. A staff member's opinion that a template "looks right" is not
+// evidence it will render correctly; only a real repo checkout (DESIGN_AGENT)
+// or a real live-CSS check (FRESHNESS_CHECK) is. The autonomous pipeline
+// (resolveOrCreateComponentTemplate below, and the verify-component-templates
+// script) is the only path that can produce a verified template.
 export const TEMPLATE_VERIFIED_BY = {
   DESIGN_AGENT: 'design-agent', // derived from the site's real repo by OpenHands
-  HUMAN: 'human',               // a staff member reviewed and confirmed it
-  FRESHNESS_CHECK: 'freshness-check', // backfill: every claimed class proven live
+  FRESHNESS_CHECK: 'freshness-check', // every claimed class proven live against the real site
 };
 
 // Attaches provenance without mutating the caller's object. `ref` is whatever
@@ -246,7 +250,7 @@ export function stampTemplateVerification(template, { verifiedBy, verifiedRef = 
 // makes NO network call, so it is safe to call on the hot path in
 // generateDraft and inside the per-item loop in buildRecommendations. Live-CSS
 // freshness is the separate, expensive checkTemplateFreshness above, used by
-// the backfill script and the staff regenerate flow.
+// server/scripts/verify-component-templates.js.
 export function isTemplateVerified(actionType, template) {
   if (!template?.wrapper) return { ok: false, reason: 'missing', detail: 'No component template is configured for this site yet.' };
   if (!template.verifiedAt || !template.verifiedBy) {
@@ -279,62 +283,14 @@ export function componentTemplateVerification(site, actionType) {
   return { ...isTemplateVerified(actionType, template), componentKey, actionType };
 }
 
-// Derives a replacement template from the site's CURRENT real page HTML,
-// grounded the same way faq.js/expand-content.js ground their own content:
-// never invent a class that isn't actually visible in the real fetched
-// markup. This is a PROPOSAL only — callers must get human approval before
-// saving it into site.url_file_map.siteRoot.componentTemplates, since a bad
-// extraction (wrong element mistaken for "the real component") would
-// otherwise roll out to every future draft of this action type sitewide.
-export async function proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate, missingClasses, fetchPage = fetchText, callLLMFn = callLLM }) {
-  const required = REQUIRED_PLACEHOLDERS[actionType];
-  if (!required) return { ok: false, error: `No known template shape for action type "${actionType}".` };
-
-  const html = await fetchPage(pageUrl);
-  if (!html) return { ok: false, error: `Could not fetch ${pageUrl} to derive an updated template from its current real design.` };
-
-  const needsRow = (required.row || []).length > 0;
-  const system = 'You are a front-end engineer. A previously-configured HTML component template for this site no ' +
-    'longer matches its real, live design — the CSS classes it uses are no longer defined on the site (the design ' +
-    'changed since the template was captured). Given the site\'s CURRENT real page HTML, derive an UPDATED template ' +
-    'with the exact same structure and placeholder tokens as the old one, but using ONLY real classes/patterns you ' +
-    'can actually see used elsewhere in the given live HTML — never invent a class name that doesn\'t appear ' +
-    'anywhere in the page. Keep the placeholder tokens verbatim (e.g. {{ROWS}}, {{QUESTION}}) — only the ' +
-    `surrounding real markup/classes should change. Respond with ONLY JSON: ${needsRow ? '{"wrapper": "...", "row": "..."}' : '{"wrapper": "..."}'}.`;
-  const user = `Action type: ${actionType}\nOld template (now stale — classes no longer defined: ` +
-    `${(missingClasses || []).join(', ') || 'unknown'}):\n${JSON.stringify(oldTemplate)}\n\n` +
-    `Current live page HTML (excerpt):\n${html.slice(0, 6000)}`;
-
-  let parsed;
-  try {
-    const raw = await callLLMFn(system, user, { maxTokens: 1200 });
-    parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
-  } catch (err) {
-    const { message } = safeMessage('design-drift.deriveUpdatedTemplate', err, 'Could not derive an updated template right now — try again shortly.');
-    return { ok: false, error: message };
-  }
-  if (!parsed?.wrapper || (needsRow && !parsed?.row)) {
-    return { ok: false, error: `Model did not return a valid {wrapper${needsRow ? ', row' : ''}} template.` };
-  }
-
-  const validated = validatePlaceholders(actionType, parsed);
-  if (!validated.ok) return validated;
-
-  return { ok: true, template: needsRow ? { wrapper: parsed.wrapper, row: parsed.row } : { wrapper: parsed.wrapper } };
-}
-
 // LEARN side of the loop this module's RETRIEVE half
 // (openhands-handler.js's createComponentTemplateHandler) already reads
 // from. Single source of truth for what a rejected-template lesson looks
-// like, called from BOTH the autonomous path below
-// (resolveOrCreateComponentTemplate) and the staff-triggered inspection
-// path (component-template-proposal.js's buildComponentTemplateProposal) —
-// same generatorId, same problemSignature shape, so a rejection recorded
-// from either path dedups into the exact same agent_fix_memory row and
-// shows up in the next RETRIEVE regardless of which path is running next.
-// This is deliberately the ONLY write path into agent_fix_memory for a
-// Design Agent placeholder rejection — there is no separate "manual UI"
-// learning path, by construction.
+// like — called from resolveOrCreateComponentTemplate below, the sole
+// path (autonomous, no human step) that can produce a componentTemplate in
+// production, so there is exactly one write path into agent_fix_memory for
+// a Design Agent placeholder rejection, not a fork between an autonomous
+// path and a separate staff-triggered one.
 //
 // validatePlaceholders is a deterministic, ground-truth check (a plain
 // string-contains test, not an LLM judgment call), so a rejection clears
@@ -370,10 +326,10 @@ function systemActorReq(siteId) {
 // directly: returns the site's real template if one is already configured
 // (the fast path — true for every recommendation after the first, on any
 // given site+actionType), or derives one from the site's real repo via the
-// Design Agent and saves it, with NO staff button/manual "seed" step —
-// see the routes/clients.js /seed and /regenerate endpoints this replaces
-// for the automatic path (they remain for a staff member who wants to
-// manually re-check/replace a template on demand).
+// Design Agent and saves it — with no staff button, manual "seed" step, or
+// human confirmation of any kind. This is the ONLY path that creates or
+// verifies a componentTemplate in production; there is no separate
+// staff-triggered inspection UI to keep in sync with it.
 //
 // Never throws and never blocks the caller on a Design Agent failure —
 // `ok: false` (site.design_agent_enabled off, no repo configured, the

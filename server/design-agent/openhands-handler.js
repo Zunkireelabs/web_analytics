@@ -10,13 +10,11 @@ import { checkoutRepoTarball } from './repo-checkout.js';
 import { findRelevantMemory } from '../agent-memory.js';
 
 // Shared generatorId in agent_fix_memory (097) for every Design Agent
-// component-templates write/read, autonomous or staff-triggered alike —
-// this module's own RETRIEVE lookup below, design-drift.js's LEARN write
-// (resolveOrCreateComponentTemplate, the autonomous path), and
-// component-template-proposal.js's LEARN write (the staff-triggered
-// /design-generate + /confirm inspection path) all tag/filter by this same
-// id, so there is exactly one learning history per site, not two forked by
-// which path produced the rejection.
+// component-templates write/read — this module's own RETRIEVE lookup below
+// and design-drift.js's LEARN write (resolveOrCreateComponentTemplate, the
+// sole autonomous path that creates or verifies a componentTemplate) both
+// tag/filter by this same id, so there is exactly one learning history per
+// site.
 export const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 const execFileAsync = promisify(execFile);
@@ -203,10 +201,8 @@ export function createComponentTemplateHandler({
     },
     // RETRIEVE — same shape as withAgentMemory (agent-memory.js): scope:
     // 'client', clientFacing: true (category='code' rows structurally
-    // unreachable), no category filter, so any past design-agent lesson —
-    // recorded from EITHER the autonomous path (design-drift.js) or the
-    // staff-triggered inspection path (component-template-proposal.js) —
-    // surfaces here regardless of which one wrote it. Never lets a
+    // unreachable), no category filter, so any past design-agent lesson
+    // recorded by design-drift.js's LEARN write surfaces here. Never lets a
     // memory-table failure block the job — same defensive no-op-on-error
     // convention withAgentMemory itself uses.
     buildArgs: async (job) => {
@@ -228,12 +224,14 @@ export function createComponentTemplateHandler({
 
 // The worker (worker.js's main()) claims ANY kind='design_generate' job
 // regardless of what it's for — this is the single dispatch point that
-// routes each claimed job to the right handler based on job.params.mode,
-// so the worker's poll loop itself never needs to know how many kinds of
-// design_generate job exist. Falls back to the fixture-demo handler for
-// jobs with no params.mode (or an unrecognized one) — the original Step
-// 6A/6C/6D trigger (routes/action-center.js's design-generate route) never
-// sets params.mode at all.
+// routes each claimed job to the right handler based on job.params.mode, so
+// the worker's poll loop itself never needs to know how many kinds of
+// design_generate job exist. In production, the only source of these jobs
+// is component-templates mode via resolveOrCreateComponentTemplate's
+// synchronous handler call (never queued through execution_jobs at all —
+// see that function). The fixture-demo fallback (no params.mode) exists for
+// the dev-only verify-design-agent-docker.js/verify-component-templates-
+// real-repo.js scripts that exercise this queue+worker machinery directly.
 export function createDesignAgentHandler(options = {}) {
   const fixtureDemoHandler = createOpenHandsHandler(options);
   const componentTemplateHandler = createComponentTemplateHandler(options);

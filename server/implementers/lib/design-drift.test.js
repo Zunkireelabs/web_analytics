@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness, proposeUpdatedTemplate,
+  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness,
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
@@ -11,9 +11,9 @@ const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUES
 
 describe('stampTemplateVerification', () => {
   test('attaches provenance without mutating the original', () => {
-    const stamped = stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN, verifiedRef: 42 });
+    const stamped = stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT, verifiedRef: 42 });
     assert.equal(VALID_FAQ.verifiedAt, undefined, 'must not mutate the caller\'s object');
-    assert.equal(stamped.verifiedBy, 'human');
+    assert.equal(stamped.verifiedBy, 'design-agent');
     assert.equal(stamped.verifiedRef, '42', 'ref is normalised to a string so a user id and a job id read the same');
     assert.ok(Date.parse(stamped.verifiedAt), 'verifiedAt is a parseable ISO timestamp');
     assert.equal(stamped.wrapper, VALID_FAQ.wrapper, 'the template itself is carried through untouched');
@@ -40,7 +40,7 @@ describe('isTemplateVerified', () => {
   });
 
   test('a stamp cannot launder a structurally broken template', () => {
-    const stamped = stampTemplateVerification({ wrapper: '<div>{{ROWS}}</div>', row: '<dd>{{ANSWER}}</dd>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN });
+    const stamped = stampTemplateVerification({ wrapper: '<div>{{ROWS}}</div>', row: '<dd>{{ANSWER}}</dd>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT });
     const v = isTemplateVerified('faq', stamped);
     assert.equal(v.ok, false);
     assert.equal(v.reason, 'invalid-placeholders', 'missing {{QUESTION}} still fails even though it is stamped');
@@ -50,7 +50,7 @@ describe('isTemplateVerified', () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = () => { throw new Error('isTemplateVerified must never fetch'); };
     try {
-      assert.equal(isTemplateVerified('faq', stampTemplateVerification(VALID_FAQ, { verifiedBy: 'human' })).ok, true);
+      assert.equal(isTemplateVerified('faq', stampTemplateVerification(VALID_FAQ, { verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT })).ok, true);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -109,7 +109,7 @@ describe('componentTemplateVerification', () => {
       url_file_map: {
         siteRoot: {
           componentTemplates: {
-            contentWrapper: stampTemplateVerification({ wrapper: '<article>{{BODY}}</article>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.HUMAN }),
+            contentWrapper: stampTemplateVerification({ wrapper: '<article>{{BODY}}</article>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT }),
           },
         },
       },
@@ -345,45 +345,5 @@ describe('checkTemplateFreshness', () => {
     assert.equal(result.ok, true);
     assert.equal(result.stale, false);
     assert.equal(called, false);
-  });
-});
-
-describe('proposeUpdatedTemplate', () => {
-  test('grounds the proposal in the real fetched page and validates required placeholders', async () => {
-    const result = await proposeUpdatedTemplate({
-      pageUrl: 'https://example.com/page/',
-      actionType: 'faq',
-      oldTemplate: { wrapper: '<section>{{ROWS}}</section>', row: '<p>{{QUESTION}} {{ANSWER}}</p>' },
-      missingClasses: ['font-normal'],
-      fetchPage: async () => '<html><body class="new-design"></body></html>',
-      callLLMFn: async () => JSON.stringify({
-        wrapper: '<section class="new-design">{{ROWS}}</section>',
-        row: '<p class="new-design">{{QUESTION}} {{ANSWER}}</p>',
-      }),
-    });
-    assert.equal(result.ok, true);
-    assert.match(result.template.wrapper, /new-design/);
-  });
-
-  test('rejects a proposal missing a required placeholder rather than saving a broken template', async () => {
-    const result = await proposeUpdatedTemplate({
-      pageUrl: 'https://example.com/page/',
-      actionType: 'faq',
-      oldTemplate: { wrapper: '<section>{{ROWS}}</section>', row: '<p>{{QUESTION}} {{ANSWER}}</p>' },
-      fetchPage: async () => '<html></html>',
-      callLLMFn: async () => JSON.stringify({ wrapper: '<section>{{ROWS}}</section>', row: '<p>{{QUESTION}}</p>' }),
-    });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /ANSWER/);
-  });
-
-  test('honest failure when the page cannot be fetched at all', async () => {
-    const result = await proposeUpdatedTemplate({
-      pageUrl: 'https://example.com/page/',
-      actionType: 'faq',
-      oldTemplate: {},
-      fetchPage: async () => null,
-    });
-    assert.equal(result.ok, false);
   });
 });

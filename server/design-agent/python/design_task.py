@@ -24,24 +24,19 @@ existing call site/test that only ever passes argv[1]):
   classes/markup patterns actually present in real source files. Optional
   argv[4] is a JSON array of agent_fix_memory rows (server/agent-memory.js's
   findRelevantMemory, looked up by openhands-handler.js before spawning this
-  process, from lessons written by EITHER the autonomous path or the
-  staff-triggered inspection path — see openhands-handler.js's
-  DESIGN_AGENT_GENERATOR_ID) appended to the task as advisory "known issues"
-  text — the same RETRIEVE step every other generator gets via
-  server/llm.js's withAgentMemory, wired in here since this generator's LLM
-  call never goes through callLLM. The derived templates are the
-  deliverable, not any file edit — captured from the agent's own final
-  message (conversation.state.events, same technique
+  process — see openhands-handler.js's DESIGN_AGENT_GENERATOR_ID) appended
+  to the task as advisory "known issues" text — the same RETRIEVE step
+  every other generator gets via server/llm.js's withAgentMemory, wired in
+  here since this generator's LLM call never goes through callLLM. The
+  derived templates are the deliverable, not any file edit — captured from
+  the agent's own final message (conversation.state.events, same technique
   design-agent-poc/run_poc_step4.py validated for extracting a design
   profile) rather than a file on disk, and reported as a
-  `componentTemplates` field on the final result line. This is a proposal
-  only: the Node/JS side (server/design-agent/component-template-proposal.js)
-  re-validates every entry against the exact same placeholder/real-class
-  checks server/implementers/lib/design-drift.js already applies to every
-  other template proposal, and nothing here is ever saved without a human
-  reviewing it via the existing /confirm route
-  (server/routes/clients.js) — identical human-in-the-loop discipline to
-  every other generator/implementer in this codebase.
+  `componentTemplates` field on the final result line. Still re-validated,
+  not trusted blind: the Node/JS side
+  (server/implementers/lib/design-drift.js's resolveOrCreateComponentTemplate)
+  re-checks every entry against the exact same placeholder contract before
+  ever saving it — no human review step anywhere in this path, by design.
 
 Prints two kinds of sentinel lines the Node handler looks for:
 - CONTAINER_PREFIX, as soon as the container exists — captured eagerly (the
@@ -77,8 +72,8 @@ DOCKER_IMAGE = os.getenv("DESIGN_AGENT_DOCKER_IMAGE", "ghcr.io/openhands/agent-s
 # Mirrors server/implementers/lib/design-drift.js's REQUIRED_PLACEHOLDERS —
 # kept in sync by hand (small, stable, cross-language) rather than shared,
 # same as any other JS<->Python contract in this repo. The Node-side
-# validator (component-template-proposal.js) is the real enforcement point;
-# this is only used to make the prompt precise about exact tokens.
+# validatePlaceholders (design-drift.js) is the real enforcement point; this
+# is only used to make the prompt precise about exact tokens.
 REQUIRED_PLACEHOLDERS = {
     "faq": {"wrapper": ["{{ROWS}}"], "row": ["{{QUESTION}}", "{{ANSWER}}"]},
     "expand-content": {"wrapper": ["{{ROWS}}"], "row": ["{{HEADING}}", "{{BODY}}"]},

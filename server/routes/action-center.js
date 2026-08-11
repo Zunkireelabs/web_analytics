@@ -6,7 +6,7 @@ import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-import { createExecutionJob, createDesignAgentJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
+import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
@@ -863,38 +863,6 @@ export async function approveAndShipRecommendation(siteId, recommendationId, { u
   if (!result.ok) { const err = new Error(result.error); err.status = 422; throw err; }
   return result.draft;
 }
-
-// Step 6A: creates a queued Design Agent job for a single recommendation.
-// No worker exists yet — the job sits in status='queued' until a later
-// step adds the OpenHands worker that polls execution_jobs for
-// kind='design_generate' rows. Gated on sites.design_agent_enabled so this
-// is strictly opt-in per tenant from day one, even though nothing
-// downstream consumes the row yet.
-export async function createDesignGenerateJob(siteId, recommendationId, { userId } = {}) {
-  const site = await getSiteById(siteId);
-  if (!site?.design_agent_enabled) {
-    const err = new Error('Design Agent is not enabled for this site.');
-    err.status = 403;
-    throw err;
-  }
-  const rec = await getRecommendationById(siteId, recommendationId);
-  if (!rec) { const err = new Error('Recommendation not found'); err.status = 404; throw err; }
-  if (rec.status !== 'open') {
-    const err = new Error('Only open recommendations can be sent to the Design Agent.');
-    err.status = 400;
-    throw err;
-  }
-  return createDesignAgentJob(siteId, recommendationId, { requestedBy: userId });
-}
-
-router.post('/action-center/recommendations/:id/design-generate', async (req, res, next) => {
-  try {
-    res.json(await createDesignGenerateJob(req.siteId, req.params.id, { userId: req.userId }));
-  } catch (e) {
-    if (e.status) return respondWithStatusError(res, e, 'Could not start the Design Agent right now — try again shortly.');
-    next(e);
-  }
-});
 
 router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   try {
