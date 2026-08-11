@@ -86,13 +86,13 @@ export default function NotificationBell() {
   // straight there with it open. Only findings with a generator ever get a
   // draft (some are structural-only, no generatorId — see
   // agents/ai-visibility.js's RECOMMENDATION_RULES) — for those, fall back
-  // to today's behavior: highlight the finding's card on Command Center
-  // (which offers a "Generate" action where applicable), same as
-  // health-drop (which has no single finding at all).
+  // to today's behavior: highlight the finding's owning agent on
+  // Orchestration (AiGrowth.jsx), same as health-drop (which has no single
+  // finding at all).
   const targetFor = (n) => {
     if (n.draft_id) return `/action-center?openDraft=${n.draft_id}`;
-    if (n.finding_ids?.length) return `/ai-growth?highlight=${encodeURIComponent(n.finding_ids[0])}`;
-    if (n.type === 'health-drop') return '/ai-growth?highlight=health-score';
+    if (n.finding_ids?.length) return `/ai-orchestration?highlight=${encodeURIComponent(n.finding_ids[0])}`;
+    if (n.type === 'health-drop') return '/ai-orchestration?highlight=health-score';
     return null;
   };
 

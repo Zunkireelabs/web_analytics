@@ -7,26 +7,21 @@ import Sidebar from './components/Sidebar.jsx';
 import CopilotPanel from './components/CopilotPanel.jsx';
 
 // Lazy-loaded: none of these are needed for first paint. The internal-only
-// ones (CommandCenter/AiGrowth/ActionCenter/ClientOnboarding) also pull in
-// heavy libraries (@xyflow/react, react-simple-maps) that would otherwise
-// ship to every visitor, including pre-login.
+// ones (AiGrowth/ActionCenter/ClientOnboarding) also pull in heavy libraries
+// (@xyflow/react, react-simple-maps) that would otherwise ship to every
+// visitor, including pre-login.
 const Insights = lazy(() => import('./pages/Insights.jsx'));
 const Compare = lazy(() => import('./pages/Compare.jsx'));
 const Reports = lazy(() => import('./pages/Reports.jsx'));
 const GrowthReport = lazy(() => import('./pages/GrowthReport.jsx'));
-const CommandCenter = lazy(() => import('./pages/CommandCenter.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
-const SiteAudit = lazy(() => import('./pages/SiteAudit.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
-const AdminUsers = lazy(() => import('./pages/admin/Users.jsx'));
-const McpAdmin = lazy(() => import('./pages/admin/McpAdmin.jsx'));
-const SystemHealth = lazy(() => import('./pages/admin/SystemHealth.jsx'));
-const AuditLog = lazy(() => import('./pages/admin/AuditLog.jsx'));
-const AiOperationsCenter = lazy(() => import('./pages/admin/AiOperationsCenter.jsx'));
+const UsersAndTokens = lazy(() => import('./pages/admin/UsersAndTokens.jsx'));
+const Monitoring = lazy(() => import('./pages/admin/Monitoring.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
@@ -138,20 +133,17 @@ export default function App() {
               <Route path="/compare" element={<Compare siteId={siteId} />} />
               <Route path="/reports" element={<Reports siteId={siteId} />} />
               <Route path="/milestones" element={<GrowthReport isInternal={isInternal} />} />
-              {/* AI Command Center is the default /ai-growth landing experience;
-                  /ai-orchestration is the orchestration diagram — how the 10
-                  specialist agents actually connect (AiGrowth.jsx) — and still
-                  the place to run or inspect one agent directly. Client-facing
-                  like the rest of the routes above — each is server-scoped to
-                  req.session.siteId, never a cross-client view. Exception:
-                  when the logged-in session's own site IS the company's own
-                  site (isInternal), /ai-growth shows the platform-wide AI
-                  Operations Center instead of the simplified client view —
-                  every real client still sees the normal CommandCenter. */}
-              <Route path="/ai-growth" element={isInternal ? <AiOperationsCenter /> : <CommandCenter />} />
-              <Route path="/ai-orchestration" element={<AiGrowth />} />
+              {/* /ai-orchestration is Orchestration — the agent runner console
+                  and the orchestration diagram showing how the 10 specialist
+                  agents actually connect (AiGrowth.jsx), plus (for isInternal
+                  sessions) the staff-only Platform Operations section. The
+                  standalone "AI Growth" nav item/page was removed — its
+                  unique content (competitor overview, executive summary,
+                  per-category detail cards, operations history, and the
+                  admin agent taskforce/execution timeline/model status) was
+                  migrated into this page instead of duplicating it. */}
+              <Route path="/ai-orchestration" element={<AiGrowth isInternal={isInternal} />} />
               <Route path="/action-center" element={<ActionCenter />} />
-              <Route path="/site-audit" element={<SiteAudit />} />
               {/* Every account, not internal-only — same session's own password either way. */}
               <Route path="/settings" element={<Settings />} />
               {/* Staff-only — operates across every client's site, not just this session's own. */}
@@ -165,10 +157,10 @@ export default function App() {
                   Each page's own API calls are independently guarded by
                   requirePlatformRole('platform_admin') server-side; this
                   gate is routing/UX, not the real access-control boundary. */}
-              {isPlatformAdmin && <Route path="/admin/users" element={<AdminUsers />} />}
-              {isPlatformAdmin && <Route path="/admin/mcp" element={<McpAdmin />} />}
-              {isPlatformAdmin && <Route path="/admin/system-health" element={<SystemHealth />} />}
-              {isPlatformAdmin && <Route path="/admin/audit-log" element={<AuditLog />} />}
+              {isPlatformAdmin && <Route path="/admin/users" element={<UsersAndTokens />} />}
+              {isPlatformAdmin && <Route path="/admin/mcp" element={<Navigate to="/admin/users" replace />} />}
+              {isPlatformAdmin && <Route path="/admin/system-health" element={<Monitoring />} />}
+              {isPlatformAdmin && <Route path="/admin/audit-log" element={<Navigate to="/admin/system-health" replace />} />}
             </Routes>
           </Suspense>
         ) : !sitesLoaded ? (

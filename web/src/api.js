@@ -76,7 +76,11 @@ export const api = {
   reportSummary: (site, period) => req(`/report-summary?site=${site}&period=${period}`),
   reportInsights: (site) => req(`/report-insights?site=${site}`),
   series: (site, start, end) => req(`/series?site=${site}&start=${start}&end=${end}`),
-  growthReport: () => req('/growth-report'),
+  // siteId is only ever passed by an internal admin's Milestones picker
+  // (web/src/pages/GrowthReport.jsx) to view another client's site — every
+  // other caller (and every non-internal user) omits it and hits the plain
+  // session-scoped route exactly as before.
+  growthReport: (siteId) => (siteId ? req(`/internal/growth-report/${siteId}`) : req('/growth-report')),
   growthTargets: {
     set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
     setBatch: (targets) => req('/growth-targets/batch', { method: 'POST', body: JSON.stringify({ targets }) }),
@@ -208,6 +212,11 @@ export const api = {
       req(`/internal/keywords/${siteId}/clusters${clusterType ? `?cluster_type=${clusterType}` : ''}`),
     gaps: (siteId, status) =>
       req(`/internal/keywords/${siteId}/gaps${status ? `?status=${status}` : ''}`),
+    // A keyword the user typed on the Analyst page as a growth target — queued
+    // as a normal pending gap, then approved through updateGapStatus like any
+    // machine-found one.
+    createGap: (siteId, topic) =>
+      req(`/internal/keywords/${siteId}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
     updateGapStatus: (siteId, gapId, status) =>
       req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
     profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),

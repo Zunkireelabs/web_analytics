@@ -329,8 +329,8 @@ export default function CopilotPanel({ open, onClose }) {
   const scrollRef = useRef(null);
 
   // Real agent names for the live "Consulting: X" indicator below — same
-  // /agents/status endpoint CommandCenter.jsx/AiGrowth.jsx use, never a
-  // guessed/hardcoded id->label map.
+  // /agents/status endpoint AiGrowth.jsx uses, never a guessed/hardcoded
+  // id->label map.
   const [agentsMeta, setAgentsMeta] = useState([]);
   useEffect(() => { api.agentsStatus().then(setAgentsMeta).catch(() => {}); }, []);
   const agentName = (id) => agentsMeta.find((a) => a.id === id)?.name || id;

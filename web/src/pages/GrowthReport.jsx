@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Users, User, Calendar, ShieldCheck, Activity, Sparkles, TrendingUp } from 'lucide-react';
+import { Activity } from 'lucide-react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import PerformanceTrendCard from '../components/PerformanceTrendCard.jsx';
@@ -8,131 +8,41 @@ import GrowthProjectionCard from '../components/GrowthProjectionCard.jsx';
 import SiteAuditSummaryCard from '../components/SiteAuditSummaryCard.jsx';
 import GrowthPlanNarrativeCard from '../components/GrowthPlanNarrativeCard.jsx';
 
-// Staff-only — every onboarded client's AI-projected growth in one place
-function AllClientsMilestones() {
-  const [clients, setClients] = useState(null); // null = loading
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    api.clients.growthSummary().then(setClients).catch(() => setError(true));
-  }, []);
-
-  if (error) return <div className="card p-6 text-sm text-slate-500 text-center">Unable to load client milestones right now.</div>;
-  if (clients === null) return <div className="card p-8 text-center text-sm text-slate-400">Loading every client…</div>;
-  if (!clients.length) return <div className="card p-8 text-center text-sm text-slate-400">No onboarded clients yet.</div>;
-
-  const totalHighPriority = clients.reduce((acc, c) => acc + (c.healthScoreProjection?.highPriorityCount || 0), 0);
-  const totalOpen = clients.reduce((acc, c) => acc + (c.healthScoreProjection?.openCount || 0), 0);
-
-  return (
-    <div className="space-y-6 fade-up">
-      {/* Executive Portfolio Overview Banner */}
-      <div className="card-dark p-5 shadow-md space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-600/90 text-white grid place-items-center shadow-md shadow-indigo-500/25 shrink-0">
-              <Users size={20} />
-            </div>
-            <div>
-              <h3 className="text-base font-black tracking-tight">Client Portfolio Executive Overview</h3>
-              <p className="text-xs text-slate-400 font-medium mt-0.5">Real-time AI projections and findings across all onboarded clients</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="px-3.5 py-2 rounded-xl bg-white/10 border border-white/10 text-center">
-              <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Active Clients</span>
-              <span className="text-sm font-black text-white">{clients.length}</span>
-            </div>
-            <div className="px-3.5 py-2 rounded-xl bg-rose-500/20 border border-rose-500/30 text-center">
-              <span className="block text-[9px] font-black uppercase tracking-widest text-rose-300">High Priority Gaps</span>
-              <span className="text-sm font-black text-rose-400">{totalHighPriority}</span>
-            </div>
-            <div className="px-3.5 py-2 rounded-xl bg-white/10 border border-white/10 text-center">
-              <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Total Open Findings</span>
-              <span className="text-sm font-black text-white">{totalOpen}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Client Cards Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {clients.map((c) => {
-          const highCount = c.healthScoreProjection?.highPriorityCount || 0;
-          const openCount = c.healthScoreProjection?.openCount || 0;
-          const currentHealth = c.healthScoreProjection?.points?.[0]?.value ?? 0;
-          const targetHealth = c.healthScoreProjection?.points?.[c.healthScoreProjection?.points?.length - 1]?.value ?? 100;
-          
-          return (
-            <div key={c.id} className="card p-6 space-y-4 bg-white/95 border border-slate-200/80 shadow-sm hover:shadow-md transition-all duration-300 card-hover">
-              {/* Card Header */}
-              <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white font-black grid place-items-center text-sm shadow-md shadow-indigo-500/20 shrink-0">
-                    {c.name.charAt(0)}
-                  </div>
-                  <div>
-                    <h3 className="text-base font-black text-slate-900 tracking-tight truncate">{c.name}</h3>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Active Baseline</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  {highCount > 0 && (
-                    <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full bg-rose-50 border border-rose-200/60 text-rose-600 shadow-2xs">
-                      {highCount} High
-                    </span>
-                  )}
-                  <span className="text-[10px] font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200/50">
-                    {openCount} Open
-                  </span>
-                </div>
-              </div>
-
-              {/* Health Progress Indicator */}
-              <div className="p-3 rounded-xl bg-slate-50/80 border border-slate-200/60 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-black text-slate-700 uppercase tracking-wider">Site Health Baseline</span>
-                  <span className={`text-xs font-black ${currentHealth >= 80 ? 'text-emerald-600' : currentHealth >= 50 ? 'text-amber-600' : 'text-rose-600'}`}>
-                    {currentHealth}/100 ➔ {targetHealth}/100
-                  </span>
-                </div>
-                <div className="w-32 bg-slate-200/80 rounded-full h-2 overflow-hidden shrink-0">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${currentHealth >= 80 ? 'bg-emerald-500' : currentHealth >= 50 ? 'bg-amber-500' : 'bg-rose-500'}`}
-                    style={{ width: `${Math.max(5, currentHealth)}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* 3 Metric Cards Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <GrowthProjectionCard title="Health Score" icon="💚" color="#10b981" compact projection={c.healthScoreProjection} />
-                <GrowthProjectionCard title="Weekly Clicks" icon="📈" color="#6C63FF" unit="/week" compact projection={c.clicksProjection} />
-                <GrowthProjectionCard title="Weekly Impressions" icon="👁️" color="#f59e0b" unit="/week" compact projection={c.impressionsProjection} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // Client-facing "how much have we actually grown you" view — real data
 // only, strictly anchored to the site's real onboarding baseline (see
 // server/agents/lib/growth-report.js). No baseline yet -> an honest empty
 // state, never a chart anchored to a fabricated start date.
-export default function GrowthReport({ isInternal }) {
+//
+// isInternal (Platform Admin Milestones picker) — an internal admin can pick
+// a different client from a dropdown above the page; picking one re-fetches
+// via api.growthReport(siteId), which hits the staff-only
+// /internal/growth-report/:siteId route (server/routes/growth-report.js)
+// instead of the plain session-scoped one. Regular client users never get
+// the prop (or get it false), so they never see the picker and every fetch
+// stays exactly the plain api.growthReport() call, unchanged from before.
+export default function GrowthReport({ isInternal = false }) {
   const [data, setData] = useState(null); // null = loading
   const [error, setError] = useState(false);
-  const [view, setView] = useState('mine'); // 'mine' | 'all'
+  const [clients, setClients] = useState([]);
+  const [selectedSiteId, setSelectedSiteId] = useState(null); // null = admin's own site (default)
 
-  const load = () => api.growthReport().then(setData).catch(() => setError(true));
-  useEffect(() => { load(); }, []);
+  const load = () => {
+    const requestedSiteId = selectedSiteId;
+    return api.growthReport(requestedSiteId || undefined)
+      .then((result) => {
+        // Ignore a stale response if the admin switched clients again while
+        // this request was still in flight.
+        if (requestedSiteId !== selectedSiteId) return;
+        setData(result);
+      })
+      .catch(() => { if (requestedSiteId === selectedSiteId) setError(true); });
+  };
+  useEffect(() => { setData(null); setError(false); load(); }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (!isInternal) return;
+    api.clients.list().then(setClients).catch(() => {});
+  }, [isInternal]);
 
   // A Full Site Audit can take from seconds to well over an hour — poll
   // while it's still running so "Where You Stand Today" reflects real
@@ -150,27 +60,21 @@ export default function GrowthReport({ isInternal }) {
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-8 fade-up">
       <PageHeader title="Milestones" icon="🌱"
-        subtitle="Real progress since your onboarding baseline — every number here traces to a real, already-verified source."
-        right={isInternal && (
-          <div className="flex bg-slate-100/80 p-1 rounded-2xl border border-slate-200/50 shrink-0 shadow-2xs">
-            <button type="button" onClick={() => setView('mine')}
-              className={`text-[11px] font-extrabold px-3.5 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
-                view === 'mine' ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/40' : 'text-slate-500 hover:text-slate-800'
-              }`}>
-              <User size={13} /> My Site
-            </button>
-            <button type="button" onClick={() => setView('all')}
-              className={`text-[11px] font-extrabold px-3.5 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
-                view === 'all' ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/40' : 'text-slate-500 hover:text-slate-800'
-              }`}>
-              <Users size={13} /> All Clients
-            </button>
-          </div>
-        )} />
+        subtitle="Real progress since your onboarding baseline — every number here traces to a real, already-verified source." />
 
-      {view === 'all' ? (
-        <AllClientsMilestones />
-      ) : error ? (
+      {isInternal && clients.length > 0 && (
+        <div className="flex items-center gap-2">
+          <label htmlFor="milestones-client-picker" className="text-xs font-bold text-slate-500 uppercase tracking-widest">Client</label>
+          <select id="milestones-client-picker" value={selectedSiteId ?? ''}
+            onChange={(e) => setSelectedSiteId(e.target.value ? Number(e.target.value) : null)}
+            className="text-xs font-bold bg-white border border-slate-200/80 rounded-xl px-2.5 py-2 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 shadow-sm transition">
+            <option value="">My site</option>
+            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+      )}
+
+      {error ? (
         <div className="card p-6 text-sm text-slate-500 text-center">Unable to load your growth report right now.</div>
       ) : data === null ? (
         <div className="card p-8 text-center text-sm text-slate-400">Loading…</div>
@@ -227,40 +131,35 @@ export default function GrowthReport({ isInternal }) {
             <SiteAuditSummaryCard siteAudit={data.siteAudit} loading={false} />
           </div>
 
-          {/* Section 2: Your Growth Plan */}
+          {/* Section 2: Growth Plan & Performance — combined narrative,
+              AI projections, and historical trends in one compact section
+              (previously two separate stacked sections). */}
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-[#6C63FF]" />
-              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Your Growth Plan & AI Projections</h2>
+              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Your Growth Plan & Performance Trends</h2>
             </div>
             <div className="space-y-4">
               <GrowthPlanNarrativeCard growthPlan={data.growthPlan} loading={false} />
-              <div className="grid lg:grid-cols-3 gap-4">
-                <GrowthProjectionCard title="Website Health Score" icon="💚" color="#10b981"
+
+              {/* Compact AI projections — 6 metrics in one tight row instead
+                  of two full-width 3-up grids. */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <GrowthProjectionCard title="Health Score" icon="💚" color="#10b981" compact
                   projection={data.healthScore.projection} />
-                <GrowthProjectionCard title="Weekly Clicks" icon="📈" color="#6C63FF" unit="/week"
+                <GrowthProjectionCard title="Weekly Clicks" icon="📈" color="#6C63FF" unit="/week" compact
                   projection={data.performance.clicksProjection} />
-                <GrowthProjectionCard title="Weekly Impressions" icon="👁️" color="#f59e0b" unit="/week"
+                <GrowthProjectionCard title="Weekly Impressions" icon="👁️" color="#f59e0b" unit="/week" compact
                   projection={data.performance.impressionsProjection} />
-              </div>
-              <div className="grid lg:grid-cols-3 gap-4">
-                <GrowthProjectionCard title="Competitor Readiness" icon="🏁" color="#f59e0b"
+                <GrowthProjectionCard title="Competitor Readiness" icon="🏁" color="#f59e0b" compact
                   projection={data.competitorTrend?.projection} />
-                <GrowthProjectionCard title="Authority Score" icon="🔗" color="#8b5cf6"
+                <GrowthProjectionCard title="Authority Score" icon="🔗" color="#8b5cf6" compact
                   projection={data.authorityTrend?.projection} />
-                <GrowthProjectionCard title="AI Recommendation Rate" icon="✦" color="#6C63FF" unit="%"
+                <GrowthProjectionCard title="AI Recommendation Rate" icon="✦" color="#6C63FF" unit="%" compact
                   projection={data.aiRecommendationTrend?.projection} />
               </div>
-            </div>
-          </div>
 
-          {/* Section 3: Performance & Health Trends */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Performance & Historical Trends</h2>
-            </div>
-            <div className="space-y-4">
+              {/* Historical trend charts, side-by-side where reasonable. */}
               <div className="grid lg:grid-cols-2 gap-4">
                 <PerformanceTrendCard series={data.performance.series} targets={data.performance.targets} loading={false} onTargetSaved={load} showClicksProjectionNote />
                 <GrowthTrendCard id="health" title="Website Health Score" icon="💚" color="#10b981"

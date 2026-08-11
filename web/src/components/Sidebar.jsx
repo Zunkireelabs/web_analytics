@@ -8,16 +8,12 @@ import {
   TrendingUp,
   FileText,
   Sprout,
-  Bot,
   Zap,
   Network,
   Building2,
-  Radar,
   Settings as SettingsIcon,
   Users,
-  KeyRound,
   HeartPulse,
-  ScrollText,
   LineChart,
   ChevronDown
 } from 'lucide-react';
@@ -37,10 +33,8 @@ const NAV = [
 // each session server-scoped to its own site (req.session.siteId), never a
 // staff-only cross-client view.
 const GROWTH_TOOLS_NAV = [
-  { to: '/ai-growth', label: 'AI Growth', icon: Bot },
   { to: '/action-center', label: 'Action Center', icon: Zap },
   { to: '/ai-orchestration', label: 'Orchestration', icon: Network },
-  { to: '/site-audit', label: 'Site Audit', icon: Radar },
 ];
 
 // Staff-only pages — operate across every client's site, not just the
@@ -55,10 +49,8 @@ const INTERNAL_NAV = [
 // dimension (isPlatformAdmin), not isInternal — see App.jsx's own comment
 // on why those two are kept distinct even though they coincide today.
 const PLATFORM_ADMIN_NAV = [
-  { to: '/admin/users', label: 'Users', icon: Users },
-  { to: '/admin/mcp', label: 'MCP Tokens', icon: KeyRound },
-  { to: '/admin/system-health', label: 'System Health', icon: HeartPulse },
-  { to: '/admin/audit-log', label: 'Audit Log', icon: ScrollText },
+  { to: '/admin/users', label: 'Users & Tokens', icon: Users },
+  { to: '/admin/system-health', label: 'Monitoring', icon: HeartPulse },
 ];
 
 // Which of the three collapsible nav groups (below) each route belongs to
