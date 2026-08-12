@@ -2,9 +2,13 @@ import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
-import { createComponentTemplateHandler, DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
+import { DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 import { FRONTEND_ACTION_TYPES } from '../frontend.js';
-import { createComponentTemplateJob, getQueuedComponentTemplateJob } from '../../store/execution-jobs.js';
+import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
+import {
+  projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
+  isProfileUsable, isProjectable,
+} from '../../design-agent/lib/design-profile.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -373,6 +377,69 @@ function systemActorReq(siteId) {
 // ACTION TYPE, e.g. 'faq' / 'expand-content') rather than one entry, because a
 // single job can be asked for several keys at once — one config write for all
 // of them, not one per key.
+// ── Website design profile ─────────────────────────────────────────────────
+//
+// The site's whole design language, derived once, and the SOURCE every
+// per-component template is projected from. Stored beside componentTemplates
+// under siteRoot so a site's design knowledge lives in one place.
+//
+// Before this existed, the Design Agent's only persisted output was the five
+// component templates. Its OpenHands session analysed the whole site to
+// produce them and then threw that understanding away — so every action type
+// re-analysed the same repo, and any generator without a template fell back
+// to its own hardcoded markup. The profile is what makes design knowledge a
+// durable, shared asset instead of a side effect of one derivation.
+export function getDesignProfile(site) {
+  return site?.url_file_map?.siteRoot?.designProfile || null;
+}
+
+export function siteHasUsableDesignProfile(site) {
+  return isProfileUsable(getDesignProfile(site));
+}
+
+// Validates and saves a freshly-derived profile, then projects EVERY
+// design-sensitive component template from it in the same pass. That is the
+// architectural point: one analysis yields the site's whole design-sensitive
+// surface, rather than one template per repo analysis.
+export async function persistDesignProfile(site, rawProfile, {
+  jobId = null,
+  saveConfig = updateSiteRepoConfig,
+  recordAudit = recordAuditEvent,
+  persistTemplatesFn = persistDerivedComponentTemplates,
+} = {}) {
+  const profile = stampDesignProfile(rawProfile, {
+    derivedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
+    derivedRef: jobId,
+  });
+  if (!isProfileUsable(profile)) {
+    return { ok: false, reason: 'invalid-profile', profile: null, projected: {} };
+  }
+
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: { ...site.url_file_map?.siteRoot, designProfile: profile },
+  };
+  const saved = await saveConfig({ siteId: site.id, urlFileMap });
+  await recordAudit(systemActorReq(site.id), {
+    action: 'tenant.design_profile_derived',
+    targetType: 'site',
+    targetId: String(site.id),
+    tenantSiteId: site.id,
+    tenantName: site.name,
+    metadata: { styling: profile.styling || null, framework: profile.framework || null, jobId },
+    success: true,
+  }).catch(() => {});
+
+  // Project from the profile we just saved, against the site row the save
+  // returned, so the templates land on top of the profile rather than
+  // racing it.
+  const siteWithProfile = saved?.url_file_map ? { ...site, url_file_map: saved.url_file_map } : { ...site, url_file_map: urlFileMap };
+  const projected = projectAllComponentTemplates(profile);
+  const result = await persistTemplatesFn(siteWithProfile, projected, { jobId });
+
+  return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [] };
+}
+
 export async function persistDerivedComponentTemplates(site, componentTemplates, {
   jobId = null,
   saveConfig = updateSiteRepoConfig,
@@ -462,12 +529,12 @@ export async function persistDerivedComponentTemplates(site, componentTemplates,
 // site that hasn't opted into (or can't currently reach) the Design Agent
 // keeps working exactly as it did before this function existed.
 export async function resolveOrCreateComponentTemplate(site, actionType, {
-  createHandler = createComponentTemplateHandler,
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
   recordFixOutcomeFn = recordFixOutcome,
   enqueueDerivation = createComponentTemplateJob,
   findQueuedDerivation = getQueuedComponentTemplateJob,
+  enqueueProfileDerivation = createDesignProfileJob,
 } = {}) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
@@ -493,72 +560,90 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     return { ok: false, reason: 'not-available', template: null, componentKey };
   }
 
-  // An unverified template is a REPAIR, not a first-time derivation, and the
-  // difference matters operationally: there is already a usable-looking
-  // template on the row, so nothing is newly broken by taking a moment to
-  // redo it properly. Queue it on the existing design-agent worker rather
-  // than running an OpenHands Docker session inline — this function sits on
-  // generateDraft's hot path, which every manual click, MCP call and
-  // unattended attempt funnels through, and a container session there can
-  // outlast the request that started it.
+  // PROJECT FROM THE SITE'S DESIGN LANGUAGE FIRST.
   //
-  // First-time derivation (no `existing` at all) deliberately stays inline
-  // below: there is no template to fall back on, so blocking once is the
-  // only way that call can produce anything at all, and that path is already
-  // proven.
-  if (existing) {
-    // Keyed by actionType, matching what createComponentTemplateJob stores.
-    const queued = await findQueuedDerivation(site.id, actionType).catch(() => null);
-    // Enqueue at most one outstanding job per site+key. Without this, every
-    // draft attempt on a blocked site would add another job for work already
-    // pending — the daily run alone would queue dozens.
-    if (!queued) {
-      // pageUrl rides along so the derived result can be checked against the
-      // site's real live CSS (checkTemplateFreshness) — createComponentTemplateJob
-      // has always accepted it and every caller was dropping it.
-      await enqueueDerivation(site.id, [actionType], { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
-        console.error(`[design-drift] could not queue re-derivation for site ${site.id}/${actionType}:`, err.message);
+  // This is the architecture: the design profile is the source and component
+  // templates are projections of it, so a site that already knows its own
+  // design language never needs another repo analysis to gain a new
+  // design-sensitive content type — it composes one instantly, in the site's
+  // real typography/spacing/component conventions, from knowledge it already
+  // has. That is also what stops two generators on the same site presenting
+  // content in two different visual languages.
+  //
+  // Runs BEFORE the queue/derive paths below because it is both cheaper (pure
+  // string composition, no container) and better grounded (the whole site,
+  // not one block re-read in isolation).
+  const profile = getDesignProfile(site);
+  if (isProjectable(actionType) && isProfileUsable(profile)) {
+    const projected = projectComponentTemplate(profile, actionType);
+    // Re-validated against the same placeholder contract a Design-Agent-derived
+    // template must satisfy — a projection is not trusted just because it was
+    // composed locally.
+    if (projected && validatePlaceholders(actionType, projected).ok) {
+      const stamped = stampTemplateVerification(projected, {
+        verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
+        verifiedRef: profile.derivedRef ?? null,
+      });
+      const urlFileMap = {
+        ...site.url_file_map,
+        siteRoot: {
+          ...site.url_file_map?.siteRoot,
+          componentTemplates: { ...site.url_file_map?.siteRoot?.componentTemplates, [componentKey]: stamped },
+        },
+      };
+      await saveConfig({ siteId: site.id, urlFileMap });
+      await recordAudit(systemActorReq(site.id), {
+        action: 'tenant.component_template_projected',
+        targetType: 'site',
+        targetId: String(site.id),
+        tenantSiteId: site.id,
+        tenantName: site.name,
+        metadata: { actionType, componentKey, from: 'design-profile' },
+        success: true,
+      }).catch(() => {});
+      return { ok: true, template: stamped, source: 'design-profile', componentKey, justCreated: true };
+    }
+  }
+
+  // No usable design profile yet — derive the SITE'S design language rather
+  // than this one component's markup. One queued job now yields every
+  // projectable template at once (persistDesignProfile projects them all),
+  // instead of one queued job per content type each re-reading the same repo.
+  if (!isProfileUsable(profile)) {
+    const queuedProfile = await findQueuedDerivation(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
+    if (!queuedProfile) {
+      await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
+        console.error(`[design-drift] could not queue design-profile derivation for site ${site.id}:`, err.message);
       });
     }
     return {
       ok: false,
       reason: 'derivation-queued',
-      detail: 'This site\'s component template has not been verified against the real site design yet. The Design Agent has been queued to re-derive it — this will resolve on its own shortly.',
+      detail: 'This site\'s design language has not been derived yet. The Design Agent has been queued to analyse the '
+        + 'site and learn its typography, spacing and component conventions — every design-sensitive template is built '
+        + 'from that in one pass.',
       template: null,
       componentKey,
     };
   }
 
-  let result;
-  try {
-    const handler = createHandler();
-    result = await handler({ id: null, site_id: site.id, params: { componentKeys: [actionType] } });
-  } catch (err) {
-    const { message } = safeMessage('design-drift.resolveOrCreateComponentTemplate', err, 'Design Agent could not derive a template right now.');
-    return { ok: false, reason: 'design-agent-error', error: message, template: null, componentKey };
+  // A component key that is not yet projectable (none today — the projectable
+  // set and COMPONENT_TEMPLATE_KEY are currently identical) would land here
+  // with a usable profile. Queue a per-type derivation for it rather than
+  // silently returning nothing, so adding a future component key that the
+  // projector doesn't understand yet degrades to the old behaviour instead of
+  // breaking.
+  const queued = await findQueuedDerivation(site.id, actionType).catch(() => null);
+  if (!queued) {
+    await enqueueDerivation(site.id, [actionType], { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
+      console.error(`[design-drift] could not queue derivation for site ${site.id}/${actionType}:`, err.message);
+    });
   }
-
-  // Same validate -> stamp -> save -> audit the queued worker path runs, so
-  // an inline derivation and a queued re-derivation can never leave the site
-  // row in two different shapes.
-  const persisted = await persistDerivedComponentTemplates(site, result?.componentTemplates, {
-    jobId: result?.jobId ?? null, saveConfig, recordAudit, recordFixOutcomeFn,
-  });
-  const stamped = persisted.saved?.[actionType];
-  if (!stamped) {
-    // This call asked for exactly one action type, so any rejection reported
-    // is this one's — surfaced verbatim rather than flattened to a generic
-    // failure, since 'not-derived' and 'invalid-placeholders' mean different
-    // things to the caller.
-    const failure = persisted.rejected.find((r) => r.actionType === actionType);
-    return {
-      ok: false,
-      reason: failure?.reason || 'not-derived',
-      error: failure?.error,
-      template: null,
-      componentKey,
-    };
-  }
-
-  return { ok: true, template: stamped, source: 'design-agent', justCreated: true, componentKey };
+  return {
+    ok: false,
+    reason: 'derivation-queued',
+    detail: `This site's "${actionType}" template cannot be composed from its design profile yet. The Design Agent has been queued to derive it.`,
+    template: null,
+    componentKey,
+  };
 }
