@@ -7,6 +7,7 @@ import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
+import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
@@ -1002,6 +1003,24 @@ async function finalizeImplemented(siteId, draftId, site) {
       await runSiteDiscoveryIfDue(site);
     } catch (err) {
       console.error(`[action-center] post-implement site discovery failed for site ${siteId}:`, err.message);
+    }
+    // The merge is the only moment we know a fix is genuinely live, and the
+    // only moment the "before" window is still cleanly defined — so the
+    // measurement is scheduled here rather than reconstructed later from
+    // draft timestamps. agents/lib/fix-impact.js fills it in ~31 days on
+    // (28 days of post-merge data + GSC's own 3-day finalization lag).
+    //
+    // Best-effort by design: this is a reporting/learning signal, and failing
+    // to schedule it must never make a genuinely merged fix look unmerged.
+    try {
+      await scheduleImpactMeasurement(siteId, {
+        draftId: draft.id,
+        pageUrl: draft.content?.page || draft.input?.page || null,
+        generatorId: draft.action_type,
+        mergedAt: new Date(),
+      });
+    } catch (err) {
+      console.error(`[action-center] could not schedule impact measurement for draft ${draftId}:`, err.message);
     }
   }
   return draft;

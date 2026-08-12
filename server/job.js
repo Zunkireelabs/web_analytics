@@ -27,6 +27,7 @@ import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.
 import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
 import { getImplementedFindingIds, countDraftsBySourceToday } from './store/drafts.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
+import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
@@ -813,6 +814,19 @@ export async function runAutoRemediationCatchupForAllSites(tz) {
     } catch (err) {
       console.error(`[job] auto-remediation catch-up failed for site ${site.id} "${site.name}":`, err.message);
     }
+  }
+}
+
+// Impact measurement's due-sweep, the sibling of runFixVerificationsForAllSites
+// below. Also global rather than per-site: due-ness is per ROW (28 days after
+// that draft's own merge), not per site, so there is nothing to iterate sites
+// for. See agents/lib/fix-impact.js for why the delay is as long as it is.
+export async function runFixImpactMeasurementsForAllSites() {
+  try {
+    return await runDueImpactMeasurements();
+  } catch (err) {
+    console.error('[job] fix impact measurement failed:', err.message);
+    return [];
   }
 }
 

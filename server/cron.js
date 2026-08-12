@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
@@ -255,6 +255,22 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] fix verification scheduled (fires at :10 each hour)');
+
+  // Impact measurement — the same per-row due check as fix verification above,
+  // asking the other question about a merged fix: not "is the issue gone" but
+  // "what did it do to real Search Console numbers". Its rows come due ~31 days
+  // after a merge (28 days of post-merge data plus GSC's own 3-day lag), so
+  // this sweep is almost always a no-op and is cheap when it isn't. Hourly
+  // rather than daily for the same reason as the verification sweep: a merge
+  // can land at any hour, so nothing should wait for a fixed morning gate.
+  cron.schedule('40 * * * *', async () => {
+    try {
+      await runFixImpactMeasurementsForAllSites();
+    } catch (err) {
+      console.error('[cron] fix impact measurement error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] fix impact measurement scheduled (fires at :40 each hour)');
 
   // PR-status polling fallback — independent safety net alongside the
   // GitHub webhook (routes/webhooks.js) for sites where the webhook was
