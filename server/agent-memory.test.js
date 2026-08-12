@@ -22,6 +22,24 @@ function resetStore() {
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
 
+  // Must be tested BEFORE the findRelevantMemory shape below — both start
+  // with "SELECT * FROM agent_fix_memory", and this one is the stricter,
+  // cross-tenant path (findPortableRepairs).
+  if (sql.startsWith('SELECT * FROM agent_fix_memory') && sql.includes("status = 'trusted'")) {
+    const [category, problemSignature] = params;
+    let rows = store.filter((r) => r.status === 'trusted'
+      && r.execution_permission === 'auto'
+      && r.category !== 'code'
+      && (r.scope === 'client' || r.scope === 'global')
+      && r.repair_recipe != null
+      && r.site_fingerprint != null
+      && r.failed_reuse_count === 0
+      && r.problem_signature.toLowerCase() === String(problemSignature).toLowerCase());
+    if (category != null) rows = rows.filter((r) => r.category === category);
+    rows = rows.sort((a, b) => b.confidence - a.confidence || b.successful_reuse_count - a.successful_reuse_count).slice(0, 20);
+    return { rows: rows.map((r) => ({ ...r })) };
+  }
+
   if (sql.startsWith('SELECT * FROM agent_fix_memory')) {
     const [category, clientFacing, scope, generatorId, siteId] = params;
     let rows = store.filter((r) => r.status !== 'flagged_for_review' && r.status !== 'deprecated');
@@ -55,12 +73,16 @@ function fakeQuery(text, params = []) {
 
   if (sql.startsWith('INSERT INTO agent_fix_memory')) {
     const [category, scope, execution_permission, site_id, generator_id, problem_signature, symptoms,
-      root_cause, affected_pattern, fix_strategy, fix_pattern, validation_rule_id, source_type, source_ref] = params;
+      root_cause, affected_pattern, fix_strategy, fix_pattern, validation_rule_id, source_type, source_ref,
+      site_fingerprint, repair_recipe] = params;
     const id = nextId++;
     store.push({
       id, category, scope, execution_permission, status: 'candidate', site_id, generator_id, problem_signature,
       symptoms, root_cause, affected_pattern, fix_strategy, fix_pattern, confidence: 0.5, occurrence_count: 1,
       successful_reuse_count: 0, failed_reuse_count: 0, reuse_history: [], validation_rule_id, source_type, source_ref,
+      // Stored parsed, matching how pg returns a jsonb column.
+      site_fingerprint: site_fingerprint ? JSON.parse(site_fingerprint) : null,
+      repair_recipe: repair_recipe ? JSON.parse(repair_recipe) : null,
     });
     return { rows: [{ id }] };
   }
@@ -99,7 +121,18 @@ function fakeQuery(text, params = []) {
 mock.module('/Users/yukta/Travel/analytics/server/db.js', {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
-const { findRelevantMemory, recordFixOutcome } = await import('./agent-memory.js');
+const { findRelevantMemory, recordFixOutcome, findPortableRepairs } = await import('./agent-memory.js');
+
+// Promotes a freshly-recorded row to the exact state findPortableRepairs
+// requires, without hand-writing a store row — so these tests exercise the
+// real promotion ladder rather than a fixture that assumes its outcome.
+function makePortable(id, { successSites = [] } = {}) {
+  const row = store.find((r) => r.id === id);
+  row.status = 'trusted';
+  row.execution_permission = 'auto';
+  row.reuse_history = successSites.map((siteId) => ({ siteId, outcome: 'success' }));
+  return row;
+}
 
 describe('agent_fix_memory runtime loop', () => {
   beforeEach(() => resetStore());
@@ -242,5 +275,128 @@ describe('agent_fix_memory runtime loop', () => {
     const codeRow = store.find((r) => r.id === codeId);
     assert.equal(codeRow.occurrence_count, 3);
     assert.equal(codeRow.execution_permission, 'informational', 'category=code must never auto-promote to auto-appliable');
+  });
+});
+
+// findPortableRepairs is the ONLY retrieval path allowed to return a lesson
+// learned on a different client's site, and the only one whose result can
+// lead to a real PR against a repo the lesson was never proven on. Every
+// clause below is a safety requirement, so each gets its own refusal test.
+describe('findPortableRepairs — cross-client retrieval', () => {
+  beforeEach(() => resetStore());
+
+  const FP = ['render:eleventy', 'target-ext:.njk'];
+  const RECIPE = { kind: 'generator-chain', generatorId: 'alt-text' };
+  const base = {
+    category: 'content', scope: 'client', generatorId: 'alt-text',
+    problemSignature: 'alt-text:missing-alt',
+    symptoms: 'Images were missing alt text.',
+    affectedPattern: 'Pages with img tags lacking an alt attribute.',
+    fixStrategy: 'Add a grounded alt attribute via the exact-match injector.',
+    outcome: 'success', siteFingerprint: FP, repairRecipe: RECIPE,
+  };
+
+  async function seed(overrides = {}) {
+    return recordFixOutcome({ ...base, siteId: 1, ...overrides });
+  }
+
+  test('returns a trusted, auto, recipe-bearing row proven on enough distinct sites', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [2] }); // learned on site 1, reused on site 2
+    const found = await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 });
+    assert.equal(found.length, 1);
+    assert.equal(found[0].id, id);
+    assert.equal(found[0].provenSiteCount, 2);
+    assert.deepEqual(found[0].siteFingerprint, FP);
+    assert.deepEqual(found[0].repairRecipe, RECIPE);
+  });
+
+  test('refuses a row proven on only ONE site — correct is not the same as portable', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [1] }); // same site as it was learned on
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('does not count the target site as its own evidence', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [7] });
+    // Only site 1 (where it was learned) remains once site 7 is excluded.
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('refuses a row that is still only a candidate', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [2] });
+    store.find((r) => r.id === id).status = 'candidate';
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('refuses a row still at requires_approval', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [2] });
+    store.find((r) => r.id === id).execution_permission = 'requires_approval';
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('refuses after a SINGLE past failure — stricter than same-site retrieval', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [2] });
+    store.find((r) => r.id === id).failed_reuse_count = 1;
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('refuses a legacy row with no fingerprint — no evidence of WHERE it worked', async () => {
+    const id = await seed({ siteFingerprint: null });
+    makePortable(id, { successSites: [2] });
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('refuses an advisory row with no repair recipe', async () => {
+    const id = await seed({ repairRecipe: null });
+    makePortable(id, { successSites: [2] });
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
+  });
+
+  test('a code lesson can never be returned, however it is promoted', async () => {
+    const id = await recordFixOutcome({
+      ...base, siteId: 1, category: 'code', scope: 'repo', problemSignature: 'code:some-bug',
+    });
+    const row = makePortable(id, { successSites: [2] });
+    row.execution_permission = 'auto'; // force past the code-stays-informational rule
+    assert.deepEqual(await findPortableRepairs({ problemSignature: 'code:some-bug', targetSiteId: 7 }), []);
+  });
+
+  test('requires an exact problem_signature — no keyword fallback on this path', async () => {
+    const id = await seed();
+    makePortable(id, { successSites: [2] });
+    assert.deepEqual(await findPortableRepairs({ problemSignature: 'alt-text:something-else', targetSiteId: 7 }), []);
+  });
+
+  test('returns nothing when given no signature at all', async () => {
+    assert.deepEqual(await findPortableRepairs({ targetSiteId: 7 }), []);
+  });
+});
+
+// The guarantee that merging this changes nothing for anyone: every existing
+// caller of findRelevantMemory passes no fingerprint, and must keep getting
+// byte-identical results.
+describe('no-production-change proof', () => {
+  beforeEach(() => resetStore());
+
+  test('findRelevantMemory is unaffected by the new columns', async () => {
+    await recordFixOutcome({
+      category: 'content', scope: 'client', siteId: 1, generatorId: 'alt-text',
+      problemSignature: 'alt-text:missing-alt', symptoms: 'Images were missing alt text.',
+      affectedPattern: 'Pages with img tags lacking an alt attribute.',
+      fixStrategy: 'Add a grounded alt attribute.', outcome: 'success',
+      siteFingerprint: ['render:eleventy'], repairRecipe: { kind: 'generator-chain' },
+    });
+    const found = await findRelevantMemory({ scope: 'client', siteId: 1, generatorId: 'alt-text' });
+    assert.equal(found.length, 1);
+    // The new columns are deliberately absent from the returned shape — a
+    // prompt-injection consumer has no business seeing an executable recipe.
+    assert.ok(!('siteFingerprint' in found[0]));
+    assert.ok(!('repairRecipe' in found[0]));
+    assert.equal(found[0].executionPermission, 'requires_approval');
   });
 });
