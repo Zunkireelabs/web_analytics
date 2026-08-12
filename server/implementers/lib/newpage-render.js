@@ -75,12 +75,28 @@ export function renderBlogOutlineBody(content, site) {
     if (!s?.heading) continue;
     parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  if (content.suggestedFaqTopics?.length) {
-    parts.push(`## FAQ topics to cover\n\n${content.suggestedFaqTopics.map((t) => `- ${t}`).join('\n')}`);
-  }
-  if (content.suggestedInternalLinks?.length) {
-    parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
-  }
+  // content.suggestedFaqTopics and content.suggestedInternalLinks are
+  // deliberately NOT rendered. They are instructions ABOUT the article, aimed at
+  // whoever (or whatever) works on it next — "FAQ topics to cover", "Suggested
+  // internal links" — and they used to be appended as real ## sections, so a
+  // published post ended with a visible editorial checklist. Harmless while a
+  // human reviewed every blog draft by hand; the moment blog-outline can open a
+  // PR unattended it becomes the first thing a reader sees at the bottom of the
+  // page.
+  //
+  // Nothing is lost by dropping them here: both fields stay on the draft, so the
+  // Action Center still shows them, the faq generator can still act on the
+  // topics, and internal-links can still place the links — in context, where an
+  // internal link is actually worth something, rather than as a bare list under
+  // a heading that announces it was machine-generated.
+  //
+  // Worth knowing for any future net-new content type: the Quality Gate
+  // (generators/lib/quality-gate.js, including content-scaffolding-guard's
+  // explicit checks for exactly this kind of text) inspects the generator's
+  // `content` object, but the artifact that actually gets committed is the
+  // markdown rendered HERE, at apply time. Scaffolding introduced during
+  // rendering is invisible to every guard by construction — so it has to not be
+  // introduced.
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
@@ -98,12 +114,9 @@ export function renderDirectAnswerBody(content, site) {
   for (const s of content.supportingSections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  if (content.suggestedFaqTopics?.length) {
-    parts.push(`## FAQ topics to cover\n\n${content.suggestedFaqTopics.map((t) => `- ${t}`).join('\n')}`);
-  }
-  if (content.suggestedInternalLinks?.length) {
-    parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
-  }
+  // Same editorial-scaffolding removal as renderBlogOutlineBody above, for the
+  // same reason — see the long comment there. Both fields remain on the draft;
+  // they just never reach a reader.
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 

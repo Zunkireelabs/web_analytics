@@ -5,9 +5,10 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
-import { isPageMapped, resolveAdapter, resolveFile } from '../../implementers/lib/url-file-map.js';
+import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
@@ -193,6 +194,32 @@ export async function buildRecommendations(siteId) {
       // check would flag, so "not in url_file_map" isn't fatal for it the
       // way it is for every other generatorId here.
       let mappingBlockedReason = null;
+      // The net-new counterpart of the page-mapping gate below. Net-new content
+      // (blog-outline, direct-answer, landing-page, the legal pages) has no
+      // params.page to map — it resolves its destination through
+      // url_file_map.newContentTargets instead, and frontend.js hard-fails with
+      // 'no-file-mapping' at apply time when that entry is absent.
+      //
+      // This is what makes promoting blog-outline to the safe tier honest for
+      // EVERY tenant rather than just the one that happens to be configured.
+      // Site 1 has a real newContentTargets['blog-outline'], so its blog
+      // recommendations are actionable; a newly-onboarded tenant has none, so
+      // theirs stay visible-and-blocked with a reason and are demoted to the
+      // manual tier — never silently queued into the unattended chain to fail
+      // 30 times at apply. When the config lands, they unblock on the next sync
+      // with no manual step.
+      //
+      // Deliberately checks only the target's existence. The second
+      // prerequisite for markdown content — a renderCapabilities entry proving
+      // the extension gets a markdown pass — is enforced by
+      // rendering-gate.js's validateRenderingBatch inside pushDraftBranch,
+      // which fails closed and is the single choke point every implementer
+      // funnels through. Duplicating that rule here would give it two
+      // definitions that could disagree.
+      if (site && FRONTEND_ACTION_TYPES.has(action.generatorId)
+        && !resolveNewContentTarget(site, action.generatorId, 'probe')) {
+        mappingBlockedReason = `No url_file_map.newContentTargets["${action.generatorId}"] is configured for this site, so there is nowhere in the repo to create the new file. Add one (e.g. {"dir":"src/blog","extension":".md"}) via 'npm run connect-repo' before this can be applied.`;
+      }
       if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
         && !isPageMapped(site, action.params.page, action.generatorId)) {
         site = await healUnmappedPage(site, action.params.page, action.generatorId);

@@ -211,3 +211,53 @@ describe('net-new pages consume the site design profile', () => {
     assert.doesNotMatch(out, /rounded-lg border/);
   });
 });
+
+// Regression guard for a bug that shipped editorial instructions into published
+// articles: renderBlogOutlineBody and renderDirectAnswerBody used to append
+// "## FAQ topics to cover" and "## Suggested internal links" — notes ABOUT the
+// article, aimed at whoever worked on it next — as real sections of the article
+// itself. Survivable while a human reviewed every blog draft; not once
+// blog-outline can open a PR unattended.
+//
+// Deliberately asserted HERE rather than left to the Quality Gate. That gate
+// inspects the generator's `content` object, while the artifact actually
+// committed is the markdown rendered by this module, so scaffolding introduced
+// during rendering is invisible to it by construction.
+describe('net-new content never publishes editorial scaffolding', () => {
+  const withSuggestions = {
+    title: 'Boiler care',
+    heading: 'How do I bleed a radiator?',
+    query: 'how to bleed a radiator',
+    directAnswer: 'Turn the valve a quarter turn with a radiator key until water appears.',
+    sections: [{ heading: 'Bleeding radiators', body: 'Turn the valve.' }],
+    supportingSections: [{ heading: 'Tools you need', body: 'A radiator key and a cloth.' }],
+    suggestedFaqTopics: ['How often should I bleed radiators?', 'What is a radiator key?'],
+    suggestedInternalLinks: [{ anchorText: 'boiler servicing', targetUrl: 'https://x.com/services/boilers/' }],
+  };
+
+  for (const [name, render] of [
+    ['renderBlogOutlineBody', renderBlogOutlineBody],
+    ['renderDirectAnswerBody', renderDirectAnswerBody],
+  ]) {
+    test(`${name} omits the suggestion sections entirely`, () => {
+      const out = render(withSuggestions, {});
+
+      assert.doesNotMatch(out, /FAQ topics to cover/i, 'an instruction heading must never reach a reader');
+      assert.doesNotMatch(out, /Suggested internal links/i);
+      // The payloads themselves must not leak under some other heading either.
+      assert.doesNotMatch(out, /How often should I bleed radiators\?/);
+      assert.doesNotMatch(out, /boiler servicing/);
+    });
+
+    test(`${name} still renders the real article body`, () => {
+      const out = render(withSuggestions, {});
+      assert.match(out, /Turn the valve/, 'dropping scaffolding must not drop content');
+      assert.match(out, /^---\n/, 'front matter is still emitted');
+    });
+  }
+
+  test('suggestions are not required — absent fields render the same article', () => {
+    const { suggestedFaqTopics, suggestedInternalLinks, ...bare } = withSuggestions;
+    assert.equal(renderBlogOutlineBody(bare, {}), renderBlogOutlineBody(withSuggestions, {}));
+  });
+});

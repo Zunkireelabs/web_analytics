@@ -61,6 +61,39 @@ const SAFE_GENERATOR_IDS = new Set([
   // redirect chain to its real endpoint. There is no guess to get wrong. The
   // generator is pure and deterministic with no LLM call at all.
   'redirect-fix',
+  // Promoted 2026-08-12 on an explicit product decision: growing impressions
+  // depends on new content, not only on fixing existing pages, so the agent must
+  // be able to draft an article and open a PR without a human first clicking
+  // Generate. This reverses the 2026-08-07 move to manual, whose reasoning was
+  // that a full net-new article "gets one human glance first" — it still does.
+  // The glance just happens on the PR, where it happens for every other safe
+  // generator, instead of gating whether the work starts at all.
+  //
+  // What actually stands between a topic and a merged article:
+  //   1. MIN_TOTAL_WORDS = 800 in the generator, with one bounded expansion pass
+  //      and then a hard 502 — a stub cannot become a draft.
+  //   2. content-scaffolding-guard, whose blog-outline exemption was already
+  //      removed, plus the rest of the Quality Gate at generate AND approve.
+  //   3. newpage-render.js no longer publishes the "FAQ topics to cover" /
+  //      "Suggested internal links" editorial checklist into the article body.
+  //      That fix is a hard prerequisite for this promotion, not a nicety: it is
+  //      the difference between a reviewable article and one that visibly reads
+  //      as machine output.
+  //   4. A human still merges. Autonomy ends at the PR.
+  //
+  // Safe for tenants that are NOT configured for net-new content, which is every
+  // tenant except site 1 today: buildRecommendations blocks a net-new
+  // recommendation with no url_file_map.newContentTargets entry and the
+  // coordinator demotes it to 'manual', so it stays visible with a reason rather
+  // than being queued into the unattended chain to fail at apply. It unblocks by
+  // itself once that config exists.
+  //
+  // Blogs are not generated daily. The only agents that raise blog-outline
+  // findings are content-gap and ai-recommendation, neither of which is in
+  // DAILY_AGENT_IDS — so opportunities appear on a weekly/monthly cadence and
+  // the daily run ships whatever is genuinely open, rather than inventing a
+  // topic every morning.
+  'blog-outline',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated
@@ -87,13 +120,14 @@ const SAFE_GENERATOR_IDS = new Set([
 //                        Quality and brand risk, unreviewed.
 //   landing-page       — net-new page, and unlike blog-outline it has no
 //                        word-count floor or expansion retry of its own.
-//   blog-outline,      — net-new CONTENT: both are genuinely safe candidates,
-//   direct-answer        but both resolve their target through
-//                        url_file_map.newContentTargets, which no site is
-//                        configured for yet. Promoting them before that config
-//                        exists would only manufacture drafts that fail at
-//                        apply time. Revisit together once net-new targets are
-//                        configured — see the plan's Phase 5.
+//   direct-answer      — the one net-new type still manual, and only because no
+//                        site has a url_file_map.newContentTargets entry for it
+//                        (site 1 has one for blog-outline, landing-page and the
+//                        three legal types, but not this). Its content shape is
+//                        bounded and grounded like blog-outline's, so it is a
+//                        straightforward promotion the moment a real target dir
+//                        is configured — at which point the net-new gate in
+//                        buildRecommendations stops blocking it anyway.
 
 export function riskTierForGenerator(generatorId) {
   return SAFE_GENERATOR_IDS.has(generatorId) ? 'safe' : 'manual';
