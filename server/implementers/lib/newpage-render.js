@@ -1,3 +1,4 @@
+import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -55,10 +56,12 @@ export function renderLandingPageBody(content, site) {
   const parts = [`# ${content.headline || content.target}`];
   if (content.subheadline) parts.push(content.subheadline);
   for (const s of content.sections || []) {
-    if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
+    const rendered = renderSection(s, site);
+    if (rendered) parts.push(rendered);
   }
-  if (content.cta) parts.push(`[${content.cta}](#)`);
-  return `${front}\n${parts.join('\n\n')}\n`;
+  const cta = renderCta(content.cta, site);
+  if (cta) parts.push(cta);
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 export function renderBlogOutlineBody(content, site) {
@@ -78,7 +81,7 @@ export function renderBlogOutlineBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // The direct-answer paragraph goes immediately after the heading — no
@@ -101,7 +104,7 @@ export function renderDirectAnswerBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -114,7 +117,7 @@ export function renderTranslationBody(content, site) {
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${content.translatedContent || ''}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's
@@ -168,6 +171,53 @@ function fillContentWrapper(wrapper, body) {
   return `${open.trimEnd()}\n\n${body}\n\n${close.trimStart()}`;
 }
 
+// Applies this site's own real prose wrapper to a rendered markdown body, for
+// EVERY net-new whole-page type (frontend.js's FRONTEND_ACTION_TYPES), not
+// just the compliance trio it was originally written for — landing pages,
+// blog posts, direct-answer pages and translations are the same shape and
+// were shipping without it, i.e. bare unstyled headings and paragraphs into a
+// real PR. Unchanged fallback: a site with no contentWrapper configured gets
+// the plain markdown body exactly as before, so nothing regresses for a site
+// that hasn't been through the Design Agent yet.
+function wrapInSiteProse(body, site) {
+  // Configured template first, then a projection from the site's design
+  // profile, then bare markdown. That middle step is the change: net-new
+  // pages were the last renderers still shipping unstyled headings and
+  // paragraphs into a real PR whenever a contentWrapper happened not to be
+  // configured, even on a site whose design language was already known.
+  // DEFAULT behaviour (bare body) now only applies to a site with no design
+  // knowledge at all.
+  const configured = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  const wrapper = configured?.includes('{{BODY}}')
+    ? configured
+    : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
+}
+
+function designProfileOf(site) {
+  return site?.url_file_map?.siteRoot?.designProfile || null;
+}
+
+// A landing page's call to action. Rendered as a real button in the site's
+// own styling when it has a button convention; otherwise the plain markdown
+// link this always emitted.
+function renderCta(cta, site) {
+  if (!cta) return null;
+  const projected = projectCta(designProfileOf(site), { label: cta });
+  return projected ? `\n${projected}\n` : `[${cta}](#)`;
+}
+
+// A content section, in the site's card convention when it has one. Falls
+// back to the plain "## heading + body" markdown these renderers always
+// produced, so a site with no card pattern is byte-for-byte unchanged.
+function renderSection(section, site, headingLevel = 2) {
+  if (!section?.heading) return null;
+  const projected = projectCard(designProfileOf(site), {
+    heading: section.heading, body: section.body || '', headingLevel,
+  });
+  return projected || `${'#'.repeat(headingLevel)} ${section.heading}\n\n${section.body || ''}`;
+}
+
 export function renderCompliancePageBody(content, preserved = {}, site) {
   const front = frontMatter([
     ['layout', preserved.layout],
@@ -180,8 +230,5 @@ export function renderCompliancePageBody(content, preserved = {}, site) {
   for (const s of content.sections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  const body = parts.join('\n\n');
-  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
-  const wrapped = wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
-  return `${front}\n${wrapped}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }

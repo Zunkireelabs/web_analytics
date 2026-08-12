@@ -3,6 +3,7 @@ import { getRelatedQueriesForTopic } from '../../store/data-analyst.js';
 import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
+import { getSiteById } from '../../store/read.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -16,14 +17,17 @@ import { generateDraft } from '../../routes/action-center.js';
 // Maps an Analyst (data-analyst-agent) insight onto the existing Action
 // Center draft-generation pipeline — a completely separate system keyed by
 // Node-side "findings" (see recommendations.js), which an Analyst insight
-// is not. Deliberately narrow: only a gsc_* metric with dimension_type
-// 'page' (never true today — anomaly/trend-shift detection only runs on
-// site/device/country/channel — until data-analyst-agent's
-// gsc_page_dimension collector admits a page, see that collector's
-// docstring) representing a real decline is eligible for 'expand-content'
-// (thin/declining content is the one generator a metric anomaly can point
-// at without guessing a schema type or topic). Returns null for anything
-// else — callers must treat null as "not eligible," never throw.
+// is not.
+//
+// This used to document page-dimension insights as "never true today",
+// because anomaly/trend-shift detection only ran on site/device/country/
+// channel. That is no longer accurate: data-analyst-agent's
+// gsc_page_dimension collector exists, emits dimension_type='page', and is
+// registered in the nightly collector chain (app/collectors/registry.py), so
+// this path is live. The comment outlived the condition it described.
+//
+// Returns null for anything not eligible — callers must treat null as "not
+// eligible," never throw.
 function isDecline(insight) {
   const e = insight?.evidence || {};
   switch (insight?.insight_type) {
@@ -134,11 +138,103 @@ export function seoDraftEligibility(site, insight) {
   if (!page) return null;
 
   return {
-    generatorId: 'expand-content',
-    params: { page },
+    ...generatorForDecliningPage(insight),
     // Deterministic per (metric, type, period, page) — getDraftByFindingId's
     // idempotency check relies on this being stable across repeated calls
     // for the same finding, not random per request.
     findingId: `analyst:${insight.metric_key}:${insight.insight_type}:${insight.period_start}:${insight.dimension_value}`,
+    page,
   };
+
+  function generatorForDecliningPage(ins) {
+    // Which KIND of decline this is decides what would actually help, and
+    // the metric already says. Every branch still names a generator whose
+    // params can be filled from the insight alone — nothing here guesses a
+    // topic or a schema type, which is the line the original single-generator
+    // mapping drew and this keeps.
+    //
+    // Impressions falling means fewer people are being SHOWN the page: a
+    // coverage/relevance problem, so give the page more substance to match
+    // more queries.
+    //
+    // Clicks or CTR falling while impressions hold means people SEE it and
+    // don't click: a presentation problem in the result itself, which is
+    // what the title and description control.
+    if (ins.metric_key === 'gsc_ctr' || ins.metric_key === 'gsc_clicks') {
+      return { generatorId: 'meta-title', params: { page, query: ins.dimension_value } };
+    }
+    // Position worsening is a competitiveness signal — answer the query more
+    // directly on the page rather than rewriting how it is listed.
+    if (ins.metric_key === 'gsc_position') {
+      return { generatorId: 'qa-content', params: { page } };
+    }
+    return { generatorId: 'expand-content', params: { page } };
+  }
+}
+
+// AUTONOMOUS NIGHTLY SYNC — the missing last mile.
+//
+// The 3am pipeline (data-analyst-agent, ingest_schedule_hour_utc=3) already
+// collects, forecasts and produces insights every night, including
+// forecast_risk ones that predict a problem before it lands. None of it
+// reached the Action Center: the only two ways an insight or a keyword gap
+// could become a recommendation were a human clicking approve on one item at
+// a time. Every night's analysis simply sat there.
+//
+// This creates RECOMMENDATIONS only — never drafts. That is deliberate: a
+// recommendation then flows through the exact same risk-tier and
+// auto-remediation machinery every agent finding already does, so analyst
+// findings become first-class without inventing a second, parallel autonomy
+// path that bypasses the gate deciding what may ship unattended.
+//
+// Idempotent per insight: findOpenRecommendation on the same
+// (page, generatorId) key means re-running a night's insights — or running
+// after a partial failure — merges rather than duplicates.
+export async function syncAnalystInsightsToActionCenter(siteId, insights, { site } = {}) {
+  const resolvedSite = site || await getSiteById(siteId);
+  if (!resolvedSite) return { created: 0, skipped: 0, ineligible: 0 };
+
+  let created = 0;
+  let skipped = 0;
+  let ineligible = 0;
+
+  for (const insight of insights || []) {
+    const action = seoDraftEligibility(resolvedSite, insight);
+    if (!action) { ineligible++; continue; }
+
+    const page = recommendationPageKey({ generatorId: action.generatorId, params: action.params });
+    const existing = await findOpenRecommendation(siteId, page, action.generatorId);
+    if (existing) { skipped++; continue; }
+
+    // forecast_risk is a PREDICTED problem, not an observed one. Saying so in
+    // the issue text matters: a human reading the Action Center needs to know
+    // whether this already happened or is about to.
+    const predicted = insight.insight_type === 'forecast_risk';
+    await insertRecommendation(siteId, {
+      page,
+      recommendationType: action.generatorId,
+      issue: `${predicted ? 'Predicted' : 'Detected'} ${insight.metric_key} decline on this page`,
+      reason: analystReason(insight, predicted),
+      params: action.params,
+      findingId: action.findingId,
+      detectingAgent: 'analyst-insights',
+      priority: predicted ? 'medium' : 'high',
+      riskTier: riskTierForGenerator(action.generatorId),
+    });
+    created++;
+  }
+  return { created, skipped, ineligible };
+}
+
+function analystReason(insight, predicted) {
+  const e = insight.evidence || {};
+  const detail = [
+    typeof e.pct_change === 'number' ? `${Math.round(e.pct_change)}% change` : null,
+    e.direction ? `direction ${e.direction}` : null,
+    insight.period_start ? `observed from ${insight.period_start}` : null,
+  ].filter(Boolean).join(', ');
+  const lead = predicted
+    ? `The nightly forecast projects ${insight.metric_key} declining for this page before it shows up in reporting`
+    : `The nightly analysis found a real ${insight.metric_key} decline on this page`;
+  return detail ? `${lead} (${detail}).` : `${lead}.`;
 }

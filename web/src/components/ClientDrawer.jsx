@@ -9,7 +9,6 @@ import Drawer from './Drawer.jsx';
 import Tabs from './Tabs.jsx';
 import Avatar from './Avatar.jsx';
 import ClientBusinessValuesPanel from './ClientBusinessValuesPanel.jsx';
-import DesignDriftPanel from './DesignDriftPanel.jsx';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
 const labelCls = 'block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5';
@@ -374,7 +373,6 @@ function AiConfigTab({ client, onReload }) {
   const [faqBaseline, setFaqBaseline] = useState(client.visibleFaqBaseline ?? 0);
 
   const [businessValuesOpen, setBusinessValuesOpen] = useState(false);
-  const [designDriftOpen, setDesignDriftOpen] = useState(false);
 
   const changeOauthLevel = async (value) => {
     const previous = oauthLevel;
@@ -463,20 +461,6 @@ function AiConfigTab({ client, onReload }) {
           </button>
         </div>
         {businessValuesOpen && <div className="mt-2"><ClientBusinessValuesPanel clientId={client.id} /></div>}
-      </div>
-
-      {/* Checks whether a stored component template still matches the
-          site's real live design (implementers/lib/design-drift.js). */}
-      <div>
-        <div className="flex items-center gap-2">
-          <AlertTriangle size={12} className="text-slate-400 shrink-0" />
-          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Design drift check</span>
-          <button type="button" onClick={() => setDesignDriftOpen((o) => !o)}
-            className="text-[10px] font-bold text-[#6C63FF] hover:text-[#5750d9] transition">
-            {designDriftOpen ? 'Hide' : 'Check…'}
-          </button>
-        </div>
-        {designDriftOpen && <div className="mt-2"><DesignDriftPanel clientId={client.id} /></div>}
       </div>
 
       {/* Organic (pre-existing) visible FAQ pages, added to the tool's own

@@ -512,6 +512,33 @@ export async function hasDraftSince(siteId, source, actionType, since) {
   return rows.length > 0;
 }
 
+// How many drafts a given source has created for this site since the start of
+// today IN THE SITE'S OWN TIMEZONE — the daily budget the unattended
+// auto-remediation loop spends against (agents/lib/auto-remediation.js).
+//
+// The timezone matters and is not decoration: sites.timezone defaults to
+// Asia/Kolkata while the server may run anywhere, so counting against UTC
+// midnight would roll the budget over mid-afternoon for an Indian client and
+// let a single day ship close to two full budgets. `AT TIME ZONE $3` does the
+// conversion in Postgres against the same clock the row was written with,
+// rather than reconstructing a local midnight in JS and hoping the two agree
+// across a DST boundary.
+//
+// Counts every draft the source created today regardless of what became of it
+// (shipped, failed at apply, abandoned): the budget is a cap on how much
+// unattended WORK the system does per day, not on how much of it succeeded —
+// otherwise a site failing every attempt would retry without limit, which is
+// exactly the runaway the cap exists to prevent.
+export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = $2
+        AND (created_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, source, timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 // Every finding_id with at least one implemented draft — finding ids are
 // stable slugs (e.g. `content-gap:<page>:Missing FAQ`, see agents/types.js),
 // so this reliably answers "already shipped" even though the underlying

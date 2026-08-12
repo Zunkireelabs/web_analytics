@@ -6,6 +6,7 @@ import { summarizeAgentRuns } from '../orchestrator.js';
 import { withRetry, isRetryable, LLM_TIMEOUT_MS } from '../../llm.js';
 import { normalizeCompetitorDomain } from './competitor-analysis.js';
 import { saveAgenticOrchestrationRun } from '../../store/agentic-orchestration-runs.js';
+import { getSiteById } from '../../store/read.js';
 import { safeMessage } from '../../lib/errors.js';
 
 // A genuine multi-round LLM tool-calling loop, distinct from orchestrator.js's
@@ -120,6 +121,62 @@ const INSPECT_DESCRIPTIONS = {
 
 function projectAnalysis(analysis, fields) {
   return fields ? Object.fromEntries(fields.map((f) => [f, analysis[f]])) : analysis;
+}
+
+// ---------------------------------------------------------------------------
+// inspect_* URL scoping
+// ---------------------------------------------------------------------------
+// The inspect_* tools take a URL straight from the MODEL and fetch it
+// server-side. While this loop was reachable only by platform_admins that was
+// an acceptable convenience; now that the Copilot is client-facing
+// (routes/copilot.js), an untrusted user can steer the model into requesting
+// any URL it likes — including ones only this server can reach
+// (http://localhost:3002/api/..., 169.254.169.254 cloud metadata, private RFC
+// 1918 addresses). That is a server-side request forgery hole opened by the
+// gate change, not a pre-existing one, so it is closed here in the same
+// change.
+//
+// The fix is an ALLOWLIST rather than a blocklist of private ranges:
+// deny-lists of internal addresses are notoriously leaky (DNS rebinding,
+// IPv6-mapped IPv4, redirects, decimal/octal IP encodings), whereas "this
+// tool may only fetch the tenant's own website" is both simpler to verify and
+// exactly the tool's legitimate purpose — there is no honest reason for the
+// Copilot to inspect a page on a domain the customer doesn't own.
+export function siteInspectHostnames(site) {
+  const candidates = [site?.website_domain, site?.gsc_property?.replace(/^sc-domain:/, '')].filter(Boolean);
+  const hosts = new Set();
+  for (const raw of candidates) {
+    try {
+      const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      hosts.add(url.hostname.toLowerCase().replace(/^www\./, ''));
+    } catch { /* an unparseable domain simply contributes no allowed host */ }
+  }
+  return hosts;
+}
+
+export function checkInspectableUrl(rawUrl, allowedHosts) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return { ok: false, error: 'not a valid absolute URL' };
+  }
+  // http/https only — blocks file:, data:, gopher:, and the like outright.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { ok: false, error: 'only http and https URLs can be inspected' };
+  }
+  if (!allowedHosts.size) {
+    return { ok: false, error: 'this site has no verified domain configured, so no page can be inspected yet' };
+  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  // Exact host, or a subdomain of an allowed host. The leading-dot check is
+  // what stops "evil-example.com" from satisfying an allowlist entry of
+  // "example.com" the way a bare endsWith would.
+  const allowed = [...allowedHosts].some((h) => host === h || host.endsWith(`.${h}`));
+  if (!allowed) {
+    return { ok: false, error: `can only inspect pages on this site's own domain (${[...allowedHosts].join(', ')})` };
+  }
+  return { ok: true, url: url.href };
 }
 
 const INSPECT_TOOLS = Object.keys(INSPECT_FIELD_SETS).map((name) => ({
@@ -318,17 +375,26 @@ async function planQuestion(client, messages, usage) {
 // mode) is set — same "mode picked by which optional field is present"
 // convention orchestrator.js's synthesizeFindings already uses.
 export async function runAgenticLoop({
-  siteId, start, end, question, history, staleness, persistSubAgentRuns = false,
+  siteId, start, end, question, history, staleness, persistSubAgentRuns = false, personaPrompt = null,
 } = {}) {
   const startedAt = Date.now();
   const mode = staleness != null ? 'selection' : 'question';
   const tools = await buildAgentTools(mode);
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
   const pageCache = createPageCache();
+  // Resolved once per session from the SESSION's siteId (never from anything
+  // the model or the user supplied) — the allowlist the inspect_* tools are
+  // bounded by. See checkInspectableUrl above.
+  const allowedInspectHosts = siteInspectHostnames(await getSiteById(siteId).catch(() => null));
   const usage = { promptTokens: 0, completionTokens: 0 };
   const budget = mode === 'selection' ? estimateSelectionBudget(staleness) : estimateQuestionBudget(question);
 
-  const systemPrompt = mode === 'selection' ? SELECTION_SYSTEM : QUESTION_SYSTEM;
+  // In 'question' mode the Copilot supplies an audience-shaped prompt (a
+  // platform admin and a site owner need different vocabulary from the same
+  // surface — see copilot-greeting.js's systemPromptFor). 'selection' mode is
+  // machine-facing agent routing with no human audience, so it always keeps
+  // SELECTION_SYSTEM regardless.
+  const systemPrompt = mode === 'selection' ? SELECTION_SYSTEM : (personaPrompt || QUESTION_SYSTEM);
   const userPrompt = mode === 'selection'
     ? `Agents and their staleness:\n${staleness}`
     : `Recent conversation: ${JSON.stringify(history || [])}\nQuestion: ${question}`;
@@ -409,7 +475,13 @@ export async function runAgenticLoop({
           let page;
           try { page = JSON.parse(tc.function.arguments || '{}').page; } catch { page = null; }
           if (!page) return { tc, content: { error: 'no page url given' } };
-          const fetched = await pageCache(page);
+          // Scoped to the tenant's own domain — see checkInspectableUrl.
+          // Returned as a normal tool result rather than thrown so the model
+          // sees "I'm not allowed to fetch that" and moves on, instead of the
+          // whole session erroring out.
+          const scoped = checkInspectableUrl(page, allowedInspectHosts);
+          if (!scoped.ok) return { tc, content: { error: scoped.error } };
+          const fetched = await pageCache(scoped.url);
           return { tc, content: fetched.ok ? projectAnalysis(fetched.analysis, INSPECT_FIELD_SETS[id]) : { error: fetched.error || 'fetch failed' } };
         }
         const params = PARAM_PARSERS[id]?.(tc.function.arguments);

@@ -39,9 +39,14 @@ const QUESTION_SYSTEM = 'You are a senior growth analyst answering a specific qu
 // implementation regardless of whether the findings came from a live run or
 // a DB read, and regardless of whether it's a briefing or an answer to a
 // specific question.
-export async function synthesizeFindings(findings, perAgent, question) {
+// `systemOverride` lets the Copilot substitute an audience-shaped system
+// prompt (agents/lib/copilot-greeting.js's systemPromptFor) now that one chat
+// surface serves both platform admins and site owners — a client must not be
+// answered in internal vocabulary (agent ids, risk tiers, draft states).
+// Every other caller passes nothing and keeps the existing behaviour exactly.
+export async function synthesizeFindings(findings, perAgent, question, systemOverride = null) {
   if (!findings.length) return null;
-  const system = question ? QUESTION_SYSTEM : BRIEFING_SYSTEM;
+  const system = systemOverride || (question ? QUESTION_SYSTEM : BRIEFING_SYSTEM);
   const user = (question ? `Question: ${question}\n` : '') +
     `Findings: ${JSON.stringify(findings)}\nAgent statuses: ${JSON.stringify(perAgent)}`;
   return callLLM(system, user, { maxTokens: 450 })
@@ -75,7 +80,7 @@ export function summarizeAgentRuns(ran) {
   return { findings, perAgent };
 }
 
-export async function runOrchestration({ siteId, start, end, agentIds, question, persistSubAgentRuns = false } = {}) {
+export async function runOrchestration({ siteId, start, end, agentIds, question, persistSubAgentRuns = false, personaPrompt = null } = {}) {
   const ids = agentIds?.length
     ? agentIds
     : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
@@ -95,7 +100,7 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
   }));
 
   const { findings, perAgent } = summarizeAgentRuns(ran);
-  const narrative = await synthesizeFindings(findings, perAgent, question);
+  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);
 
   return { ranAgentIds: ids, generatedAt: new Date().toISOString(), findings, perAgent, narrative };
 }

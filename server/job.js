@@ -24,6 +24,7 @@ import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
 import { getImplementedFindingIds } from './store/drafts.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
@@ -693,6 +694,57 @@ export async function runHourlyCatchupForAllSites(tz) {
 // the exact flagged page, real re-run of the exact check that flagged it —
 // see agents/lib/fix-verification.js). Due-ness is per-row (verify_after),
 // not per-site, so this runs once globally rather than per connected site.
+// Carries the 3am Analyst cycle's output into the Action Center.
+//
+// data-analyst-agent runs its full nightly pipeline at 03:00 UTC
+// (ingest_schedule_hour_utc) — collectors, forecasts, insights, including
+// forecast_risk insights that predict a decline before it shows up in
+// reporting. Until now none of that reached the Action Center: the only ways
+// an insight could become a recommendation were a human clicking approve on
+// one item at a time. Every night's analysis simply sat in the Analyst page.
+//
+// Creates recommendations only, never drafts, so analyst findings flow
+// through the same risk-tier/auto-remediation machinery as every agent
+// finding rather than getting their own parallel autonomy path.
+//
+// Best-effort per site and never throws: the Analyst is a separate service,
+// and it being down must not take the rest of the schedule with it.
+export async function runAnalystSyncForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0 };
+
+  for (const site of sites) {
+    try {
+      const insights = await fetchAnalystInsights(site.id);
+      if (!insights.length) continue;
+      const result = await syncAnalystInsightsToActionCenter(site.id, insights, { site });
+      totals.sites++;
+      totals.created += result.created;
+      totals.skipped += result.skipped;
+      totals.ineligible += result.ineligible;
+      if (result.created) {
+        console.log(`[job] analyst sync: site ${site.id} "${site.name}" created ${result.created} recommendation(s) from nightly insights.`);
+      }
+    } catch (err) {
+      console.error(`[job] analyst sync failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  if (totals.created) console.log(`[job] analyst sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// Reads the Analyst service's own insights endpoint. Kept here rather than
+// importing routes/dataAnalyst.js's callPython, which is request-scoped and
+// not exported — one small fetch is cheaper than restructuring that module.
+async function fetchAnalystInsights(siteId) {
+  const base = process.env.DATA_ANALYST_AGENT_INTERNAL_URL || 'http://127.0.0.1:8000';
+  const url = new URL(`/clients/${siteId}/insights`, base);
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`analyst insights returned HTTP ${res.status}`);
+  const body = await res.json();
+  return Array.isArray(body) ? body : (body?.insights || []);
+}
+
 export async function runFixVerificationsForAllSites() {
   try {
     const results = await runDueVerifications();
