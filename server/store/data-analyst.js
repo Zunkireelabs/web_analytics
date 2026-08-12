@@ -104,6 +104,40 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
   }
 }
 
+// "I want to grow on this keyword" — seeds ONE keyword gap by hand.
+//
+// Deliberately writes the same keyword_gaps row shape clustering.py produces,
+// with source='manual', so an added keyword travels the exact same
+// approve -> Action Center recommendation -> draft path a discovered gap
+// does. No parallel mechanism, and it inherits every gate that path already
+// has. Returns the row so the caller can hand it straight to
+// createActionCenterRecommendationForGap.
+//
+// Deduped on (site, topic) among gaps still open: asking for the same
+// keyword twice should not create two competing gaps, but a topic that was
+// previously dismissed can legitimately be raised again.
+export async function addKeywordGap(siteId, { topic, reason = null, priority = 'medium' }) {
+  const trimmed = String(topic || '').trim();
+  if (!trimmed) throw new Error('topic is required to add a keyword gap.');
+
+  const { rows: existing } = await query(
+    `SELECT id, topic, reason, priority, status, source, created_at
+       FROM keyword_gaps
+      WHERE site_id = $1 AND lower(topic) = lower($2) AND status IN ('pending_review', 'accepted')
+      LIMIT 1`,
+    [siteId, trimmed]
+  );
+  if (existing[0]) return { ...existing[0], status: GAP_STATUS_FROM_DB[existing[0].status], alreadyExisted: true };
+
+  const { rows } = await query(
+    `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
+     VALUES ($1, $2, $3, $4, 'pending_review', 'manual')
+     RETURNING id, topic, reason, priority, status, source, created_at`,
+    [siteId, trimmed, reason, priority]
+  );
+  return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyExisted: false };
+}
+
 export async function getKeywordClusters(siteId, clusterType) {
   const { rows } = await query(
     `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score
