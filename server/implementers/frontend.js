@@ -1,4 +1,4 @@
-import { resolveFile, resolveNewContentTarget, resolveTranslationTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentUrl, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
@@ -49,30 +49,44 @@ export async function resolveTargetAndBody(site, draft) {
   const actionType = draft.action_type;
   const content = draft.content || {};
 
+  // The title each of the branches below slugifies into its file path — the
+  // permalink must be resolved from the SAME title, or the page would be
+  // written at one slug and declare it lives at another.
   if (actionType === 'landing-page') {
-    const filePath = resolveNewContentTarget(site, 'landing-page', content.metaTitle || content.headline || content.target);
+    const title = content.metaTitle || content.headline || content.target;
+    const filePath = resolveNewContentTarget(site, 'landing-page', title);
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["landing-page"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderLandingPageBody(content, site), contentFormat: 'markdown' };
+    const permalink = resolveNewContentUrl(site, 'landing-page', title);
+    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
-    const filePath = resolveNewContentTarget(site, 'blog-outline', content.title || content.topic);
+    const title = content.title || content.topic;
+    const filePath = resolveNewContentTarget(site, 'blog-outline', title);
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderBlogOutlineBody(content, site), contentFormat: 'markdown' };
+    const permalink = resolveNewContentUrl(site, 'blog-outline', title);
+    return { ok: true, filePath, body: renderBlogOutlineBody(content, site, { permalink }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'direct-answer') {
-    const filePath = resolveNewContentTarget(site, 'direct-answer', content.title || content.heading || content.query);
+    const title = content.title || content.heading || content.query;
+    const filePath = resolveNewContentTarget(site, 'direct-answer', title);
     if (!filePath) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
-    return { ok: true, filePath, body: renderDirectAnswerBody(content, site), contentFormat: 'markdown' };
+    const permalink = resolveNewContentUrl(site, 'direct-answer', title);
+    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink }), contentFormat: 'markdown' };
   }
 
+  // No permalink for a translation: its target is a language-suffixed sibling
+  // of the SOURCE page's real file (resolveTranslationTarget), not a
+  // newContentTargets directory, so there is no urlPattern to resolve against
+  // and no honest way to know the site's translated-URL convention. It keeps
+  // today's behavior — the build decides — rather than guessing one.
   if (actionType === 'translation') {
     const sourcePath = resolveFile(site, content.page);
     if (!sourcePath) {
@@ -92,7 +106,8 @@ export async function resolveTargetAndBody(site, draft) {
     // site hasn't mapped that URL in url_file_map.pages.
     const page = content.page || draft.input?.page;
     const existingFile = page ? resolveFile(site, page) : null;
-    const filePath = existingFile || resolveNewContentTarget(site, actionType, content.metaTitle || content.headline);
+    const title = content.metaTitle || content.headline;
+    const filePath = existingFile || resolveNewContentTarget(site, actionType, title);
     if (!filePath) {
       const pageHint = page ? ` (real target "${page}" isn't in url_file_map.pages either)` : '';
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map.newContentTargets["${actionType}"] configured${pageHint} — add one via \`npm run connect-repo\` before this can be applied.` };
@@ -102,7 +117,10 @@ export async function resolveTargetAndBody(site, draft) {
     // this doesn't silently orphan the live URL.
     const existing = existingFile ? await getFileContent(site, existingFile, baseBranch(site)) : null;
     const preserved = extractPreservedFrontMatter(existing?.content);
-    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site), contentFormat: 'markdown' };
+    // Only for the genuinely-new-file case — an existing page's own preserved
+    // permalink always wins inside the renderer.
+    const permalink = existingFile ? null : resolveNewContentUrl(site, actionType, title);
+    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site, { permalink }), contentFormat: 'markdown' };
   }
 
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };

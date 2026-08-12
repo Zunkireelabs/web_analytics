@@ -126,3 +126,47 @@ describe('site prose wrapper across every net-new page type', () => {
     assert.ok(out.indexOf('<article') > frontMatterEnd, 'wrapper opens after the closing front-matter fence');
   });
 });
+
+// The permalink is how a new page reaches a BUILD-TIME generated sitemap.
+// zunkireelabs-web has no sitemap.xml in the repo at all — src/sitemap.njk
+// (permalink: /sitemap.xml) iterates collections.all, so every page Eleventy
+// builds is listed automatically. What decides whether it's listed at the
+// RIGHT url is the page's own permalink.
+describe('permalink front matter on net-new pages', () => {
+  const site = { url_file_map: {} };
+
+  test('every net-new renderer emits the resolved permalink', () => {
+    assert.match(renderLandingPageBody({ headline: 'Leeds' }, site, { permalink: '/services/leeds/' }), /^permalink: "\/services\/leeds\/"$/m);
+    assert.match(renderBlogOutlineBody({ title: 'Boilers' }, site, { permalink: '/blog/boilers/' }), /^permalink: "\/blog\/boilers\/"$/m);
+    assert.match(renderDirectAnswerBody({ heading: 'How long?' }, site, { permalink: '/answers/how-long/' }), /^permalink: "\/answers\/how-long\/"$/m);
+    assert.match(renderTranslationBody({ translatedTitle: 'Servicios' }, site, { permalink: '/es/servicios/' }), /^permalink: "\/es\/servicios\/"$/m);
+  });
+
+  test('no permalink resolved -> the key is omitted entirely, not written empty', () => {
+    for (const [render, content] of [
+      [renderLandingPageBody, { headline: 'Leeds' }],
+      [renderBlogOutlineBody, { title: 'Boilers' }],
+      [renderDirectAnswerBody, { heading: 'How long?' }],
+      [renderTranslationBody, { translatedTitle: 'Servicios' }],
+    ]) {
+      assert.doesNotMatch(render(content, site), /permalink/, 'today\'s behavior is preserved exactly when urlPattern is unconfigured');
+      assert.doesNotMatch(render(content, site, {}), /permalink/);
+    }
+  });
+
+  test('an existing compliance page keeps its OWN permalink — overwriting must never move a live URL', () => {
+    const body = renderCompliancePageBody(
+      { headline: 'Privacy Policy' },
+      { layout: 'base.njk', permalink: '/privacy/' },
+      site,
+      { permalink: '/pages/privacy-policy/' },
+    );
+    assert.match(body, /^permalink: "\/privacy\/"$/m);
+    assert.doesNotMatch(body, /pages\/privacy-policy/);
+  });
+
+  test('a brand-new compliance page takes the resolved permalink', () => {
+    const body = renderCompliancePageBody({ headline: 'Cookie Policy' }, {}, site, { permalink: '/cookies/' });
+    assert.match(body, /^permalink: "\/cookies\/"$/m);
+  });
+});

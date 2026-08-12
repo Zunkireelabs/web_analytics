@@ -222,11 +222,52 @@ export function resolveLinkDataSources(site, pageUrl) {
 export function resolveNewContentTarget(site, actionType, title) {
   const target = site.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return null;
-  const slug = String(title || 'untitled')
+  return `${target.dir}/${slugifyTitle(title)}${target.extension}`;
+}
+
+// The single slug both the file path above and the public URL below derive
+// from — they must agree, or a page gets written to one place and declares
+// it lives at another.
+function slugifyTitle(title) {
+  return String(title || 'untitled')
     .toLowerCase().trim()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'untitled';
-  return `${target.dir}/${slug}${target.extension}`;
+}
+
+// The public URL path that same new page will live at — the other half of
+// resolveNewContentTarget, and what lets a new page reach the site's sitemap
+// without a second draft and a second PR.
+//
+// This exists because a static-site generator decides a page's URL at BUILD
+// time from the page's own front matter, not from where its file sits.
+// zunkireelabs-web's sitemap is src/sitemap.njk (permalink: /sitemap.xml)
+// iterating collections.all, so every page Eleventy builds is already in the
+// sitemap automatically and the sitemap file itself needs no edit — there is
+// no sitemap.xml in the repo to edit. What a new page actually needs is a
+// correct `permalink`. That site's own two directories show why it can't be
+// inferred: src/blog/blog.json sets "permalink": "/blog/{{ page.fileSlug }}/"
+// for every post (so blog posts are already correct), while src/pages/*.njk
+// each carry their own explicit `permalink: /about/` with no directory
+// default — a new file dropped into src/pages/ would publish at Eleventy's
+// fallback /pages/<slug>/ and be listed in the sitemap at that wrong URL.
+//
+// `urlPattern` is therefore per-target CONFIG ("/services/{slug}/"), not
+// inference: the directory -> URL mapping is a property of the site's build
+// setup this code cannot observe, and a guessed URL is worse than none — it
+// would publish a real page at a URL that 404s and then advertise that URL
+// in the sitemap. No urlPattern (or an unusable one) returns null, and every
+// caller falls back to exactly today's behavior: write the page, add no
+// permalink, let the build decide.
+export function resolveNewContentUrl(site, actionType, title) {
+  const urlPattern = site.url_file_map?.newContentTargets?.[actionType]?.urlPattern;
+  if (!urlPattern || !urlPattern.includes('{slug}')) return null;
+  const url = urlPattern.replace('{slug}', slugifyTitle(title));
+  // Must be a site-root-relative path. Anything else — a full URL, a
+  // traversal, a doubled separator from an empty segment — is malformed
+  // config, not something to normalize into a guess.
+  if (!url.startsWith('/') || url.includes('..') || url.includes('//')) return null;
+  return url;
 }
 
 // Site-level (not per-page) targets — today only llms.txt/robots.txt.
