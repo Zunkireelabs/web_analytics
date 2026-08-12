@@ -3,6 +3,10 @@ import { getWatchlistItemById, setWatchlistStatus } from '../../store/watchlist.
 import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, contentGapsFor, GAP_TYPE_TO_GENERATOR } from './page-content.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
+import { getSiteById } from '../../store/read.js';
+import { resolveFile } from '../../implementers/lib/url-file-map.js';
+import { computeSiteFingerprint } from './site-fingerprint.js';
+import { problemSignatureFor, buildRepairRecipe } from './learned-repair.js';
 
 // Reverse of TAG_TO_GENERATOR / GAP_TYPE_TO_GENERATOR — which real tag(s) a
 // given generatorId's draft was meant to resolve, per source agent (the same
@@ -75,17 +79,49 @@ async function learnFromOutcome(row, outcome, tags) {
       return;
     }
     if (outcome !== 'verified-fixed') return;
+
+    // A live re-check confirming the issue is genuinely gone is the only
+    // signal strong enough to justify letting this repair run on a DIFFERENT
+    // client later, so this is the one write path that attaches a fingerprint
+    // and a recipe. Both are best-effort: if the site row or its file mapping
+    // can't be resolved, the memory is still written — it just stays
+    // advisory-only (findPortableRepairs requires both to be non-null), which
+    // is exactly today's behavior rather than a regression.
+    const { fingerprint, recipe } = await portabilityFor(row).catch(() => ({ fingerprint: null, recipe: null }));
+
     await recordFixOutcome({
       category: topLevelCategoryForGenerator(row.generator_id), scope: 'client', siteId: row.site_id,
       generatorId: row.generator_id, outcome: 'success', sourceType: 'runtime-auto',
-      problemSignature: `${row.generator_id}:${(tags || []).join(',') || row.source}`,
+      problemSignature: problemSignatureFor(row.generator_id, tags, row.source),
       symptoms: `A ${row.generator_id} fix (source: ${row.source}) for tag(s) [${(tags || []).join(', ')}] was confirmed resolved on a real re-check of the live page.`,
       affectedPattern: `${row.generator_id} draft addressing tag(s): ${(tags || []).join(', ')}.`,
       fixStrategy: `See the implemented draft (id ${row.draft_id}) for the fix content that resolved this — re-run the same generator with the same approach for this tag pattern.`,
+      siteFingerprint: fingerprint,
+      repairRecipe: recipe,
     });
   } catch (err) {
     console.warn(`[fix-verification] agent_fix_memory write failed for row ${row.id}:`, err.message);
   }
+}
+
+// The technology context this fix was proven in, plus how to re-perform it.
+// Returns nulls (not a throw) for a generator that may never run
+// cross-client, or a site whose config can't answer the question — the
+// resulting memory is then simply advisory, same as every row written today.
+async function portabilityFor(row) {
+  const recipe = buildRepairRecipe(row.generator_id);
+  if (!recipe) return { fingerprint: null, recipe: null };
+
+  const site = await getSiteById(row.site_id);
+  if (!site) return { fingerprint: null, recipe: null };
+
+  const fingerprint = computeSiteFingerprint(site, { targetFilePath: resolveFile(site, row.page_url) });
+  // fingerprintCompatible refuses when a required token is absent, so a
+  // fingerprint missing render:/target-ext: could never match anything
+  // anyway. Storing null instead makes that explicit in the data rather than
+  // leaving a row that looks portable and silently never is.
+  const hasRequired = fingerprint.some((t) => t.startsWith('render:')) && fingerprint.some((t) => t.startsWith('target-ext:'));
+  return hasRequired ? { fingerprint, recipe } : { fingerprint: null, recipe: null };
 }
 
 async function verifyOne(row) {
