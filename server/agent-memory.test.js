@@ -115,13 +115,28 @@ function fakeQuery(text, params = []) {
     return { rows: [{ id }] };
   }
 
+  if (sql.startsWith('UPDATE agent_fix_memory') && sql.includes("SET status = 'deprecated'")) {
+    const [id, suffix] = params;
+    const row = store.find((r) => r.id === id && r.status !== 'deprecated');
+    if (!row) return { rows: [] };
+    row.status = 'deprecated';
+    row.root_cause = `${row.root_cause || ''}${suffix}`;
+    return { rows: [{ id }] };
+  }
+
+  if (sql.startsWith('SELECT id, generator_id FROM agent_fix_memory')) {
+    const [known] = params;
+    const rows = store.filter((r) => r.status !== 'deprecated' && r.generator_id != null && !known.includes(r.generator_id));
+    return { rows: rows.map((r) => ({ id: r.id, generator_id: r.generator_id })) };
+  }
+
   throw new Error(`agent-memory.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
 mock.module('/Users/yukta/Travel/analytics/server/db.js', {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
-const { findRelevantMemory, recordFixOutcome, findPortableRepairs } = await import('./agent-memory.js');
+const { findRelevantMemory, recordFixOutcome, findPortableRepairs, deprecateMemory, deprecateObsoleteMemories } = await import('./agent-memory.js');
 
 // Promotes a freshly-recorded row to the exact state findPortableRepairs
 // requires, without hand-writing a store row — so these tests exercise the
@@ -398,5 +413,90 @@ describe('no-production-change proof', () => {
     assert.ok(!('siteFingerprint' in found[0]));
     assert.ok(!('repairRecipe' in found[0]));
     assert.equal(found[0].executionPermission, 'requires_approval');
+  });
+});
+
+// Two capabilities that existed in the schema but had never once run: the
+// fix_pattern prompt branch (0 of 58 live rows had one, making
+// withAgentMemory's "Fix: ..." form unreachable) and status='deprecated'
+// (in every read filter, written by nothing).
+describe('fix_pattern reaches the prompt only when trusted', () => {
+  beforeEach(() => resetStore());
+
+  const lesson = {
+    category: 'content', scope: 'client', siteId: 1, generatorId: 'faq',
+    problemSignature: 'todo-marker', validationRuleId: 'todo-marker',
+    symptoms: 'Past faq drafts left a TODO marker.',
+    affectedPattern: 'faq generation output matching Quality Gate pattern "todo-marker".',
+    fixStrategy: 'Avoid "todo-marker" on the first attempt.',
+    fixPattern: 'Never emit TODO/TBD/FIXME markers — write the finished text.',
+    outcome: 'success',
+  };
+
+  test('a candidate lesson stores its directive but is not yet auto-appliable', async () => {
+    const id = await recordFixOutcome(lesson);
+    const row = store.find((r) => r.id === id);
+    assert.equal(row.fix_pattern, lesson.fixPattern);
+    assert.equal(row.execution_permission, 'requires_approval', 'one occurrence is not enough to inline a directive');
+  });
+
+  test('after the trust threshold it becomes auto, which is what unlocks the "Fix:" prompt form', async () => {
+    const id = await recordFixOutcome(lesson);
+    await recordFixOutcome(lesson);
+    await recordFixOutcome(lesson);
+    const row = store.find((r) => r.id === id);
+    assert.equal(row.status, 'trusted');
+    assert.equal(row.execution_permission, 'auto');
+    assert.equal(row.fix_pattern, lesson.fixPattern, 'the directive survives promotion');
+  });
+
+  test('a lesson with no directive stays advisory rather than carrying invented guidance', async () => {
+    const id = await recordFixOutcome({ ...lesson, fixPattern: null, validationRuleId: 'unknown-pattern', problemSignature: 'unknown-pattern' });
+    assert.equal(store.find((r) => r.id === id).fix_pattern, null);
+  });
+});
+
+describe('deprecation — retiring obsolete lessons', () => {
+  beforeEach(() => resetStore());
+
+  const base = {
+    category: 'content', scope: 'client', siteId: 1,
+    symptoms: 'x', affectedPattern: 'y', fixStrategy: 'z', outcome: 'success',
+  };
+
+  test('retires a lesson whose generator no longer exists', async () => {
+    const gone = await recordFixOutcome({ ...base, generatorId: 'removed-generator', problemSignature: 'a' });
+    const kept = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'b' });
+    const retired = await deprecateObsoleteMemories(['faq', 'meta-title']);
+    assert.deepEqual(retired, [gone]);
+    assert.equal(store.find((r) => r.id === gone).status, 'deprecated');
+    assert.equal(store.find((r) => r.id === kept).status, 'candidate');
+  });
+
+  test('never touches generator_id NULL rows — those are cross-generator by design', async () => {
+    const structural = await recordFixOutcome({ ...base, generatorId: null, problemSignature: 'c' });
+    assert.deepEqual(await deprecateObsoleteMemories(['faq']), []);
+    assert.equal(store.find((r) => r.id === structural).status, 'candidate');
+  });
+
+  test('an empty generator list is treated as "unknown", never as "nothing exists"', async () => {
+    // Otherwise a caller that failed to load the registry would deprecate the
+    // entire table in one call.
+    const id = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'd' });
+    assert.deepEqual(await deprecateObsoleteMemories([]), []);
+    assert.deepEqual(await deprecateObsoleteMemories(null), []);
+    assert.equal(store.find((r) => r.id === id).status, 'candidate');
+  });
+
+  test('a deprecated lesson is excluded from retrieval', async () => {
+    const id = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'e' });
+    await deprecateMemory(id, 'superseded');
+    assert.deepEqual(await findRelevantMemory({ scope: 'client', siteId: 1, generatorId: 'faq' }), []);
+  });
+
+  test('deprecating twice is a no-op, not a double write', async () => {
+    const id = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'f' });
+    assert.equal(await deprecateMemory(id, 'first'), id);
+    assert.equal(await deprecateMemory(id, 'second'), null);
   });
 });

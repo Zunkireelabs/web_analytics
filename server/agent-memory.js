@@ -111,6 +111,67 @@ export async function findRelevantMemory({
   return ranked;
 }
 
+// Retirement. `deprecated` has been in the CHECK constraint and in every read
+// filter since migration 097, but nothing has ever written it — so a lesson
+// could only ever be quarantined as WRONG (flagged_for_review, via two
+// consecutive failed reuses), never retired as OBSOLETE. Those are different
+// things: a lesson about a generator that no longer exists isn't incorrect,
+// it just has nothing left to apply to, and leaving it 'trusted' means it
+// keeps consuming one of withAgentMemory's five prompt slots forever.
+export async function deprecateMemory(id, reason) {
+  const { rows } = await query(
+    `UPDATE agent_fix_memory
+     SET status = 'deprecated',
+         root_cause = COALESCE(root_cause, '') || $2,
+         updated_at = now()
+     WHERE id = $1 AND status != 'deprecated'
+     RETURNING id`,
+    [id, ` [deprecated: ${reason}]`],
+  );
+  clearCache();
+  return rows[0]?.id ?? null;
+}
+
+// Retires every lesson whose generator no longer exists. `knownGeneratorIds`
+// is passed in rather than imported so this module keeps its documented
+// no-heavy-imports property (the generator registry loads every generator
+// module); callers hand it the real registry list.
+//
+// DELIBERATELY NOT WIRED TO A CRON, and the reason is concrete rather than
+// cautious: not every generator_id in this table is a registry generator.
+// PSEUDO-GENERATORS exist — design-drift.js's recordRejectedTemplateLesson
+// writes generator_id = 'design-agent-component-templates', which is a real,
+// current lesson source and is not in generators/registry.js. Checked against
+// live data: a naive registry-only sweep today would retire exactly one row,
+// and that row would be the wrong one.
+//
+// So any caller must pass registry ids PLUS every pseudo-generator id it
+// knows about, and should be a deliberate operator action rather than a
+// background job quietly deleting knowledge on a schedule.
+//
+// Deliberately conservative: rows with generator_id NULL are never touched —
+// those are the deliberately cross-generator structural lessons (see
+// audit-url-file-map.js's note on that convention), not orphans. And an
+// EMPTY knownGeneratorIds is treated as "the caller couldn't tell us", which
+// must never be read as "no generator exists" — that would deprecate the
+// entire table in one call.
+export async function deprecateObsoleteMemories(knownGeneratorIds) {
+  const known = [...(knownGeneratorIds || [])].filter(Boolean);
+  if (!known.length) return [];
+
+  const { rows } = await query(
+    `SELECT id, generator_id FROM agent_fix_memory
+     WHERE status != 'deprecated' AND generator_id IS NOT NULL AND NOT (generator_id = ANY($1::text[]))`,
+    [known],
+  );
+  const retired = [];
+  for (const row of rows) {
+    const id = await deprecateMemory(row.id, `generator "${row.generator_id}" no longer exists`);
+    if (id) retired.push(id);
+  }
+  return retired;
+}
+
 // Cross-client retrieval — the ONLY function here permitted to return a row
 // learned on a DIFFERENT site than the caller's.
 //
