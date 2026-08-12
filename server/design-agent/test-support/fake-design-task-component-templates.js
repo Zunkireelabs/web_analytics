@@ -23,10 +23,37 @@ console.log(`DESIGN_AGENT_CONTAINER: ${JSON.stringify({ container_id: containerI
 if (process.env.DESIGN_AGENT_TEST_CONTAINER_LOG) fs.writeFileSync(process.env.DESIGN_AGENT_TEST_CONTAINER_LOG, containerId);
 if (process.env.DESIGN_AGENT_TEST_LESSONS_LOG) fs.writeFileSync(process.env.DESIGN_AGENT_TEST_LESSONS_LOG, lessonsJson || '');
 
+// The placeholder tokens each action type's stored template MUST contain —
+// the same contract design-drift.js's REQUIRED_PLACEHOLDERS enforces on every
+// derived template before it can be saved. This stub used to emit a row with
+// no tokens at all, which was harmless only because nothing validated the
+// agent's output on the way to storage; now that the worker persists what it
+// derives, an invalid stub is indistinguishable from a genuinely broken agent
+// run and correctly fails the job. Emitting a template that satisfies the real
+// contract is what keeps this fixture a stand-in for a SUCCESSFUL run.
+const ROW_TOKENS = {
+  faq: ['{{QUESTION}}', '{{ANSWER}}'],
+  'qa-content': ['{{QUESTION}}', '{{ANSWER}}'],
+  'expand-content': ['{{HEADING}}', '{{BODY}}'],
+  'internal-links': ['{{URL}}', '{{ANCHOR_TEXT}}'],
+};
+
 const actionTypes = actionTypesJson ? JSON.parse(actionTypesJson) : [];
 const componentTemplates = {};
 for (const actionType of actionTypes) {
-  componentTemplates[actionType] = { wrapper: '<div class="stub-wrap">{{ROWS}}</div>', row: `<div class="stub-row">${actionType}</div>` };
+  // content-wrapper is the single-slot shape — one {{BODY}}, no repeating row.
+  if (actionType === 'content-wrapper') {
+    componentTemplates[actionType] = { wrapper: `<div class="stub-prose" data-action="${actionType}">{{BODY}}</div>` };
+    continue;
+  }
+  const tokens = ROW_TOKENS[actionType] || [];
+  // data-action echoes the requested type back so tests can still assert the
+  // real requested keys travelled through end to end (that's what this stub is
+  // for) while the row also satisfies the placeholder contract above.
+  componentTemplates[actionType] = {
+    wrapper: '<div class="stub-wrap">{{ROWS}}</div>',
+    row: `<div class="stub-row" data-action="${actionType}">${tokens.join(' ')}</div>`,
+  };
 }
 
 console.log('DESIGN_AGENT_RESULT: ' + JSON.stringify({

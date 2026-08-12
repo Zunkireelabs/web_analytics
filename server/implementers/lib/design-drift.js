@@ -3,7 +3,7 @@ import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { createComponentTemplateHandler, DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
-import { COMPLIANCE_ACTION_TYPES } from '../frontend.js';
+import { FRONTEND_ACTION_TYPES } from '../frontend.js';
 import { createComponentTemplateJob, getQueuedComponentTemplateJob } from '../../store/execution-jobs.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
@@ -19,10 +19,13 @@ import { createComponentTemplateJob, getQueuedComponentTemplateJob } from '../..
 //
 // Only action types with a real componentTemplates entry can go stale this
 // way — meta-title/schema/canonical/open-graph are plain values with no CSS
-// component to drift, and net-new content (blog-outline/landing-page/
-// translation, frontend.js) is placed straight into the site's own live
-// layout template rather than a stored markup snapshot, so it's always
-// current by construction. qa-content is deliberately excluded even though
+// component to drift. Net-new content (blog-outline/landing-page/translation/
+// direct-answer and the compliance pages, frontend.js) was once assumed to be
+// "always current by construction" because it lands in the site's own layout
+// template; that is only true of the layout CHROME. The body itself gets no
+// typography from the layout unless the site's real prose wrapper is applied
+// to it, which is what componentTemplates.contentWrapper supplies — so these
+// are gated like any other rendered component. qa-content is deliberately excluded even though
 // it has a componentTemplates entry: its DEFAULT_QA_TEMPLATE (marker-merge.js)
 // uses a native <details>/<summary> element with no site-specific classes at
 // all when unconfigured, so there's nothing that can go stale until a site
@@ -33,8 +36,9 @@ export const COMPONENT_TEMPLATE_KEY = {
   'expand-content': 'expandContent',
   'internal-links': 'internalLinks',
   'qa-content': 'qaContent',
-  // Net-new whole-page markdown content (compliance pages today — terms/
-  // privacy/cookie-policy, see newpage-render.js) has no repeating-item
+  // Net-new whole-page markdown content — every frontend.js action type
+  // (terms/privacy/cookie-policy, landing-page, blog-outline, direct-answer,
+  // translation; see newpage-render.js) — has no repeating-item
   // "rows" the way faq/expand-content/internal-links do, just a single
   // {{BODY}} slot — same per-site, Design-Agent-derived template mechanism,
   // one entry, no `row` placeholder requirement (see REQUIRED_PLACEHOLDERS
@@ -262,16 +266,28 @@ export function isTemplateVerified(actionType, template) {
   return { ok: true, verifiedAt: template.verifiedAt, verifiedBy: template.verifiedBy };
 }
 
-// generatorId -> the componentTemplates action type it renders through. The
-// three compliance generators all share the single generic 'content-wrapper'
-// key (see frontend.js's COMPLIANCE_ACTION_TYPES and newpage-render.js's
-// renderCompliancePageBody) rather than each having their own; every other
-// generator maps to itself. Lives here, next to COMPONENT_TEMPLATE_KEY, so
-// the draft-generation gate (routes/action-center.js) and the recommendation
-// gate (agents/lib/recommendations.js) cannot drift apart on which action
-// type a generator is actually checked against.
+// generatorId -> the componentTemplates action type it renders through. Every
+// net-new whole-page generator (frontend.js's FRONTEND_ACTION_TYPES: the three
+// compliance pages, landing-page, blog-outline, direct-answer, translation)
+// shares the single generic 'content-wrapper' key rather than each having its
+// own — they all render the same shape, one markdown body dropped into one
+// {{BODY}} slot (newpage-render.js). Every other generator maps to itself.
+//
+// This used to be COMPLIANCE_ACTION_TYPES only, which meant the other four
+// net-new page types had no component-template concept at all: both gates saw
+// 'no-concept', returned ok, and waved them straight through — while
+// newpage-render.js emitted their bodies with no site wrapper, i.e. bare
+// unstyled <h1>/<h2>/<p> into a real PR. That is the exact failure already
+// confirmed live on zunkireelabs-web's /terms/, /privacy/ and /cookies/ before
+// contentWrapper was captured for it; the compliance trio was fixed then and
+// these four were left behind.
+//
+// Lives here, next to COMPONENT_TEMPLATE_KEY, so the draft-generation gate
+// (routes/action-center.js) and the recommendation gate
+// (agents/lib/recommendations.js) cannot drift apart on which action type a
+// generator is actually checked against.
 export function componentTemplateActionTypeFor(generatorId) {
-  return COMPLIANCE_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
+  return FRONTEND_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
 }
 
 // Convenience read used by both gates: resolves the stored template for a
@@ -311,6 +327,17 @@ export function recordRejectedTemplateLesson({ siteId, actionType, error, record
   }).catch((err) => console.error(`[design-drift] failed to record rejected-template memory for ${actionType}:`, err.message));
 }
 
+// The site's own real homepage URL — the page a freshness check runs against
+// when no more specific one is known. website_domain is the configured value;
+// gsc_property is the fallback for a site connected via Search Console only
+// (its `sc-domain:` prefix is not part of the URL). Returns null when neither
+// is set, which every caller treats as "cannot check against a live page."
+export function sitePageUrl(site) {
+  const domain = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '');
+  if (!domain) return null;
+  return /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
+}
+
 // A synthetic req-like shape for recordAuditEvent — this resolver runs
 // during draft GENERATION (generateDraft, called from the manual UI route,
 // the MCP tool, and the unattended execution engine alike), never from one
@@ -320,6 +347,100 @@ export function recordRejectedTemplateLesson({ siteId, actionType, error, record
 // clicked to create.
 function systemActorReq(siteId) {
   return { userId: null, siteId, ip: null, get: () => null };
+}
+
+// The ONE place a Design-Agent-derived template becomes a saved, verified
+// template on a site — validate, stamp, persist, audit. Extracted out of
+// resolveOrCreateComponentTemplate below because there are two ways a
+// derivation can arrive and they must produce byte-identical stored state:
+//
+//   1. INLINE — resolveOrCreateComponentTemplate ran the OpenHands session
+//      itself (first-time derivation, no template to fall back on).
+//   2. QUEUED — the design-agent worker ran it off the execution_jobs queue
+//      (worker.js's processOneJob), which is the repair path for an existing
+//      but unverified template.
+//
+// Path 2 had NO consumer at all before this: the worker wrote the derived
+// templates onto execution_jobs.result and stopped, and every reader of that
+// column (component-template-proposal.js and the /design-jobs + /confirm
+// staff routes) was deleted by f7156ef along with the human-confirm workflow.
+// So a queued re-derivation ran, succeeded, and its output was discarded —
+// the template stayed unstamped, the gate kept rejecting it, and the next
+// attempt queued another job to throw away. That is why the four templates on
+// the only repo-connected site never healed.
+//
+// Takes the whole `componentTemplates` map the handler returned (keyed by
+// ACTION TYPE, e.g. 'faq' / 'expand-content') rather than one entry, because a
+// single job can be asked for several keys at once — one config write for all
+// of them, not one per key.
+export async function persistDerivedComponentTemplates(site, componentTemplates, {
+  jobId = null,
+  saveConfig = updateSiteRepoConfig,
+  recordAudit = recordAuditEvent,
+  recordFixOutcomeFn = recordFixOutcome,
+} = {}) {
+  const accepted = [];
+  const rejected = [];
+
+  for (const [actionType, derived] of Object.entries(componentTemplates || {})) {
+    const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+    if (!componentKey) { rejected.push({ actionType, reason: 'no-concept' }); continue; }
+    if (!derived?.wrapper) { rejected.push({ actionType, reason: 'not-derived' }); continue; }
+
+    const check = validatePlaceholders(actionType, derived);
+    if (!check.ok) {
+      recordRejectedTemplateLesson({ siteId: site.id, actionType, error: check.error, recordFixOutcomeFn });
+      rejected.push({ actionType, reason: 'invalid-placeholders', error: check.error });
+      continue;
+    }
+
+    // Stamped verified-by-design-agent at the moment of derivation: this
+    // template was just read out of the site's REAL repo by an OpenHands
+    // session (openhands-handler.js), which is exactly the grounding the gate
+    // in generateDraft is asking for. `jobId` is the evidence trail — null for
+    // the inline (non-job) path, which is fine; the stamp's value is
+    // `verifiedBy`, and `verifiedRef` is supporting detail.
+    accepted.push({
+      actionType,
+      componentKey,
+      template: stampTemplateVerification(derived, {
+        verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
+        verifiedRef: jobId,
+      }),
+    });
+  }
+
+  if (!accepted.length) return { ok: false, saved: {}, rejected };
+
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: {
+      ...site.url_file_map?.siteRoot,
+      componentTemplates: {
+        ...site.url_file_map?.siteRoot?.componentTemplates,
+        ...Object.fromEntries(accepted.map((a) => [a.componentKey, a.template])),
+      },
+    },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap });
+
+  for (const { actionType, componentKey } of accepted) {
+    await recordAudit(systemActorReq(site.id), {
+      action: 'tenant.component_template_auto_created',
+      targetType: 'site',
+      targetId: String(site.id),
+      tenantSiteId: site.id,
+      tenantName: site.name,
+      metadata: { actionType, componentKey, source: 'design-agent-auto', verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT, jobId },
+      success: true,
+    });
+  }
+
+  return {
+    ok: true,
+    saved: Object.fromEntries(accepted.map((a) => [a.actionType, a.template])),
+    rejected,
+  };
 }
 
 // The find-or-create entry point every draft-generation/apply call site
@@ -392,7 +513,10 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // draft attempt on a blocked site would add another job for work already
     // pending — the daily run alone would queue dozens.
     if (!queued) {
-      await enqueueDerivation(site.id, [actionType], { requestedBy: null }).catch((err) => {
+      // pageUrl rides along so the derived result can be checked against the
+      // site's real live CSS (checkTemplateFreshness) — createComponentTemplateJob
+      // has always accepted it and every caller was dropping it.
+      await enqueueDerivation(site.id, [actionType], { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
         console.error(`[design-drift] could not queue re-derivation for site ${site.id}/${actionType}:`, err.message);
       });
     }
@@ -414,46 +538,27 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     return { ok: false, reason: 'design-agent-error', error: message, template: null, componentKey };
   }
 
-  const derived = result?.componentTemplates?.[actionType];
-  if (!derived?.wrapper) return { ok: false, reason: 'not-derived', template: null, componentKey };
-
-  const check = validatePlaceholders(actionType, derived);
-  if (!check.ok) {
-    recordRejectedTemplateLesson({ siteId: site.id, actionType, error: check.error, recordFixOutcomeFn });
-    return { ok: false, reason: 'invalid-placeholders', error: check.error, template: null, componentKey };
+  // Same validate -> stamp -> save -> audit the queued worker path runs, so
+  // an inline derivation and a queued re-derivation can never leave the site
+  // row in two different shapes.
+  const persisted = await persistDerivedComponentTemplates(site, result?.componentTemplates, {
+    jobId: result?.jobId ?? null, saveConfig, recordAudit, recordFixOutcomeFn,
+  });
+  const stamped = persisted.saved?.[actionType];
+  if (!stamped) {
+    // This call asked for exactly one action type, so any rejection reported
+    // is this one's — surfaced verbatim rather than flattened to a generic
+    // failure, since 'not-derived' and 'invalid-placeholders' mean different
+    // things to the caller.
+    const failure = persisted.rejected.find((r) => r.actionType === actionType);
+    return {
+      ok: false,
+      reason: failure?.reason || 'not-derived',
+      error: failure?.error,
+      template: null,
+      componentKey,
+    };
   }
-
-  // Stamped verified-by-design-agent at the moment of derivation: this
-  // template was just read out of the site's REAL repo by an OpenHands
-  // session (openhands-handler.js), which is exactly the grounding the gate
-  // in generateDraft is asking for. `result.jobId` is the evidence trail —
-  // null for the inline (non-job) handler path, which is fine; the stamp's
-  // value is `verifiedBy`, and `verifiedRef` is supporting detail.
-  const stamped = stampTemplateVerification(derived, {
-    verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
-    verifiedRef: result?.jobId ?? null,
-  });
-
-  const urlFileMap = {
-    ...site.url_file_map,
-    siteRoot: {
-      ...site.url_file_map?.siteRoot,
-      componentTemplates: {
-        ...site.url_file_map?.siteRoot?.componentTemplates,
-        [componentKey]: stamped,
-      },
-    },
-  };
-  await saveConfig({ siteId: site.id, urlFileMap });
-  await recordAudit(systemActorReq(site.id), {
-    action: 'tenant.component_template_auto_created',
-    targetType: 'site',
-    targetId: String(site.id),
-    tenantSiteId: site.id,
-    tenantName: site.name,
-    metadata: { actionType, componentKey, source: 'design-agent-auto', verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT },
-    success: true,
-  });
 
   return { ok: true, template: stamped, source: 'design-agent', justCreated: true, componentKey };
 }

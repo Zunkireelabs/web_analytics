@@ -1,6 +1,8 @@
 import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
 import { createDesignAgentHandler } from './openhands-handler.js';
 import { safeMessage } from '../lib/errors.js';
+import { getSiteById } from '../store/read.js';
+import { persistDerivedComponentTemplates } from '../implementers/lib/design-drift.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 
@@ -24,13 +26,43 @@ async function notImplementedHandler() {
 // real worker keeps polling globally across every tenant; it exists for
 // callers (worker.test.js's fixtures) that need to claim only their own
 // site's jobs.
-export async function processOneJob({ handler = notImplementedHandler, siteId = null } = {}) {
+export async function processOneJob({
+  handler = notImplementedHandler,
+  siteId = null,
+  getSiteByIdFn = getSiteById,
+  persistTemplates = persistDerivedComponentTemplates,
+} = {}) {
   const job = await claimNextDesignAgentJob(siteId);
   if (!job) return null;
 
   await appendJobLog(job.id, `Claimed by worker pid ${process.pid}`);
   try {
     const outcome = await handler(job);
+
+    // A component-templates job's whole point is to leave a VERIFIED template
+    // on the site row. Writing the derived markup only onto execution_jobs.result
+    // (below) does not do that: every reader of that column was deleted with the
+    // human-confirm workflow (f7156ef), so this job's real output had no consumer
+    // at all — the queued re-derivation design-drift.js enqueues for an unverified
+    // template ran, succeeded, and was discarded, leaving the gate downstream to
+    // reject the same template forever. This is the consumer.
+    //
+    // Deliberately INSIDE the try, before the status transition: if persisting
+    // fails, this job is a failure — the site is no better off than before it ran
+    // — and the next draft attempt should queue a fresh derivation rather than
+    // trust a 'completed' row that changed nothing.
+    if (job.params?.mode === 'component-templates' && outcome?.componentTemplates) {
+      const site = await getSiteByIdFn(job.site_id);
+      if (!site) throw new Error(`site ${job.site_id} no longer exists — cannot save derived component templates`);
+      const persisted = await persistTemplates(site, outcome.componentTemplates, { jobId: job.id });
+      const savedKeys = Object.keys(persisted.saved || {});
+      if (!savedKeys.length) {
+        const why = persisted.rejected?.map((r) => `${r.actionType}: ${r.error || r.reason}`).join('; ') || 'no usable template in the result';
+        throw new Error(`Design Agent returned no saveable component template — ${why}`);
+      }
+      await appendJobLog(job.id, `Verified and saved component template(s): ${savedKeys.join(', ')}`);
+    }
+
     await appendJobLog(job.id, 'Job completed');
     // outcome is the handler's own return value (e.g. openhands-handler.js's
     // { jobId, detail, componentTemplates } for a component-templates job) —

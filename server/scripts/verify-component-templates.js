@@ -40,6 +40,7 @@ import {
   validatePlaceholders,
   stampTemplateVerification,
   TEMPLATE_VERIFIED_BY,
+  sitePageUrl,
 } from '../implementers/lib/design-drift.js';
 
 function parseArgs(argv) {
@@ -56,15 +57,12 @@ function parseArgs(argv) {
 // The page the freshness check runs against. A component's classes are only
 // provably live if they're defined in the CSS the real site actually ships,
 // so this needs a real URL: an explicit --page-url when the caller knows a
-// page that uses the component, otherwise the site's own homepage. Homepage
-// is a sound default because Tailwind builds one stylesheet for the whole
-// site — a class that survived the build is present in that bundle whichever
-// page loads it.
-function defaultPageUrl(site) {
-  const domain = site.website_domain || site.gsc_property?.replace(/^sc-domain:/, '');
-  if (!domain) return null;
-  return /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
-}
+// page that uses the component, otherwise the site's own homepage (design-drift.js's
+// sitePageUrl — the same derivation the autonomous re-derivation path uses when it
+// attaches a pageUrl to a queued job, so this script and the live pipeline can never
+// disagree about which page a site is verified against). Homepage is a sound default
+// because Tailwind builds one stylesheet for the whole site — a class that survived
+// the build is present in that bundle whichever page loads it.
 
 async function verifySite(site, { apply, pageUrl: pageUrlOverride }) {
   const templates = site.url_file_map?.siteRoot?.componentTemplates || {};
@@ -78,7 +76,7 @@ async function verifySite(site, { apply, pageUrl: pageUrlOverride }) {
     return { checked: 0, stamped: 0, failed: 0 };
   }
 
-  const pageUrl = pageUrlOverride || defaultPageUrl(site);
+  const pageUrl = pageUrlOverride || sitePageUrl(site);
   if (!pageUrl) {
     console.log('  SKIP: no website_domain or gsc_property on this site, and no --page-url given — cannot verify against a real page');
     return { checked: 0, stamped: 0, failed: entries.length };

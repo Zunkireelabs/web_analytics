@@ -5,6 +5,7 @@ import {
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
+  persistDerivedComponentTemplates, sitePageUrl,
 } from './design-drift.js';
 
 const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
@@ -64,9 +65,98 @@ describe('componentTemplateActionTypeFor', () => {
     assert.equal(componentTemplateActionTypeFor('terms-of-service'), 'content-wrapper');
   });
 
+  // These four render the same single-{{BODY}} whole-page shape as the
+  // compliance trio (newpage-render.js) but had no component-template concept
+  // at all, so both gates saw 'no-concept' and waved them through while their
+  // bodies shipped with no site prose wrapper — bare unstyled headings into a
+  // real PR.
+  test('every other net-new whole-page generator shares content-wrapper too', () => {
+    assert.equal(componentTemplateActionTypeFor('landing-page'), 'content-wrapper');
+    assert.equal(componentTemplateActionTypeFor('blog-outline'), 'content-wrapper');
+    assert.equal(componentTemplateActionTypeFor('direct-answer'), 'content-wrapper');
+    assert.equal(componentTemplateActionTypeFor('translation'), 'content-wrapper');
+  });
+
   test('every other generator maps to itself', () => {
     assert.equal(componentTemplateActionTypeFor('faq'), 'faq');
     assert.equal(componentTemplateActionTypeFor('meta-title'), 'meta-title');
+  });
+});
+
+describe('sitePageUrl', () => {
+  test('prefers the configured website_domain, normalized to an absolute URL', () => {
+    assert.equal(sitePageUrl({ website_domain: 'example.com' }), 'https://example.com');
+    assert.equal(sitePageUrl({ website_domain: 'https://example.com' }), 'https://example.com');
+  });
+
+  test('falls back to gsc_property with its sc-domain: prefix stripped', () => {
+    assert.equal(sitePageUrl({ gsc_property: 'sc-domain:example.com' }), 'https://example.com');
+  });
+
+  test('null when the site has neither — callers treat that as "cannot check"', () => {
+    assert.equal(sitePageUrl({}), null);
+    assert.equal(sitePageUrl(null), null);
+  });
+});
+
+describe('persistDerivedComponentTemplates', () => {
+  const site = { id: 7, name: 'Acme', url_file_map: { pages: { '/': 'src/index.njk' } } };
+  const noop = async () => {};
+
+  test('validates, stamps and saves every derived template in ONE config write', async () => {
+    const saves = [];
+    const audits = [];
+    const result = await persistDerivedComponentTemplates(site, {
+      faq: VALID_FAQ,
+      'content-wrapper': { wrapper: '<article class="prose">{{BODY}}</article>' },
+    }, { jobId: 42, saveConfig: async (a) => saves.push(a), recordAudit: async (_req, e) => audits.push(e) });
+
+    assert.equal(result.ok, true);
+    assert.equal(saves.length, 1, 'one write for both keys, not one per key');
+    const stored = saves[0].urlFileMap.siteRoot.componentTemplates;
+    assert.deepEqual(Object.keys(stored).sort(), ['contentWrapper', 'faq']);
+    assert.equal(stored.faq.verifiedBy, TEMPLATE_VERIFIED_BY.DESIGN_AGENT);
+    assert.equal(stored.faq.verifiedRef, '42');
+    assert.ok(stored.contentWrapper.verifiedAt);
+    assert.equal(saves[0].urlFileMap.pages['/'], 'src/index.njk', 'unrelated url_file_map config is preserved');
+    assert.equal(audits.length, 2, 'one audit event per saved template');
+  });
+
+  test('a template missing its required placeholder is rejected and recorded, and never reaches the write', async () => {
+    const saves = [];
+    const lessons = [];
+    const result = await persistDerivedComponentTemplates(site, {
+      faq: { wrapper: '<div>{{ROWS}}</div>', row: '<div>nothing here</div>' },
+    }, { saveConfig: async (a) => saves.push(a), recordAudit: noop, recordFixOutcomeFn: async (l) => lessons.push(l) });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(saves, [], 'nothing written when every candidate was rejected');
+    assert.equal(result.rejected[0].reason, 'invalid-placeholders');
+    assert.equal(lessons.length, 1, 'the rejection is recorded to agent_fix_memory for the next derivation');
+  });
+
+  test('one bad template does not block the good ones alongside it', async () => {
+    const saves = [];
+    const result = await persistDerivedComponentTemplates(site, {
+      faq: VALID_FAQ,
+      'expand-content': { wrapper: '<div>{{ROWS}}</div>', row: '<div>no tokens</div>' },
+    }, { saveConfig: async (a) => saves.push(a), recordAudit: noop, recordFixOutcomeFn: noop });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(Object.keys(result.saved), ['faq']);
+    assert.deepEqual(Object.keys(saves[0].urlFileMap.siteRoot.componentTemplates), ['faq']);
+    assert.equal(result.rejected[0].actionType, 'expand-content');
+  });
+
+  test('an action type with no component-template concept is skipped, not saved under a bogus key', async () => {
+    const saves = [];
+    const result = await persistDerivedComponentTemplates(site, {
+      'meta-title': { wrapper: '<title>{{ROWS}}</title>' },
+    }, { saveConfig: async (a) => saves.push(a), recordAudit: noop, recordFixOutcomeFn: noop });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(saves, []);
+    assert.equal(result.rejected[0].reason, 'no-concept');
   });
 });
 

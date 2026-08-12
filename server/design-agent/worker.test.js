@@ -364,6 +364,47 @@ describe('componentTemplates job — full real-DB lifecycle through the dispatch
       assert.equal(rows[0].status, 'completed');
       assert.deepEqual(rows[0].params, { mode: 'component-templates', componentKeys: ['faq', 'expand-content'], pageUrl: 'https://example.com/faq' });
       assert.deepEqual(Object.keys(rows[0].result.componentTemplates).sort(), ['expand-content', 'faq']);
+
+      // The point of the whole job: the derived templates are now VERIFIED on
+      // the site row, not just sitting on execution_jobs.result where nothing
+      // reads them. This is the step that was missing entirely — the queued
+      // re-derivation ran, succeeded, and left the site exactly as blocked as
+      // before, so an unverified template could never heal on its own.
+      const { rows: siteRows } = await query('SELECT url_file_map FROM sites WHERE id = $1', [siteId]);
+      const saved = siteRows[0].url_file_map?.siteRoot?.componentTemplates || {};
+      assert.deepEqual(Object.keys(saved).sort(), ['expandContent', 'faq'], 'stored under componentTemplates KEYS, not action types');
+      for (const key of ['faq', 'expandContent']) {
+        assert.equal(saved[key].verifiedBy, 'design-agent');
+        assert.ok(saved[key].verifiedAt, `${key} carries a verification timestamp`);
+        assert.equal(saved[key].verifiedRef, String(job.id), `${key} points back at the job that derived it`);
+      }
+    });
+  });
+
+  test('a derived template that violates its placeholder contract fails the job instead of being saved', async () => {
+    // The inverse guarantee: persistence is not a rubber stamp. A template
+    // missing a required token must never reach the site row — the gate
+    // downstream would reject it anyway, and a 'completed' job that changed
+    // nothing would make the state look healed when it isn't.
+    let leftover = await processOneJob({ handler: createMockHandler(), siteId });
+    while (leftover) leftover = await processOneJob({ handler: createMockHandler(), siteId });
+
+    const jobIdRef = { current: null };
+    await retryUnlessStolen(jobIdRef, async () => {
+      const job = await createComponentTemplateJob(siteId, ['faq'], { requestedBy: null });
+      jobIdRef.current = job.id;
+
+      const outcome = await processOneJob({
+        siteId,
+        handler: async () => ({ jobId: job.id, componentTemplates: { faq: { wrapper: '<div>{{ROWS}}</div>', row: '<div>no tokens here</div>' } } }),
+      });
+      assert.ok(outcome, 'job was claimed by somebody else — see retryUnlessStolen');
+      assert.equal(outcome.status, 'failed');
+
+      const { rows } = await query('SELECT url_file_map FROM sites WHERE id = $1', [siteId]);
+      const storedRow = rows[0].url_file_map?.siteRoot?.componentTemplates?.faq?.row;
+      assert.ok(!storedRow?.includes('no tokens here'),
+        'the invalid row must not have been written over whatever the site already had');
     });
   });
 });

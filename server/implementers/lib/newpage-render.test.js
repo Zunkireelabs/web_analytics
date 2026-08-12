@@ -1,6 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderCompliancePageBody } from './newpage-render.js';
+import {
+  renderCompliancePageBody, renderLandingPageBody, renderBlogOutlineBody,
+  renderDirectAnswerBody, renderTranslationBody,
+} from './newpage-render.js';
 
 describe('renderCompliancePageBody', () => {
   const content = {
@@ -78,5 +81,48 @@ describe('renderCompliancePageBody', () => {
     const body = renderCompliancePageBody(content, { layout: 'base.njk', permalink: '/privacy/' });
     assert.match(body, /layout: "base\.njk"/);
     assert.match(body, /permalink: "\/privacy\/"/);
+  });
+});
+
+// The compliance trio was wrapped in the site's own prose markup; the other
+// four net-new page types were not, so landing pages, blog posts,
+// direct-answer pages and translations shipped bare <h1>/<h2>/<p> into real
+// PRs — the same unstyled-body failure already confirmed live on
+// zunkireelabs-web's /terms/, /privacy/ and /cookies/ before contentWrapper
+// was captured for it.
+describe('site prose wrapper across every net-new page type', () => {
+  const siteWithWrapper = {
+    url_file_map: {
+      siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<article class="prose prose-lg">\n{{BODY}}\n</article>' } } },
+    },
+  };
+  const bare = { url_file_map: {} };
+
+  const cases = [
+    ['renderLandingPageBody', renderLandingPageBody, { headline: 'Plumbers in Leeds', subheadline: 'Fast callouts.', sections: [{ heading: 'Why us', body: 'We show up.' }], cta: 'Book now' }, /# Plumbers in Leeds/],
+    ['renderBlogOutlineBody', renderBlogOutlineBody, { title: 'Boiler care', sections: [{ heading: 'Bleeding radiators', body: 'Turn the valve.' }] }, /## Bleeding radiators/],
+    ['renderDirectAnswerBody', renderDirectAnswerBody, { heading: 'How long does a boiler last?', directAnswer: 'Typically 10-15 years.' }, /# How long does a boiler last\?/],
+    ['renderTranslationBody', renderTranslationBody, { translatedTitle: 'Servicios', translatedContent: '# Servicios\n\nOfrecemos fontanería.' }, /# Servicios/],
+  ];
+
+  for (const [name, render, content, bodyPattern] of cases) {
+    test(`${name} wraps its body in the site's real prose markup when one is configured`, () => {
+      const out = render(content, siteWithWrapper);
+      assert.match(out, /<article class="prose prose-lg">/);
+      assert.match(out, /<\/article>/);
+      assert.match(out, bodyPattern, 'the real content survives the wrapping');
+    });
+
+    test(`${name} ships plain markdown when the site has no contentWrapper yet`, () => {
+      const out = render(content, bare);
+      assert.doesNotMatch(out, /<article/);
+      assert.match(out, bodyPattern);
+    });
+  }
+
+  test('front matter stays outside the wrapper — wrapping it would break the page', () => {
+    const out = renderLandingPageBody({ headline: 'Leeds', metaTitle: 'Leeds' }, siteWithWrapper);
+    const frontMatterEnd = out.indexOf('---', 3);
+    assert.ok(out.indexOf('<article') > frontMatterEnd, 'wrapper opens after the closing front-matter fence');
   });
 });

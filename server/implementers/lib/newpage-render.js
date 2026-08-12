@@ -58,7 +58,7 @@ export function renderLandingPageBody(content, site) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
   if (content.cta) parts.push(`[${content.cta}](#)`);
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 export function renderBlogOutlineBody(content, site) {
@@ -78,7 +78,7 @@ export function renderBlogOutlineBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // The direct-answer paragraph goes immediately after the heading — no
@@ -101,7 +101,7 @@ export function renderDirectAnswerBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -114,7 +114,7 @@ export function renderTranslationBody(content, site) {
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${content.translatedContent || ''}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's
@@ -168,6 +168,19 @@ function fillContentWrapper(wrapper, body) {
   return `${open.trimEnd()}\n\n${body}\n\n${close.trimStart()}`;
 }
 
+// Applies this site's own real prose wrapper to a rendered markdown body, for
+// EVERY net-new whole-page type (frontend.js's FRONTEND_ACTION_TYPES), not
+// just the compliance trio it was originally written for — landing pages,
+// blog posts, direct-answer pages and translations are the same shape and
+// were shipping without it, i.e. bare unstyled headings and paragraphs into a
+// real PR. Unchanged fallback: a site with no contentWrapper configured gets
+// the plain markdown body exactly as before, so nothing regresses for a site
+// that hasn't been through the Design Agent yet.
+function wrapInSiteProse(body, site) {
+  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
+}
+
 export function renderCompliancePageBody(content, preserved = {}, site) {
   const front = frontMatter([
     ['layout', preserved.layout],
@@ -180,8 +193,5 @@ export function renderCompliancePageBody(content, preserved = {}, site) {
   for (const s of content.sections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  const body = parts.join('\n\n');
-  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
-  const wrapped = wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
-  return `${front}\n${wrapped}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
