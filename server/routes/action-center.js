@@ -231,61 +231,17 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }
   }
 
-  // The Quality Gate — stage 1 of Generate -> Validate -> Auto-fix ->
-  // Validate again. Never persist a draft (and never let schema/PR steps
-  // downstream see one) that's still outline instructions, placeholder
-  // brackets, duplicate paragraphs, or invalid JSON-LD instead of finished
-  // content — one bounded regeneration attempt first, matching generators'
-  // own "one bounded retry, never a hard failure" convention, then reject
-  // outright rather than shipping it. This is the ONE place every
-  // generator's output is validated, whether called from the manual UI,
-  // the MCP tool, or the unattended execution-engine/auto-remediation
-  // chains — a future generator gets this for free just by existing.
-  const MAX_GENERATION_ATTEMPTS = 2;
-  let content, summary, gateResult;
-  let firstAttemptIssues = null;
-  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = runQualityGate(content, generatorId);
-    if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
-    if (gateResult.clean) break;
-    if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
-    }
-  }
-  if (!gateResult.clean) {
-    const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
-    err.status = 502;
-    err.userFacing = true;
-    throw err;
-  }
-
-  // Learning system, stage 1 — the first attempt failed but a later one
-  // didn't: real, deterministic evidence that this generator's output for
-  // this class of issue was auto-fixed successfully. Recorded as
-  // agent_fix_memory rows keyed by the exact validation rule (patternId)
-  // that fired, so server/llm.js's existing withAgentMemory() picks it up on
-  // this generator's very next call — the "before every generation, check
-  // for previously-observed patterns and avoid repeating them" half of the
-  // learning loop needs no new code beyond writing here; the read/inject
-  // path already exists. gateResolvedPatterns rides along on the draft row
-  // so approveAndPublishDraft can later confirm (or not) that this fix
-  // actually held.
-  let gateResolvedPatterns = null;
-  if (firstAttemptIssues?.length) {
-    gateResolvedPatterns = [...new Set(firstAttemptIssues.map((i) => i.patternId))];
-    await Promise.all(gateResolvedPatterns.map((patternId) => recordFixOutcome({
-      category: topLevelCategoryForGenerator(generatorId), scope: 'client', siteId, generatorId,
-      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
-      problemSignature: patternId,
-      symptoms: `Past ${generatorId} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
-      rootCause: rootCauseForPattern(patternId),
-      affectedPattern: `${generatorId} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
-      fixStrategy: `Avoid "${patternId}" on the first attempt` +
-        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
-    }).catch((err) => console.error(`[action-center] failed to record auto-fix memory for ${generatorId}/${patternId}:`, err.message))));
-  }
-
+  // Design verification runs BEFORE the generator does, not after.
+  // It used to sit below the Quality Gate loop, which meant a
+  // design-blocked site burned a full LLM generation on every manual
+  // Generate Draft click and then threw 422 on content it had already
+  // paid for and could never persist. Nothing about the gate itself
+  // needs the generated content — it is a structural/provenance check on
+  // the site config — so the cheap check goes first.
+  //
+  // `effectiveSite` is still produced here and consumed by the Rendering
+  // Validation Gate further down, which is why this block resolves the
+  // template rather than only verifying it.
   // Design Agent, stage — find-or-create the real, site-specific
   // componentTemplate this generator's output needs to render styled,
   // BEFORE this recommendation ever becomes a reviewable draft. Replaces
@@ -345,14 +301,80 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     // block. Only the five keys in COMPONENT_TEMPLATE_KEY are gated.
     const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
     if (!verification.ok) {
-      throw httpError(422, `${verification.detail} Run the Design Agent for this site to verify its "${verification.actionType}" template before ${generatorId} drafts can be generated.`, {
-        reason: 'design-unverified',
+      // When the resolver has just QUEUED a re-derivation, say so instead of
+      // repeating isTemplateVerified's generic "never been verified" text and
+      // telling the operator to go run the Design Agent by hand. The state is
+      // self-healing now; a message implying manual work is both wrong and
+      // the exact instinct that produced the stuck templates in the first
+      // place.
+      const queued = templateResult?.reason === 'derivation-queued';
+      const message = queued
+        ? `${templateResult.detail} Retry this draft once it completes.`
+        : `${verification.detail} Run the Design Agent for this site to verify its "${verification.actionType}" template before ${generatorId} drafts can be generated.`;
+      throw httpError(422, message, {
+        reason: queued ? 'design-derivation-queued' : 'design-unverified',
         actionType: verification.actionType,
         componentKey: verification.componentKey,
-        verificationReason: verification.reason,
+        verificationReason: queued ? 'derivation-queued' : verification.reason,
       });
     }
   }
+
+  // The Quality Gate — stage 1 of Generate -> Validate -> Auto-fix ->
+  // Validate again. Never persist a draft (and never let schema/PR steps
+  // downstream see one) that's still outline instructions, placeholder
+  // brackets, duplicate paragraphs, or invalid JSON-LD instead of finished
+  // content — one bounded regeneration attempt first, matching generators'
+  // own "one bounded retry, never a hard failure" convention, then reject
+  // outright rather than shipping it. This is the ONE place every
+  // generator's output is validated, whether called from the manual UI,
+  // the MCP tool, or the unattended execution-engine/auto-remediation
+  // chains — a future generator gets this for free just by existing.
+  const MAX_GENERATION_ATTEMPTS = 2;
+  let content, summary, gateResult;
+  let firstAttemptIssues = null;
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
+    gateResult = runQualityGate(content, generatorId);
+    if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
+    if (gateResult.clean) break;
+    if (attempt < MAX_GENERATION_ATTEMPTS) {
+      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
+    }
+  }
+  if (!gateResult.clean) {
+    const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
+    err.status = 502;
+    err.userFacing = true;
+    throw err;
+  }
+
+  // Learning system, stage 1 — the first attempt failed but a later one
+  // didn't: real, deterministic evidence that this generator's output for
+  // this class of issue was auto-fixed successfully. Recorded as
+  // agent_fix_memory rows keyed by the exact validation rule (patternId)
+  // that fired, so server/llm.js's existing withAgentMemory() picks it up on
+  // this generator's very next call — the "before every generation, check
+  // for previously-observed patterns and avoid repeating them" half of the
+  // learning loop needs no new code beyond writing here; the read/inject
+  // path already exists. gateResolvedPatterns rides along on the draft row
+  // so approveAndPublishDraft can later confirm (or not) that this fix
+  // actually held.
+  let gateResolvedPatterns = null;
+  if (firstAttemptIssues?.length) {
+    gateResolvedPatterns = [...new Set(firstAttemptIssues.map((i) => i.patternId))];
+    await Promise.all(gateResolvedPatterns.map((patternId) => recordFixOutcome({
+      category: topLevelCategoryForGenerator(generatorId), scope: 'client', siteId, generatorId,
+      validationRuleId: patternId, outcome: 'success', sourceType: 'runtime-auto',
+      problemSignature: patternId,
+      symptoms: `Past ${generatorId} drafts have hit "${patternId}" and needed a second attempt to fix it.`,
+      rootCause: rootCauseForPattern(patternId),
+      affectedPattern: `${generatorId} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
+      fixStrategy: `Avoid "${patternId}" on the first attempt` +
+        `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
+    }).catch((err) => console.error(`[action-center] failed to record auto-fix memory for ${generatorId}/${patternId}:`, err.message))));
+  }
+
 
   // Rendering Validation Gate, stage — for the net-new-content action types
   // (frontend.js's FRONTEND_ACTION_TYPES: compliance pages, landing pages,

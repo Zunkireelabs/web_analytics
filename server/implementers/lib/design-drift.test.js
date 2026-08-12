@@ -136,13 +136,67 @@ describe('templateActionRequiresRow', () => {
 describe('resolveOrCreateComponentTemplate', () => {
   const baseSite = { id: 1, name: 'Test Site', repo_owner: 'acme', repo_name: 'acme-web', design_agent_enabled: true, url_file_map: {} };
 
-  test('returns the existing template immediately without touching the Design Agent', async () => {
-    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
-    const createHandler = () => { throw new Error('should never be called — a template already exists'); };
+  // The fast path requires the template to be VERIFIED, not merely present.
+  // This test previously used an unstamped template and asserted ok:true —
+  // which was the bug: an unverified template short-circuited the Design
+  // Agent here, then got 422'd by the gate in generateDraft, permanently,
+  // with nothing able to re-derive it.
+  const verifiedWrapper = {
+    wrapper: '<div>{{BODY}}</div>',
+    verifiedAt: '2026-08-01T00:00:00.000Z',
+    verifiedBy: 'design-agent',
+  };
+
+  test('returns an existing VERIFIED template immediately without touching the Design Agent', async () => {
+    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: verifiedWrapper } } } };
+    const createHandler = () => { throw new Error('should never be called — a verified template already exists'); };
     const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
     assert.equal(result.ok, true);
     assert.equal(result.source, 'existing');
     assert.equal(result.template.wrapper, '<div>{{BODY}}</div>');
+  });
+
+  test('an existing UNVERIFIED template queues re-derivation instead of being accepted', async () => {
+    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
+    const enqueued = [];
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
+      createHandler: () => { throw new Error('must not run an OpenHands session on the hot path'); },
+      enqueueDerivation: async (siteId, keys) => { enqueued.push([siteId, keys]); },
+      findQueuedDerivation: async () => null,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'derivation-queued');
+    assert.deepEqual(enqueued, [[1, ['content-wrapper']]], 'queued by ACTION TYPE, matching what the job stores');
+  });
+
+  test('does not queue a second job when one is already pending for that action type', async () => {
+    // resolveOrCreate sits on generateDraft's hot path — without this check a
+    // single daily run against a blocked site would queue dozens of jobs for
+    // work already pending.
+    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
+    const enqueued = [];
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
+      createHandler: () => { throw new Error('should never be called'); },
+      enqueueDerivation: async (...args) => { enqueued.push(args); },
+      findQueuedDerivation: async () => ({ id: 99 }),
+    });
+    assert.equal(result.reason, 'derivation-queued');
+    assert.deepEqual(enqueued, []);
+  });
+
+  test('an unverified template on a site without the Design Agent reports not-available, not queued', async () => {
+    // Nothing can re-derive it, so promising "queued, resolves shortly" would
+    // be a lie.
+    const site = {
+      ...baseSite, design_agent_enabled: false,
+      url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } },
+    };
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
+      createHandler: () => { throw new Error('should never be called'); },
+      enqueueDerivation: async () => { throw new Error('should never queue'); },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'not-available');
   });
 
   test('action type with no component-template concept short-circuits', async () => {

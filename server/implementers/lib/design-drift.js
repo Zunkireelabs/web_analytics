@@ -4,6 +4,7 @@ import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { createComponentTemplateHandler, DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 import { COMPLIANCE_ACTION_TYPES } from '../frontend.js';
+import { createComponentTemplateJob, getQueuedComponentTemplateJob } from '../../store/execution-jobs.js';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -344,15 +345,64 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
   recordFixOutcomeFn = recordFixOutcome,
+  enqueueDerivation = createComponentTemplateJob,
+  findQueuedDerivation = getQueuedComponentTemplateJob,
 } = {}) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
 
   const existing = site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
-  if (existing) return { ok: true, template: existing, source: 'existing', componentKey };
+
+  // The fast path now requires the template to be VERIFIED, not merely to
+  // exist. That distinction is the whole bug this branch shipped with: an
+  // existing-but-unstamped template returned ok:true here, which meant the
+  // Design Agent was never invoked to re-derive it — and only a fresh
+  // derivation stamps verifiedBy. The generateDraft gate directly downstream
+  // then rejected that same template with a 422, permanently, with no
+  // autonomous way out. Confirmed live: all four templates on the only
+  // repo-connected site were in exactly this state, blocking every faq /
+  // qa-content / expand-content / internal-links draft, escapable only by
+  // running `npm run verify-component-templates` by hand — precisely the
+  // human-confirmation dependency f7156ef set out to remove.
+  if (existing && isTemplateVerified(actionType, existing).ok) {
+    return { ok: true, template: existing, source: 'existing', componentKey };
+  }
 
   if (!site.design_agent_enabled || !site.repo_owner || !site.repo_name) {
     return { ok: false, reason: 'not-available', template: null, componentKey };
+  }
+
+  // An unverified template is a REPAIR, not a first-time derivation, and the
+  // difference matters operationally: there is already a usable-looking
+  // template on the row, so nothing is newly broken by taking a moment to
+  // redo it properly. Queue it on the existing design-agent worker rather
+  // than running an OpenHands Docker session inline — this function sits on
+  // generateDraft's hot path, which every manual click, MCP call and
+  // unattended attempt funnels through, and a container session there can
+  // outlast the request that started it.
+  //
+  // First-time derivation (no `existing` at all) deliberately stays inline
+  // below: there is no template to fall back on, so blocking once is the
+  // only way that call can produce anything at all, and that path is already
+  // proven.
+  if (existing) {
+    // Keyed by actionType, matching what createComponentTemplateJob stores.
+    const queued = await findQueuedDerivation(site.id, actionType).catch(() => null);
+    // Enqueue at most one outstanding job per site+key. Without this, every
+    // draft attempt on a blocked site would add another job for work already
+    // pending — the daily run alone would queue dozens.
+    if (!queued) {
+      await enqueueDerivation(site.id, [actionType], { requestedBy: null }).catch((err) => {
+        console.error(`[design-drift] could not queue re-derivation for site ${site.id}/${actionType}:`, err.message);
+      });
+    }
+    return {
+      ok: false,
+      reason: 'derivation-queued',
+      detail: 'This site\'s component template has not been verified against the real site design yet. The Design Agent has been queued to re-derive it — this will resolve on its own shortly.',
+      template: null,
+      componentKey,
+    };
   }
 
   let result;
