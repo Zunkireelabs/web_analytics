@@ -1,5 +1,6 @@
 import { query } from './db.js';
 import { sanitizeForCustomer } from './lib/errors.js';
+import { classifyForSweep } from './agents/lib/lesson-producers.js';
 
 // Single authoritative shared learning/memory store for every agent in this
 // platform (migration 097) — replaces fix_lessons (content-generation
@@ -132,44 +133,54 @@ export async function deprecateMemory(id, reason) {
   return rows[0]?.id ?? null;
 }
 
-// Retires every lesson whose generator no longer exists. `knownGeneratorIds`
-// is passed in rather than imported so this module keeps its documented
-// no-heavy-imports property (the generator registry loads every generator
-// module); callers hand it the real registry list.
+// Retires only lessons whose producer is EXPLICITLY declared retired in
+// agents/lib/lesson-producers.js.
 //
-// DELIBERATELY NOT WIRED TO A CRON, and the reason is concrete rather than
-// cautious: not every generator_id in this table is a registry generator.
-// PSEUDO-GENERATORS exist — design-drift.js's recordRejectedTemplateLesson
-// writes generator_id = 'design-agent-component-templates', which is a real,
-// current lesson source and is not in generators/registry.js. Checked against
-// live data: a naive registry-only sweep today would retire exactly one row,
-// and that row would be the wrong one.
+// The previous version of this function deprecated any lesson whose
+// generator_id was absent from generators/registry.js. That was wrong, and
+// wrong in the most damaging possible direction: run against live data it
+// would have retired exactly one row, and that row was the Design Agent's
+// component-template lesson — a first-class, actively-written memory that the
+// autonomous Design Agent workflow depends on, whose producer is not a
+// generator and therefore was never going to be in that registry. Worse, that
+// producer's source file does not exist on every branch, so the same sweep
+// could delete or preserve the same real memory depending on which checkout
+// it happened to run from.
 //
-// So any caller must pass registry ids PLUS every pseudo-generator id it
-// knows about, and should be a deliberate operator action rather than a
-// background job quietly deleting knowledge on a schedule.
+// So obsolescence is now positive-only. `knownGeneratorIds` is still accepted
+// and still feeds the "active" determination, but nothing can be swept for
+// merely being absent from it. Unrecognised producers are returned separately
+// for a human to classify rather than deleted.
 //
-// Deliberately conservative: rows with generator_id NULL are never touched —
-// those are the deliberately cross-generator structural lessons (see
-// audit-url-file-map.js's note on that convention), not orphans. And an
-// EMPTY knownGeneratorIds is treated as "the caller couldn't tell us", which
-// must never be read as "no generator exists" — that would deprecate the
-// entire table in one call.
-export async function deprecateObsoleteMemories(knownGeneratorIds) {
+// Returns { retired, skipped } — skipped carries every row that was NOT
+// retired along with the reason, so enabling this on a schedule later is a
+// decision made against real evidence rather than hope.
+export async function deprecateObsoleteMemories(knownGeneratorIds = []) {
   const known = [...(knownGeneratorIds || [])].filter(Boolean);
-  if (!known.length) return [];
 
   const { rows } = await query(
     `SELECT id, generator_id FROM agent_fix_memory
-     WHERE status != 'deprecated' AND generator_id IS NOT NULL AND NOT (generator_id = ANY($1::text[]))`,
-    [known],
+     WHERE status != 'deprecated' AND generator_id IS NOT NULL`,
   );
+
   const retired = [];
+  const skipped = [];
   for (const row of rows) {
-    const id = await deprecateMemory(row.id, `generator "${row.generator_id}" no longer exists`);
+    const verdict = classifyForSweep(row, known);
+    if (!verdict.obsolete) {
+      skipped.push({ id: row.id, generatorId: row.generator_id, status: verdict.status, reason: verdict.reason });
+      continue;
+    }
+    const id = await deprecateMemory(row.id, verdict.reason);
     if (id) retired.push(id);
   }
-  return retired;
+
+  const unknown = skipped.filter((s) => s.status === 'unknown');
+  if (unknown.length) {
+    console.warn(`[agent-memory] ${unknown.length} lesson(s) have an unrecognised producer and were LEFT IN PLACE: `
+      + `${[...new Set(unknown.map((u) => u.generatorId))].join(', ')}. Declare them in agents/lib/lesson-producers.js.`);
+  }
+  return { retired, skipped };
 }
 
 // Cross-client retrieval — the ONLY function here permitted to return a row

@@ -125,8 +125,9 @@ function fakeQuery(text, params = []) {
   }
 
   if (sql.startsWith('SELECT id, generator_id FROM agent_fix_memory')) {
-    const [known] = params;
-    const rows = store.filter((r) => r.status !== 'deprecated' && r.generator_id != null && !known.includes(r.generator_id));
+    // No registry filter in SQL any more — every non-null producer is
+    // returned and classified in JS by lesson-producers.js.
+    const rows = store.filter((r) => r.status !== 'deprecated' && r.generator_id != null);
     return { rows: rows.map((r) => ({ id: r.id, generator_id: r.generator_id })) };
   }
 
@@ -464,27 +465,53 @@ describe('deprecation — retiring obsolete lessons', () => {
     symptoms: 'x', affectedPattern: 'y', fixStrategy: 'z', outcome: 'success',
   };
 
-  test('retires a lesson whose generator no longer exists', async () => {
-    const gone = await recordFixOutcome({ ...base, generatorId: 'removed-generator', problemSignature: 'a' });
-    const kept = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'b' });
-    const retired = await deprecateObsoleteMemories(['faq', 'meta-title']);
-    assert.deepEqual(retired, [gone]);
-    assert.equal(store.find((r) => r.id === gone).status, 'deprecated');
-    assert.equal(store.find((r) => r.id === kept).status, 'candidate');
+  test('REGRESSION: a Design Agent lesson survives a sweep with the full registry', async () => {
+    // The exact row the old registry-absence rule would have destroyed. Its
+    // producer is not a generator and never will be, so no registry list can
+    // ever vouch for it.
+    const design = await recordFixOutcome({ ...base, generatorId: 'design-agent-component-templates', problemSignature: 'missing-placeholders:faq' });
+    const { retired, skipped } = await deprecateObsoleteMemories(['faq', 'meta-title', 'alt-text']);
+    assert.deepEqual(retired, []);
+    assert.equal(store.find((r) => r.id === design).status, 'candidate');
+    assert.equal(skipped.find((s) => s.id === design).status, 'active');
+  });
+
+  test('REGRESSION: a Design Agent lesson survives a sweep with an EMPTY registry', async () => {
+    // Simulates running the sweep from a checkout where the Design Agent code
+    // does not exist — which is the real situation on the stage line.
+    const design = await recordFixOutcome({ ...base, generatorId: 'design-agent-component-templates', problemSignature: 'missing-placeholders:qa-content' });
+    const { retired } = await deprecateObsoleteMemories([]);
+    assert.deepEqual(retired, []);
+    assert.equal(store.find((r) => r.id === design).status, 'candidate');
+  });
+
+  test('an unrecognised producer is kept and reported, never retired', async () => {
+    const unknown = await recordFixOutcome({ ...base, generatorId: 'mystery-producer', problemSignature: 'g' });
+    const { retired, skipped } = await deprecateObsoleteMemories(['faq']);
+    assert.deepEqual(retired, []);
+    assert.equal(store.find((r) => r.id === unknown).status, 'candidate');
+    assert.equal(skipped.find((s) => s.id === unknown).status, 'unknown');
+  });
+
+  test('nothing is retired today, because nothing is declared retired', async () => {
+    await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'h' });
+    await recordFixOutcome({ ...base, generatorId: 'design-agent-component-templates', problemSignature: 'i' });
+    await recordFixOutcome({ ...base, generatorId: null, problemSignature: 'j' });
+    const { retired } = await deprecateObsoleteMemories(['faq']);
+    assert.deepEqual(retired, [], 'a sweep run right now must be a no-op');
   });
 
   test('never touches generator_id NULL rows — those are cross-generator by design', async () => {
     const structural = await recordFixOutcome({ ...base, generatorId: null, problemSignature: 'c' });
-    assert.deepEqual(await deprecateObsoleteMemories(['faq']), []);
+    const { retired } = await deprecateObsoleteMemories(['faq']);
+    assert.deepEqual(retired, []);
     assert.equal(store.find((r) => r.id === structural).status, 'candidate');
   });
 
-  test('an empty generator list is treated as "unknown", never as "nothing exists"', async () => {
-    // Otherwise a caller that failed to load the registry would deprecate the
-    // entire table in one call.
+  test('an empty generator list cannot wipe the table', async () => {
     const id = await recordFixOutcome({ ...base, generatorId: 'faq', problemSignature: 'd' });
-    assert.deepEqual(await deprecateObsoleteMemories([]), []);
-    assert.deepEqual(await deprecateObsoleteMemories(null), []);
+    assert.deepEqual((await deprecateObsoleteMemories([])).retired, []);
+    assert.deepEqual((await deprecateObsoleteMemories(null)).retired, []);
     assert.equal(store.find((r) => r.id === id).status, 'candidate');
   });
 
