@@ -1,0 +1,43 @@
+// The two decisions the autonomous shipping run and its catch-up guard make
+// about a site, kept here rather than inline in job.js so they can be tested
+// without dragging in job.js's whole dependency graph (GSC/GA4 clients, Google
+// auth, every store module) — no existing test imports job.js for that reason.
+//
+// Both are pure: the caller supplies the clock and the already-shipped count.
+
+// The hour, in each SITE's own timezone, at which the day's detected
+// recommendations get shipped as a branch + PR. THE one definition — job.js's
+// cron entry and its catch-up guard both read it from here, because a
+// hand-mirrored copy of this hour is exactly the kind of constant this
+// codebase has already had go stale twice.
+export const SHIP_HOUR_LOCAL = Number(process.env.SHIP_HOUR_LOCAL || 13);
+
+// Whether a site is eligible to have work SHIPPED at all. Deliberately keyed
+// on the repo, not on GSC/GA4 (listConnectedSites' filter): a site with
+// analytics but no repository has nowhere to push a branch. The
+// auto_remediation_enabled flag stays the real per-tenant opt-in on top of
+// this — this is only "could it physically ship", not "should it".
+export function isShippable(site) {
+  return Boolean(site?.repo_owner && site?.repo_name);
+}
+
+// Local hour in an arbitrary IANA timezone, without pulling in a date library.
+export function hourInTimezone(timezone, now = new Date()) {
+  return new Date(now.toLocaleString('en-US', { timeZone: timezone })).getHours();
+}
+
+// The catch-up guard's whole decision. Work is owed when this site's own ship
+// hour has passed and the scheduled run produced nothing today.
+//
+// "Produced nothing" is measured as drafts auto-remediation created today in
+// the SITE's timezone — the same measure auto-remediation uses for its own
+// daily budget — rather than a new state column, so the guard can never
+// disagree with the thing it is guarding. A site that legitimately had zero
+// candidates re-checks cheaply each hour, the same trade the existing daily
+// narrative guard already makes, and a recommendation detected later in the
+// day still ships the same day onto the same batch branch/PR.
+export function isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone = 'UTC', now = new Date() }) {
+  if (!isShippable(site)) return false;
+  if (alreadyShippedToday > 0) return false;
+  return hourInTimezone(site.timezone || fallbackTimezone, now) >= SHIP_HOUR_LOCAL;
+}

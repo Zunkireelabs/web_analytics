@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
+import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 
@@ -198,6 +199,48 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
+
+  // THE SHIPPING RUN. The daily job above (07:00) only DETECTS — it fills the
+  // recommendations table and stops. This is the half that turns those
+  // recommendations into a real branch + PR for every opted-in tenant,
+  // highest severity first and bounded by each site's own daily budget.
+  //
+  // Separate from CRON_SCHEDULE on purpose: detection wants to run as soon as
+  // GSC's data is final, whereas shipping wants a predictable hour a human can
+  // expect to review a batch at. Tying both to one schedule is what made
+  // branches appear the instant an agent noticed something.
+  const shipSchedule = process.env.SHIP_CRON_SCHEDULE || `0 ${SHIP_HOUR_LOCAL} * * *`;
+  if (!cron.validate(shipSchedule)) {
+    console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
+  } else {
+    cron.schedule(shipSchedule, async () => {
+      console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+      try {
+        const results = await runAutoRemediationForAllSites();
+        const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+        console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] autonomous shipping run error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] autonomous shipping scheduled "${shipSchedule}" (${tz})`);
+  }
+
+  // Catch-up guard for the shipping run above — the same role the :05 guard
+  // plays for the morning job, and for the same recorded reason: cron is not a
+  // reliable trigger on a machine that sleeps, and this app runs on one. A
+  // missed 13:00 fire would otherwise cost a full day's PR silently. Fires at
+  // :35 to stay clear of the other four hourly sweeps. Per-site gating (has
+  // this site's own ship hour passed, did it already produce work today) lives
+  // in the job, not here, because it depends on each site's timezone.
+  cron.schedule('35 * * * *', async () => {
+    try {
+      await runAutoRemediationCatchupForAllSites(tz);
+    } catch (err) {
+      console.error('[cron] autonomous shipping catch-up error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] autonomous shipping catch-up scheduled (fires at :35 each hour)');
 
   // Verify stage — independent of the hourly catch-up guard above (that one
   // is a per-site "has today's report run" check; this is a per-row
