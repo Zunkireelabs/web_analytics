@@ -44,7 +44,56 @@ const SAFE_GENERATOR_IDS = new Set([
   // refused at apply time, which is what leaves the recommendation open for
   // a human instead of silently failing.
   'alt-text',
+  // Promoted 2026-08-12 during a full audit of all 29 generators. It has the
+  // same exact-match-or-refuse shape as schema-repair and alt-text above:
+  // href-rewrite-inject.js rewrites one specific <a href> and returns
+  // 'no-match' (or 'nested-anchor') rather than touching a file it isn't sure
+  // about, so a draft it can't apply cleanly is refused whole and the
+  // recommendation stays open for a human.
+  //
+  // The obvious objection is that broken-link-fix is manual precisely because
+  // "a wrong redirect/link fix breaks live navigation", and this also rewrites
+  // a link. The difference is where the replacement URL comes from, and it is
+  // a real one: broken-link-fix has to FIND a plausible replacement for a dead
+  // link (its params.page is only the first page the href was crawled from,
+  // and it falls back to GitHub code search), whereas redirect-fix's
+  // destination was already observed — technical-seo.js followed the actual
+  // redirect chain to its real endpoint. There is no guess to get wrong. The
+  // generator is pure and deterministic with no LLM call at all.
+  'redirect-fix',
 ]);
+
+// Everything NOT in the set above is manual, and stays that way for a stated
+// reason rather than by omission. Recorded here so a future audit re-litigates
+// evidence instead of guessing at intent (all 29 generator ids reviewed
+// 2026-08-12):
+//
+//   analytics-install  — its draft is blocked on a real tracking ID a human has
+//                        to supply, so it can never be a zero-review auto-apply.
+//   broken-link-fix    — must infer a replacement for a dead link; see above.
+//   duplicate-id-fix   — renaming an id safely needs every CSS/JS/anchor
+//                        reference to it, which a static fetch cannot see. Its
+//                        one provably-safe shape (an SVG gradient referenced
+//                        only by url(#id) within its own <svg>) auto-applies,
+//                        and every other occurrence falls back to an advisory
+//                        draft with no file diff — which would fail at apply if
+//                        it reached an unattended chain.
+//   geo-audit          — report/score only, deliberately never actionable
+//                        (confirmed 2026-08-10).
+//   cookie-policy,     — legal content. Publishing unreviewed legal text is a
+//   privacy-policy,      different category of risk from a meta tag, regardless
+//   terms-of-service     of how good the draft is.
+//   translation        — publishes a whole machine-translated, indexable page.
+//                        Quality and brand risk, unreviewed.
+//   landing-page       — net-new page, and unlike blog-outline it has no
+//                        word-count floor or expansion retry of its own.
+//   blog-outline,      — net-new CONTENT: both are genuinely safe candidates,
+//   direct-answer        but both resolve their target through
+//                        url_file_map.newContentTargets, which no site is
+//                        configured for yet. Promoting them before that config
+//                        exists would only manufacture drafts that fail at
+//                        apply time. Revisit together once net-new targets are
+//                        configured — see the plan's Phase 5.
 
 export function riskTierForGenerator(generatorId) {
   return SAFE_GENERATOR_IDS.has(generatorId) ? 'safe' : 'manual';
