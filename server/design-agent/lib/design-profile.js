@@ -197,6 +197,63 @@ export function projectAllComponentTemplates(profile, actionTypes = projectableA
   return out;
 }
 
+// ── Content-block projections ──────────────────────────────────────────────
+//
+// The net-new page renderers (newpage-render.js: landing pages, blog posts,
+// direct-answer pages, translations, compliance pages) emit MARKDOWN, not the
+// marker-merge HTML templates above, so they cannot consume a component
+// template. They were therefore the last places still shipping presentation
+// this platform invented rather than derived — a call to action as a bare
+// `[label](#)` link, and sections as plain headings regardless of how the
+// site actually presents a block of content.
+//
+// These projections give those renderers the same design language everything
+// else now uses. Each returns null when the site genuinely has no such
+// pattern, and every caller falls back to exactly what it emitted before, so
+// a site with no profile is byte-for-byte unchanged.
+//
+// MARKDOWN SAFETY: raw HTML inside a markdown document is only parsed as an
+// HTML block when it is surrounded by blank lines, and inner markdown is only
+// parsed if it too is separated by blank lines. Every helper here follows the
+// same open/blank/body/blank/close shape newpage-render.js's fillContentWrapper
+// already relies on.
+
+// A real call-to-action in the site's own button styling. Falls back to null
+// (caller keeps its markdown link) when the site has no button convention —
+// inventing one would be exactly the guessing this module exists to stop.
+export function projectCta(profile, { label, href = '#' } = {}) {
+  const cls = profile?.components?.button?.primary;
+  if (!cls || !label) return null;
+  return `<a href="${href}" class="${cls}">${label}</a>`;
+}
+
+// One content block in the site's card convention, with its markdown body
+// left as markdown so it still renders normally inside the wrapper.
+export function projectCard(profile, { heading, body, headingLevel = 2 } = {}) {
+  const card = profile?.components?.card;
+  const cls = cx(card?.wrapper);
+  if (!cls) return null;
+
+  const inner = cx(card?.body);
+  const hashes = '#'.repeat(Math.min(Math.max(headingLevel, 1), 6));
+  const parts = [`<div${attr(cls)}>`, ''];
+  if (inner) parts.push(`<div${attr(inner)}>`, '');
+  if (heading) parts.push(`${hashes} ${heading}`, '');
+  if (body) parts.push(body, '');
+  if (inner) parts.push('</div>', '');
+  parts.push('</div>');
+  return parts.join('\n');
+}
+
+// The wrapper a whole net-new page's body is placed inside. Deliberately the
+// SAME projection content-wrapper templates are built from, so a page rendered
+// through this route and a compliance page rendered through the component
+// template land in identical markup.
+export function projectPageWrapper(profile) {
+  const projected = projectComponentTemplate(profile, 'content-wrapper');
+  return projected?.wrapper || null;
+}
+
 // Provenance stamp, mirroring stampTemplateVerification's shape so a profile
 // and a template carry the same kind of evidence trail.
 export function stampDesignProfile(profile, { derivedBy, derivedRef = null, at = new Date() } = {}) {

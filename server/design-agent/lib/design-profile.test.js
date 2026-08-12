@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   validateDesignProfile, isProfileUsable, projectComponentTemplate,
   projectAllComponentTemplates, projectableActionTypes, stampDesignProfile,
+  projectCta, projectCard, projectPageWrapper,
   DESIGN_PROFILE_VERSION,
 } from './design-profile.js';
 import { validatePlaceholders } from '../../implementers/lib/design-drift.js';
@@ -199,5 +200,83 @@ describe('stampDesignProfile', () => {
     assert.equal(stamped.derivedBy, 'design-agent');
     assert.equal(stamped.derivedRef, '42');
     assert.equal(stamped.derivedAt, '2026-08-12T00:00:00.000Z');
+  });
+});
+
+// The net-new page renderers emit MARKDOWN, so they cannot consume a
+// component template. These projections are how they get the same design
+// language everything else uses — and the reason DEFAULT/plain markdown is
+// now only reached by a site with no design knowledge at all.
+describe('content-block projections for markdown renderers', () => {
+  const WITH_PATTERNS = {
+    ...TAILWIND_PROFILE,
+    components: {
+      ...TAILWIND_PROFILE.components,
+      button: { primary: 'inline-flex rounded-md bg-blue-600 px-4 py-2 text-white', secondary: 'text-blue-600' },
+      card: { wrapper: 'rounded-lg border border-gray-200 p-6', body: 'mt-2' },
+    },
+  };
+
+  describe('projectCta', () => {
+    test('renders a real button in the site\'s own styling', () => {
+      const html = projectCta(WITH_PATTERNS, { label: 'Book a call' });
+      assert.match(html, /class="inline-flex rounded-md bg-blue-600 px-4 py-2 text-white"/);
+      assert.match(html, />Book a call</);
+    });
+
+    test('honours an explicit href', () => {
+      assert.match(projectCta(WITH_PATTERNS, { label: 'Go', href: '/contact' }), /href="\/contact"/);
+    });
+
+    test('returns null when the site has no button convention — caller keeps its markdown link', () => {
+      assert.equal(projectCta(TAILWIND_PROFILE, { label: 'Book a call' }), null);
+      assert.equal(projectCta(null, { label: 'Book a call' }), null);
+    });
+
+    test('returns null with no label rather than an empty button', () => {
+      assert.equal(projectCta(WITH_PATTERNS, { label: '' }), null);
+    });
+  });
+
+  describe('projectCard', () => {
+    test('wraps a section in the site\'s card pattern', () => {
+      const md = projectCard(WITH_PATTERNS, { heading: 'Why us', body: 'Real **body** copy.' });
+      assert.match(md, /<div class="rounded-lg border border-gray-200 p-6">/);
+      assert.match(md, /## Why us/);
+      assert.match(md, /Real \*\*body\*\* copy\./);
+    });
+
+    test('MARKDOWN SAFETY: blank lines separate the HTML from the markdown inside it', () => {
+      // Without these, markdown-it swallows the inner content verbatim and
+      // the section ships as unparsed source into a real PR.
+      const md = projectCard(WITH_PATTERNS, { heading: 'H', body: 'B' });
+      const lines = md.split('\n');
+      assert.equal(lines[1], '', 'blank line must follow the opening tag');
+      assert.equal(lines[lines.length - 2], '', 'blank line must precede the closing tag');
+    });
+
+    test('respects the requested heading level', () => {
+      assert.match(projectCard(WITH_PATTERNS, { heading: 'H', body: 'B', headingLevel: 3 }), /### H/);
+    });
+
+    test('returns null when the site has no card convention', () => {
+      // PLAIN_PROFILE has components: {} — TAILWIND_PROFILE does define a
+      // card, so it is the wrong fixture for the no-pattern case.
+      assert.equal(projectCard(PLAIN_PROFILE, { heading: 'H', body: 'B' }), null);
+      assert.equal(projectCard(null, { heading: 'H', body: 'B' }), null);
+    });
+  });
+
+  describe('projectPageWrapper', () => {
+    test('is the SAME projection content-wrapper templates are built from', () => {
+      // A page rendered through the markdown route and a compliance page
+      // rendered through the component template must land in identical markup.
+      assert.equal(projectPageWrapper(TAILWIND_PROFILE), projectComponentTemplate(TAILWIND_PROFILE, 'content-wrapper').wrapper);
+    });
+
+    test('null for an unusable profile', () => {
+      assert.equal(projectPageWrapper({ version: 1 }), null);
+      assert.equal(projectPageWrapper(null), null);
+    });
   });
 });
