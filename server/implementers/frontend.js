@@ -1,4 +1,4 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentUrl, resolveTranslationTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
@@ -59,7 +59,8 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["landing-page"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'landing-page', title);
-    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink }), contentFormat: 'markdown' };
+    const layout = resolveNewContentLayout(site, 'landing-page');
+    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
@@ -69,7 +70,8 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'blog-outline', title);
-    return { ok: true, filePath, body: renderBlogOutlineBody(content, site, { permalink }), contentFormat: 'markdown' };
+    const layout = resolveNewContentLayout(site, 'blog-outline');
+    return { ok: true, filePath, body: renderBlogOutlineBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'direct-answer') {
@@ -79,7 +81,8 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'direct-answer', title);
-    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink }), contentFormat: 'markdown' };
+    const layout = resolveNewContentLayout(site, 'direct-answer');
+    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 
   // No permalink for a translation: its target is a language-suffixed sibling
@@ -93,7 +96,10 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches the source page "${content.page || '(none)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
-    return { ok: true, filePath, body: renderTranslationBody(content, site), contentFormat: 'markdown' };
+    // No permalink (see above), but a translated page is still a brand-new
+    // file that needs the site's real chrome around it.
+    const layout = resolveNewContentLayout(site, 'translation');
+    return { ok: true, filePath, body: renderTranslationBody(content, site, { layout }), contentFormat: 'markdown' };
   }
 
   if (COMPLIANCE_ACTION_TYPES.has(actionType)) {
@@ -120,7 +126,8 @@ export async function resolveTargetAndBody(site, draft) {
     // Only for the genuinely-new-file case — an existing page's own preserved
     // permalink always wins inside the renderer.
     const permalink = existingFile ? null : resolveNewContentUrl(site, actionType, title);
-    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site, { permalink }), contentFormat: 'markdown' };
+    const layout = resolveNewContentLayout(site, actionType);
+    return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };

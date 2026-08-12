@@ -55,8 +55,9 @@ function frontMatter(fields, site) {
 // URL (see url-file-map.js's resolveNewContentUrl) with no second draft, no
 // second PR, and no edit to a sitemap file that in the Eleventy case doesn't
 // exist in the repo at all.
-export function renderLandingPageBody(content, site, { permalink = null } = {}) {
+export function renderLandingPageBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
     ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
@@ -70,8 +71,9 @@ export function renderLandingPageBody(content, site, { permalink = null } = {}) 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null } = {}) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
@@ -95,8 +97,9 @@ export function renderBlogOutlineBody(content, site, { permalink = null } = {}) 
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site, { permalink = null } = {}) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
@@ -120,8 +123,9 @@ export function renderDirectAnswerBody(content, site, { permalink = null } = {})
 // generators/translation.js) — a minimal new page with the real translated
 // title/description/content. A reviewer adapts layout/includes on the real
 // PR as needed, same as landing-page/blog-outline.
-export function renderTranslationBody(content, site, { permalink = null } = {}) {
+export function renderTranslationBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
     ['permalink', permalink],
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
@@ -193,9 +197,11 @@ function wrapInSiteProse(body, site) {
   return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
 }
 
-export function renderCompliancePageBody(content, preserved = {}, site, { permalink = null } = {}) {
+export function renderCompliancePageBody(content, preserved = {}, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
-    ['layout', preserved.layout],
+    // An existing page's own layout always wins, same reasoning as permalink
+    // below — overwriting a real page must not restyle it.
+    ['layout', preserved.layout || layout],
     // An existing page's own permalink always wins — overwriting a real,
     // already-linked page must never move its live URL (see
     // extractPreservedFrontMatter below). The resolved one only applies to

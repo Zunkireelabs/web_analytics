@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPageMapped, resolveNewContentTarget, resolveNewContentUrl } from './url-file-map.js';
+import { isPageMapped, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout } from './url-file-map.js';
 
 // Regression coverage for a real report: zunkireelabs-web's `/compare/:slug`
 // pattern configures `adapters` for faq/meta-title only (no `file`, no
@@ -91,5 +91,45 @@ describe('resolveNewContentUrl', () => {
     for (const urlPattern of bad) {
       assert.equal(resolveNewContentUrl(site({ 'blog-outline': { urlPattern } }), 'blog-outline', 'X'), null, urlPattern);
     }
+  });
+});
+
+// A new page with the right content but no layout renders as a bare document —
+// no navbar, no footer, no site chrome. Resolved by BASENAME because that is
+// what Eleventy's `layout:` value means: it resolves relative to dir.layouts,
+// not the project root (zunkireelabs-web sets dir.layouts = "_includes/layouts"
+// and its own pages declare `layout: base.njk`).
+describe('resolveNewContentLayout', () => {
+  const withLayout = (extra = {}) => ({
+    url_file_map: { siteRoot: { layoutTemplate: 'src/_includes/layouts/base.njk' }, ...extra },
+  });
+
+  test('derives the layout name from the configured layoutTemplate path', () => {
+    assert.equal(resolveNewContentLayout(withLayout(), 'landing-page'), 'base.njk');
+  });
+
+  test('no layoutTemplate configured -> null, key omitted, exactly today\'s behavior', () => {
+    assert.equal(resolveNewContentLayout({ url_file_map: {} }, 'landing-page'), null);
+    assert.equal(resolveNewContentLayout({}, 'landing-page'), null);
+    assert.equal(resolveNewContentLayout(null, 'landing-page'), null);
+  });
+
+  // The real hazard: front matter overrides directory data, so emitting the
+  // generic site layout onto a new blog post would silently downgrade it from
+  // the blog layout its directory already assigns.
+  test('an explicit per-target null suppresses it, for a directory that supplies its own layout', () => {
+    const site = withLayout({ newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md', layout: null } } });
+    assert.equal(resolveNewContentLayout(site, 'blog-outline'), null);
+    assert.equal(resolveNewContentLayout(site, 'landing-page'), 'base.njk', 'other targets still get the site default');
+  });
+
+  test('an explicit per-target string overrides the site default outright', () => {
+    const site = withLayout({ newContentTargets: { 'blog-outline': { layout: 'blog-post.njk' } } });
+    assert.equal(resolveNewContentLayout(site, 'blog-outline'), 'blog-post.njk');
+  });
+
+  test('a target with no layout key at all falls back to the site default', () => {
+    const site = withLayout({ newContentTargets: { 'landing-page': { dir: 'src/pages', extension: '.njk' } } });
+    assert.equal(resolveNewContentLayout(site, 'landing-page'), 'base.njk');
   });
 });

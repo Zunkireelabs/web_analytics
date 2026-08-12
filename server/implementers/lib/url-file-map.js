@@ -259,6 +259,43 @@ function slugifyTitle(title) {
 // in the sitemap. No urlPattern (or an unusable one) returns null, and every
 // caller falls back to exactly today's behavior: write the page, add no
 // permalink, let the build decide.
+// The `layout` a genuinely-new page should declare, so it renders inside the
+// site's real chrome (navbar/footer/head) instead of as a bare document with
+// correct content and no site around it.
+//
+// Resolved from the configured siteRoot.layoutTemplate by BASENAME, because
+// that is what a layout front-matter value actually means: Eleventy resolves
+// it relative to `dir.layouts`, not to the project root. Confirmed against
+// the real repo rather than assumed — zunkireelabs-web's .eleventy.js sets
+// dir.layouts = "_includes/layouts", its layoutTemplate config is
+// "src/_includes/layouts/base.njk", and its own src/pages/about.njk declares
+// exactly `layout: base.njk`.
+//
+// The per-target override exists for one real, non-hypothetical reason: a
+// directory data file can already supply a layout for everything in that
+// directory, and front matter OVERRIDES directory data. On this same site
+// src/blog/blog.json sets "layout": "blog-post.njk" for every post, so
+// emitting the generic site layout on a new blog post would silently
+// downgrade it from the blog layout to the base one. Setting
+// newContentTargets["blog-outline"].layout = null suppresses it for that
+// target; a string overrides it outright.
+//
+// Nothing configured -> null -> the key is omitted and the build decides,
+// exactly as today. Deliberately conservative: a layout name that doesn't
+// resolve is not a cosmetic problem, it fails the site BUILD, so this only
+// ever emits a name derived from real configuration, never a guess.
+export function resolveNewContentLayout(site, actionType) {
+  const target = site?.url_file_map?.newContentTargets?.[actionType];
+  // Explicit per-target config wins, including an explicit null/'' meaning
+  // "this directory already supplies its own layout — do not emit one."
+  if (target && 'layout' in target) return target.layout || null;
+
+  const configured = site?.url_file_map?.siteRoot?.layoutTemplate;
+  if (!configured) return null;
+  const basename = configured.split('/').filter(Boolean).pop();
+  return basename || null;
+}
+
 export function resolveNewContentUrl(site, actionType, title) {
   const urlPattern = site.url_file_map?.newContentTargets?.[actionType]?.urlPattern;
   if (!urlPattern || !urlPattern.includes('{slug}')) return null;
