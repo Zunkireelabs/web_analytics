@@ -1,4 +1,4 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,15 +14,37 @@ const testSupportDir = path.join(here, 'test-support');
 // Integration coverage against the real DB (Postgres FOR UPDATE SKIP LOCKED
 // semantics can't be meaningfully faked with a mock pool) — mirrors the
 // atomic-claim pattern proven in store/oauth-refresh-tokens.js. Everything
-// this suite creates is scoped to one throwaway site and torn down in
-// `after`, so it never leaves rows behind in the shared DB.
+// this suite creates is scoped to throwaway sites and torn down in `after`,
+// so it never leaves rows behind in the shared DB.
 
-let siteId;
+// One throwaway site PER TEST, not per file.
+//
+// Job claiming is site-scoped (claimNextDesignAgentJob(siteId)), so a private
+// site makes cross-test contention structurally impossible rather than merely
+// tolerated. It has to be per-test because node:test runs the subtests in this
+// file CONCURRENTLY: the concurrency case below spawns two drain loops that
+// claim every queued job for their site until the queue is empty, so on a
+// shared site it would routinely swallow the polling case's two jobs before
+// that worker's 10ms poll could reach them — which is exactly the flake this
+// replaces ("waitFor: condition not met before timeout", after all 5 retries).
+const siteIds = [];
 const recIds = [];
 
 let recSeq = 0;
 
-async function makeRecommendation() {
+async function makeSite() {
+  const stamp = `test-worker-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const { rows } = await query(
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone)
+     VALUES ('design-agent-worker.test.js fixture', $1, $2, 'UTC')
+     RETURNING id`,
+    [stamp, stamp]
+  );
+  siteIds.push(rows[0].id);
+  return rows[0].id;
+}
+
+async function makeRecommendation(siteId) {
   // recommendations_dedup_key (077b) is unique on (site_id, page,
   // recommendation_type) for open rows — each fixture needs its own page so
   // parallel test cases (and the 8 jobs in the concurrency test) don't collide.
@@ -37,26 +59,17 @@ async function makeRecommendation() {
   return rows[0].id;
 }
 
-async function makeQueuedJob() {
-  const recommendationId = await makeRecommendation();
+async function makeQueuedJob(siteId) {
+  const recommendationId = await makeRecommendation(siteId);
   return createDesignAgentJob(siteId, recommendationId, { requestedBy: null });
 }
 
-before(async () => {
-  const stamp = `test-worker-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const { rows } = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone)
-     VALUES ('design-agent-worker.test.js fixture', $1, $2, 'UTC')
-     RETURNING id`,
-    [stamp, stamp]
-  );
-  siteId = rows[0].id;
-});
+
 
 after(async () => {
-  await query('DELETE FROM execution_jobs WHERE site_id = $1', [siteId]);
+  if (siteIds.length) await query('DELETE FROM execution_jobs WHERE site_id = ANY($1::int[])', [siteIds]);
   if (recIds.length) await query('DELETE FROM recommendations WHERE id = ANY($1::int[])', [recIds]);
-  await query('DELETE FROM sites WHERE id = $1', [siteId]);
+  if (siteIds.length) await query('DELETE FROM sites WHERE id = ANY($1::int[])', [siteIds]);
   await pool.end();
 });
 
@@ -106,18 +119,18 @@ async function retryUnlessStolen(jobIdRef, fn, { attempts = 5 } = {}) {
 
 describe('processOneJob — single-job lifecycle', () => {
   test('returns null when the queue is empty', async () => {
-    // Drain anything already queued for this site (e.g. left behind by an
-    // earlier test's own fixture) so this check is accurate — scoped by
-    // siteId, never touching any other site's real queued jobs.
-    let leftover = await processOneJob({ handler: createMockHandler(), siteId });
-    while (leftover) leftover = await processOneJob({ handler: createMockHandler(), siteId });
+    // A freshly-created site has an empty queue by construction, so this needs
+    // no drain-the-leftovers preamble any more — that only existed because
+    // every test used to share one site and could inherit another's fixtures.
+    const siteId = await makeSite();
     assert.equal(await processOneJob({ handler: createMockHandler(), siteId }), null);
   });
 
   test('claims a queued job, transitions to executing then completed, and logs both', async () => {
+    const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
-      const job = await makeQueuedJob();
+      const job = await makeQueuedJob(siteId);
       jobIdRef.current = job.id;
       const result = await processOneJob({ handler: createMockHandler(), siteId });
       assert.ok(result, 'job was claimed by somebody else before this test\'s own call — see retryUnlessStolen');
@@ -137,9 +150,10 @@ describe('processOneJob — single-job lifecycle', () => {
   });
 
   test('a throwing handler leaves the job failed, not stuck executing', async () => {
+    const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
-      const job = await makeQueuedJob();
+      const job = await makeQueuedJob(siteId);
       jobIdRef.current = job.id;
       const result = await processOneJob({ handler: createMockHandler({ shouldFail: true }), siteId });
       assert.ok(result, 'job was claimed by somebody else before this test\'s own call — see retryUnlessStolen');
@@ -154,9 +168,10 @@ describe('processOneJob — single-job lifecycle', () => {
   });
 
   test('default handler (no OpenHands yet) fails the job with a clear "not implemented" message', async () => {
+    const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
-      const job = await makeQueuedJob();
+      const job = await makeQueuedJob(siteId);
       jobIdRef.current = job.id;
       const result = await processOneJob({ siteId });
       assert.ok(result, 'job was claimed by somebody else before this test\'s own call — see retryUnlessStolen');
@@ -194,7 +209,8 @@ describe('concurrency — two workers racing the same queue', () => {
   // is ever claimed twice, by A, by B, or by anyone else) and that every
   // job reaches a terminal state, never stuck in 'queued'/'executing'.
   test('no job is claimed more than once by this test\'s own workers, and every job reaches a terminal state', async () => {
-    const jobs = await Promise.all(Array.from({ length: 8 }, () => makeQueuedJob()));
+    const siteId = await makeSite();
+    const jobs = await Promise.all(Array.from({ length: 8 }, () => makeQueuedJob(siteId)));
     const claimedBy = new Map(); // jobId -> count of handler invocations
 
     const onRun = (job) => claimedBy.set(job.id, (claimedBy.get(job.id) || 0) + 1);
@@ -244,38 +260,66 @@ async function waitFor(conditionFn, { timeoutMs = 10_000, intervalMs = 50 } = {}
   throw new Error('waitFor: condition not met before timeout');
 }
 
-// Both tests below need a fixture job to be claimed by THIS test's own
-// local worker specifically (they're checking real poll-timing/shutdown
-// behavior, not just "does it eventually get processed by somebody") — see
-// retryUnlessStolen (defined above, before the first describe block) for
-// why that needs a bounded retry rather than a bare assertion.
+// Keeps at least one job queued for `siteId` until this test's own worker has
+// claimed `target` of them, then stops.
+//
+// This exists because of a REAL, reproduced external claimant, not a
+// hypothetical one: claimNextDesignAgentJob's siteId argument only narrows what
+// the CALLER can see, so a separately-deployed worker polling the same database
+// with the unscoped default claims any queued design_generate row, on any site,
+// including the fixtures created here. Confirmed from the stolen jobs' own log
+// lines — "Claimed by worker pid 1", a containerised worker, while this suite's
+// process had a different pid.
+//
+// A fixed two-job fixture therefore could not be made reliable by any amount of
+// site isolation or timeout tuning: when the thief took one, this test's worker
+// had nothing left to claim and waited out the clock. Topping the queue back up
+// converges instead — every steal simply costs one more round — while the
+// property under test (the worker never starts a claim while its own previous
+// handler is still running) is asserted exactly as strictly as before.
+function keepQueueTopped(siteId, isDone) {
+  let stop = false;
+  const finished = (async () => {
+    while (!stop && !isDone()) {
+      const { rows } = await query(
+        `SELECT count(*)::int AS queued FROM execution_jobs
+          WHERE site_id = $1 AND kind = 'design_generate' AND status = 'queued'`,
+        [siteId]
+      );
+      if (!rows[0].queued) await makeQueuedJob(siteId);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  })();
+  return async () => { stop = true; await finished; };
+}
+
 describe('createWorker — polling lifecycle', () => {
   test('prevents overlapping polls: a slow job blocks the next poll until it settles', async () => {
-    const jobIdRef = { current: null };
-    await retryUnlessStolen(jobIdRef, async () => {
-      await makeQueuedJob();
-      const job2 = await makeQueuedJob();
-      jobIdRef.current = job2.id;
+    const siteId = await makeSite();
+    {
       const polls = []; // { at, claimedJob }
       const handlerDelayMs = 500; // well above real network jitter for one round-trip
+      const claimedCount = () => polls.filter((p) => p.claimedJob).length;
       const worker = createWorker({
         pollIntervalMs: 10,
         handler: createMockHandler({ delayMs: handlerDelayMs }),
         onPoll: (result) => polls.push({ at: Date.now(), claimedJob: result !== null }),
         siteId,
       });
+      const stopTopping = keepQueueTopped(siteId, () => claimedCount() >= 2);
       try {
         worker.start();
-        // Wait for both real jobs to have been claimed and settled — once the
-        // queue drains, later polls legitimately speed back up (nothing to
-        // wait on), so only the two job-claiming polls are meaningful here.
-        await waitFor(() => polls.filter((p) => p.claimedJob).length >= 2, { timeoutMs: 15_000 });
+        // Two claims by THIS worker is what the assertion below needs; the
+        // top-up loop guarantees there is always something to claim, so this
+        // converges regardless of how many jobs the external worker takes.
+        await waitFor(() => claimedCount() >= 2, { timeoutMs: 30_000 });
       } finally {
+        await stopTopping();
         await worker.stop();
       }
 
       const jobPolls = polls.filter((p) => p.claimedJob);
-      assert.equal(jobPolls.length, 2, 'expected exactly the 2 queued jobs to have been claimed');
+      assert.ok(jobPolls.length >= 2, `expected at least 2 claims by this test's own worker, got ${jobPolls.length}`);
       // The gap between the two job-claiming polls' completion times must be
       // at least the handler's own delay — proof the second job's claim never
       // started while the first job's handler was still running (structurally
@@ -283,13 +327,14 @@ describe('createWorker — polling lifecycle', () => {
       // timer; this is the empirical check).
       const gap = jobPolls[1].at - jobPolls[0].at;
       assert.ok(gap >= handlerDelayMs * 0.8, `second job's poll started too soon after the first settled (gap ${gap}ms)`);
-    });
+    }
   });
 
   test('graceful shutdown: stop() waits for the in-flight job, leaves nothing stuck in executing', async () => {
+    const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
-      const job = await makeQueuedJob();
+      const job = await makeQueuedJob(siteId);
       jobIdRef.current = job.id;
       let handlerStarted = false;
       const worker = createWorker({
@@ -321,7 +366,8 @@ describe('createWorker — polling lifecycle', () => {
   });
 
   test('stop() before any job is claimed leaves the queue untouched', async () => {
-    const job = await makeQueuedJob();
+    const siteId = await makeSite();
+    const job = await makeQueuedJob(siteId);
     const worker = createWorker({ pollIntervalMs: 5, handler: createMockHandler({ delayMs: 500 }), siteId });
     // Never started — stop() should be a safe no-op.
     await worker.stop();
@@ -332,13 +378,7 @@ describe('createWorker — polling lifecycle', () => {
 
 describe('componentTemplates job — full real-DB lifecycle through the dispatching handler', () => {
   test('createComponentTemplateJob -> claim -> dispatch -> completed, with params and result round-tripping through Postgres JSONB', async () => {
-    // Drain any job left queued by an earlier test in this file (e.g. "stop()
-    // before any job is claimed" deliberately leaves one behind) — otherwise
-    // the shared FIFO queue could hand processOneJob below that leftover
-    // instead of the job this test just created.
-    let leftover = await processOneJob({ handler: createMockHandler(), siteId });
-    while (leftover) leftover = await processOneJob({ handler: createMockHandler(), siteId });
-
+    const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
       const job = await createComponentTemplateJob(siteId, ['faq', 'expand-content'], { requestedBy: null, pageUrl: 'https://example.com/faq' });
@@ -382,12 +422,7 @@ describe('componentTemplates job — full real-DB lifecycle through the dispatch
   });
 
   test('a derived template that violates its placeholder contract fails the job instead of being saved', async () => {
-    // The inverse guarantee: persistence is not a rubber stamp. A template
-    // missing a required token must never reach the site row — the gate
-    // downstream would reject it anyway, and a 'completed' job that changed
-    // nothing would make the state look healed when it isn't.
-    let leftover = await processOneJob({ handler: createMockHandler(), siteId });
-    while (leftover) leftover = await processOneJob({ handler: createMockHandler(), siteId });
+    const siteId = await makeSite();
 
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
