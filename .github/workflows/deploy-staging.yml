@@ -169,9 +169,16 @@ jobs:
             # still changes daily. Deliberately absent from deploy.yml —
             # production must reach real recipients.
             #
-            # NOTE this also captures invitation and password-reset mail, so
-            # those flows need forwarding by hand (or a temporary unset) while
-            # it is on.
+            # Invitation and password-reset mail is EXEMPT (see email.js's
+            # REDIRECT_EXEMPT): each is addressed to one person who just
+            # requested that exact link, so redirecting it protects nobody and
+            # silently breaks the thing they asked for. Everything
+            # system-initiated — daily reports, notifications, sales leads —
+            # is still redirected here.
+            #
+            # Consequence worth knowing: an invitation sent from staging
+            # contains a STAGING link, so only invite people you actually
+            # want landing in staging while this host is the live one.
             EMAIL_REDIRECT_TO=${{ vars.EMAIL_REDIRECT_TO || 'yukta@zunkireelabs.com' }}
 
             # ── Dashboard auth (staging) ────────────────────────────────────

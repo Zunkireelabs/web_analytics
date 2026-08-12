@@ -18,7 +18,7 @@ mock.module('nodemailer', {
   },
 });
 
-const { sendDailyEmail } = await import('./email.js');
+const { sendDailyEmail, sendInvitationEmail, sendPasswordResetEmail, sendNotificationEmail, sendContactLeadEmail } = await import('./email.js');
 
 const SITE = { name: 'LifeLinkNepal', report_email_to: 'client@lifelinknepal.com' };
 const DAY = { clicks: 10, impressions: 100, users: 5, sessions: 7 };
@@ -58,5 +58,79 @@ describe('sendDailyEmail — redirect wiring', () => {
       assert.doesNotMatch(sent[0].subject, /REDIRECTED/);
       assert.equal(sent[0].headers, undefined);
     });
+  });
+});
+
+// The redirect exists to stop BULK, SYSTEM-INITIATED reporting reaching real
+// clients from an environment that changes daily. Invitations and password
+// resets are neither: each is addressed to one person who just asked for that
+// exact link, and redirecting it doesn't protect them — it silently breaks
+// the thing they requested.
+//
+// The tests that matter most here are the ones proving the exemption did NOT
+// widen: everything else must still be redirected.
+describe('transactional exemption', () => {
+  const REAL = 'someone@client.example';
+
+  test('an invitation reaches its real recipient', () => {
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendInvitationEmail({ to: REAL, siteName: 'LifeLinkNepal', role: 'tenant_admin', acceptUrl: 'https://app.example/accept?t=1' })
+      .then(() => {
+        assert.equal(sent[0].to, REAL);
+        assert.doesNotMatch(sent[0].subject, /REDIRECTED/);
+      });
+  });
+
+  test('a password reset reaches its real recipient', () => {
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendPasswordResetEmail({ to: REAL, resetUrl: 'https://app.example/reset?t=1' })
+      .then(() => {
+        assert.equal(sent[0].to, REAL);
+        assert.doesNotMatch(sent[0].subject, /REDIRECTED/);
+      });
+  });
+
+  test('the exemption marker never reaches the SMTP envelope', () => {
+    // A Symbol key would not serialise anyway, but an exemption flag leaking
+    // into a real message is the kind of thing worth pinning.
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendPasswordResetEmail({ to: REAL, resetUrl: 'https://app.example/reset' })
+      .then(() => {
+        assert.equal(Object.getOwnPropertySymbols(sent[0]).length, 0);
+      });
+  });
+
+  test('EXEMPTION DID NOT WIDEN: a client report is still redirected', () => {
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendDailyEmail(SITE, '2026-08-12', DAY, 'narrative').then(() => {
+      assert.equal(sent[0].to, 'yukta@zunkireelabs.com');
+      assert.match(sent[0].subject, /^\[REDIRECTED/);
+    });
+  });
+
+  test('EXEMPTION DID NOT WIDEN: a notification email is still redirected', () => {
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendNotificationEmail(SITE, [{ title: 'Something changed', body: 'Detail.' }]).then(() => {
+      if (!sent.length) return; // no events -> no send, which is also fine
+      assert.equal(sent[0].to, 'yukta@zunkireelabs.com');
+    });
+  });
+
+  test('EXEMPTION DID NOT WIDEN: a sales lead is still redirected', () => {
+    process.env.EMAIL_REDIRECT_TO = 'yukta@zunkireelabs.com';
+    return sendContactLeadEmail({ companyName: 'Acme', websiteDomain: 'acme.com', contactEmail: 'a@acme.com', message: 'hi' })
+      .then(() => {
+        if (!sent.length) return;
+        assert.equal(sent[0].to, 'yukta@zunkireelabs.com');
+      });
+  });
+
+  test('with the redirect OFF, transactional mail is unchanged', () => {
+    delete process.env.EMAIL_REDIRECT_TO;
+    return sendInvitationEmail({ to: REAL, siteName: 'S', role: 'tenant_member', acceptUrl: 'https://app.example/a' })
+      .then(() => {
+        assert.equal(sent[0].to, REAL);
+        assert.equal(sent[0].headers, undefined);
+      });
   });
 });

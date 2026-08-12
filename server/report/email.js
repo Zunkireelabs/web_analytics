@@ -16,6 +16,22 @@ import nodemailer from 'nodemailer';
 // forget.
 //
 // Unset in production, where mail must reach its real recipient.
+// Exemption marker for mail that must always reach its real recipient even
+// while the catch-all redirect is on.
+//
+// The redirect exists to stop BULK, SYSTEM-INITIATED reporting reaching real
+// clients from an environment that changes several times a day. An invitation
+// or a password reset is neither: it is addressed to one specific person who
+// just asked for that exact link, seconds ago, and redirecting it doesn't
+// protect them — it silently breaks the thing they requested and leaves an
+// operator to forward links by hand.
+//
+// A Symbol rather than a string field so it cannot collide with any real
+// nodemailer option, and it is deleted from the message before send, so
+// nothing leaks into the SMTP envelope. Deliberately opt-IN per call site:
+// the default for anything new stays redirected, which is the safe direction.
+export const REDIRECT_EXEMPT = Symbol('redirect-exempt');
+
 export function redirectTarget() {
   const to = (process.env.EMAIL_REDIRECT_TO || '').trim();
   return to || null;
@@ -57,6 +73,13 @@ function getTransporter() {
   return {
     ...transporter,
     sendMail: (message) => {
+      // Person-requested transactional mail is exempt — see REDIRECT_EXEMPT.
+      // The flag is stripped before nodemailer ever sees the message.
+      if (message?.[REDIRECT_EXEMPT]) {
+        const { [REDIRECT_EXEMPT]: _exempt, ...clean } = message;
+        console.log(`[email] redirect exempt (transactional) — "${message.subject}" delivered to its real recipient.`);
+        return transporter.sendMail(clean);
+      }
       const redirected = applyRedirect(message, target);
       console.log(`[email] REDIRECT ACTIVE — "${message.subject}" for ${redirected.headers['X-Original-To']} sent to ${target} instead.`);
       return transporter.sendMail(redirected);
@@ -179,6 +202,7 @@ export async function sendInvitationEmail({ to, siteName, role, acceptUrl }) {
   </div>`;
 
   await transporter.sendMail({
+    [REDIRECT_EXEMPT]: true,
     from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
     to,
     subject: `You've been invited to ${siteName}`,
@@ -207,6 +231,7 @@ export async function sendPasswordResetEmail({ to, resetUrl }) {
   </div>`;
 
   await transporter.sendMail({
+    [REDIRECT_EXEMPT]: true,
     from: process.env.REPORT_EMAIL_FROM || process.env.SMTP_USER,
     to,
     subject: 'Reset your password',
