@@ -1,29 +1,24 @@
 import { getDueVerifications, recordVerificationOutcome } from '../../store/fix-verifications.js';
 import { getWatchlistItemById, setWatchlistStatus } from '../../store/watchlist.js';
-import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, contentGapsFor, GAP_TYPE_TO_GENERATOR } from './page-content.js';
+import { analyzePageUrl, recommendationsFor, contentGapsFor } from './page-content.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint } from './site-fingerprint.js';
-import { problemSignatureFor, buildRepairRecipe } from './learned-repair.js';
+import { problemSignatureFor, buildRepairRecipe, tagsForGenerator } from './learned-repair.js';
 
-// Reverse of TAG_TO_GENERATOR / GAP_TYPE_TO_GENERATOR — which real tag(s) a
-// given generatorId's draft was meant to resolve, per source agent (the same
-// generatorId can mean different things from different agents — e.g. 'faq'
-// is produced by both opportunity and content-gap, with different checks).
-// Derived, not hand-duplicated, so it can never drift from the real mapping
+// Which real tag(s) a given generatorId's draft was meant to resolve, per
+// source agent (the same generatorId can mean different things from different
+// agents — e.g. 'faq' is produced by both opportunity and content-gap, with
+// different checks). Derived from TAG_TO_GENERATOR/GAP_TYPE_TO_GENERATOR
+// rather than hand-duplicated, so it can never drift from the real mapping
 // each agent sets recommendedAction.generatorId from.
-const GENERATOR_TO_TAGS = {};
-for (const [tag, generatorId] of Object.entries(TAG_TO_GENERATOR)) {
-  if (!generatorId) continue;
-  (GENERATOR_TO_TAGS[generatorId] ||= []).push(tag);
-}
-const GENERATOR_TO_GAP_TYPES = {};
-for (const [gapType, generatorId] of Object.entries(GAP_TYPE_TO_GENERATOR)) {
-  if (!generatorId) continue;
-  (GENERATOR_TO_GAP_TYPES[generatorId] ||= []).push(gapType);
-}
+//
+// The derivation moved to learned-repair.js because the cross-client reader
+// needs the identical slugs to build the identical problem_signature — see
+// tagsForGenerator's own comment. Importing it here rather than keeping a
+// second copy is what makes "writer and reader agree" structural.
 
 const CLOSED_STATUSES = new Set(['completed', 'no_longer_applicable']);
 
@@ -41,16 +36,11 @@ async function reopenIfClosed(siteId, watchlistItemId) {
 // (created before migration 037) fall back to the original opportunity-only
 // behavior.
 function currentTagsFor(row, analysis) {
+  const tags = tagsForGenerator(row.generator_id, row.source);
   if (row.source === 'content-gap') {
-    return {
-      tags: GENERATOR_TO_GAP_TYPES[row.generator_id] || [],
-      tagsNow: contentGapsFor(analysis, row.query || '').map((g) => g.type),
-    };
+    return { tags, tagsNow: contentGapsFor(analysis, row.query || '').map((g) => g.type) };
   }
-  return {
-    tags: GENERATOR_TO_TAGS[row.generator_id] || [],
-    tagsNow: recommendationsFor(analysis, row.query || ''),
-  };
+  return { tags, tagsNow: recommendationsFor(analysis, row.query || '') };
 }
 
 // The primary automatic-LEARN trigger for the shared agent_fix_memory loop —
