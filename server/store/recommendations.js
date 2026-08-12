@@ -17,17 +17,17 @@ export async function findOpenRecommendation(siteId, page, recommendationType) {
 
 export async function insertRecommendation(siteId, {
   page, recommendationType, issue, reason, params, findingId, detectingAgent, priority, expectedImpact, riskTier,
-  designBlockedReason,
+  blockedReason,
 }) {
   const { rows } = await query(
     `INSERT INTO recommendations
-       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, design_blocked_reason)
+       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [
       siteId, page, recommendationType, issue, reason || null, JSON.stringify(params || {}),
       [findingId], [detectingAgent], priority || 'medium', expectedImpact ? JSON.stringify(expectedImpact) : null,
-      riskTier || 'manual', designBlockedReason ?? null,
+      riskTier || 'manual', blockedReason ?? null,
     ]
   );
   return rows[0];
@@ -41,7 +41,7 @@ export async function insertRecommendation(siteId, {
 // supporting_agents is "who else corroborated it." Never changes `status` —
 // closing a recommendation is out of scope for M1 (see
 // recommendation-coordinator.js's syncFromGrounded doc comment).
-export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, designBlockedReason, riskTier }) {
+export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier }) {
   const { rows } = await query(
     `UPDATE recommendations SET
        finding_ids = (SELECT ARRAY(SELECT DISTINCT unnest(finding_ids || $2::text[]))),
@@ -54,13 +54,15 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
        priority = COALESCE($6, priority),
        expected_impact = COALESCE($7, expected_impact),
        -- Deliberately NOT COALESCE: these two must be able to go back to
-       -- NULL/'safe' when a previously-unverified component template gets
-       -- verified. COALESCE would make a block permanent once set, so a site
-       -- that fixed its template would stay stuck in the manual tier forever.
-       -- Both are recomputed from live state on every sync by
-       -- recommendation-coordinator.js's designRiskTier, so overwriting
-       -- unconditionally is the correct semantics here.
-       design_blocked_reason = $8,
+       -- NULL/'safe' when whatever was blocking clears — a component template
+       -- gets verified, or a url_file_map entry finally resolves (possibly via
+       -- autoHealFileMapping, with no human involved at all). COALESCE would
+       -- make a block permanent once set, so a site that fixed the underlying
+       -- cause would stay stuck in the manual tier forever. Both are recomputed
+       -- from live state on every sync by recommendation-coordinator.js's
+       -- blockedRiskTier, so overwriting unconditionally is the correct
+       -- semantics here.
+       blocked_reason = $8,
        risk_tier = COALESCE($9, risk_tier),
        last_seen_at = now(),
        updated_at = now()
@@ -70,7 +72,7 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
       id, [findingId], agentId, reason || null,
       params ? JSON.stringify(params) : null, priority || null,
       expectedImpact ? JSON.stringify(expectedImpact) : null,
-      designBlockedReason ?? null, riskTier || null,
+      blockedReason ?? null, riskTier || null,
     ]
   );
   return rows[0];

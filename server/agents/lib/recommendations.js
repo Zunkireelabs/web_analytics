@@ -8,8 +8,9 @@ import { recommendationPageKey } from './recommendation-coordinator.js';
 import { isPageMapped, resolveAdapter, resolveFile } from '../../implementers/lib/url-file-map.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
-import { getFileContent } from '../../github/client.js';
+import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
+import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -50,12 +51,17 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, draftedFindingIds, catByAgent, site] = await Promise.all([
+  const [runs, draftedFindingIds, catByAgent, loadedSite] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
     getSiteById(siteId),
   ]);
+  // Reassignable: healUnmappedPage below persists newly-discovered url_file_map
+  // entries and returns the updated row, and later findings in the same pass
+  // must see them — otherwise two findings on one page would each try to heal
+  // it, and the second would still read the stale map.
+  let site = loadedSite;
   const lookupQuery = makeQueryLookup(siteId);
   // One real GitHub read per unique data file for this whole refresh, no
   // matter how many candidate pages share it (e.g. every /locations/:city/
@@ -63,13 +69,62 @@ export async function buildRecommendations(siteId) {
   // audit-url-file-map.js already uses, so isDataReady below stays cheap
   // even across a large candidate-page pool.
   const dataFileCache = new Map(); // `${path}@${ref}` -> file | null
-  const cachedFetchFile = async (site, path, ref) => {
+  // "We could not check" is NOT the same as "it is not there", and conflating
+  // them is how a revoked token or a rate limit silently empties a tenant's
+  // Action Center. getFileContent already draws the line correctly — it returns
+  // null only for a real 404 and throws on anything else — but the old
+  // `.catch(() => null)` here threw that distinction away, so a 401 read as
+  // evidence that a live page was a soft-404 and the finding was dropped.
+  // Tracked separately so cachedFetchFile keeps its existing file|null contract
+  // for isDataReady, which genuinely does want "no data" for both cases.
+  const unverifiableFiles = new Set(); // `${path}@${ref}`
+  const cachedFetchFile = async (s, path, ref) => {
     const key = `${path}@${ref}`;
     if (dataFileCache.has(key)) return dataFileCache.get(key);
-    const file = await getFileContent(site, path, ref).catch(() => null);
+    let file = null;
+    try {
+      file = await getFileContent(s, path, ref);
+    } catch (err) {
+      unverifiableFiles.add(key);
+      console.warn(`[recommendations] site ${siteId}: could not verify ${path} exists (${err.message}) — not treating that as absent.`);
+    }
     dataFileCache.set(key, file);
     return file;
   };
+  // One repo-tree read for this whole refresh no matter how many unmapped pages
+  // need discovering — same caching idiom as cachedFetchFile above, and the
+  // reason autoHealFileMapping takes an injectable fetchTree at all: the tree is
+  // identical for every page on the same branch, and getRepoTree costs two
+  // GitHub calls each time.
+  const treeCache = new Map(); // `${siteId}@${branch}` -> { files, truncated }
+  const cachedFetchTree = async (s, branch) => {
+    const key = `${s.id}@${branch}`;
+    if (!treeCache.has(key)) treeCache.set(key, await getRepoTree(s, branch));
+    return treeCache.get(key);
+  };
+  // Attempts are deduped per (page, actionType) rather than per page: whether a
+  // page needs file-mapping healing at all depends on the action type, because
+  // an adapter configured for one type and not another makes
+  // autoHealFileMapping bail early for the former only. Keyed on page alone, a
+  // page whose faq route is adapter-handled would suppress the genuine attempt
+  // for its schema route.
+  const healAttempted = new Set();
+  const healUnmappedPage = async (currentSite, pageUrl, actionType) => {
+    if (!currentSite?.repo_owner || !currentSite?.repo_name) return currentSite;
+    const key = `${pageUrl}::${actionType}`;
+    if (healAttempted.has(key)) return currentSite;
+    healAttempted.add(key);
+    // Never fatal: this is an opportunistic upgrade of a recommendation from
+    // "blocked" to "actionable". A rate-limited or unreachable repo must leave
+    // the finding visible-and-blocked, not take down the whole refresh.
+    const healed = await autoHealFileMapping(currentSite, pageUrl, actionType, { fetchTree: cachedFetchTree })
+      .catch((err) => {
+        console.warn(`[recommendations] site ${siteId}: could not auto-discover a file mapping for ${pageUrl}:`, err.message);
+        return null;
+      });
+    return healed || currentSite;
+  };
+
   const items = [];
   const lastAnalyzedAt = {};
   // Every generatorId+page this run's agents still flag, independent of the
@@ -106,21 +161,45 @@ export async function buildRecommendations(siteId) {
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
       // A page-scoped finding whose page has no real deploy target (no
-      // url_file_map entry, no adapter route) can never actually be
-      // applied — surfacing it as an "auto-eligible" recommendation only
-      // for it to fail with "No url_file_map entry matches..." at
-      // approve/apply time. Skip it entirely (not added to detectedKeys
-      // either) so any already-open recommendation for it closes out on
-      // the next sync instead of staying stuck. See
-      // implementers/lib/url-file-map.js's isPageMapped and
-      // scripts/audit-url-file-map.js, which surfaces this same gap
-      // proactively for a whole site's config.
+      // url_file_map entry, no adapter route) can't be applied yet — it would
+      // fail with "No url_file_map entry matches..." at approve/apply time.
+      //
+      // This used to `continue`, dropping the finding entirely. That was wrong,
+      // and wrong in the most misleading direction: a tenant whose repo has not
+      // been mapped yet has EVERY page-scoped finding discarded here, so their
+      // Action Center renders near-empty and reads as "my site is healthy" when
+      // it actually means "we never configured your repo." Confirmed against
+      // the live DB: sites 6, 7 and 8 have an empty url_file_map, so this line
+      // was silently throwing away every real page-scoped issue we found for
+      // them.
+      //
+      // It was also a deadlock. autoHealFileMapping (implementers/lib/
+      // discover-file-mapping.js) can often resolve a page's file on its own by
+      // matching the URL's last segment against the real repo tree — but it
+      // only ran at push time, and a finding dropped HERE never reaches push
+      // time. So the mapping could never heal for exactly the tenants that
+      // needed it. healUnmappedPage below is that same function, moved to where
+      // the decision is actually made.
+      //
+      // Unlike the two gates below it, this one is OUR configuration gap, not a
+      // fact about the tenant's site: the issue is real and the page is real.
+      // So it stays visible carrying a reason, is added to detectedKeys (it must
+      // NOT auto-close as "resolved" — nothing was resolved), and
+      // recommendation-coordinator.js forces it to the 'manual' tier so it can
+      // never enter the unattended chain. Same treatment as the design gate.
+      //
       // broken-link-fix is excluded: computeBrokenLinkFixMerge (backend.js)
       // has its own GitHub code-search fallback for exactly the pages this
       // check would flag, so "not in url_file_map" isn't fatal for it the
       // way it is for every other generatorId here.
+      let mappingBlockedReason = null;
       if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
-        && !isPageMapped(site, action.params.page, action.generatorId)) continue;
+        && !isPageMapped(site, action.params.page, action.generatorId)) {
+        site = await healUnmappedPage(site, action.params.page, action.generatorId);
+        if (!isPageMapped(site, action.params.page, action.generatorId)) {
+          mappingBlockedReason = `No url_file_map entry resolves ${action.params.page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
+        }
+      }
       // isPageMapped above only proves url_file_map SYNTACTICALLY resolves a
       // path (an exact `pages[]` entry, or a `patterns[]` regex match) — it
       // never confirms that resolved file genuinely exists in the repo. A
@@ -143,7 +222,17 @@ export async function buildRecommendations(siteId) {
       // adapter validates itself below.
       if (action.generatorId !== 'broken-link-fix' && action.params?.page && site) {
         const filePath = resolveFile(site, action.params.page);
-        if (filePath && !(await cachedFetchFile(site, filePath, baseBranch(site)))) continue;
+        if (filePath) {
+          const ref = baseBranch(site);
+          const exists = await cachedFetchFile(site, filePath, ref);
+          // Drop ONLY on a definitive 404. If the read failed for any other
+          // reason we have no evidence either way, and dropping would repeat
+          // the very bug this gate's own comment warns about — inventing a
+          // conclusion from an unverified guess, just in the opposite
+          // direction. Left in place, it is caught by the real apply-time
+          // checks instead, which fail loudly rather than silently.
+          if (!exists && !unverifiableFiles.has(`${filePath}@${ref}`)) continue;
+        }
       }
       // isPageMapped above only confirms a ROUTE exists (a file, or an
       // adapter configured for this actionType) — for data-array-content
@@ -167,21 +256,29 @@ export async function buildRecommendations(siteId) {
         params.query = await lookupQuery(run.start, run.end, params.page);
         if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
-      // Design-verification gate. Unlike the three gates above, this one does
-      // NOT `continue` — a blocked item is a real, correctly-detected issue
-      // we simply aren't allowed to auto-fix yet, so dropping it would lose a
-      // genuine finding and let the recommendation close out as "resolved"
-      // when nothing was resolved. It stays visible, carries its reason, and
-      // recommendation-coordinator.js forces it to the 'manual' risk tier so
-      // it can never enter the unattended safe-fix chain. The real hard block
-      // (a 422) lives in generateDraft — this is the honest UI half of it, so
-      // a user sees "blocked, here's why" instead of clicking Generate and
-      // getting an error.
+      // Design-verification gate. Like the url_file_map gate above (and unlike
+      // the two that drop their items), this one does NOT `continue` — a blocked
+      // item is a real, correctly-detected issue we simply aren't allowed to
+      // auto-fix yet, so dropping it would lose a genuine finding and let the
+      // recommendation close out as "resolved" when nothing was resolved. It
+      // stays visible, carries its reason, and recommendation-coordinator.js
+      // forces it to the 'manual' risk tier so it can never enter the unattended
+      // safe-fix chain. The real hard block (a 422) lives in generateDraft —
+      // this is the honest UI half of it, so a user sees "blocked, here's why"
+      // instead of clicking Generate and getting an error.
       // Pure in-memory check against the already-loaded `site` row — no
       // network or DB access, safe inside this per-finding loop.
       const designCheck = site
         ? componentTemplateVerification(site, componentTemplateActionTypeFor(action.generatorId))
         : { ok: true };
+
+      // Both blockers land in one field. The reason text says which one it was,
+      // and nothing downstream needs to branch on the kind — blockedRiskTier
+      // only checks truthiness. The mapping block is reported first when both
+      // apply, because it's the more fundamental one: there is no point telling
+      // someone to verify a component template for a page we can't locate a
+      // file for.
+      const blockedReason = mappingBlockedReason || (designCheck.ok ? null : designCheck.detail);
 
       const { bucket, category } = classify({ source: run.agentId, generatorId: action.generatorId });
       items.push({
@@ -190,7 +287,7 @@ export async function buildRecommendations(siteId) {
         tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
         bucket, category,
-        designBlockedReason: designCheck.ok ? null : designCheck.detail,
+        blockedReason,
       });
     }
   }

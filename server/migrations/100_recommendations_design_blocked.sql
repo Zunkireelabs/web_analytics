@@ -19,7 +19,23 @@
 -- unattended safe-fix chain while remaining actionable by a human.
 --
 -- NULL = not blocked, which is the correct reading for every existing row.
-ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS design_blocked_reason TEXT;
+--
+-- Named `blocked_reason`, not `design_blocked_reason`: the design gate was the
+-- first blocker to need this, but not the only one (a missing url_file_map entry
+-- now uses the same column — see 103, and buildRecommendations). The column was
+-- briefly named for the design gate specifically; it is named for what it holds
+-- instead, because this file has never reached `stage` and so nothing deployed
+-- depends on the old name.
+--
+-- Deliberately NOT renamed by a later migration. This directory has no
+-- migration-tracking table — every file re-runs on every `npm run migrate`, and
+-- idempotency comes solely from IF NOT EXISTS guards. An `ADD COLUMN IF NOT
+-- EXISTS design_blocked_reason` here plus a `RENAME` in 103 therefore does not
+-- converge: 100 re-creates the old column on the next run, 103 sees the new one
+-- already present and skips, and the database ends up with BOTH. Verified by
+-- running the directory twice. The only stable form is for each file to declare
+-- the end state it wants directly.
+ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
 
-CREATE INDEX IF NOT EXISTS recommendations_design_blocked_idx
-  ON recommendations (site_id) WHERE design_blocked_reason IS NOT NULL;
+CREATE INDEX IF NOT EXISTS recommendations_blocked_idx
+  ON recommendations (site_id) WHERE blocked_reason IS NOT NULL;

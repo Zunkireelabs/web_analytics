@@ -26,7 +26,7 @@ function reset() {
 }
 
 function item(id, { priority = 'medium', blocked = null } = {}) {
-  return { id, tag: `Fix ${id}`, generatorId: 'meta-title', params: { page: `/p${id}` }, priority, designBlockedReason: blocked };
+  return { id, tag: `Fix ${id}`, generatorId: 'meta-title', params: { page: `/p${id}` }, priority, blockedReason: blocked };
 }
 
 describe('resolveDisplayName', () => {

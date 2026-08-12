@@ -99,14 +99,21 @@ export function recommendationPageKey(item) {
 // built BEFORE buildRecommendations' draftedFindingIds filter specifically
 // so a finding with an unshipped draft still counts as "detected" here and
 // its recommendation row is never closed out from under a pending draft.
-// A design-blocked recommendation is forced to 'manual' regardless of what
+// A blocked recommendation is forced to 'manual' regardless of what
 // risk-tiers.js says about its generator. This is the single mechanism that
 // keeps blocked items out of the unattended chain: listOpenSafeRecommendations
 // and auto-remediation.js both select on risk_tier = 'safe', so demoting the
 // tier is sufficient — no second filter to remember in either place, and no
 // way for a new unattended caller added later to accidentally bypass it.
-function designRiskTier(item) {
-  return item.designBlockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
+//
+// Blocker-agnostic on purpose. It started as design-verification only, and now
+// also carries "no url_file_map entry for this page" (see
+// buildRecommendations). Any future blocker gets the same treatment for free by
+// setting item.blockedReason, rather than each one inventing its own way to
+// stay out of the autonomous path — which is exactly how one of them would
+// eventually forget to.
+function blockedRiskTier(item) {
+  return item.blockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
 }
 
 export async function syncFromGrounded(siteId, grounded) {
@@ -123,15 +130,15 @@ export async function syncFromGrounded(siteId, grounded) {
         // been verified clears the block automatically (back to its real risk
         // tier), and one that regresses re-blocks — no manual unblock step,
         // and no stale "blocked" banner outliving the thing that caused it.
-        designBlockedReason: item.designBlockedReason ?? null,
-        riskTier: designRiskTier(item),
+        blockedReason: item.blockedReason ?? null,
+        riskTier: blockedRiskTier(item),
       });
     } else {
       await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
-        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: designRiskTier(item),
-        designBlockedReason: item.designBlockedReason ?? null,
+        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: blockedRiskTier(item),
+        blockedReason: item.blockedReason ?? null,
       });
     }
   }
@@ -237,7 +244,7 @@ export async function getRecommendations(siteId) {
         // the real gate), but a button that always fails is worse than no
         // button. See engineering lesson button-state-visibility: state the
         // reason inline rather than only on hover.
-        designBlockedReason: r.design_blocked_reason || null,
+        blockedReason: r.blocked_reason || null,
       };
     });
   const lastAnalyzedAt = {};

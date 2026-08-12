@@ -45,7 +45,7 @@ export function resolveDisplayName(user) {
 // from something that has actually been working, rather than a chat box.
 function summarize(items) {
   const open = items.length;
-  const blocked = items.filter((i) => i.designBlockedReason).length;
+  const blocked = items.filter((i) => i.blockedReason).length;
   const highPriority = items.filter((i) => i.priority === 'high').length;
   return { open, blocked, highPriority, actionable: open - blocked };
 }
@@ -55,7 +55,7 @@ function summarize(items) {
 // by definition cannot be actioned yet, see the design gate).
 function suggestedActions(items, { isAdmin }) {
   return items
-    .filter((i) => !i.designBlockedReason)
+    .filter((i) => !i.blockedReason)
     .sort((a, b) => (a.priority === 'high' ? -1 : 0) - (b.priority === 'high' ? -1 : 0))
     .slice(0, 3)
     .map((i) => (isAdmin

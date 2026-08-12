@@ -55,13 +55,21 @@ export function findCandidateFile(pageUrl, repoFiles) {
 // match, or nothing is written) — never guesses, never partially trusted.
 // Returns the resolved site (with url_file_map updated) on success, or null
 // if nothing could be safely resolved.
-export async function autoHealFileMapping(site, pageUrl, actionType) {
+//
+// `fetchTree` is injectable so a caller resolving MANY pages in one pass can
+// share a single repo-tree read across all of them — getRepoTree costs two
+// GitHub calls (branch sha, then the recursive tree) and the tree is identical
+// for every page on the same branch. buildRecommendations does exactly this;
+// without it, healing a tenant's whole unmapped page set would issue two
+// GitHub calls per page. Defaults to the real getRepoTree so existing callers
+// are unaffected.
+export async function autoHealFileMapping(site, pageUrl, actionType, { fetchTree = getRepoTree } = {}) {
   if (!site.repo_owner || !site.repo_name) return null;
   if (resolveFile(site, pageUrl)) return null; // already resolvable, nothing to heal
   if (resolveAdapter(site, pageUrl, actionType)) return null; // adapter-routed pages are a separate concern, not a missing file mapping
 
   const branch = baseBranch(site);
-  const tree = await getRepoTree(site, branch);
+  const tree = await fetchTree(site, branch);
   const candidate = findCandidateFile(pageUrl, tree.files);
   if (candidate.kind !== 'resolved') return null;
 
