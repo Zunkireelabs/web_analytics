@@ -5,7 +5,7 @@ import {
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
-  persistDerivedComponentTemplates, sitePageUrl,
+  persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
 } from './design-drift.js';
 
 const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
@@ -281,11 +281,46 @@ describe('resolveOrCreateComponentTemplate', () => {
   });
 
   test('an UNVERIFIED existing template is replaced by a projection when a profile exists', async () => {
+    // Also the fallthrough regression test: this site (baseSite) has no
+    // website_domain, so the self-heal step below gets 'unreachable' from
+    // verifyTemplateAgainstLiveSite before it can even check any CSS. It used
+    // to treat that as a dead end and return early — 'unreachable' must fall
+    // through to this projection path instead, since a network blip fetching
+    // the live page says nothing about whether the cheap, no-network
+    // projection below can succeed.
     const site = siteWithProfile({ siteRoot: { componentTemplates: { faq: { wrapper: '<dl>{{ROWS}}</dl>' } } } });
     const result = await resolveOrCreateComponentTemplate(site, 'faq', noopDeps());
     assert.equal(result.ok, true);
     assert.equal(result.source, 'design-profile');
   });
+
+  test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {
+    // The self-heal check runs BEFORE the projection path — for a template
+    // that is merely unstamped and genuinely matches the live site, checking
+    // is strictly better than replacing real repo-derived markup with a
+    // composed approximation, even when a profile is available to fall back
+    // on.
+    const wrapper = '<section class="py-12"><div class="divide-y divide-gray-200">{{ROWS}}</div></section>';
+    const row = '<div class="py-5"><span>{{QUESTION}}</span><p>{{ANSWER}}</p></div>';
+    const site = {
+      ...siteWithProfile({ siteRoot: { componentTemplates: { faq: { wrapper, row } } } }),
+      website_domain: 'zunkireelabs.com',
+    };
+    let saved = null;
+
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head></html>',
+      fetchStylesheet: async () => '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}',
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'freshness-check');
+    assert.equal(result.template.wrapper, wrapper, 'the real markup is preserved, not replaced by a projection');
+    assert.ok(saved.siteRoot.componentTemplates.faq.verifiedAt);
+  });
+
 
   test('every projectable type resolves from ONE profile', async () => {
     for (const actionType of ['faq', 'qa-content', 'expand-content', 'internal-links', 'content-wrapper']) {
@@ -461,5 +496,96 @@ describe('checkTemplateFreshness', () => {
     assert.equal(result.ok, true);
     assert.equal(result.stale, false);
     assert.equal(called, false);
+  });
+
+  // Regression: real Tailwind output for divide-*/space-y-* utilities is
+  // `.divide-y>:not([hidden])~:not([hidden]){...}` — the class is followed by
+  // `>`, never by `{`/`:`/`,`/space. Verified against the real shipped CSS at
+  // zunkireelabs.com, where classExistsInCss's old enumerate-what-can-follow
+  // list did not include `>` and so reported divide-y, divide-gray-200 and
+  // space-y-3 as missing on every single check — the actual reason site 1's
+  // faq and internalLinks templates never got stamped, despite using markup
+  // that matched the live site exactly.
+  test('a class followed by a combinator selector (Tailwind divide-*/space-y-*) is not flagged missing', async () => {
+    const divideTemplate = { wrapper: '<div class="divide-y divide-gray-200">{{ROWS}}</div>' };
+    const css = '.divide-y>:not([hidden])~:not([hidden]){border-top-width:1px}.divide-gray-200{--tw-divide-opacity:1}';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/', templateEntry: divideTemplate,
+      fetchPage: async () => html, fetchStylesheet: async () => css,
+    });
+    assert.equal(result.stale, false);
+    assert.deepEqual(result.missingClasses, []);
+  });
+
+  test('still does not match a class name that is merely a PREFIX of a longer one', async () => {
+    // The combinator fix must not regress the substring-safety test above:
+    // '.divide-y-custom' must not satisfy a check for 'divide-y'.
+    const divideTemplate = { wrapper: '<div class="divide-y">{{ROWS}}</div>' };
+    const css = '.divide-y-custom{color:red}';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/', templateEntry: divideTemplate,
+      fetchPage: async () => html, fetchStylesheet: async () => css,
+    });
+    assert.equal(result.stale, true);
+    assert.deepEqual(result.missingClasses, ['divide-y']);
+  });
+});
+
+describe('verifyTemplateAgainstLiveSite', () => {
+  const wrapper = '<section class="py-12"><div class="divide-y divide-gray-200">{{ROWS}}</div></section>';
+  const row = '<div class="py-5"><span>{{QUESTION}}</span><p>{{ANSWER}}</p></div>';
+  const liveCss = '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}';
+  const html = '<html><head><link rel="stylesheet" href="/assets/main.css"></head></html>';
+
+  test('a real, live-matching template is verified and stamped freshness-check', async () => {
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.stamped.verifiedBy, 'freshness-check');
+    assert.equal(result.stamped.verifiedRef, 'https://zunkireelabs.com');
+    assert.equal(result.stamped.wrapper, wrapper, 'markup preserved exactly');
+  });
+
+  test('a template missing a required placeholder is rejected before any network call', async () => {
+    let fetched = false;
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper: '<dl>{{ROWS}}</dl>' }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => { fetched = true; return html; },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-placeholders');
+    assert.equal(fetched, false, 'a deterministic string check should never cost a network round trip');
+  });
+
+  test('a template claiming a purged class is rejected as stale, not stamped', async () => {
+    const cssWithoutDivide = liveCss.replace('.divide-y>:not([hidden]){a}', '');
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => cssWithoutDivide,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'stale');
+    assert.deepEqual(result.missingClasses, ['divide-y']);
+  });
+
+  test('a classless template has no design claims to verify, even if reachable', async () => {
+    const result = await verifyTemplateAgainstLiveSite('content-wrapper', { wrapper: '<div>{{BODY}}</div>' }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-design-claims');
+  });
+
+  test('an unreachable page fails as unreachable, never as stale', async () => {
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => null,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'unreachable');
+  });
+
+  test('no page URL at all is unreachable, not a crash', async () => {
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {});
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'unreachable');
   });
 });

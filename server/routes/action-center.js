@@ -3,6 +3,7 @@ import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
+import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
@@ -187,6 +188,12 @@ export async function refreshRecommendations(siteId, { start, end }) {
   } else {
     await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
   }
+  // Same up-front template repair as the morning run (job.js): stamp any
+  // existing-but-unstamped component template that the live CSS still backs,
+  // so a manual refresh shows what is genuinely blocked rather than what was
+  // merely never stamped. Never fatal.
+  await repairSiteTemplates(siteId)
+    .catch((err) => console.warn(`[action-center] site ${siteId} component-template repair failed:`, err.message));
   const grounded = await buildRecommendations(siteId);
   await syncFromGrounded(siteId, grounded);
   await autoRemediateSafeRecommendations(siteId).catch((err) => console.error(`[action-center] site ${siteId} auto-remediation failed:`, err.message));

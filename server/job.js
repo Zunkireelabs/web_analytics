@@ -22,6 +22,7 @@ import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
+import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
 import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
@@ -178,6 +179,18 @@ export async function runDailyAgentAnalysisForSite(site) {
 
   const events = await detectNotificationEvents(site.id, { trendWeek });
   await deliverToAllChannels(site.id, events);
+
+  // Verify any existing-but-unstamped component templates against the live
+  // site BEFORE grounding findings, so the list this run produces reflects
+  // what is genuinely blocked. The design gate inside buildRecommendations is
+  // pure and in-memory by design, so it can only read the stamps that already
+  // exist — a template stamped later, at draft time, leaves every affected
+  // recommendation showing as blocked for a full day.
+  //
+  // Never fatal, and never a reason to skip detection: this is an
+  // opportunistic upgrade of some rows from "blocked" to "actionable".
+  await repairSiteTemplates(site.id)
+    .catch((err) => console.warn(`[job] site ${site.id} component-template repair failed:`, err.message));
 
   const recommendations = await buildRecommendations(site.id);
   await syncFromGrounded(site.id, recommendations)

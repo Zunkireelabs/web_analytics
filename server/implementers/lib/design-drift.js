@@ -58,7 +58,12 @@ export const COMPONENT_TEMPLATE_KEY = {
 // "unverified freshness" rather than to a wrong verdict.
 const FETCH_TIMEOUT_MS = Number(process.env.DESIGN_DRIFT_FETCH_TIMEOUT_MS || 10000);
 
-async function fetchText(url) {
+// Exported so callers that check SEVERAL templates for one site (see
+// agents/lib/template-repair.js) can wrap it in their own memo and fetch the
+// page and its stylesheets once for all of them, rather than once per
+// template — every component template on a site links the same CSS bundle,
+// so re-fetching per key costs five round trips for one answer.
+export async function fetchText(url) {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
@@ -126,20 +131,40 @@ function escapeForCssSelector(cls) {
   return cls.replace(NEEDS_CSS_ESCAPE, '\\$&');
 }
 
-// Substring search for `.escaped-class` immediately followed by a character
-// that only appears there in a real selector (`{` a plain rule, `:` a
-// pseudo-class/variant like `:hover`, `,` a selector list, or whitespace
-// before a descendant combinator) — deliberately not just "class exists
-// anywhere in the file" (a class name could appear inside a comment or an
-// unrelated string) or "class exists as its own complete rule" (variants
-// nest the base selector inside `@media`/`:hover` wrappers in real Tailwind
-// output, never as a bare top-level rule).
+// Substring search for `.escaped-class` at a real selector boundary —
+// deliberately not just "class exists anywhere in the file" (a class name
+// could appear inside a comment or an unrelated string) or "class exists as
+// its own complete rule" (variants nest the base selector inside
+// `@media`/`:hover` wrappers in real Tailwind output, never as a bare
+// top-level rule).
+//
+// The boundary is defined by what CANNOT follow, not by enumerating what can.
+// That distinction matters: the enumerate-what-can version listed `{`, `:`,
+// `,` and space, and so silently reported EVERY space-y-* and divide-* utility
+// as missing — Tailwind emits those as `.divide-y>:not([hidden])~:not([hidden])`,
+// and `>` was not on the list. Verified against the real shipped CSS at
+// zunkireelabs.com, where `.divide-y`, `.divide-gray-200` and `.space-y-3` are
+// each followed ONLY ever by `>`.
+//
+// That single missing character is why site 1's faq, qaContent and
+// internalLinks templates were never stamped: the freshness check could not
+// verify any template using those utilities, so it reported perfectly live
+// markup as stale, and the templates sat blocked. An allow-list of
+// punctuation is a guess about CSS output; "the class name does not simply
+// continue" is the actual rule.
+//
+// Identifier continuation characters are the ones that would mean we matched
+// a PREFIX of a longer class (`.divide-y` inside `.divide-yellow`), including
+// a backslash, which begins an escape that is still part of the name. End of
+// input counts as a non-match: a name with nothing after it has no rule body,
+// so it is not a real selector.
+const IDENT_CONTINUATION = /[A-Za-z0-9_\-\\]/;
 function classExistsInCss(cls, css) {
   const needle = `.${escapeForCssSelector(cls)}`;
   let idx = css.indexOf(needle);
   while (idx !== -1) {
     const after = css[idx + needle.length];
-    if (after === '{' || after === ':' || after === ',' || after === ' ') return true;
+    if (after !== undefined && !IDENT_CONTINUATION.test(after)) return true;
     idx = css.indexOf(needle, idx + 1);
   }
   return false;
@@ -268,6 +293,61 @@ export function isTemplateVerified(actionType, template) {
   const placeholders = validatePlaceholders(actionType, template);
   if (!placeholders.ok) return { ok: false, reason: 'invalid-placeholders', detail: placeholders.error };
   return { ok: true, verifiedAt: template.verifiedAt, verifiedBy: template.verifiedBy };
+}
+
+// Turns an UNSTAMPED but otherwise real template into a verified one, by
+// proving its classes are live on the site right now.
+//
+// This closes a gap that was costing site 1 real shippable work. Three of its
+// four component templates (faq, qaContent, internalLinks) held genuine
+// repo-derived markup and were blocked solely because they carried no
+// verification stamp — isTemplateVerified returns 'unverified' for a template
+// with no verifiedAt, which is the correct default for anything stored before
+// stamping existed. But resolveOrCreateComponentTemplate treated
+// unstamped-but-present as unusable and jumped straight to re-derivation,
+// never asking the cheap question first: are these classes actually live?
+//
+// They were. All of divide-y, divide-gray-200 and space-y-3 are present in
+// the site's shipped CSS, verified directly against
+// https://zunkireelabs.com/assets/main-*.css. So the correct repair was a
+// single page fetch, not an OpenHands container job — and certainly not
+// declaring those templates permanently invalid.
+//
+// Fails OPEN only on infrastructure. A network blip must not be read as
+// evidence a template is bad, and must not trigger an expensive re-derivation
+// — 'unreachable' means "we learned nothing", so the caller should leave the
+// template exactly as it found it and try again next pass.
+export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet } = {}) {
+  if (!template?.wrapper) return { ok: false, reason: 'missing' };
+  if (!pageUrl) return { ok: false, reason: 'unreachable', error: 'No live page URL available to verify against.' };
+
+  // Placeholders first: it is a pure string check, and a template that would
+  // splice broken is not worth a network round trip to confirm.
+  const placeholders = validatePlaceholders(actionType, template);
+  if (!placeholders.ok) return { ok: false, reason: 'invalid-placeholders', error: placeholders.error };
+
+  const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: template, fetchPage, fetchStylesheet })
+    .catch((err) => ({ ok: false, error: err.message }));
+  if (!freshness.ok) return { ok: false, reason: 'unreachable', error: freshness.error };
+  if (freshness.stale) return { ok: false, reason: 'stale', missingClasses: freshness.missingClasses };
+
+  // A template with no literal classes at all (e.g. a bare `<dl>{{ROWS}}</dl>`)
+  // passes the freshness check vacuously — there is nothing to disprove. It
+  // must NOT be stamped on that basis: the stamp asserts "this matches the real
+  // site design", and a template making no design claims has not earned it.
+  // Such a template is exactly the case a design-profile projection improves
+  // on, so report it as unverifiable-here and let the caller fall through.
+  if (!freshness.checkedClasses?.length) return { ok: false, reason: 'no-design-claims' };
+
+  return {
+    ok: true,
+    reason: 'passed',
+    checkedClasses: freshness.checkedClasses,
+    stamped: stampTemplateVerification(template, {
+      verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK,
+      verifiedRef: pageUrl,
+    }),
+  };
 }
 
 // generatorId -> the componentTemplates action type it renders through. Every
@@ -535,6 +615,10 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   enqueueDerivation = createComponentTemplateJob,
   findQueuedDerivation = getQueuedComponentTemplateJob,
   enqueueProfileDerivation = createDesignProfileJob,
+  // Injected only so the self-heal below is testable without a network — the
+  // defaults are checkTemplateFreshness's own.
+  fetchPage,
+  fetchStylesheet,
 } = {}) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: false, reason: 'no-concept', template: null, componentKey: null };
@@ -554,6 +638,62 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   // human-confirmation dependency f7156ef set out to remove.
   if (existing && isTemplateVerified(actionType, existing).ok) {
     return { ok: true, template: existing, source: 'existing', componentKey };
+  }
+
+  // SELF-HEAL AN UNSTAMPED TEMPLATE BEFORE RE-DERIVING ANYTHING.
+  //
+  // The fast path above requires a stamp, and correctly so. But "no stamp"
+  // and "wrong markup" are different problems with wildly different costs,
+  // and the code above conflated them: it sent a template that was merely
+  // unstamped down the same path as one that was genuinely broken — an
+  // OpenHands container job, or a design-profile projection that overwrites
+  // real repo-derived markup with a composed approximation.
+  //
+  // Site 1's faq, qaContent and internalLinks templates were all in exactly
+  // this state: real markup captured from the repo, every class live in the
+  // shipped CSS, blocked only for want of a stamp. The honest repair is to
+  // check, and stamp what passes.
+  //
+  // Deliberately NOT gated on design_agent_enabled or on a connected repo:
+  // this is one page fetch against the public site, not a repo analysis. A
+  // tenant who never opted into the Design Agent still gets their existing
+  // templates verified, which is the whole point — it removes a human step
+  // rather than relocating it.
+  if (existing?.wrapper && isTemplateVerified(actionType, existing).reason === 'unverified') {
+    const verified = await verifyTemplateAgainstLiveSite(actionType, existing, {
+      pageUrl: sitePageUrl(site), fetchPage, fetchStylesheet,
+    }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+
+    if (verified.ok) {
+      const urlFileMap = {
+        ...site.url_file_map,
+        siteRoot: {
+          ...site.url_file_map?.siteRoot,
+          componentTemplates: { ...site.url_file_map?.siteRoot?.componentTemplates, [componentKey]: verified.stamped },
+        },
+      };
+      await saveConfig({ siteId: site.id, urlFileMap });
+      await recordAudit(systemActorReq(site.id), {
+        action: 'tenant.component_template_freshness_verified',
+        targetType: 'site',
+        targetId: String(site.id),
+        tenantSiteId: site.id,
+        tenantName: site.name,
+        metadata: { actionType, componentKey, checkedClasses: verified.checkedClasses?.length ?? 0 },
+        success: true,
+      }).catch(() => {});
+      return { ok: true, template: verified.stamped, source: 'freshness-check', componentKey };
+    }
+
+    // Any other outcome falls through to the existing logic below exactly as
+    // it always has — this self-heal is purely an early optimization in front
+    // of it, not a new gate. In particular 'unreachable' (a network blip
+    // fetching the LIVE page) says nothing about whether a cheap
+    // design-profile projection can succeed just below, so it must not block
+    // that path — only the expensive container-derivation path further down
+    // was ever meant to wait for real evidence, and that path already re-runs
+    // on every unverified template regardless of reason, same as before this
+    // self-heal existed.
   }
 
   if (!site.design_agent_enabled || !site.repo_owner || !site.repo_name) {
