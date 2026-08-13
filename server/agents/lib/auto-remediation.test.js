@@ -17,6 +17,7 @@ let site;
 let spentToday;
 const calls = { generated: [], approved: [], prsOpened: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
+let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the normal production path)
 
 function reset() {
@@ -28,6 +29,7 @@ function reset() {
   calls.approved = [];
   calls.prsOpened = [];
   failOn = () => false;
+  refuseOn = () => false;
   approveOpensPr = false;
 }
 reset();
@@ -53,6 +55,12 @@ mock.module(resolve('../../store/read.js'), {
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
     generateDraft: async (siteId, { generatorId, findingId }) => {
+      // The shape real generators use to decline an item honestly — e.g. schema.js's
+      // "had no real data on the page" and expand-content.js's ungrounded-citations
+      // refusal, both { status: 400, userFacing: true }.
+      if (refuseOn(generatorId)) {
+        throw Object.assign(new Error(`refusing to draft ${generatorId} — no real data`), { status: 400, userFacing: true });
+      }
       if (failOn(generatorId)) throw new Error(`simulated generate failure for ${generatorId}`);
       calls.generated.push(findingId);
       return { id: `d-${findingId}`, status: 'draft', content: {} };
@@ -243,5 +251,73 @@ describe('when approveAndPublishDraft already opened the PR (the normal path)', 
 
     assert.deepEqual(calls.prsOpened, ['d-f1'], 'this path still needs the explicit open');
     assert.equal(result.shipped, 1);
+  });
+});
+
+
+// A generator declining to fabricate is the no-fabrication policy WORKING, and
+// says nothing about system health — so it must not feed the circuit breaker,
+// which exists for faults where every later attempt is also doomed (revoked
+// token, moved default branch, conflicted batch branch).
+//
+// This was live on site 1: its three permanently-unfixable recommendations sort
+// to positions 1, 2 and 3 (two high-priority), so the next scheduled run would
+// have refused three times, tripped the breaker, and halted with 0 shipped and
+// 35 shippable candidates untouched — every day, silently, while every component
+// behaved exactly as designed.
+describe('principled refusals vs systemic faults', () => {
+  beforeEach(() => { reset(); approveOpensPr = true; });
+
+  test('three refusals in a row do NOT trip the breaker, and later work still ships', async () => {
+    refuseOn = (type) => type === 'schema';
+    recommendations = [
+      rec(1, { type: 'schema' }), rec(2, { type: 'schema' }), rec(3, { type: 'schema' }),
+      rec(4), rec(5),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'refusals must not halt the run');
+    assert.equal(result.refused, 3);
+    assert.equal(result.shipped, 2, 'the shippable items after them still ship');
+    assert.equal(result.attempted, 5);
+  });
+
+  test('three REAL faults in a row still trip the breaker', async () => {
+    failOn = (type) => type === 'schema';
+    recommendations = [
+      rec(1, { type: 'schema' }), rec(2, { type: 'schema' }), rec(3, { type: 'schema' }),
+      rec(4), rec(5),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, 'circuit-breaker', 'a systemic fault must still stop the run');
+    assert.equal(result.refused, 0);
+    assert.equal(result.shipped, 0);
+  });
+
+  test('a refusal resets the consecutive-fault count, so faults must be genuinely consecutive', async () => {
+    failOn = (type) => type === 'faq';
+    refuseOn = (type) => type === 'schema';
+    recommendations = [
+      rec(1, { type: 'faq' }), rec(2, { type: 'faq' }),
+      rec(3, { type: 'schema' }),   // refusal breaks the run of faults
+      rec(4, { type: 'faq' }), rec(5),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, null);
+    assert.equal(result.shipped, 1);
+  });
+
+  test('refusals are still counted in failed, so a run never overstates what landed', async () => {
+    refuseOn = () => true;
+    recommendations = [rec(1), rec(2)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.failed, 2);
+    assert.equal(result.refused, 2);
+    assert.equal(result.shipped, 0);
   });
 });

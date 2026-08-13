@@ -83,6 +83,9 @@ export async function autoRemediateSafeRecommendations(siteId) {
 
   let shipped = 0;
   let failed = 0;
+  // Refusals are a SUBSET of `failed` — reported separately so a run that
+  // declined three items honestly is not read as three things going wrong.
+  let refused = 0;
   let consecutiveFailures = 0;
   let stoppedReason = null;
   let attempted = 0;
@@ -144,12 +147,34 @@ export async function autoRemediateSafeRecommendations(siteId) {
       consecutiveFailures = 0;
     } catch (err) {
       failed++;
-      consecutiveFailures++;
-      console.warn(`[auto-remediation] site ${siteId} could not auto-fix recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
+      // A REFUSAL is not a fault, and must not feed the circuit breaker.
+      //
+      // Generators deliberately throw { status: 4xx, userFacing: true } when a
+      // specific item cannot be drafted honestly — "Review schema had no real
+      // data on the page", "external citations require real search grounding".
+      // That is the no-fabrication policy working, and it says nothing about
+      // whether the system is healthy. The breaker exists for the opposite
+      // thing: a revoked token, a moved default branch, a conflicted batch
+      // branch — faults where every subsequent attempt is also doomed.
+      //
+      // Counting refusals broke that distinction badly. Site 1's three
+      // permanently-unfixable items sort to positions 1, 2 and 3 (two are
+      // high-priority), so tomorrow's run would have refused three times,
+      // tripped the breaker, and halted with 0 shipped and 35 shippable
+      // candidates untouched — every day, silently, while the machinery was
+      // working exactly as designed.
+      const isRefusal = err?.userFacing === true && err?.status >= 400 && err?.status < 500;
+      if (isRefusal) {
+        refused++;
+        consecutiveFailures = 0;
+      } else {
+        consecutiveFailures++;
+      }
+      console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }
   }
   return {
-    attempted, shipped, failed,
+    attempted, shipped, failed, refused,
     skipped: candidates.length - attempted,
     spentToday, dailyLimit, stoppedReason,
   };
