@@ -37,7 +37,16 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 20m
+          # 20m was enough for a warm-cache build. A cold cache (e.g. right
+          # after a disk-space `docker system prune` on the VPS) reinstalls
+          # data-analyst-agent's Python ML dependencies (scikit-learn,
+          # transformers, sentence-transformers) from scratch with no cached
+          # layers — a real deploy on 2026-08-13 got through git pull, image
+          # build, and dependency install, then died on "exporting layers" at
+          # the 20m mark, one step from finishing. 35m covers a full cold
+          # build with headroom; a normal warm-cache deploy still finishes in
+          # its usual few minutes and never gets close to this ceiling.
+          command_timeout: 35m
           script: |
             # Without this, a failed step (e.g. `docker compose build` running
             # out of disk space) doesn't stop the script — it falls through to
