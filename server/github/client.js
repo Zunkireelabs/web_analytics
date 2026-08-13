@@ -74,6 +74,31 @@ export async function getDefaultBranchSha(site) {
   return getBranchSha(site, defaultBranchName(site));
 }
 
+// When this site's PAT expires, as a Date — or null if it never does (classic
+// PATs, and fine-grained ones created with no expiry) or GitHub didn't say.
+//
+// GitHub returns the token's own expiry on every authenticated response, in the
+// `github-authentication-token-expiration` header. Nothing here read it, which
+// meant a token one day from expiry looked exactly as healthy as a fresh one —
+// and expiry is not a hypothetical failure mode: site 1's PAT expired between
+// 2026-08-11 and 2026-08-12, the autonomous chain stopped opening PRs, and
+// nothing noticed for two days because every surface only ever asked "does it
+// work right now".
+//
+// A dead token throws (401 -> the caller's own error handling); this is
+// deliberately for the "still working, but for how long" question only.
+export async function getTokenExpiry(site) {
+  const res = await githubRequest(site, 'GET', '/user');
+  if (!res.ok) throw new Error(`Token check failed (${res.status})`);
+  const raw = res.headers.get('github-authentication-token-expiration');
+  if (!raw) return null;
+  // Observed format is "2026-11-13 14:30:00 UTC"; ISO-8601 also parses. Both
+  // are normalized here rather than at call sites, and an unparseable value
+  // reports null (unknown) rather than a wrong date.
+  const parsed = new Date(raw.trim().replace(' UTC', 'Z').replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 // Creates `refs/heads/<branchName>` pointing at fromSha. A 422 "Reference
 // already exists" is treated as success (not an error) — apply() is safe to
 // retry against a branch a prior attempt already created, matching this
