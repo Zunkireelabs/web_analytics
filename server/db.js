@@ -215,6 +215,21 @@ export async function updateSiteOauthPolicy({ siteId, oauthMaxPermissionLevel })
 // (migration 071) — read by render-inspector.js's inspectRenderMode via
 // countVisibleFaqDrafts (server/store/drafts.js) to keep visible FAQs
 // selective rather than appearing on every eligible page.
+// Per-site consent for cross-client learned repair (migration 099): may this
+// site be fixed using a repair whose only evidence comes from ANOTHER
+// client's site. Deliberately distinct from auto_remediation_enabled (089),
+// which only covers acting unattended on this site's own findings — a client
+// can reasonably agree to one and not the other, and
+// interceptWithLearnedRepairs requires both.
+export async function updateSiteLearnedRepair({ siteId, enabled }) {
+  const { rows } = await query(
+    `UPDATE sites SET learned_repair_enabled = $1 WHERE id = $2 RETURNING *`,
+    [enabled, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   const { rows } = await query(
     `UPDATE sites SET visible_faq_cap = $1 WHERE id = $2 RETURNING *`,

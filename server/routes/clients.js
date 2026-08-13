@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
+
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+
 import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
@@ -456,6 +460,25 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+
+// Consent for cross-client learned repair (migration 099): may this site be
+// fixed automatically using a repair whose evidence comes from a DIFFERENT
+// client's site.
+//
+// platform_admin only, inherited from this router's own
+// requirePlatformRole('platform_admin') — not re-declared, same as every
+// route in this file. That gate is the point here rather than an
+// implementation detail: the blast radius is a real pull request against this
+// client's repository, justified by something that happened on someone
+// else's.
+//
+// Enabling is refused unless auto_remediation_enabled is already on. The two
+// are separate consents and interceptWithLearnedRepairs requires both, so
+// allowing this one alone would produce a setting that reads as enabled and
+// can never do anything — the silent-inert failure this feature is most prone
+// to. Disabling is always allowed.
+router.post('/internal/clients/:id/learned-repair', async (req, res, next) => {
+
 // The switch for the unattended auto-remediation loop
 // (agents/lib/auto-remediation.js): draft -> approve -> push branch -> open
 // PR, every morning, with no human in the loop until the PR review itself.
@@ -493,10 +516,25 @@ export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
 }
 
 router.post('/internal/clients/:id/auto-remediation', async (req, res, next) => {
+
   try {
     const siteId = Number(req.params.id);
     const existing = await getSiteById(siteId);
     if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false.' });
+    if (enabled && !existing.auto_remediation_enabled) {
+      return res.status(400).json({
+        error: 'Autonomous fixes are off for this site, so learned cross-client repairs could never run. Enable autonomous fixes first.',
+      });
+    }
+
+    const site = await updateSiteLearnedRepair({ siteId, enabled });
+
+    await recordAuditEvent(req, {
+      action: enabled ? 'tenant.learned_repair_enabled' : 'tenant.learned_repair_disabled',
 
     const { enabled, dailyLimit } = req.body || {};
     const invalid = validateAutoRemediationRequest({ enabled, dailyLimit, site: existing });
@@ -506,10 +544,18 @@ router.post('/internal/clients/:id/auto-remediation', async (req, res, next) => 
 
     await recordAuditEvent(req, {
       action: enabled ? 'tenant.auto_remediation_enabled' : 'tenant.auto_remediation_disabled',
+
       targetType: 'site',
       targetId: String(siteId),
       tenantSiteId: siteId,
       tenantName: site.name,
+
+      metadata: { enabled },
+      success: true,
+    });
+
+    res.json({ id: site.id, learnedRepairEnabled: site.learned_repair_enabled });
+
       metadata: { enabled, dailyLimit, repo: `${site.repo_owner}/${site.repo_name}` },
       success: true,
     });
@@ -519,6 +565,7 @@ router.post('/internal/clients/:id/auto-remediation', async (req, res, next) => 
       autoRemediationEnabled: site.auto_remediation_enabled,
       autoRemediationDailyLimit: site.auto_remediation_daily_limit,
     });
+
   } catch (e) { next(e); }
 });
 
