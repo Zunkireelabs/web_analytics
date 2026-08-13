@@ -88,7 +88,7 @@ describe('expand-content generator — author-byline with no configured author p
       const { content } = await generate({ siteId: site.id, params: { page: 'https://example.com/real-page', focus: 'author-byline' } });
       assert.equal(llmWasCalled, false);
       assert.equal(content.sections[0].body, 'By the Expand Content Author Byline Test Site Team');
-      const gate = runQualityGate(content, meta.id);
+      const gate = await runQualityGate(content, meta.id);
       assert.deepEqual(gate.issues, []);
       assert.equal(gate.clean, true);
     } finally { globalThis.fetch = original; }
@@ -120,7 +120,7 @@ describe('expand-content generator — freshness-date', () => {
       assert.equal(llmWasCalled, false);
       const today = new Date().toISOString().slice(0, 10);
       assert.match(content.sections[0].body, new RegExp(today));
-      const gate = runQualityGate(content, meta.id);
+      const gate = await runQualityGate(content, meta.id);
       assert.deepEqual(gate.issues, []);
       assert.equal(gate.clean, true);
     } finally { globalThis.fetch = original; }

@@ -104,40 +104,6 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
   }
 }
 
-// "I want to grow on this keyword" — seeds ONE keyword gap by hand.
-//
-// Deliberately writes the same keyword_gaps row shape clustering.py produces,
-// with source='manual', so an added keyword travels the exact same
-// approve -> Action Center recommendation -> draft path a discovered gap
-// does. No parallel mechanism, and it inherits every gate that path already
-// has. Returns the row so the caller can hand it straight to
-// createActionCenterRecommendationForGap.
-//
-// Deduped on (site, topic) among gaps still open: asking for the same
-// keyword twice should not create two competing gaps, but a topic that was
-// previously dismissed can legitimately be raised again.
-export async function addKeywordGap(siteId, { topic, reason = null, priority = 'medium' }) {
-  const trimmed = String(topic || '').trim();
-  if (!trimmed) throw new Error('topic is required to add a keyword gap.');
-
-  const { rows: existing } = await query(
-    `SELECT id, topic, reason, priority, status, source, created_at
-       FROM keyword_gaps
-      WHERE site_id = $1 AND lower(topic) = lower($2) AND status IN ('pending_review', 'accepted')
-      LIMIT 1`,
-    [siteId, trimmed]
-  );
-  if (existing[0]) return { ...existing[0], status: GAP_STATUS_FROM_DB[existing[0].status], alreadyExisted: true };
-
-  const { rows } = await query(
-    `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
-     VALUES ($1, $2, $3, $4, 'pending_review', 'manual')
-     RETURNING id, topic, reason, priority, status, source, created_at`,
-    [siteId, trimmed, reason, priority]
-  );
-  return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyExisted: false };
-}
-
 export async function getKeywordClusters(siteId, clusterType) {
   const { rows } = await query(
     `SELECT cluster_name, cluster_type, keywords_json, avg_impressions, avg_position, gap_score
@@ -157,7 +123,7 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
-    `SELECT id, topic, reason, priority, status, source, created_at
+    `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at
        FROM keyword_gaps
       WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
       ORDER BY created_at DESC`,
@@ -170,11 +136,101 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   const { rows } = await query(
     `UPDATE keyword_gaps SET status = $3
       WHERE site_id = $1 AND id = $2
-      RETURNING id, topic, reason, priority, status, source, created_at`,
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
     [siteId, gapId, GAP_STATUS_TO_DB[status]]
   );
   if (!rows[0]) return null;
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
+}
+
+// Written once by classifyGapRelevance/findExistingPageMatch (analyst-seo-
+// mapping.js) at approval time. Every field is independently optional and
+// COALESCEd against its own current value — the two checks run in parallel
+// and neither depends on the other, so a call that only has ONE result
+// (e.g. the page-inventory check ran but classification was already set
+// from an earlier approval) must never null out the other's already-
+// recorded value. A gap is only ever classified/checked once; re-approval
+// after a dismissed draft reuses what's already known rather than
+// re-judging against a possibly-changed capability set or page inventory.
+export async function setGapClassification(siteId, gapId, { searchIntent, productRelevance, priority, existingPageMatch }) {
+  const { rows } = await query(
+    `UPDATE keyword_gaps SET
+            search_intent = COALESCE($3, search_intent),
+            product_relevance = COALESCE($4, product_relevance),
+            priority = COALESCE($5, priority),
+            existing_page_match = COALESCE($6, existing_page_match)
+      WHERE site_id = $1 AND id = $2
+      RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
+    [siteId, gapId, searchIntent, productRelevance, priority ?? null, existingPageMatch ?? null]
+  );
+  if (!rows[0]) return null;
+  return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
+}
+
+// Product Understanding Layer (migration 111). 'verified' rows are the only
+// ones classifyGapRelevance ever reads — a 'proposed' row an agent adds is
+// invisible to routing decisions until a human approves it.
+export async function getProductCapabilities(siteId, status) {
+  const { rows } = await query(
+    `SELECT id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at
+       FROM product_capabilities
+      WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
+      ORDER BY created_at DESC`,
+    [siteId, status || null]
+  );
+  return rows;
+}
+
+// Added through the Analyst page's own form, so 'human' + 'verified' is the
+// only path this function writes — an agent proposing a capability is a
+// separate, not-yet-built entry point that would insert source='agent_proposed',
+// status='proposed' instead. No such writer exists yet, so every row today
+// is human-asserted ground truth, per the "do not invent capabilities" rule.
+export async function createProductCapability(siteId, { name, category, description, industries }) {
+  const { rows } = await query(
+    `INSERT INTO product_capabilities (site_id, name, category, description, industries_json, status, source)
+     VALUES ($1, $2, $3, $4, $5, 'verified', 'human')
+     RETURNING id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at`,
+    [siteId, name, category || null, description || null, JSON.stringify(industries || [])]
+  );
+  return rows[0];
+}
+
+export async function updateProductCapabilityStatus(siteId, id, status) {
+  const { rows } = await query(
+    `UPDATE product_capabilities SET status = $3, updated_at = now()
+      WHERE site_id = $1 AND id = $2
+      RETURNING id, site_id, name, category, description, industries_json AS industries, status, source, created_at, updated_at`,
+    [siteId, id, status]
+  );
+  return rows[0] || null;
+}
+
+// Product-visibility growth objective, Phase 5 (migration 114) — one row
+// per capability per snapshotCapabilityVisibility run (analyst-seo-mapping.js),
+// on the same 14-day cadence as keyword clustering/narrative (server/cron.js).
+export async function recordCapabilityVisibilitySnapshot(siteId, capabilityId, { avgImpressions, avgPosition, openGapCount, approvedGapCount }) {
+  await query(
+    `INSERT INTO capability_visibility_snapshots
+       (site_id, capability_id, avg_impressions, avg_position, open_gap_count, approved_gap_count)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [siteId, capabilityId, avgImpressions, avgPosition, openGapCount ?? 0, approvedGapCount ?? 0]
+  );
+}
+
+// The two most recent snapshots for a capability — enough to compute a
+// single trend (current vs. immediately-prior run), which is all a 14-day
+// cadence needs; a longer history is a chart concern, not this read's job.
+export async function getRecentCapabilityVisibilitySnapshots(siteId, capabilityId, limit = 2) {
+  const { rows } = await query(
+    `SELECT avg_impressions, avg_position, open_gap_count, approved_gap_count, created_at
+       FROM capability_visibility_snapshots
+      WHERE site_id = $1 AND capability_id = $2
+      ORDER BY created_at DESC
+      LIMIT $3`,
+    [siteId, capabilityId, limit]
+  );
+  return rows;
 }
 
 // A keyword a human typed on the Analyst page as a growth target. Deliberately
@@ -190,7 +246,7 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
 // was previously approved or rejected can legitimately be raised again.
 export async function createUserKeywordGap(siteId, topic, reason) {
   const { rows: existing } = await query(
-    `SELECT id, topic, reason, priority, status, source, created_at
+    `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at
        FROM keyword_gaps
       WHERE site_id = $1 AND lower(topic) = lower($2) AND status = 'pending_review'
       ORDER BY created_at DESC
@@ -204,7 +260,7 @@ export async function createUserKeywordGap(siteId, topic, reason) {
   const { rows } = await query(
     `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
      VALUES ($1, $2, $3, 'medium', 'pending_review', 'user_request')
-     RETURNING id, topic, reason, priority, status, source, created_at`,
+     RETURNING id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at`,
     [siteId, topic, reason || null]
   );
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyQueued: false };

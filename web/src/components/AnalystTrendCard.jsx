@@ -60,6 +60,15 @@ function formatLabel(dateStr, granularity) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// Axis ticks need to stay short at any width (46px), so a plain
+// toLocaleString() on a value like 14542 — "14,542" — still doesn't fit and
+// gets clipped by the SVG viewport, which is what read as a bare "000"
+// before: only the tick's rightmost digits were inside the visible area.
+function compactNumber(v) {
+  if (v == null) return '';
+  return Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
+}
+
 function CustomTooltip({ active, payload, label, unit }) {
   if (!active || !payload?.length) return null;
   const format = (v) => (unit === 'ratio' ? `${(v * 100).toFixed(1)}%` : Math.round(v * 100) / 100).toLocaleString();
@@ -186,7 +195,7 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
           <div className="py-20 text-center text-sm text-slate-500 font-medium">No data yet for this metric.</div>
         ) : (
           <ResponsiveContainer width="100%" height={260}>
-            <ComposedChart data={chartRows.rows} margin={{ top: 5, right: 8, left: -14, bottom: 0 }}>
+            <ComposedChart data={chartRows.rows} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
               <defs>
                 <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.25} />
@@ -195,9 +204,10 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
               <XAxis dataKey="date" tickFormatter={(d) => formatLabel(d, granularity)}
-                tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false} width={44}
-                tickFormatter={(v) => metric?.unit === 'ratio' ? `${Math.round(v * 100)}%` : v} />
+                tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false}
+                minTickGap={40} />
+              <YAxis tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 600 }} axisLine={false} tickLine={false} width={46}
+                tickFormatter={(v) => metric?.unit === 'ratio' ? `${Math.round(v * 100)}%` : compactNumber(v)} />
               <Tooltip content={<CustomTooltip unit={metric?.unit} />} cursor={{ stroke: '#cbd5e1', strokeWidth: 1 }}
                 labelFormatter={(d) => formatLabel(d, granularity)} />
               {chartRows.lastActualDate && (

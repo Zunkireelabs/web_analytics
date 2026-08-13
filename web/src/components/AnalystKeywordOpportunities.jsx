@@ -48,6 +48,12 @@ const SOURCE_LABEL = {
   internal_analysis: 'Gap analysis',
 };
 
+// product_relevance is set once, at approval time (classifyGapRelevance in
+// server/agents/lib/analyst-seo-mapping.js) — a gap still pending review
+// simply has no chip yet, not "unrelated".
+const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber', unrelated: 'an-chip-slate' };
+const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
+
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
   const [clusters, setClusters] = useState(null);
   const [gaps, setGaps] = useState(null);
@@ -92,7 +98,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
   // each topic once instead of the same one several times.
   const visibleGaps = useMemo(() => {
     const seen = new Set();
-    return (gaps || [])
+    const deduped = (gaps || [])
       .filter((g) => g.status === 'pending_review' || gapAction[g.id])
       .filter((g) => {
         const key = (g.topic || '').trim().toLowerCase();
@@ -100,6 +106,19 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         seen.add(key);
         return true;
       });
+    // product_relevance is only known once a gap has been approved
+    // (classifyGapRelevance runs at approval time, not on every pending
+    // gap — classifying all of them eagerly would mean an LLM call per gap
+    // shown, most of which are never approved). So a 'direct' match always
+    // sorts first when known, but priority is what orders the majority of
+    // this list, which is still unclassified.
+    const relevanceRank = { direct: 0, supporting: 1, unrelated: 2 };
+    const priorityRank = { high: 0, medium: 1, low: 2 };
+    return [...deduped].sort((a, b) => {
+      const relDiff = (relevanceRank[a.product_relevance] ?? 3) - (relevanceRank[b.product_relevance] ?? 3);
+      if (relDiff !== 0) return relDiff;
+      return (priorityRank[a.priority] ?? 3) - (priorityRank[b.priority] ?? 3);
+    });
   }, [gaps, gapAction]);
 
   const pendingCount = useMemo(
@@ -117,6 +136,13 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         [gap.id]: {
           draftId: updated.actionCenter?.draftId ?? null,
           draftError: updated.actionCenter?.draftError ?? null,
+          // requiresFutureInfrastructure — a real opportunity the system
+          // identified (e.g. comparison-page) but has no generator for yet;
+          // distinct from blockedReason's other cause (missing per-site repo
+          // config), which is fixable by an admin today, so both need to
+          // read differently in the UI.
+          blockedReason: updated.actionCenter?.blockedReason ?? null,
+          requiresFutureInfrastructure: updated.actionCenter?.requiresFutureInfrastructure ?? false,
           rejected: status === 'rejected',
         },
       }));
@@ -138,35 +164,33 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
   // found" while the request is still in flight reads as a real answer.
   const loading = clusters === null || gaps === null;
 
-  return (
-    <div className="an-panel p-5 space-y-6">
-      <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-500/10 border border-indigo-500/25 text-indigo-600 shrink-0">
-          <Search size={15} />
-        </div>
-        <div>
-          <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Keyword Opportunities</h2>
-          <p className="text-[11px] font-medium text-slate-500">
-            What people search for, and what to publish next
-          </p>
-        </div>
+  if (loading) {
+    return (
+      <div className="an-panel p-5 space-y-2">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-11 rounded-xl bg-slate-200/50 animate-pulse" />
+        ))}
       </div>
+    );
+  }
 
-      {loading ? (
-        <div className="space-y-2">
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-11 rounded-xl bg-slate-200/50 animate-pulse" />
-          ))}
+  return (
+    <div className="space-y-5">
+      {/* ── Close to page 1 — real performance data, already ranking ─── */}
+      <div className="an-panel p-5 space-y-2.5 border-t-2 border-t-emerald-500/60">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl grid place-items-center bg-emerald-500/10 border border-emerald-500/25 text-emerald-600 shrink-0">
+            <TrendingUp size={15} />
+          </div>
+          <div>
+            <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Close to page 1</h2>
+            <p className="text-[11px] font-medium text-slate-500">
+              Real Search Console impressions this site already earns — the fastest wins
+            </p>
+          </div>
         </div>
-      ) : (
-        <>
-          {/* ── Close to page 1 ───────────────────────────────────────── */}
-          <section className="space-y-2.5">
-            <div className="flex items-center gap-2">
-              <TrendingUp size={12} className="text-emerald-600 shrink-0" />
-              <h3 className="an-label">Close to page 1</h3>
-            </div>
 
+        <div className="pt-1">
             {keywords.length === 0 ? (
               <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
                 No keywords ranking between positions {NEAR_PAGE_ONE_MIN_POSITION + 1} and{' '}
@@ -205,28 +229,39 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                   </table>
                 </div>
                 <p className="text-[10px] font-medium text-slate-400">
-                  Real Search Console impressions this site already earns — not an estimated search
-                  volume. These are searches you're being shown for but not clicked on yet.
+                  Not an estimated search volume — these are searches you're already being shown
+                  for but not clicked on yet.
                 </p>
               </>
             )}
-          </section>
+        </div>
+      </div>
 
-          {/* ── Content gaps ──────────────────────────────────────────── */}
-          <section className="space-y-2.5">
-            <div className="flex items-center gap-2">
-              <Send size={12} className="text-indigo-600 shrink-0" />
-              <h3 className="an-label">Ready to publish</h3>
+      {/* ── Content gaps — net-new topics to discover and publish ─────── */}
+      <div className="an-panel p-5 space-y-2.5 border-t-2 border-t-indigo-500/60 bg-gradient-to-b from-indigo-500/[0.03] to-transparent">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-500/10 border border-indigo-500/25 text-indigo-600 shrink-0">
+            <Send size={15} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-xs font-black uppercase tracking-widest text-slate-800">Keyword Discovery</h2>
               {pendingCount > 0 && <span className="an-chip an-chip-violet">{pendingCount} waiting</span>}
             </div>
+            <p className="text-[11px] font-medium text-slate-500">
+              Topics you don't rank for yet — queued to draft and publish
+            </p>
+          </div>
+        </div>
 
+        <div className="pt-1">
             {visibleGaps.length === 0 ? (
               <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
                 Nothing waiting for review. Ask the analyst for a keyword you want to grow for and it
                 will show up here, ready to send to Action Center.
               </p>
             ) : (
-              <div className="space-y-2">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 max-h-[34rem] overflow-y-auto custom-scrollbar pr-1 -mr-1">
                 {visibleGaps.map((gap) => {
                   const state = gapAction[gap.id];
                   const sending = state === 'sending';
@@ -234,7 +269,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                   return (
                     <div
                       key={gap.id}
-                      className="rounded-xl border border-slate-200 bg-slate-100/40 p-3.5 flex flex-col sm:flex-row sm:items-start gap-3"
+                      className="rounded-xl border border-indigo-200/60 bg-indigo-500/[0.04] p-3.5 flex flex-col gap-3"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -245,6 +280,11 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                           <span className="an-chip an-chip-slate">
                             {SOURCE_LABEL[gap.source] || gap.source}
                           </span>
+                          {gap.product_relevance && (
+                            <span className={`an-chip ${RELEVANCE_CHIP[gap.product_relevance] || 'an-chip-slate'}`}>
+                              {RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance}
+                            </span>
+                          )}
                         </div>
                         {gap.reason && (
                           <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
@@ -272,7 +312,16 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                             </span>
                           </p>
                         )}
-                        {done && !state.draftId && !state.draftError && !state.rejected && (
+                        {done && state.requiresFutureInfrastructure && (
+                          <p className="text-[11px] font-semibold text-amber-700 mt-2 flex items-start gap-1.5">
+                            <Ban size={11} className="shrink-0 mt-0.5" />
+                            <span>
+                              Real comparison-page opportunity — recorded in Action Center, but no generator can
+                              build a standalone comparison page yet. Needs new infrastructure before it can draft.
+                            </span>
+                          </p>
+                        )}
+                        {done && !state.draftId && !state.draftError && !state.rejected && !state.requiresFutureInfrastructure && (
                           <p className="text-[11px] font-semibold text-slate-500 mt-2">
                             Queued in Action Center — no draft was generated for this one.
                           </p>
@@ -280,12 +329,12 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                       </div>
 
                       {!done && (
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-2">
                           <button
                             type="button"
                             onClick={() => act(gap, 'approved')}
                             disabled={sending}
-                            className="an-grad-btn text-[11px] font-bold px-3 py-2 rounded-xl text-white flex items-center gap-1.5 cursor-pointer"
+                            className="an-grad-btn flex-1 text-[11px] font-bold px-3 py-2 rounded-xl text-white flex items-center justify-center gap-1.5 cursor-pointer"
                           >
                             {sending ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
                             {sending ? 'Sending…' : 'Send to Action Center'}
@@ -296,7 +345,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                             disabled={sending}
                             title="Dismiss"
                             aria-label="Dismiss"
-                            className="p-2 rounded-xl border border-slate-300 text-slate-400 hover:text-rose-600 hover:border-rose-300 transition disabled:opacity-40 cursor-pointer"
+                            className="p-2 rounded-xl border border-slate-300 text-slate-400 hover:text-rose-600 hover:border-rose-300 transition disabled:opacity-40 cursor-pointer shrink-0"
                           >
                             <Ban size={12} />
                           </button>
@@ -307,9 +356,8 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                 })}
               </div>
             )}
-          </section>
-        </>
-      )}
+        </div>
+      </div>
     </div>
   );
 }

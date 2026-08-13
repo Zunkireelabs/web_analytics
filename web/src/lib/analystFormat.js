@@ -18,6 +18,43 @@ export const TYPE_META = {
 
 export const METHOD_LABEL = { zscore: 'Z-score', iqr: 'IQR' };
 
+// Shared by AnalystImpressionForecast and AnalystGrowthPulse — both need
+// "where is this metric's forecast heading vs. its last real reading."
+//
+// A metric can have a perfectly good forecast while latest_value is null —
+// latest_value is the most recent observation row, and the collectors write
+// a NULL-valued row for a day the upstream API returned nothing. The
+// forecast still renders in that case; only the percentage change, which
+// genuinely needs a baseline to compare against, is withheld.
+export function horizonChange(metric) {
+  const f = metric?.forecast;
+  const last = f?.status === 'ok' && f.points?.length ? f.points[f.points.length - 1] : null;
+  if (!last) return null;
+  const baseline = metric?.latest_value;
+  const hasBaseline = typeof baseline === 'number' && baseline !== 0;
+  return {
+    endValue: last.point_estimate,
+    baseline: hasBaseline ? baseline : null,
+    deltaPct: hasBaseline ? ((last.point_estimate - baseline) / Math.abs(baseline)) * 100 : null,
+    horizon: f.horizon_periods,
+  };
+}
+
+// Every insight the agent found that represents something going DOWN — not
+// just forecast risks. Mirrors isDecline() in
+// server/agents/lib/analyst-seo-mapping.js so what's surfaced here is the
+// same set the backend considers actionable.
+export function isDecline(i) {
+  const e = i.evidence || {};
+  switch (i.insight_type) {
+    case 'forecast_risk': return true;
+    case 'anomaly': return e.direction === 'low';
+    case 'trend_shift': return typeof e.pct_change === 'number' && e.pct_change < 0;
+    case 'milestone': return e.direction === 'down';
+    default: return false;
+  }
+}
+
 export function formatByUnit(value, unit) {
   if (value == null) return '—';
   if (unit === 'ratio') return `${(value * 100).toFixed(1)}%`;

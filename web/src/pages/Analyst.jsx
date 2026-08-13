@@ -1,22 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
+import AnalystGrowthPulse from '../components/AnalystGrowthPulse.jsx';
+import AnalystProductCapabilities from '../components/AnalystProductCapabilities.jsx';
+import AnalystTopicMap from '../components/AnalystTopicMap.jsx';
 import AnalystKeywordOpportunities from '../components/AnalystKeywordOpportunities.jsx';
+import AnalystGrowKeyword from '../components/AnalystGrowKeyword.jsx';
 import AnalystImpressionForecast from '../components/AnalystImpressionForecast.jsx';
-import AnalystChatPanel from '../components/AnalystChatPanel.jsx';
+import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
 import { Activity, AlertTriangle } from 'lucide-react';
 
-// The Analyst agent does two jobs, so this page shows two things:
+// The Analyst agent does three jobs, so this page shows three things,
+// full-width and stacked (not squeezed into a two-column layout anymore —
+// "Ask the analyst" moved to a floating drawer, see AnalystChatDrawer):
 //
-//   1. Keyword Opportunities — what people search for that we could rank for,
-//      pushed into Action Center (and from there to a PR on the site) via the
-//      existing keyword-gap approval pipeline.
-//   2. Impression Forecast — where traffic is heading, and which metrics are
-//      predicted to drop while there's still time to fix them.
-//
-// Plus a chat column to ask about either, and to hand the agent a keyword you
-// want to grow for.
+//   1. Growth Outlook — the proactive read: where the two headline metrics
+//      are forecast to land, and the single most urgent thing to fix before
+//      it drops, promoted out of Impression Forecast's own list.
+//   2. Keyword Opportunities — what people search for that we could rank for
+//      (already-ranking near-page-1 terms), plus Keyword Discovery — net-new
+//      topics queued for Action Center, and Grow for a keyword to seed one
+//      by hand regardless of what the site profiler has picked up yet.
+//   3. Impression Forecast — the full trend chart plus every decline insight
+//      found, each with its own real Fix/Dismiss/Send-to-Action-Center
+//      controls (Growth Outlook's CTA jumps straight here).
 //
 // This page previously rendered nine sections wrapped in a personalization
 // layer (drag-to-reorder, show/hide toggles, four layout presets, theme and
@@ -70,21 +78,31 @@ function AnalystBody({ clientId }) {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-5 items-start">
-      {/* Content column — on narrow screens this stacks above the chat. */}
-      <div className="space-y-5 min-w-0">
-        <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
-        {dashboard === null ? (
-          <AnalystSkeletonLoader variant="card" />
-        ) : (
-          <AnalystImpressionForecast clientId={clientId} dashboard={dashboard} onChanged={load} />
-        )}
-      </div>
+    <div className="space-y-5">
+      {dashboard === null ? (
+        <AnalystSkeletonLoader variant="card" />
+      ) : (
+        <AnalystGrowthPulse dashboard={dashboard} />
+      )}
 
-      <AnalystChatPanel
+      <AnalystProductCapabilities clientId={clientId} />
+
+      <AnalystTopicMap clientId={clientId} />
+
+      <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
+
+      <AnalystGrowKeyword
         clientId={clientId}
         onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
       />
+
+      {dashboard === null ? (
+        <AnalystSkeletonLoader variant="card" />
+      ) : (
+        <AnalystImpressionForecast clientId={clientId} dashboard={dashboard} onChanged={load} />
+      )}
+
+      <AnalystChatDrawer clientId={clientId} dashboard={dashboard} />
     </div>
   );
 }

@@ -44,6 +44,20 @@ mock.module(resolve('../../routes/action-center.js'), {
   },
 });
 
+// analyst-seo-mapping.js now imports llm.js directly (classifyGapRelevance/
+// findExistingPageMatch, product-visibility growth objective) — llm.js's own
+// import graph reaches the same broken formdata-node/web-streams-polyfill
+// transitive dependency the comment above describes for
+// recommendation-coordinator.js/action-center.js, so it needs the same
+// narrow mock. None of these tests exercise LLM-backed gap classification —
+// they cover syncAnalystInsightsToActionCenter/seoDraftEligibility, which
+// never call it.
+mock.module(resolve('../../llm.js'), {
+  namedExports: {
+    callLLMForJson: async () => { throw new Error('these tests do not exercise LLM-backed gap classification'); },
+  },
+});
+
 const { syncAnalystInsightsToActionCenter, seoDraftEligibility } = await import('./analyst-seo-mapping.js');
 
 const SITE = { id: 7, website_domain: 'client.example', url_file_map: {} };

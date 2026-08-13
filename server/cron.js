@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
+import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 
 const execFileAsync = promisify(execFile);
@@ -404,5 +405,32 @@ export function startCron() {
       { timezone: tz }
     );
     console.log(`[cron] keyword narrative scheduled "${keywordNarrative}" (${tz})`);
+  }
+
+  // Capability Visibility Snapshot — product-visibility growth objective,
+  // Phase 5 (server/agents/lib/analyst-seo-mapping.js's
+  // snapshotCapabilityVisibility). Same 14-day cadence and same reasoning as
+  // keyword narrative above: reads clustering's freshly-written output, so
+  // it runs after clustering has landed — offset 3 hours (one hour after
+  // narrative) purely to avoid three jobs racing on the same data at once,
+  // not because of an actual dependency on narrative's own output.
+  const capabilitySnapshot = process.env.CAPABILITY_SNAPSHOT_CRON_SCHEDULE || '0 6 */14 * *';
+  if (!cron.validate(capabilitySnapshot)) {
+    console.error(`[cron] invalid CAPABILITY_SNAPSHOT_CRON_SCHEDULE "${capabilitySnapshot}" — capability visibility snapshot NOT scheduled.`);
+  } else {
+    cron.schedule(
+      capabilitySnapshot,
+      async () => {
+        console.log(`[cron] capability visibility snapshot started ${new Date().toISOString()}`);
+        try {
+          const results = await snapshotCapabilityVisibilityForAllSites();
+          console.log(`[cron] capability visibility snapshot finished (${results.filter((r) => r.status === 'ok').length}/${results.length} ok)`);
+        } catch (err) {
+          console.error('[cron] capability visibility snapshot error:', err.message);
+        }
+      },
+      { timezone: tz }
+    );
+    console.log(`[cron] capability visibility snapshot scheduled "${capabilitySnapshot}" (${tz})`);
   }
 }

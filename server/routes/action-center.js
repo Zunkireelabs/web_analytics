@@ -351,7 +351,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   let firstAttemptIssues = null;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = runQualityGate(content, generatorId);
+    gateResult = await runQualityGate(content, generatorId, siteId);
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
     if (attempt < MAX_GENERATION_ATTEMPTS) {
@@ -632,7 +632,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = runQualityGate(draft.content, draft.action_type);
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId);
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the

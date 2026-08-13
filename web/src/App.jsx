@@ -1,5 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
@@ -25,6 +25,7 @@ const Monitoring = lazy(() => import('./pages/admin/Monitoring.jsx'));
 
 export default function App() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [authed, setAuthed] = useState(null); // null = still checking
   const [isInternal, setIsInternal] = useState(false);
   const [role, setRole] = useState(null);
@@ -95,6 +96,12 @@ export default function App() {
   // requirePlatformRole('platform_admin') on the server is what actually
   // guards every route these pages call.
   const isPlatformAdmin = role === 'platform_admin';
+
+  // The Analyst page (/analyst) has its own inline "Ask the analyst" chat
+  // scoped to whichever client is selected there — a second floating
+  // assistant on top of that would just be two chat entry points fighting
+  // for the same corner of the screen.
+  const hideCopilot = location.pathname === '/analyst';
 
   return (
     <div className="min-h-screen relative flex">
@@ -186,7 +193,7 @@ export default function App() {
           answering prompt adapt to who is asking (server/agents/lib/
           copilot-greeting.js), while the data stays scoped to the session's
           own site either way. */}
-      {!copilotOpen && (
+      {!copilotOpen && !hideCopilot && (
         <button type="button" onClick={() => setCopilotOpen(true)}
           className="fixed bottom-6 right-6 z-20 w-14 h-14 rounded-full text-white text-xl shadow-lg
                      hover:scale-105 transition-transform focus-visible:outline focus-visible:outline-2
@@ -196,7 +203,7 @@ export default function App() {
           ✦
         </button>
       )}
-      <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />
+      <CopilotPanel open={copilotOpen && !hideCopilot} onClose={() => setCopilotOpen(false)} />
     </div>
   );
 }
