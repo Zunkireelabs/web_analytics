@@ -25,6 +25,8 @@ let refuseOn; // (recommendationType) => boolean — simulates a generator's pri
 // whether it threw. Returning null lets the attempt succeed.
 let generateError;
 let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the normal production path)
+let recordedOutcomes; // Phase 5: [{generatorId, outcome}] recorded via the mocked recordOutcome below
+let learnedMap; // Phase 5: generatorId -> {demote, ...} fed to classifyRecommendation via the mocked getLearnedConfidenceMap
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
@@ -40,6 +42,8 @@ function reset() {
   generateError = () => null;
   generateAttempts = 0;
   approveOpensPr = false;
+  recordedOutcomes = [];
+  learnedMap = new Map();
 }
 let generateAttempts;
 reset();
@@ -62,6 +66,17 @@ mock.module(resolve('../../store/drafts.js'), {
 });
 mock.module(resolve('../../store/read.js'), {
   namedExports: { getSiteById: async () => site },
+});
+// Phase 5: what's under test in this file is auto-remediation's OWN control
+// flow, not the learning log — mocked to an empty map (no generator ever
+// demoted) and a no-op recorder, same as every other collaborator here.
+// generator-learning.test.js covers the real query/scoring logic against a
+// real database.
+mock.module(resolve('./generator-learning.js'), {
+  namedExports: {
+    getLearnedConfidenceMap: async () => learnedMap ?? new Map(),
+    recordOutcome: async (siteId, generatorId, outcome) => { recordedOutcomes.push({ generatorId, outcome }); },
+  },
 });
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
@@ -506,5 +521,46 @@ describe('autoRemediateSafeRecommendations — refusal vs failure classification
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.shipped, 1);
     assert.equal(result.attempted, 13, 'the streak restarts after the success, so 4 + 1 + 8 are attempted');
+  });
+});
+
+describe('Phase 5 — learning actually changes what the loop does, not just what it reports', () => {
+  beforeEach(reset);
+
+  test('a generator the learned map has demoted is excluded from this run, and a still-healthy one still ships', async () => {
+    learnedMap = new Map([['meta-title', { demote: true, reason: '3 of 4 recent attempts failed or were rejected — held for review until this improves' }]]);
+    recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 1, 'only the non-demoted generator ships');
+    assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  test('every shipped item records a "shipped" outcome for its own generator', async () => {
+    recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' })];
+    await autoRemediateSafeRecommendations(1);
+    assert.deepEqual(recordedOutcomes.sort((a, b) => a.generatorId.localeCompare(b.generatorId)), [
+      { generatorId: 'faq', outcome: 'shipped' },
+      { generatorId: 'meta-title', outcome: 'shipped' },
+    ]);
+  });
+
+  test('a genuine failure records "failed"; a principled refusal records "refused", never "failed"', async () => {
+    recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' })];
+    refuseOn = (type) => type === 'meta-title';
+    generateError = () => new Error('a genuine systemic fault');
+    failOn = () => true;
+    // failOn alone isn't read by generateDraft's mock; force via refuseOn for
+    // f1 (refusal) and a thrown non-refusal error for f2 via generateError
+    // gated on attempt number instead, to get one of each deterministically.
+    let attempt = 0;
+    generateError = () => { attempt++; return attempt === 2 ? new Error('a genuine systemic fault') : null; };
+
+    await autoRemediateSafeRecommendations(1);
+
+    const byGenerator = Object.fromEntries(recordedOutcomes.map((o) => [o.generatorId, o.outcome]));
+    assert.equal(byGenerator['meta-title'], 'refused');
+    assert.equal(byGenerator['faq'], 'failed');
   });
 });

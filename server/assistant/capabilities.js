@@ -3,6 +3,9 @@ import { getSiteById } from '../store/read.js';
 import { getLatestAgentRuns, getRecentActivity } from '../store/agent-runs.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { runDiscovery } from '../discovery/run-discovery.js';
+import { listOpenRecommendations } from '../store/recommendations.js';
+import { summarizeAutonomy } from '../agents/lib/autonomy-decision.js';
+import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { query } from '../db.js';
 
 // The Assistant's entire surface for touching the system (Phase 3, §9/§21).
@@ -135,6 +138,26 @@ export const CAPABILITIES = {
         // that predate Phase 1 — reported as null rather than invented.
         failure: r.result?.failure ?? null,
       }));
+    },
+  },
+
+  get_autonomy_summary: {
+    description: 'Which open recommendations are safe to auto-execute, need human review, or are rejected — and why.',
+    requiredRole: 'tenant_member',
+    run: async (ctx) => {
+      const recs = await listOpenRecommendations(ctx.siteId);
+      return summarizeAutonomy(recs);
+    },
+  },
+
+  run_safe_remediation: {
+    description: "Run the existing autonomous find-decide-act-validate-PR loop for this site's safe-tier recommendations. Ends at an open pull request; never merges.",
+    requiredRole: 'tenant_admin',
+    run: async (ctx) => {
+      // Calls the SAME function the daily cron calls (job.js's
+      // runAutoRemediationForAllSites) — the Assistant is a manual trigger
+      // for it, not a second implementation of it (§1/§26).
+      return autoRemediateSafeRecommendations(ctx.siteId);
     },
   },
 

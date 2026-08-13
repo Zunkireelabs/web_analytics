@@ -246,3 +246,34 @@ describe('regression: specific reference beats a trivially-substring-matching sh
     assert.equal(matches[0].u.id, 2, 'the longer, more specific match must win regardless of array position');
   });
 });
+
+describe('Phase 4 — autonomy capabilities', () => {
+  test('run_remediation intent is routed deterministically', () => {
+    assert.equal(classifyIntent('ship the safe fixes'), 'run_remediation');
+    assert.equal(classifyIntent('run safe remediation'), 'run_remediation');
+  });
+
+  test('get_autonomy_summary is readable by any authenticated role', () => {
+    assert.equal(roleAllows('tenant_member', CAPABILITIES.get_autonomy_summary.requiredRole), true);
+  });
+
+  test('run_safe_remediation requires tenant_admin, same as other write actions', () => {
+    assert.equal(roleAllows('tenant_member', CAPABILITIES.run_safe_remediation.requiredRole), false);
+    assert.equal(roleAllows('tenant_admin', CAPABILITIES.run_safe_remediation.requiredRole), true);
+  });
+
+  test('a tenant_member cannot invoke run_safe_remediation even by asking', async () => {
+    const result = await invokeCapability('run_safe_remediation', { siteId: 1, userId: 1, role: 'tenant_member' }, {});
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'not-authorized');
+  });
+
+  test('run_safe_remediation never accepts siteId as an argument (same client-scoping guarantee as every other capability)', () => {
+    // Function.toString() on an arrow function returns its own signature,
+    // not the object-literal key — 'async (ctx) => { ... }', no 'run:'
+    // prefix. Matches the same convention as the 'client scoping' suite
+    // above, adjusted for this capability's own (ctx)-only signature.
+    const src = CAPABILITIES.run_safe_remediation.run.toString();
+    assert.match(src, /^async\s*\(ctx\)\s*=>/, 'run_safe_remediation must take ctx only — siteId comes from ctx.siteId, never a parameter');
+  });
+});

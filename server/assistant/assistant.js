@@ -20,6 +20,7 @@ const INTENTS = [
   { id: 'explain', patterns: [/\bwhy\b/i, /\bexplain\b/i, /what does .* mean/i] },
   { id: 'confirm', patterns: [/\b(use|choose|pick|select)\b.*\b(first|second|option|a|b|one)\b/i, /\bconfirm\b/i, /\byes,? (use|go|do)\b/i] },
   { id: 'run_discovery', patterns: [/\b(run|start|begin|redo|refresh)\b.*\b(discovery|onboarding|scan|inspect)\b/i, /\bconfigure the\b/i, /\bset ?up\b/i] },
+  { id: 'run_remediation', patterns: [/\b(ship|fix|remediat\w*)\b.*\b(safe|what.?s safe|today|now)\b/i, /\brun (safe )?remediation\b/i, /\bfix everything safe\b/i] },
   { id: 'do_it', patterns: [/^\s*(do it|go ahead|proceed|continue|carry on)\s*[.!]?\s*$/i] },
   { id: 'failures', patterns: [/\b(fail(ed|ure)s?|error|broke|not working|why did .* fail)\b/i] },
   { id: 'agent_work', patterns: [/\b(what|anything)\b.*\b(agents?|autonomous|today|happened|done)\b/i, /\bactivity\b/i] },
@@ -164,6 +165,15 @@ export async function handleMessage({ ctx, message, deps = {} } = {}) {
       return { state: ASSISTANT_STATE.REVIEWING, message: composeDiscovery(result.data), data: result.data, actions: [] };
     }
 
+    case 'run_remediation': {
+      // Reuses the exact function the daily cron calls — not a second
+      // implementation. Ends at open PRs; never merges (§9 — the human
+      // merge gate is untouched by this session's changes end to end).
+      const result = await invokeCapability('run_safe_remediation', ctx, {}, deps);
+      if (!result.ok) return { state: onboarding.state, message: result.remedy || `I could not run remediation: ${result.error}.`, data: result, actions: [] };
+      return { state: onboarding.state, message: composeRemediation(result.data), data: result.data, actions: [] };
+    }
+
     case 'failures': {
       const result = await invokeCapability('get_failures', ctx, {}, deps);
       const failures = result.ok ? result.data : [];
@@ -173,14 +183,15 @@ export async function handleMessage({ ctx, message, deps = {} } = {}) {
     }
 
     case 'agent_work': {
-      const [agents, approvals] = await Promise.all([
+      const [agents, approvals, autonomy] = await Promise.all([
         invokeCapability('get_agent_status', ctx, {}, deps),
         invokeCapability('get_pending_approvals', ctx, {}, deps),
+        invokeCapability('get_autonomy_summary', ctx, {}, deps),
       ]);
       return {
         state: onboarding.state,
-        message: composeAgentWork(agents.ok ? agents.data : null, approvals.ok ? approvals.data : null),
-        data: { agents: agents.data, approvals: approvals.data },
+        message: composeAgentWork(agents.ok ? agents.data : null, approvals.ok ? approvals.data : null, autonomy.ok ? autonomy.data : null),
+        data: { agents: agents.data, approvals: approvals.data, autonomy: autonomy.data },
         actions: [],
       };
     }
@@ -255,6 +266,20 @@ function composeDiscovery(d) {
   return lines.join('\n');
 }
 
+function composeRemediation(r) {
+  if (r.stoppedReason === 'disabled') {
+    return "Autonomous remediation isn't enabled for this site, so I didn't run anything. Nothing was attempted or changed.";
+  }
+  if (r.stoppedReason === 'budget-exhausted') {
+    return `Today's budget (${r.spentToday}/${r.dailyLimit}) is already used — nothing new attempted. It resumes tomorrow.`;
+  }
+  const lines = [`Ran the safe-remediation loop: ${r.shipped} shipped, ${r.failed} failed, ${r.refused} declined honestly, ${r.skipped} left for later.`];
+  if (r.stoppedReason === 'circuit-breaker') lines.push('Stopped early — several failures in a row suggested a systemic problem rather than one-off issues. The rest stayed untouched and open, not lost.');
+  if (r.stoppedReason === 'refusal-streak') lines.push("Stopped early — several items in a row couldn't be drafted honestly. That's the no-fabrication policy working, not a fault.");
+  if (r.shipped) lines.push('Each shipped item ended at an open pull request — nothing merges without your review.');
+  return lines.join('\n');
+}
+
 function composeFailures(explained) {
   return explained.map((f) => {
     if (!f.known) return `Job #${f.jobId}: ${f.headline}`;
@@ -269,13 +294,17 @@ function composeFailures(explained) {
   }).join('\n\n');
 }
 
-function composeAgentWork(agents, approvals) {
+function composeAgentWork(agents, approvals, autonomy) {
   const lines = ['Recent autonomous work:'];
   const recent = agents?.recent || [];
   lines.push(recent.length ? `  ✓ ${recent.length} agent run(s) recorded` : '  • No agent activity recorded yet');
   if (approvals) {
     lines.push(`  ⚠ ${approvals.actionable} recommendation(s) ready for approval`);
     if (approvals.blocked) lines.push(`  • ${approvals.blocked} blocked pending prerequisites`);
+  }
+  if (autonomy) {
+    lines.push(`  ✓ ${autonomy.safeToAutoExecute.length} safe to auto-execute right now`);
+    lines.push(`  ⚠ ${autonomy.needsHumanReview.length} need your review`);
   }
   lines.push('', 'Production merge still requires your approval — I prepare changes, I do not ship them.');
   return lines.join('\n');
