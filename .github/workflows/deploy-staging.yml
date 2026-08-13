@@ -156,6 +156,31 @@ jobs:
             REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
             REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
 
+            # Catch-all: EVERY outbound email from this host goes here instead
+            # of its real recipient (server/report/email.js's getTransporter
+            # wraps the shared transporter, so no sender can bypass it). The
+            # original recipient is preserved in the subject and an
+            # X-Original-To header.
+            #
+            # This is what resolves the hazard the Cron block below describes:
+            # staging's 07:00/Thursday schedule is deliberately live, and real
+            # client sites now share this database, so without a redirect the
+            # daily pipeline would email real clients from an environment that
+            # still changes daily. Deliberately absent from deploy.yml —
+            # production must reach real recipients.
+            #
+            # Invitation and password-reset mail is EXEMPT (see email.js's
+            # REDIRECT_EXEMPT): each is addressed to one person who just
+            # requested that exact link, so redirecting it protects nobody and
+            # silently breaks the thing they asked for. Everything
+            # system-initiated — daily reports, notifications, sales leads —
+            # is still redirected here.
+            #
+            # Consequence worth knowing: an invitation sent from staging
+            # contains a STAGING link, so only invite people you actually
+            # want landing in staging while this host is the live one.
+            EMAIL_REDIRECT_TO=${{ vars.EMAIL_REDIRECT_TO || 'yukta@zunkireelabs.com' }}
+
             # ── Dashboard auth (staging) ────────────────────────────────────
             SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
@@ -194,8 +219,13 @@ jobs:
             # against runStartupCatchup() re-running real ingestion/weekly/
             # executive jobs (and re-emailing) on every redeploy-triggered
             # restart; it's unrelated to the recurring schedule itself.
-            # Revisit before onboarding any real/test client onto the
-            # staging database — its cron being live would email them too.
+            # Real client sites DO now share this database, so the "its cron
+            # being live would email them too" hazard this used to warn about
+            # is real rather than hypothetical. It is handled by
+            # EMAIL_REDIRECT_TO above, which sends every outbound message here
+            # to one internal address instead of its real recipient — not by
+            # this schedule being safe. Do not remove that redirect while this
+            # cron stays live and real clients remain in this database.
             CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
             DISABLE_CRON=false
             DISABLE_CATCHUP=true
