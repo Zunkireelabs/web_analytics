@@ -1,4 +1,4 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations, closeStaleRecommendations, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, closeStaleRecommendations, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -100,11 +100,21 @@ export function recommendationPageKey(item) {
 // so a finding with an unshipped draft still counts as "detected" here and
 // its recommendation row is never closed out from under a pending draft.
 // A blocked recommendation is forced to 'manual' regardless of what
-// risk-tiers.js says about its generator. This is the single mechanism that
-// keeps blocked items out of the unattended chain: listOpenSafeRecommendations
-// and auto-remediation.js both select on risk_tier = 'safe', so demoting the
-// tier is sufficient — no second filter to remember in either place, and no
-// way for a new unattended caller added later to accidentally bypass it.
+// risk-tiers.js says about its generator.
+//
+// This used to claim that demoting the tier was *sufficient* to keep blocked
+// items out of the unattended chain, so no second filter was needed anywhere.
+// That was wrong, and the live table proved it: site 1 accumulated 45 rows
+// that were risk_tier='safe' AND blocked. Demotion is only sufficient if this
+// function is the last word on risk_tier, and it was not — migration 078's
+// re-running backfill overwrote the tier behind it (now guarded, and forbidden
+// outright by migration 108's CHECK constraint).
+//
+// So the invariant is now asserted in four places on purpose, and each one
+// should stay: here (the writer), migration 108 (the database), and both
+// unattended selectors — auto-remediation.js's eligibility filter and
+// listOpenSafeRecommendations. A safety property that only one layer enforces
+// is a safety property one bug away from being gone.
 //
 // Blocker-agnostic on purpose. It started as design-verification only, and now
 // also carries "no url_file_map entry for this page" (see
@@ -122,7 +132,24 @@ export async function syncFromGrounded(siteId, grounded) {
     const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
     if (existing) {
-      if (existing.finding_ids.includes(item.id)) continue; // already merged this exact finding, nothing new
+      if (existing.finding_ids.includes(item.id)) {
+        // Nothing new about the *finding* — finding ids are deterministic
+        // (e.g. `geo-signals:${page}:${label}`), so re-detecting the same
+        // issue yields the same id every run and re-merging it is churn.
+        //
+        // Block state is a different thing entirely: it is recomputed from
+        // live site and repo state on every sync, not carried by the finding.
+        // Returning early here meant that for any recommendation the agents
+        // keep re-detecting — which is most of them — the block never
+        // refreshed in either direction. A template that got verified stayed
+        // blocked; a row corrupted to 'safe' by migration 078 stayed
+        // corrupted. Refresh just that, then skip the merge as before.
+        await refreshRecommendationBlockState(existing.id, {
+          blockedReason: item.blockedReason ?? null,
+          riskTier: blockedRiskTier(item),
+        });
+        continue;
+      }
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,

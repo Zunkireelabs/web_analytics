@@ -42,6 +42,10 @@ export async function insertRecommendation(siteId, {
 // closing a recommendation is out of scope for M1 (see
 // recommendation-coordinator.js's syncFromGrounded doc comment).
 export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier }) {
+  // risk_tier is NOT NULL and is now written unconditionally, so an omitted
+  // riskTier would surface as a constraint violation deep in the driver.
+  // Reject it here instead, where the caller is still in the stack trace.
+  if (!riskTier) throw new Error('mergeIntoRecommendation requires riskTier (use blockedRiskTier)');
   const { rows } = await query(
     `UPDATE recommendations SET
        finding_ids = (SELECT ARRAY(SELECT DISTINCT unnest(finding_ids || $2::text[]))),
@@ -62,8 +66,14 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
        -- from live state on every sync by recommendation-coordinator.js's
        -- blockedRiskTier, so overwriting unconditionally is the correct
        -- semantics here.
+       --
+       -- risk_tier was COALESCE'd here until 2026-08-13, which meant a caller
+       -- passing a falsy riskTier alongside a fresh blocked_reason would leave
+       -- a stale 'safe' next to a live block — the exact contradiction
+       -- migration 108 now forbids at the DB level. The two fields express one
+       -- decision (blockedRiskTier), so they are written as one.
        blocked_reason = $8,
-       risk_tier = COALESCE($9, risk_tier),
+       risk_tier = $9,
        last_seen_at = now(),
        updated_at = now()
      WHERE id = $1
@@ -72,10 +82,41 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
       id, [findingId], agentId, reason || null,
       params ? JSON.stringify(params) : null, priority || null,
       expectedImpact ? JSON.stringify(expectedImpact) : null,
-      blockedReason ?? null, riskTier || null,
+      blockedReason ?? null, riskTier,
     ]
   );
   return rows[0];
+}
+
+// Refreshes ONLY the block state of an already-open recommendation, without
+// touching finding_ids/supporting_agents/evidence.
+//
+// syncFromGrounded skips the full merge when a finding id is already on the
+// row (deterministic finding ids mean a re-detected finding is the same id
+// every run, so re-merging it would be pure churn). But block state is not
+// part of the finding — it is recomputed from live site/repo state on every
+// sync, and skipping the merge was also skipping that recomputation. The
+// result: a block that cleared never cleared, and a block that appeared never
+// appeared, on any recommendation the agents keep re-detecting. That is what
+// let migration 078's corruption survive indefinitely instead of being
+// overwritten by the next sync.
+//
+// last_seen_at is bumped because we did re-detect the finding this run — the
+// staleness sweep in closeStaleRecommendations reads it.
+export async function refreshRecommendationBlockState(id, { blockedReason, riskTier }) {
+  if (!riskTier) throw new Error('refreshRecommendationBlockState requires riskTier (use blockedRiskTier)');
+  const { rows } = await query(
+    `UPDATE recommendations SET
+       blocked_reason = $2,
+       risk_tier = $3,
+       last_seen_at = now(),
+       updated_at = now()
+     WHERE id = $1
+       AND (blocked_reason IS DISTINCT FROM $2 OR risk_tier IS DISTINCT FROM $3)
+     RETURNING *`,
+    [id, blockedReason ?? null, riskTier]
+  );
+  return rows[0] || null; // null = already correct, nothing written
 }
 
 export async function listOpenRecommendations(siteId) {
@@ -104,9 +145,18 @@ export async function closeRecommendation(id) {
 // candidate for executeSafeFixes (agents/lib/execution-engine.js) —
 // excludes anything with a non-null execution_job_id so a recommendation
 // already queued/shipped by an earlier job is never picked up twice.
+//
+// blocked_reason IS NULL is not redundant with risk_tier = 'safe', even
+// though migration 108 now forbids a row from being both. Belt and braces on
+// purpose: this is one of the two selectors that feed work into the
+// unattended path (the other is auto-remediation.js's own filter), and the
+// cost of the extra predicate is nil against the cost of shipping a
+// known-unshippable recommendation if the invariant is ever weakened again.
+// The last time this was reasoned about as "the tier already covers it", the
+// tier stopped covering it and nobody noticed for weeks.
 export async function listOpenSafeRecommendations(siteId, limit) {
   const { rows } = await query(
-    `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' AND risk_tier = 'safe' AND execution_job_id IS NULL
+    `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' AND risk_tier = 'safe' AND blocked_reason IS NULL AND execution_job_id IS NULL
        ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC
        LIMIT $2`,
     [siteId, limit]
