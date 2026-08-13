@@ -88,8 +88,12 @@ jobs:
             # without a new secret, a new line here, and a redeploy.
             # The key is base64 because this block writes .env in one heredoc
             # and a PEM's newlines would not survive it.
-            GITHUB_APP_ID=${{ secrets.GITHUB_APP_ID }}
-            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GITHUB_APP_PRIVATE_KEY_B64 }}
+            # Same reserved-prefix rule as GH_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
 
             # ── Design Agent worker ─────────────────────────────────────────
             # The design-agent-worker container's ONLY env source is this file

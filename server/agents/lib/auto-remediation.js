@@ -1,5 +1,5 @@
 import { listOpenRecommendations } from '../../store/recommendations.js';
-import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday } from '../../store/drafts.js';
+import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
 
@@ -13,6 +13,55 @@ const SOURCE = 'auto-remediation';
 // Without this, one such fault burns the entire daily budget on 30 identical
 // failures and buries the real cause in noise.
 const CONSECUTIVE_FAILURE_LIMIT = 3;
+
+// Generators that publish net-new content on a cadence rather than fixing an
+// existing page, and so are paced instead of merely budgeted. The daily
+// budget answers "how much work per day"; this answers "how often does this
+// KIND of work happen at all" — a distinction the budget alone can't make,
+// since 28 open blog-outline recommendations are 28 legitimate candidates as
+// far as it is concerned.
+//
+// Two rules per entry, both needed:
+//   - at most ONE per run, so a single day can't publish a burst; and
+//   - none at all if one was published inside the site's gap window.
+// The first without the second would still allow one blog every single day.
+//
+// Paced items are NOT given a separate allowance — the one that survives
+// competes for the same auto_remediation_daily_limit slot as every ordinary
+// fix, which is what keeps "30 a day" a single honest number.
+const PACED_GENERATORS = [
+  { generatorId: 'blog-outline', gapColumn: 'blog_min_gap_days', defaultGapDays: 3 },
+];
+
+// Drops paced candidates that this site isn't due for yet, and thins the rest
+// to one each. Returns the candidates in their original priority order, plus
+// the human-readable notes the caller logs — deferrals are never silent, the
+// same rule the daily budget's truncation already follows.
+export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType } = {}) {
+  const timezone = site.timezone || 'UTC';
+  const notes = [];
+  const dropped = new Set();
+
+  for (const { generatorId, gapColumn, defaultGapDays } of PACED_GENERATORS) {
+    const matching = candidates.filter((r) => r.recommendation_type === generatorId);
+    if (matching.length === 0) continue;
+
+    const gapDays = site[gapColumn] ?? defaultGapDays;
+    if (await recentDraftCheck(site.id, generatorId, gapDays, timezone)) {
+      for (const r of matching) dropped.add(r.id);
+      notes.push(`${generatorId}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);
+      continue;
+    }
+    // Due: keep the highest-priority one (candidates arrive in
+    // listOpenRecommendations' order), defer the rest to future runs.
+    for (const r of matching.slice(1)) dropped.add(r.id);
+    if (matching.length > 1) {
+      notes.push(`${generatorId}: taking 1 of ${matching.length} open candidate(s); the rest wait for the next ${gapDays}-day slot.`);
+    }
+  }
+
+  return { paced: candidates.filter((r) => !dropped.has(r.id)), notes };
+}
 
 // Stage 3-4 of Generate -> Validate -> Auto-fix -> Validate again -> Action
 // Center: closes the loop risk-tiers.js opened. A 'safe'-tier recommendation
@@ -61,7 +110,15 @@ export async function autoRemediateSafeRecommendations(siteId) {
   // by recommendation-coordinator.js, so this existing 'safe' filter also
   // excludes it — no separate design check is needed here, and no future
   // unattended caller can forget one.
-  const candidates = rows.filter((r) => r.risk_tier === 'safe' && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
+  const eligible = rows.filter((r) => r.risk_tier === 'safe' && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
+
+  // Publishing cadence, applied BEFORE the daily budget so a paced generator
+  // can't consume budget slots it isn't due for. Only the unattended path
+  // paces itself — routes/action-center.js's executeSafeFixes is a human
+  // deliberately asking for a batch, and a human doesn't need the agent's
+  // sense of rhythm imposed on them.
+  const { paced: candidates, notes: pacingNotes } = await applyPacing(site, eligible);
+  for (const note of pacingNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no

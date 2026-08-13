@@ -15,6 +15,7 @@ let recommendations;
 let draftedFindingIds;
 let site;
 let spentToday;
+let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
@@ -25,6 +26,7 @@ function reset() {
   recommendations = [];
   draftedFindingIds = new Set();
   spentToday = 0;
+  recentDraftTypes = new Set();
   calls.generated = [];
   calls.approved = [];
   calls.prsOpened = [];
@@ -45,6 +47,7 @@ mock.module(resolve('../../store/drafts.js'), {
   namedExports: {
     getDraftedFindingIds: async () => draftedFindingIds,
     countDraftsBySourceToday: async () => spentToday,
+    hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => ({ id: draftId }),
     updateDraft: async () => null,
   },
