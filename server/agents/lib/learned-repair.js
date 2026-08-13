@@ -1,5 +1,6 @@
 import { riskTierForGenerator } from './risk-tiers.js';
 import { findPortableRepairs, recordFixOutcome } from '../../agent-memory.js';
+import { sanitizeForCustomer } from '../../lib/errors.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint, fingerprintCompatible } from './site-fingerprint.js';
@@ -229,9 +230,15 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
       // and findPortableRepairs' failed_reuse_count = 0 rule disqualifies it
       // from cross-client reuse after even one.
       console.warn(`[learned-repair] site ${siteId} could not apply memory #${chosen.id} to "${item.tag}", leaving it for the Action Center:`, err.message);
+      // reuse_history is persisted (agent_fix_memory), not just logged — the
+      // raw exception text stops at the console.warn above. sanitizeForCustomer
+      // is the same persistence-boundary net server/lib/errors.js already
+      // documents for drafts/agent-runs/audit-runs; this notes field is the
+      // same kind of boundary, just on a different table.
       await recordFixOutcome({
         memoryRefId: chosen.id, outcome: 'failure', agentId: 'learned-repair',
-        generatorId: item.generatorId, siteId, notes: `cross-client repair failed: ${err.message}`,
+        generatorId: item.generatorId, siteId,
+        notes: `cross-client repair failed: ${sanitizeForCustomer(err.message, '(internal error — see server logs)')}`,
       }).catch(() => {});
     }
   }
