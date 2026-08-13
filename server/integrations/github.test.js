@@ -6,6 +6,13 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let site;
 let expiry;      // Date | null | Error
 const DAY = 86_400_000;
+// One frozen instant for the whole suite, passed into check() as its clock.
+// Both sides of the comparison have to come from the SAME instant: reading
+// Date.now() once here to build the expiry and again inside check() to
+// measure it left a microseconds-wide window where a millisecond tick
+// rounded 5 days down to 4, failing about one run in four.
+const NOW = Date.parse('2026-08-13T00:00:00Z');
+const clock = { now: () => NOW };
 
 function reset() {
   site = {
@@ -40,8 +47,8 @@ describe('github integration check — token expiry warning', () => {
   beforeEach(reset);
 
   test('warns, with a date, when the token expires inside the window', async () => {
-    expiry = new Date(Date.now() + 5 * DAY);
-    const r = await check(site);
+    expiry = new Date(NOW + 5 * DAY);
+    const r = await check(site, clock);
 
     assert.equal(r.ok, true, 'a soon-to-expire token still works — this is a warning, not an outage');
     assert.match(r.recoveryAction, /expires in 5 day\(s\)/);
@@ -50,8 +57,8 @@ describe('github integration check — token expiry warning', () => {
   });
 
   test('stays quiet for most of a token\'s life', async () => {
-    expiry = new Date(Date.now() + 200 * DAY);
-    const r = await check(site);
+    expiry = new Date(NOW + 200 * DAY);
+    const r = await check(site, clock);
 
     assert.equal(r.ok, true);
     assert.equal(r.recoveryAction, null, 'no nagging outside the warning window');
@@ -80,18 +87,18 @@ describe('github integration check — token expiry warning', () => {
   });
 
   test('expiry advice outranks config-gap advice — an expired token fails every draft', async () => {
-    expiry = new Date(Date.now() + 3 * DAY);
+    expiry = new Date(NOW + 3 * DAY);
     site.action_center_config_gap_count = 400;
 
-    const r = await check(site);
+    const r = await check(site, clock);
     assert.match(r.recoveryAction, /expires in 3 day\(s\)/, 'the more total failure wins the one advice slot');
   });
 
   test('config-gap advice still shows when the token is nowhere near expiry', async () => {
-    expiry = new Date(Date.now() + 200 * DAY);
+    expiry = new Date(NOW + 200 * DAY);
     site.action_center_config_gap_count = 400;
 
-    const r = await check(site);
+    const r = await check(site, clock);
     assert.match(r.recoveryAction, /config gap/i);
   });
 });

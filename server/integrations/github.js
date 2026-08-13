@@ -19,7 +19,13 @@ export const meta = {
 // PAT can actually reach it. A site with no repo configured reports ok:false
 // with a distinct, non-alarming reason (not "broken," just "not set up yet")
 // so it doesn't read like an outage on sites that were never meant to have this.
-export async function check(site) {
+// `now` is injectable purely so the expiry-window tests can pin a single
+// instant. Without it, the test computed an expiry from one Date.now() and
+// this function measured it against a second one taken microseconds later —
+// so whenever a millisecond happened to tick over between the two, the
+// Math.floor below rounded 5 days down to 4 and the suite failed roughly one
+// run in four. Same clock-injection idiom as lib/ship-window.js.
+export async function check(site, { now = Date.now } = {}) {
   const full = await getSiteById(site.id);
   if (!full?.repo_owner || !full?.repo_name) {
     return {
@@ -55,7 +61,7 @@ export async function check(site) {
     // other ~11 months of a token's life.
     let recoveryAction = null;
     const expiresAt = await getTokenExpiry(full).catch(() => null); // never fail the check over the warning
-    const daysLeft = expiresAt ? Math.floor((expiresAt - Date.now()) / 86_400_000) : null;
+    const daysLeft = expiresAt ? Math.floor((expiresAt - now()) / 86_400_000) : null;
     if (daysLeft !== null && daysLeft <= EXPIRY_WARNING_DAYS) {
       recoveryAction = `This site's GitHub token expires in ${daysLeft} day(s), on ${expiresAt.toISOString().slice(0, 10)}. Generate a replacement (Contents + Pull requests, read/write, scoped to ${full.repo_owner}/${full.repo_name}) and update ${envVar} before then — when it lapses, the Action Center silently stops opening pull requests.`;
     } else if (!full.action_center_config_checked_at) {
