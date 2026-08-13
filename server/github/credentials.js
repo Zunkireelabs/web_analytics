@@ -1,3 +1,5 @@
+import { appConfigured, getInstallationToken } from './app-auth.js';
+
 // THE one place a GitHub credential is resolved for a site.
 //
 // Before this module the rule `site.github_pat_env_var || 'GITHUB_PAT'` was
@@ -36,13 +38,42 @@ export function isFineGrainedToken(token) {
   return typeof token === 'string' && token.startsWith('github_pat_');
 }
 
+// Whether this site is meant to authenticate as a GitHub App installation
+// rather than with a PAT. Set by the tenant clicking "Install" on their repo
+// (migration 106); NULL means the PAT path, which is every site today.
+export function usesGithubApp(site) {
+  return site?.github_app_installation_id != null;
+}
+
 // The credential this site should authenticate with, or null if none is
-// configured. Never throws — callers decide whether a missing credential is
-// fatal (authHeaders) or merely disables a feature (code search).
+// available. Never throws for a missing credential — callers decide whether
+// that is fatal (authHeaders) or merely disables a feature (code search).
+//
+// Precedence, and the reasoning for each step:
+//
+//  1. Code search NEVER uses an App installation token. GitHub's /search/code
+//     needs a classic PAT with `repo` scope — a fine-grained PAT silently
+//     returns zero results there, and an installation token (ghs_...) is no
+//     better. Silently-zero is the worst possible failure for a search whose
+//     caller treats "no matches" as a real answer, so search stays on its own
+//     explicitly-configured classic token or nothing at all.
+//
+//  2. An installation id, when set, is AUTHORITATIVE — including when the App
+//     is unconfigured, in which case this returns null rather than falling back
+//     to the PAT. That is deliberate and is the security property of this
+//     module: the PAT env var defaults to the shared GITHUB_PAT, so a silent
+//     fallback would let a misconfigured deploy authenticate tenant B's repo
+//     with tenant A's credential. Failing to find a credential is recoverable
+//     and loud; using the wrong tenant's is neither.
+//
+//  3. Otherwise the per-site PAT, exactly as before.
 export async function resolveGithubToken(site, { forSearch = false } = {}) {
-  if (forSearch) {
-    const search = searchToken(site);
-    if (search) return search;
+  if (forSearch) return searchToken(site);
+
+  if (usesGithubApp(site)) {
+    if (!appConfigured()) return null;
+    return getInstallationToken(site.github_app_installation_id);
   }
+
   return process.env[githubTokenEnvVar(site)] || null;
 }

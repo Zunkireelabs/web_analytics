@@ -93,7 +93,7 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape
 // as updateSiteConnection above — only fields actually passed are touched.
-export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap }) {
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, urlFileMap }) {
   const fields = [];
   const values = [];
   let i = 1;
@@ -105,6 +105,8 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (repoDefaultBranch !== undefined) set('repo_default_branch', repoDefaultBranch);
   if (techStack !== undefined) set('tech_stack', techStack);
   if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
+  // null is meaningful here — it moves a site back off the App onto its PAT.
+  if (githubAppInstallationId !== undefined) set('github_app_installation_id', githubAppInstallationId);
   if (urlFileMap !== undefined) set('url_file_map', JSON.stringify(urlFileMap));
 
   if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');

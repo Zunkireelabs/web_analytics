@@ -81,6 +81,16 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            GITHUB_APP_ID=${{ secrets.GITHUB_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GITHUB_APP_PRIVATE_KEY_B64 }}
+
             # ── Design Agent worker ─────────────────────────────────────────
             # The design-agent-worker container's ONLY env source is this file
             # (docker-compose's `env_file: .env`, plus NODE_ENV), and this step
