@@ -99,6 +99,16 @@ export function recommendationPageKey(item) {
 // built BEFORE buildRecommendations' draftedFindingIds filter specifically
 // so a finding with an unshipped draft still counts as "detected" here and
 // its recommendation row is never closed out from under a pending draft.
+// A design-blocked recommendation is forced to 'manual' regardless of what
+// risk-tiers.js says about its generator. This is the single mechanism that
+// keeps blocked items out of the unattended chain: listOpenSafeRecommendations
+// and auto-remediation.js both select on risk_tier = 'safe', so demoting the
+// tier is sufficient — no second filter to remember in either place, and no
+// way for a new unattended caller added later to accidentally bypass it.
+function designRiskTier(item) {
+  return item.designBlockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
+}
+
 export async function syncFromGrounded(siteId, grounded) {
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
@@ -109,12 +119,19 @@ export async function syncFromGrounded(siteId, grounded) {
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,
+        // Refreshed on every sync, both directions: a template that has since
+        // been verified clears the block automatically (back to its real risk
+        // tier), and one that regresses re-blocks — no manual unblock step,
+        // and no stale "blocked" banner outliving the thing that caused it.
+        designBlockedReason: item.designBlockedReason ?? null,
+        riskTier: designRiskTier(item),
       });
     } else {
       await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
-        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: riskTierForGenerator(item.generatorId),
+        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: designRiskTier(item),
+        designBlockedReason: item.designBlockedReason ?? null,
       });
     }
   }
@@ -214,6 +231,13 @@ export async function getRecommendations(siteId) {
         tag: r.issue, generatorId: r.recommendation_type, bucket, category,
         reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
         riskTier: r.risk_tier,
+        // Non-null means Action Center should show this as "blocked pending
+        // design verification" with this exact reason, and must not offer a
+        // Generate Draft affordance — generateDraft would 422 anyway (that's
+        // the real gate), but a button that always fails is worse than no
+        // button. See engineering lesson button-state-visibility: state the
+        // reason inline rather than only on hover.
+        designBlockedReason: r.design_blocked_reason || null,
       };
     });
   const lastAnalyzedAt = {};

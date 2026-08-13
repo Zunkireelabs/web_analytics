@@ -47,8 +47,18 @@ function frontMatter(fields, site) {
   return lines.join('\n');
 }
 
-export function renderLandingPageBody(content, site) {
+// `permalink` (every renderer below) is the page's real public URL path,
+// resolved by frontend.js from the site's own newContentTargets.urlPattern
+// config — null whenever that config is absent or unusable, in which case it
+// is simply omitted and the build decides the URL exactly as it does today.
+// It is what puts a new page into a build-time-generated sitemap at the right
+// URL (see url-file-map.js's resolveNewContentUrl) with no second draft, no
+// second PR, and no edit to a sitemap file that in the Eleventy case doesn't
+// exist in the repo at all.
+export function renderLandingPageBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
   ], site);
@@ -58,11 +68,13 @@ export function renderLandingPageBody(content, site) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
   if (content.cta) parts.push(`[${content.cta}](#)`);
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
-export function renderBlogOutlineBody(content, site) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
@@ -78,15 +90,17 @@ export function renderBlogOutlineBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // The direct-answer paragraph goes immediately after the heading — no
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
@@ -101,7 +115,7 @@ export function renderDirectAnswerBody(content, site) {
   if (content.suggestedInternalLinks?.length) {
     parts.push(`## Suggested internal links\n\n${content.suggestedInternalLinks.map((l) => `- [${l.anchorText}](${l.targetUrl})`).join('\n')}`);
   }
-  return `${front}\n${parts.join('\n\n')}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -109,12 +123,14 @@ export function renderDirectAnswerBody(content, site) {
 // generators/translation.js) — a minimal new page with the real translated
 // title/description/content. A reviewer adapts layout/includes on the real
 // PR as needed, same as landing-page/blog-outline.
-export function renderTranslationBody(content, site) {
+export function renderTranslationBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${content.translatedContent || ''}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's
@@ -168,10 +184,29 @@ function fillContentWrapper(wrapper, body) {
   return `${open.trimEnd()}\n\n${body}\n\n${close.trimStart()}`;
 }
 
-export function renderCompliancePageBody(content, preserved = {}, site) {
+// Applies this site's own real prose wrapper to a rendered markdown body, for
+// EVERY net-new whole-page type (frontend.js's FRONTEND_ACTION_TYPES), not
+// just the compliance trio it was originally written for — landing pages,
+// blog posts, direct-answer pages and translations are the same shape and
+// were shipping without it, i.e. bare unstyled headings and paragraphs into a
+// real PR. Unchanged fallback: a site with no contentWrapper configured gets
+// the plain markdown body exactly as before, so nothing regresses for a site
+// that hasn't been through the Design Agent yet.
+function wrapInSiteProse(body, site) {
+  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
+}
+
+export function renderCompliancePageBody(content, preserved = {}, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
-    ['layout', preserved.layout],
-    ['permalink', preserved.permalink],
+    // An existing page's own layout always wins, same reasoning as permalink
+    // below — overwriting a real page must not restyle it.
+    ['layout', preserved.layout || layout],
+    // An existing page's own permalink always wins — overwriting a real,
+    // already-linked page must never move its live URL (see
+    // extractPreservedFrontMatter below). The resolved one only applies to
+    // the genuinely-new-file case, where there is no existing URL to keep.
+    ['permalink', preserved.permalink || permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription],
   ], site);
@@ -180,8 +215,5 @@ export function renderCompliancePageBody(content, preserved = {}, site) {
   for (const s of content.sections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  const body = parts.join('\n\n');
-  const wrapper = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
-  const wrapped = wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
-  return `${front}\n${wrapped}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }

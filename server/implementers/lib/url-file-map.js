@@ -222,11 +222,89 @@ export function resolveLinkDataSources(site, pageUrl) {
 export function resolveNewContentTarget(site, actionType, title) {
   const target = site.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return null;
-  const slug = String(title || 'untitled')
+  return `${target.dir}/${slugifyTitle(title)}${target.extension}`;
+}
+
+// The single slug both the file path above and the public URL below derive
+// from — they must agree, or a page gets written to one place and declares
+// it lives at another.
+function slugifyTitle(title) {
+  return String(title || 'untitled')
     .toLowerCase().trim()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'untitled';
-  return `${target.dir}/${slug}${target.extension}`;
+}
+
+// The public URL path that same new page will live at — the other half of
+// resolveNewContentTarget, and what lets a new page reach the site's sitemap
+// without a second draft and a second PR.
+//
+// This exists because a static-site generator decides a page's URL at BUILD
+// time from the page's own front matter, not from where its file sits.
+// zunkireelabs-web's sitemap is src/sitemap.njk (permalink: /sitemap.xml)
+// iterating collections.all, so every page Eleventy builds is already in the
+// sitemap automatically and the sitemap file itself needs no edit — there is
+// no sitemap.xml in the repo to edit. What a new page actually needs is a
+// correct `permalink`. That site's own two directories show why it can't be
+// inferred: src/blog/blog.json sets "permalink": "/blog/{{ page.fileSlug }}/"
+// for every post (so blog posts are already correct), while src/pages/*.njk
+// each carry their own explicit `permalink: /about/` with no directory
+// default — a new file dropped into src/pages/ would publish at Eleventy's
+// fallback /pages/<slug>/ and be listed in the sitemap at that wrong URL.
+//
+// `urlPattern` is therefore per-target CONFIG ("/services/{slug}/"), not
+// inference: the directory -> URL mapping is a property of the site's build
+// setup this code cannot observe, and a guessed URL is worse than none — it
+// would publish a real page at a URL that 404s and then advertise that URL
+// in the sitemap. No urlPattern (or an unusable one) returns null, and every
+// caller falls back to exactly today's behavior: write the page, add no
+// permalink, let the build decide.
+// The `layout` a genuinely-new page should declare, so it renders inside the
+// site's real chrome (navbar/footer/head) instead of as a bare document with
+// correct content and no site around it.
+//
+// Resolved from the configured siteRoot.layoutTemplate by BASENAME, because
+// that is what a layout front-matter value actually means: Eleventy resolves
+// it relative to `dir.layouts`, not to the project root. Confirmed against
+// the real repo rather than assumed — zunkireelabs-web's .eleventy.js sets
+// dir.layouts = "_includes/layouts", its layoutTemplate config is
+// "src/_includes/layouts/base.njk", and its own src/pages/about.njk declares
+// exactly `layout: base.njk`.
+//
+// The per-target override exists for one real, non-hypothetical reason: a
+// directory data file can already supply a layout for everything in that
+// directory, and front matter OVERRIDES directory data. On this same site
+// src/blog/blog.json sets "layout": "blog-post.njk" for every post, so
+// emitting the generic site layout on a new blog post would silently
+// downgrade it from the blog layout to the base one. Setting
+// newContentTargets["blog-outline"].layout = null suppresses it for that
+// target; a string overrides it outright.
+//
+// Nothing configured -> null -> the key is omitted and the build decides,
+// exactly as today. Deliberately conservative: a layout name that doesn't
+// resolve is not a cosmetic problem, it fails the site BUILD, so this only
+// ever emits a name derived from real configuration, never a guess.
+export function resolveNewContentLayout(site, actionType) {
+  const target = site?.url_file_map?.newContentTargets?.[actionType];
+  // Explicit per-target config wins, including an explicit null/'' meaning
+  // "this directory already supplies its own layout — do not emit one."
+  if (target && 'layout' in target) return target.layout || null;
+
+  const configured = site?.url_file_map?.siteRoot?.layoutTemplate;
+  if (!configured) return null;
+  const basename = configured.split('/').filter(Boolean).pop();
+  return basename || null;
+}
+
+export function resolveNewContentUrl(site, actionType, title) {
+  const urlPattern = site.url_file_map?.newContentTargets?.[actionType]?.urlPattern;
+  if (!urlPattern || !urlPattern.includes('{slug}')) return null;
+  const url = urlPattern.replace('{slug}', slugifyTitle(title));
+  // Must be a site-root-relative path. Anything else — a full URL, a
+  // traversal, a doubled separator from an empty segment — is malformed
+  // config, not something to normalize into a guess.
+  if (!url.startsWith('/') || url.includes('..') || url.includes('//')) return null;
+  return url;
 }
 
 // Site-level (not per-page) targets — today only llms.txt/robots.txt.

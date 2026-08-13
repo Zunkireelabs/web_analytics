@@ -37,6 +37,37 @@ export async function createDesignAgentJob(siteId, recommendationId, { requested
 // design-drift.js/marker-merge.js action-type strings, e.g. ['faq',
 // 'expand-content']) travels in `params` for the worker's handler to read
 // off the claimed job row.
+// Is there already an unfinished componentTemplates derivation pending for
+// this site + component key? Used by design-drift.js's
+// resolveOrCreateComponentTemplate to enqueue at most ONE outstanding
+// re-derivation per site+key: that function sits on generateDraft's hot path,
+// so without this check every draft attempt against a site with an unverified
+// template would queue another job for work already pending — a single daily
+// run would add dozens.
+//
+// Matched on ACTION TYPE ('expand-content'), not the componentTemplates key
+// ('expandContent') — createComponentTemplateJob stores whatever its
+// `componentKeys` argument was, and every caller passes action types. The two
+// vocabularies are identical for faq/qaContent-style names and differ for the
+// hyphenated ones, so querying by the wrong one would silently never match
+// and re-queue forever.
+//
+// Treats both 'queued' and 'executing' as pending: a job a worker has already
+// claimed is still going to produce the template.
+//
+// jsonb_exists() rather than the `?` operator, which node-postgres parses as
+// a placeholder and would break the query.
+export async function getQueuedComponentTemplateJob(siteId, actionType) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate' AND status IN ('queued', 'executing')
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT 1`,
+    [siteId, actionType]
+  );
+  return rows[0] || null;
+}
+
 export async function createComponentTemplateJob(siteId, componentKeys, { requestedBy, pageUrl } = {}) {
   return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
 }
@@ -49,16 +80,24 @@ export async function createComponentTemplateJob(siteId, componentKeys, { reques
 // never both claim the same job. Returns null (not a rejected promise) when
 // the queue is empty, same "empty is a normal outcome" convention as the
 // rest of this file's read helpers.
-export async function claimNextDesignAgentJob() {
+//
+// siteId is optional and defaults to unscoped (every real worker.js
+// deployment polls globally, across every tenant, by design). It exists so
+// a caller that already knows it only ever wants ITS OWN site's jobs — in
+// practice, worker.test.js's fixtures — can't accidentally claim (and
+// fake-complete with a mock handler) some other site's real queued job.
+export async function claimNextDesignAgentJob(siteId = null) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows: candidates } = await client.query(
       `SELECT id FROM execution_jobs
        WHERE kind = 'design_generate' AND status = 'queued'
+         AND ($1::int IS NULL OR site_id = $1)
        ORDER BY id
        FOR UPDATE SKIP LOCKED
-       LIMIT 1`
+       LIMIT 1`,
+      [siteId]
     );
     if (!candidates[0]) {
       await client.query('COMMIT');

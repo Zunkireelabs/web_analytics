@@ -11,11 +11,22 @@ import { getOrDetectStrategy } from './strategy-registry.js';
 
 let site;
 
+// Fixture identity is stamped unique per run (same convention
+// worker.test.js's own site fixture uses) rather than a fixed string —
+// gsc_property has a unique constraint, so a fixed value means any orphaned
+// row left by a previous run that was killed before `after()` ran (a hard
+// process kill skips afterEach/after cleanup entirely) permanently breaks
+// every future run's `before()` with a unique-violation, failing every test
+// in this file with no code-level bug to fix. A random stamp makes that
+// class of failure structurally impossible — a leftover orphan from a
+// killed run just sits there unused instead of colliding.
 before(async () => {
+  const stamp = `strategy-registry-test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const { rows } = await query(
     `INSERT INTO sites (name, gsc_property, ga4_property_id, repo_owner, repo_name)
-     VALUES ('strategy-registry-test-site', 'sc-domain:strategy-registry-test.example', 'test-ga4', 'test-owner', 'test-repo')
-     RETURNING *`
+     VALUES ('strategy-registry-test-site', $1, $2, 'test-owner', 'test-repo')
+     RETURNING *`,
+    [`sc-domain:${stamp}`, stamp]
   );
   site = rows[0];
 });

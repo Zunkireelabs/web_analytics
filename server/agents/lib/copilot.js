@@ -6,6 +6,28 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { callLLM } from '../../llm.js';
 import { buildRecommendations } from './recommendations.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from './agentic-orchestrator.js';
+import { systemPromptFor, resolveDisplayName } from './copilot-greeting.js';
+import { getUserById } from '../../store/users.js';
+import { getSiteById } from '../../store/read.js';
+
+// Who is being answered, resolved server-side. Never throws — an unresolvable
+// user falls back to the client persona, which is the safe default because it
+// is the one that forbids internal vocabulary.
+async function resolvePersona(siteId, userId) {
+  const [user, site] = await Promise.all([
+    userId ? getUserById(userId).catch(() => null) : null,
+    getSiteById(siteId).catch(() => null),
+  ]);
+  const isAdmin = user?.role === 'platform_admin';
+  return {
+    isAdmin,
+    systemPrompt: systemPromptFor({
+      isAdmin,
+      name: resolveDisplayName(user),
+      siteLabel: site?.website_domain || site?.name || 'this site',
+    }),
+  };
+}
 
 // "Reuse cached intelligence whenever possible. Only run agents when
 // information is stale or unavailable." — matches the daily ingest cadence,
@@ -96,7 +118,7 @@ async function honestGapMessage(siteId, agentIds) {
 // call. Findings/summaries are already rich (evidence, whyItMatters,
 // priority, recommendedAction per finding), so this stays fast without
 // needing each agent's full raw `facts` blob the way a fresh run does.
-async function answerFromCache(siteId, agentIds, question) {
+async function answerFromCache(siteId, agentIds, question, personaPrompt) {
   const runs = await getLatestFindings(siteId, agentIds);
   const findings = runs
     .flatMap((r) => r.findings.map((f) => ({ ...f, agentId: r.agentId })))
@@ -106,7 +128,7 @@ async function answerFromCache(siteId, agentIds, question) {
   // itself failed) — answerQuestion's caller applies the honest-gap fallback
   // uniformly for both this path and the fresh-run path, so it isn't
   // duplicated here.
-  const narrative = await synthesizeFindings(findings, perAgent, question);
+  const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);
   return { findings, narrative, ranAgentIds: agentIds, fromCache: true };
 }
 
@@ -129,8 +151,17 @@ async function suggestFollowUps(question, answer) {
 // in the answer text itself — `ranAgentIds` travels back only as metadata
 // (agent_ids_used on the persisted message) for internal transparency, not
 // user-facing copy.
-export async function answerQuestion({ siteId, conversationId, message, history }) {
-  const routing = await classifyIntent(message, history);
+export async function answerQuestion({ siteId, conversationId, message, history, userId }) {
+  // Audience is resolved from the SESSION's user, never from anything the
+  // caller passed in the request body — a client cannot ask to be answered as
+  // an admin. Failing to resolve it degrades to the client persona (the more
+  // conservative of the two: it exposes no internal vocabulary), rather than
+  // to the admin one.
+  const [routing, persona] = await Promise.all([
+    classifyIntent(message, history),
+    resolvePersona(siteId, userId),
+  ]);
+  const personaPrompt = persona.systemPrompt;
 
   let result;
   if (routing.mode === 'summary') {
@@ -149,21 +180,21 @@ export async function answerQuestion({ siteId, conversationId, message, history 
     // surfacing a hard error to the user.
     const { start, end } = last7Days();
     try {
-      result = await runAgenticLoop({ siteId, start, end, question: message, history, persistSubAgentRuns: true });
+      result = await runAgenticLoop({ siteId, start, end, question: message, history, persistSubAgentRuns: true, personaPrompt });
     } catch (err) {
       console.warn('[copilot] agentic loop failed, falling back to classify+orchestrate:', err.message);
       const stale = await staleAgentIds(siteId, routing.agentIds);
       result = stale.length
-        ? await runOrchestration({ siteId, start, end, agentIds: routing.agentIds, persistSubAgentRuns: true, question: message })
-        : await answerFromCache(siteId, routing.agentIds, message);
+        ? await runOrchestration({ siteId, start, end, agentIds: routing.agentIds, persistSubAgentRuns: true, question: message, personaPrompt })
+        : await answerFromCache(siteId, routing.agentIds, message, personaPrompt);
     }
   } else {
     const stale = await staleAgentIds(siteId, routing.agentIds);
     if (stale.length) {
       const { start, end } = last7Days();
-      result = await runOrchestration({ siteId, start, end, agentIds: routing.agentIds, persistSubAgentRuns: true, question: message });
+      result = await runOrchestration({ siteId, start, end, agentIds: routing.agentIds, persistSubAgentRuns: true, question: message, personaPrompt });
     } else {
-      result = await answerFromCache(siteId, routing.agentIds, message);
+      result = await answerFromCache(siteId, routing.agentIds, message, personaPrompt);
     }
   }
 

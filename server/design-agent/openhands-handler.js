@@ -7,6 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { getSiteById } from '../store/read.js';
 import { checkoutRepoTarball } from './repo-checkout.js';
+import { findRelevantMemory } from '../agent-memory.js';
+
+// Shared generatorId in agent_fix_memory (097) for every Design Agent
+// component-templates write/read — this module's own RETRIEVE lookup below
+// and design-drift.js's LEARN write (resolveOrCreateComponentTemplate, the
+// sole autonomous path that creates or verifies a componentTemplate) both
+// tag/filter by this same id, so there is exactly one learning history per
+// site.
+export const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -148,7 +157,7 @@ export function createOpenHandsHandler({
       };
 
       const { result, code, timedOut, stderrTail } = await runDesignTaskProcess({
-        pythonBin, scriptPath, workspaceDir, extraArgs: buildArgs(job), env, timeoutMs, killGraceMs,
+        pythonBin, scriptPath, workspaceDir, extraArgs: await buildArgs(job), env, timeoutMs, killGraceMs,
         onContainerId: (id) => { containerId = id; },
       });
 
@@ -176,29 +185,53 @@ export function createOpenHandsHandler({
 // spawn/stdout-parsing/timeout/SIGKILL-escalation/backstop cleanup — is the
 // exact same createOpenHandsHandler machinery above, just parameterized
 // differently.
-// getSiteByIdFn/checkoutRepoTarballFn are injectable (default to the real
-// store/read.js + repo-checkout.js implementations) so tests can stub the
-// DB lookup and the real GitHub tarball download independently, same
+// getSiteByIdFn/checkoutRepoTarballFn/findRelevantMemoryFn are injectable
+// (default to the real store/read.js, repo-checkout.js, and
+// agent-memory.js implementations) so tests can stub the DB lookup, the
+// real GitHub tarball download, and the memory lookup independently, same
 // dependency-injection convention as pythonBin/scriptPath/dockerBin above.
-export function createComponentTemplateHandler({ getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, ...options } = {}) {
+export function createComponentTemplateHandler({
+  getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, findRelevantMemoryFn = findRelevantMemory, ...options
+} = {}) {
   return createOpenHandsHandler({
     ...options,
     workspaceSource: async (destDir, job) => {
       const site = await getSiteByIdFn(job.site_id);
       await checkoutRepoTarballFn(site, destDir);
     },
-    buildArgs: (job) => ['component-templates', JSON.stringify(job.params?.componentKeys || [])],
+    // RETRIEVE — same shape as withAgentMemory (agent-memory.js): scope:
+    // 'client', clientFacing: true (category='code' rows structurally
+    // unreachable), no category filter, so any past design-agent lesson
+    // recorded by design-drift.js's LEARN write surfaces here. Never lets a
+    // memory-table failure block the job — same defensive no-op-on-error
+    // convention withAgentMemory itself uses.
+    buildArgs: async (job) => {
+      const lessons = await findRelevantMemoryFn({
+        scope: 'client', siteId: job.site_id, generatorId: DESIGN_AGENT_GENERATOR_ID, clientFacing: true, limit: 5,
+      }).catch((err) => {
+        console.warn(`[design-agent] memory lookup failed for site ${job.site_id}, continuing without it: ${err.message}`);
+        return [];
+      });
+      const lessonsForPrompt = lessons.map((l) => ({
+        symptoms: l.symptoms,
+        rootCause: l.rootCause,
+        fixPattern: l.executionPermission === 'auto' ? l.fixPattern : null,
+      }));
+      return ['component-templates', JSON.stringify(job.params?.componentKeys || []), JSON.stringify(lessonsForPrompt)];
+    },
   });
 }
 
 // The worker (worker.js's main()) claims ANY kind='design_generate' job
 // regardless of what it's for — this is the single dispatch point that
-// routes each claimed job to the right handler based on job.params.mode,
-// so the worker's poll loop itself never needs to know how many kinds of
-// design_generate job exist. Falls back to the fixture-demo handler for
-// jobs with no params.mode (or an unrecognized one) — the original Step
-// 6A/6C/6D trigger (routes/action-center.js's design-generate route) never
-// sets params.mode at all.
+// routes each claimed job to the right handler based on job.params.mode, so
+// the worker's poll loop itself never needs to know how many kinds of
+// design_generate job exist. In production, the only source of these jobs
+// is component-templates mode via resolveOrCreateComponentTemplate's
+// synchronous handler call (never queued through execution_jobs at all —
+// see that function). The fixture-demo fallback (no params.mode) exists for
+// the dev-only verify-design-agent-docker.js/verify-component-templates-
+// real-repo.js scripts that exercise this queue+worker machinery directly.
 export function createDesignAgentHandler(options = {}) {
   const fixtureDemoHandler = createOpenHandsHandler(options);
   const componentTemplateHandler = createComponentTemplateHandler(options);
