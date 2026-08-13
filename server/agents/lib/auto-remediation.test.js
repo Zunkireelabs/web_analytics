@@ -413,4 +413,32 @@ describe('autoRemediateSafeRecommendations — blocked recommendations', () => {
     assert.equal(result.stoppedReason, null, 'blocked rows must be filtered out, not attempted and failed');
     assert.equal(result.shipped, 1);
   });
+
+  // The full eligibility matrix, stated once and explicitly. Only one of the
+  // four combinations may ship unattended, and the three that may not are
+  // each excluded for a different reason — so asserting them together is what
+  // stops a future change from fixing one and quietly regressing another.
+  //
+  // Migration 108 now forbids the safe+blocked row at the database level, but
+  // this suite deliberately still constructs one: the invariant is asserted in
+  // four independent places (coordinator, DB constraint, and both unattended
+  // selectors) precisely because relying on a single layer is what produced
+  // the 45 contradictory rows in the first place. This pins THIS layer.
+  const MATRIX = [
+    { name: 'safe + unblocked', riskTier: 'safe', blocked: null, eligible: true },
+    { name: 'safe + blocked', riskTier: 'safe', blocked: 'design not verified', eligible: false },
+    { name: 'manual + unblocked', riskTier: 'manual', blocked: null, eligible: false },
+    { name: 'manual + blocked', riskTier: 'manual', blocked: 'design not verified', eligible: false },
+  ];
+
+  for (const c of MATRIX) {
+    test(`${c.name} -> ${c.eligible ? 'executable' : 'not executable'}`, async () => {
+      recommendations = [{ ...rec(1, { riskTier: c.riskTier }), blocked_reason: c.blocked }];
+
+      const result = await autoRemediateSafeRecommendations(1);
+      assert.equal(result.shipped, c.eligible ? 1 : 0);
+      assert.deepEqual(calls.generated, c.eligible ? ['f1'] : []);
+      assert.equal(result.stoppedReason, null, 'an ineligible row is skipped, never attempted-and-failed');
+    });
+  }
 });

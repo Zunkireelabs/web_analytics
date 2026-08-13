@@ -4,6 +4,7 @@ import { findOpenRecommendation, insertRecommendation } from '../../store/recomm
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { getSiteById } from '../../store/read.js';
+import { createRecommendationGates } from './recommendation-gates.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -91,6 +92,22 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
 
   const page = recommendationPageKey({ generatorId: eligibility.generatorId, params: { topic: gap.topic } });
   const existing = await findOpenRecommendation(siteId, page, eligibility.generatorId);
+
+  // The same gates every other writer to this table passes through.
+  // blog-outline is net-new content, so the gate that matters here is
+  // newContentTargets: a tenant with no configured destination for new blog
+  // files gets a visible, blocked, manual-tier recommendation carrying the
+  // reason, instead of a 'safe' one that enters the unattended chain and
+  // fails at apply. Never fatal — approving the gap must still succeed even
+  // if we cannot reach the repo to evaluate the gates.
+  const site = await getSiteById(siteId).catch(() => null);
+  const gate = site
+    ? await createRecommendationGates(siteId, site)
+        .evaluate(eligibility.generatorId, params)
+        .catch(() => ({ drop: null, blockedReason: null }))
+    : { drop: null, blockedReason: null };
+  if (gate.drop) return { eligible: false, dropped: gate.drop };
+
   const recommendationId = existing
     ? existing.id
     : (await insertRecommendation(siteId, {
@@ -102,8 +119,17 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
         findingId: eligibility.findingId,
         detectingAgent: 'analyst-keyword-gaps',
         priority: gap.priority,
-        riskTier: riskTierForGenerator(eligibility.generatorId),
+        riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
+        blockedReason: gate.blockedReason,
       })).id;
+
+  // A blocked recommendation must not be drafted: generateDraft would hit the
+  // same missing prerequisite and throw, and the catch below would record a
+  // draftError that reads like a transient failure rather than the missing
+  // configuration it actually is.
+  if (gate.blockedReason) {
+    return { eligible: true, created: !existing, recommendationId, draftId: null, blockedReason: gate.blockedReason };
+  }
 
   // Design Agent -> Implementation -> Validation, all BEFORE this reaches a
   // human as an executable Action Center item — generateDraft is idempotent
@@ -197,6 +223,17 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
   let created = 0;
   let skipped = 0;
   let ineligible = 0;
+  let dropped = 0;
+  let blocked = 0;
+
+  // One gates instance for the whole nightly pass, so its caches hold: one
+  // repo-tree read and one soft-404 fingerprint for every insight, not one
+  // per insight. Without these gates this loop was the most prolific source
+  // of contradictory rows — it inserted meta-title/qa-content/expand-content
+  // recommendations at the generator's own risk tier for any page the Analyst
+  // flagged, with no check that the page is mapped, that its file still
+  // exists, or that the page exists at all.
+  const gates = createRecommendationGates(siteId, resolvedSite);
 
   for (const insight of insights || []) {
     const action = seoDraftEligibility(resolvedSite, insight);
@@ -205,6 +242,11 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
     const page = recommendationPageKey({ generatorId: action.generatorId, params: action.params });
     const existing = await findOpenRecommendation(siteId, page, action.generatorId);
     if (existing) { skipped++; continue; }
+
+    const gate = await gates.evaluate(action.generatorId, action.params)
+      .catch(() => ({ drop: null, blockedReason: null }));
+    if (gate.drop) { dropped++; continue; }
+    if (gate.blockedReason) blocked++;
 
     // forecast_risk is a PREDICTED problem, not an observed one. Saying so in
     // the issue text matters: a human reading the Action Center needs to know
@@ -219,11 +261,12 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
       findingId: action.findingId,
       detectingAgent: 'analyst-insights',
       priority: predicted ? 'medium' : 'high',
-      riskTier: riskTierForGenerator(action.generatorId),
+      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
+      blockedReason: gate.blockedReason,
     });
     created++;
   }
-  return { created, skipped, ineligible };
+  return { created, skipped, ineligible, dropped, blocked };
 }
 
 function analystReason(insight, predicted) {

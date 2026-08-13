@@ -167,7 +167,8 @@ describe('syncAnalystInsightsToActionCenter', () => {
   });
 
   test('an empty night is a no-op, not an error', async () => {
-    assert.deepEqual(await syncAnalystInsightsToActionCenter(7, [], { site: SITE }), { created: 0, skipped: 0, ineligible: 0 });
-    assert.deepEqual(await syncAnalystInsightsToActionCenter(7, null, { site: SITE }), { created: 0, skipped: 0, ineligible: 0 });
+    const empty = { created: 0, skipped: 0, ineligible: 0, dropped: 0, blocked: 0 };
+    assert.deepEqual(await syncAnalystInsightsToActionCenter(7, [], { site: SITE }), empty);
+    assert.deepEqual(await syncAnalystInsightsToActionCenter(7, null, { site: SITE }), empty);
   });
 });

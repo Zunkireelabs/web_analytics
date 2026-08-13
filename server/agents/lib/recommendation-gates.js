@@ -1,0 +1,307 @@
+import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
+import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
+import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
+import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
+import { getFileContent, getRepoTree } from '../../github/client.js';
+import { baseBranch } from '../../implementers/lib/github-ops.js';
+import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
+import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason } from '../../implementers/lib/pagination-routes.js';
+
+// The gates that decide whether a candidate recommendation is real, and
+// whether it may enter the unattended chain.
+//
+// This lived inline inside buildRecommendations, which made it the gate for
+// exactly one of the three writers to the recommendations table. The other
+// two — createActionCenterRecommendationForGap and
+// syncAnalystInsightsToActionCenter (analyst-seo-mapping.js) — inserted rows
+// with `riskTier: riskTierForGenerator(...)` and no blockedReason at all, so
+// the nightly analyst pipeline could mint a 'safe', unblocked recommendation
+// for a page with no file mapping, an unverified component template, or no
+// page at all. Those rows then went straight into the shipping loop to fail.
+//
+// Extracted here so every writer asks the same question. New writers should
+// call this rather than inventing a fourth answer.
+//
+// Two kinds of outcome, and the difference matters:
+//
+//   drop         — the finding is not real, or cannot ever be acted on: the
+//                  page is a soft-404, its mapped file no longer exists, its
+//                  adapter has no data for it. The caller should discard it
+//                  entirely and leave it out of detectedKeys, so any already
+//                  open row closes on the next sync.
+//
+//   blockedReason — the finding IS real and the page IS real; we just are
+//                  not configured to fix it automatically yet. The caller
+//                  should keep it visible, carry the reason, and let
+//                  blockedRiskTier demote it to the 'manual' tier. Dropping
+//                  these would report a tenant's site as healthy when the
+//                  truth is that we never finished configuring their repo.
+//
+// The caches are per-instance and deliberately so: one repo tree read, one
+// read per unique file, and one soft-404 fingerprint per pass, no matter how
+// many findings share them.
+
+export function createRecommendationGates(siteId, initialSite, deps = {}) {
+  const {
+    fetchTree = getRepoTree,
+    fetchFile = getFileContent,
+    healFn = autoHealFileMapping,
+    discoverRoutes = discoverPaginationRoutes,
+    fetchFingerprint = fetchSoftNotFoundFingerprint,
+    checkSoftNotFound = isSoftNotFound,
+    log = console,
+  } = deps;
+
+  // Reassignable: healing persists newly-discovered url_file_map entries and
+  // returns the updated row, and later findings in the same pass must see
+  // them — otherwise two findings on one page would each try to heal it, and
+  // the second would still read the stale map.
+  let site = initialSite;
+
+  // One real read per unique data file for this whole pass, no matter how
+  // many candidate pages share it (e.g. every /locations/:city/ page routes
+  // through the same locations.js).
+  const dataFileCache = new Map(); // `${path}@${ref}` -> file | null
+  // "We could not check" is NOT the same as "it is not there", and conflating
+  // them is how a revoked token or a rate limit silently empties a tenant's
+  // Action Center. getFileContent already draws the line correctly — it
+  // returns null only for a real 404 and throws on anything else — but a
+  // `.catch(() => null)` here would throw that distinction away, so a 401
+  // would read as evidence that a live page was a soft-404. Tracked
+  // separately so cachedFetchFile keeps its file|null contract for
+  // isDataReady, which genuinely does want "no data" for both cases.
+  const unverifiableFiles = new Set(); // `${path}@${ref}`
+  const cachedFetchFile = async (s, path, ref) => {
+    const key = `${path}@${ref}`;
+    if (dataFileCache.has(key)) return dataFileCache.get(key);
+    let file = null;
+    try {
+      file = await fetchFile(s, path, ref);
+    } catch (err) {
+      unverifiableFiles.add(key);
+      log.warn(`[recommendation-gates] site ${siteId}: could not verify ${path} exists (${err.message}) — not treating that as absent.`);
+    }
+    dataFileCache.set(key, file);
+    return file;
+  };
+
+  // One repo-tree read for this whole pass no matter how many unmapped pages
+  // need discovering — the tree is identical for every page on the same
+  // branch, and getRepoTree costs two API calls each time.
+  const treeCache = new Map(); // `${siteId}@${branch}` -> { files, truncated }
+  const cachedFetchTree = async (s, branch) => {
+    const key = `${s.id}@${branch}`;
+    if (!treeCache.has(key)) treeCache.set(key, await fetchTree(s, branch));
+    return treeCache.get(key);
+  };
+
+  // Attempts are deduped per (page, actionType) rather than per page: whether
+  // a page needs file-mapping healing at all depends on the action type,
+  // because an adapter configured for one type and not another makes
+  // autoHealFileMapping bail early for the former only. Keyed on page alone, a
+  // page whose faq route is adapter-handled would suppress the genuine attempt
+  // for its schema route.
+  const healAttempted = new Set();
+  const healUnmappedPage = async (pageUrl, actionType) => {
+    if (!site?.repo_owner || !site?.repo_name) return;
+    const key = `${pageUrl}::${actionType}`;
+    if (healAttempted.has(key)) return;
+    healAttempted.add(key);
+    // Never fatal: this is an opportunistic upgrade of a recommendation from
+    // "blocked" to "actionable". A rate-limited or unreachable repo must leave
+    // the finding visible-and-blocked, not take down the whole pass.
+    const healed = await healFn(site, pageUrl, actionType, { fetchTree: cachedFetchTree })
+      .catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a file mapping for ${pageUrl}: ${err.message}`);
+        return null;
+      });
+    if (healed) site = healed;
+  };
+
+  // Soft-404 detection for pages we are about to report as unmapped.
+  //
+  // zunkireelabs.com returns its HOMEPAGE, with HTTP 200, for ANY unknown
+  // path — verified against a URL invented for the test. That is an ordinary
+  // static/SPA fallback, and it means a URL an agent picked up from GSC or a
+  // crawl can look perfectly alive while pointing at nothing. Six such
+  // /docs/* URLs were sitting in site 1's Action Center asking to be mapped
+  // to a file that does not, and never will, exist.
+  //
+  // Reporting those as "add a url_file_map entry" is worse than dropping
+  // them: it asks for work that cannot be done.
+  let softNotFoundFingerprint;      // undefined = not fetched yet, null = unavailable
+  let softNotFoundDiscriminates;    // guard, see below
+  const softNotFoundCache = new Map();
+  const isPageSoftNotFound = async (pageUrl) => {
+    if (softNotFoundCache.has(pageUrl)) return softNotFoundCache.get(pageUrl);
+    if (softNotFoundFingerprint === undefined) {
+      let origin = null;
+      try { origin = new URL(pageUrl).origin; } catch { origin = null; }
+      softNotFoundFingerprint = origin ? await fetchFingerprint(origin).catch(() => null) : null;
+
+      // A genuinely client-rendered SPA serves the same shell for EVERY
+      // route, real or not, so the fingerprint would match real pages too and
+      // this check would delete the entire Action Center. Prove it
+      // discriminates first, using a page this site has a real file mapping
+      // for — if even that looks like the 404 fallback, the signal is
+      // meaningless here and is abandoned rather than trusted.
+      const known = Object.keys(site?.url_file_map?.pages || {})[0];
+      if (softNotFoundFingerprint && known) {
+        let knownUrl = null;
+        try { knownUrl = new URL(known, new URL(pageUrl).origin).href; } catch { knownUrl = null; }
+        softNotFoundDiscriminates = knownUrl
+          ? !(await checkSoftNotFound(knownUrl, softNotFoundFingerprint).catch(() => true))
+          : false;
+        if (!softNotFoundDiscriminates) {
+          log.warn(`[recommendation-gates] site ${siteId}: a known-real page matches the 404 fallback fingerprint — treating the soft-404 signal as unusable for this site.`);
+        }
+      } else {
+        softNotFoundDiscriminates = false;
+      }
+    }
+    if (!softNotFoundFingerprint || !softNotFoundDiscriminates) return false;
+    const result = await checkSoftNotFound(pageUrl, softNotFoundFingerprint).catch(() => false);
+    if (result) log.log(`[recommendation-gates] site ${siteId}: ${pageUrl} renders the site's 404 fallback — dropping its recommendation instead of asking for a file mapping.`);
+    softNotFoundCache.set(pageUrl, result);
+    return result;
+  };
+
+  // Generated-page detection, so an unmappable URL gets an accurate reason
+  // instead of "add a url_file_map entry" — see implementers/lib/pagination-routes.js.
+  // Discovered once per pass (a repo-tree read plus one fetch per paginating
+  // template) and only when something is actually about to be reported unmapped.
+  let paginationRoutes;
+  const paginationRouteFor = async (pageUrl) => {
+    if (paginationRoutes === undefined) {
+      paginationRoutes = await discoverRoutes(site, { fetchTree: cachedFetchTree })
+        .catch((err) => {
+          log.warn(`[recommendation-gates] site ${siteId}: could not scan for generated routes: ${err.message}`);
+          return [];
+        });
+      if (paginationRoutes.length) {
+        log.log(`[recommendation-gates] site ${siteId}: found ${paginationRoutes.length} generated route family(ies): ${paginationRoutes.map((r) => r.routePrefix + '/*').join(', ')}`);
+      }
+    }
+    return matchPaginationRoute(pageUrl, paginationRoutes);
+  };
+
+  // Runs every gate for one candidate, in the order that produces the most
+  // useful answer: cheap config checks first, network evidence only when
+  // something is actually about to be reported.
+  async function evaluate(generatorId, params) {
+    if (!site) return { drop: null, blockedReason: null };
+    const page = params?.page;
+
+    // The net-new counterpart of the page-mapping gate. Net-new content
+    // (blog-outline, direct-answer, landing-page, the legal pages) has no
+    // params.page to map — it resolves its destination through
+    // url_file_map.newContentTargets instead, and frontend.js hard-fails with
+    // 'no-file-mapping' at apply time when that entry is absent.
+    //
+    // This is what makes promoting blog-outline to the safe tier honest for
+    // EVERY tenant rather than just the one that happens to be configured.
+    //
+    // Deliberately checks only the target's existence. The second
+    // prerequisite for markdown content — a renderCapabilities entry proving
+    // the extension gets a markdown pass — is enforced by rendering-gate.js's
+    // validateRenderingBatch inside pushDraftBranch, which fails closed and is
+    // the single choke point every implementer funnels through. Duplicating
+    // that rule here would give it two definitions that could disagree.
+    let mappingBlockedReason = null;
+    if (FRONTEND_ACTION_TYPES.has(generatorId) && !resolveNewContentTarget(site, generatorId, 'probe')) {
+      mappingBlockedReason = `No url_file_map.newContentTargets["${generatorId}"] is configured for this site, so there is nowhere in the repo to create the new file. Add one (e.g. {"dir":"src/blog","extension":".md"}) via 'npm run connect-repo' before this can be applied.`;
+    }
+
+    // broken-link-fix is excluded from every page gate below:
+    // computeBrokenLinkFixMerge (backend.js) has its own GitHub code-search
+    // fallback for exactly the pages these checks would flag, so "not in
+    // url_file_map" isn't fatal for it the way it is for every other
+    // generatorId.
+    const pageGated = generatorId !== 'broken-link-fix' && !!page;
+
+    if (pageGated && !isPageMapped(site, page, generatorId)) {
+      await healUnmappedPage(page, generatorId);
+      if (!isPageMapped(site, page, generatorId)) {
+        // Before asking anyone to map it, make sure the page is real.
+        if (await isPageSoftNotFound(page)) return { drop: 'soft-404', blockedReason: null };
+        // A GENERATED page has no per-page file by construction, so telling
+        // someone to add a mapping is asking for the wrong fix. Say what
+        // actually produces the page and where a fix would have to go.
+        const generated = await paginationRouteFor(page);
+        mappingBlockedReason = generated
+          ? paginationBlockedReason(generated, generatorId)
+          : `No url_file_map entry resolves ${page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
+      }
+    }
+
+    // isPageMapped only proves url_file_map SYNTACTICALLY resolves a path (an
+    // exact `pages[]` entry, or a `patterns[]` regex match) — it never
+    // confirms that resolved file genuinely exists in the repo. A generic
+    // catch-all pattern (e.g. `^/([a-z0-9-]+)/?$` -> "src/pages/$1.njk")
+    // matches any URL that merely LOOKS like a real page, and many static-site
+    // nginx configs make that trivially true for URLs that were never real.
+    // Real incident: zunkireelabs.com/ai-agents/ (a soft-404 — no template
+    // anywhere sets that permalink) matched the generic pattern to a
+    // nonexistent src/pages/ai-agents.njk, and the resulting recommendation
+    // showed "SAFE — AUTO-ELIGIBLE" right up until someone approved it.
+    //
+    // Drop ONLY on a definitive 404. If the read failed for any other reason
+    // we have no evidence either way, and dropping would repeat the very bug
+    // this gate exists to prevent — inventing a conclusion from an unverified
+    // guess, just in the opposite direction.
+    if (pageGated) {
+      const filePath = resolveFile(site, page);
+      if (filePath) {
+        const ref = baseBranch(site);
+        const exists = await cachedFetchFile(site, filePath, ref);
+        if (!exists && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+      }
+    }
+
+    // isPageMapped only confirms a ROUTE exists (a file, or an adapter
+    // configured for this actionType) — for data-array-content specifically,
+    // that route can be configured while the adapter's own data still has
+    // nothing for this exact page (e.g. a location with no
+    // `services.web-development` entry yet). Checked here, not just inside the
+    // adapter's own apply(), so a recommendation that can never actually apply
+    // stops resurfacing every refresh.
+    if (pageGated) {
+      const adapterConfig = resolveAdapter(site, page, generatorId);
+      if (adapterConfig?.id === 'data-array-content'
+        && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
+    }
+
+    // Design-verification gate. Like the url_file_map gate above (and unlike
+    // the gates that drop), this one does NOT drop — a blocked item is a real,
+    // correctly-detected issue we simply aren't allowed to auto-fix yet, so
+    // dropping it would lose a genuine finding and let the recommendation
+    // close out as "resolved" when nothing was resolved. The real hard block
+    // (a 422) lives in generateDraft — this is the honest UI half of it, so a
+    // user sees "blocked, here's why" instead of clicking Generate and getting
+    // an error. Pure in-memory check against the already-loaded `site` row.
+    const designCheck = componentTemplateVerification(site, componentTemplateActionTypeFor(generatorId));
+
+    // Both blockers land in one field. The reason text says which one it was,
+    // and nothing downstream needs to branch on the kind — blockedRiskTier
+    // only checks truthiness. The mapping block is reported first when both
+    // apply, because it's the more fundamental one: there is no point telling
+    // someone to verify a component template for a page we can't locate a file
+    // for.
+    return { drop: null, blockedReason: mappingBlockedReason || (designCheck.ok ? null : designCheck.detail) };
+  }
+
+  return {
+    evaluate,
+    // The caches are shared with buildRecommendations, which needs the same
+    // repo reads for its own purposes — exposing them keeps the pass to one
+    // read per file/tree rather than two parallel sets of caches.
+    get site() { return site; },
+    cachedFetchFile,
+    cachedFetchTree,
+    isPageSoftNotFound,
+    paginationRouteFor,
+  };
+}
