@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
@@ -53,6 +53,8 @@ router.get('/internal/clients', async (req, res, next) => {
       authorRole: s.author_role,
       authorUrl: s.author_url,
       requireVisibleByline: s.require_visible_byline,
+      autoRemediationEnabled: s.auto_remediation_enabled,
+      autoRemediationDailyLimit: s.auto_remediation_daily_limit,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -451,6 +453,72 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
     });
 
     res.json({ id: site.id, visibleFaqCap: site.visible_faq_cap });
+  } catch (e) { next(e); }
+});
+
+// The switch for the unattended auto-remediation loop
+// (agents/lib/auto-remediation.js): draft -> approve -> push branch -> open
+// PR, every morning, with no human in the loop until the PR review itself.
+//
+// platform_admin only — inherited from this router's own
+// requirePlatformRole('platform_admin') at the top of the file, not
+// re-declared here, same as every other route in this file. That is
+// deliberate for this one: the blast radius is real pull requests against a
+// customer's own repository, so it is not a tenant-level self-service
+// setting.
+//
+// Enabling is REFUSED when the site has no repo wired. Without that guard
+// the switch would appear to work and then do nothing every morning —
+// auto-remediation would run, reach approveAndPublishDraft, and fail per
+// item with a GitHub error, burning the daily budget on a misconfiguration
+// rather than saying so once, here, at the moment someone asks for it.
+// (Live at the time of writing: 3 of 4 real client sites had no
+// repo_owner/repo_name at all.)
+// Exported and pure so the rules that decide whether a site may run
+// unattended are unit-testable without an HTTP layer (this repo has no
+// supertest convention). Returns null when the request is acceptable, or the
+// customer-facing reason it isn't.
+export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
+  if (typeof enabled !== 'boolean') return 'enabled must be true or false.';
+  // Matches migration 101's own CHECK (>= 0) rather than inventing a second,
+  // stricter bound the DB wouldn't enforce.
+  if (!Number.isInteger(dailyLimit) || dailyLimit < 0) return 'dailyLimit must be a non-negative integer.';
+  // Only blocks ENABLING. Disabling a site that somehow lost its repo config
+  // must always be allowed — refusing to turn autonomy off would be the
+  // wrong way round.
+  if (enabled && !(site?.repo_owner && site?.repo_name)) {
+    return 'This site has no GitHub repository connected, so autonomous fixes would have nowhere to open a pull request. Connect a repo first, then enable autonomy.';
+  }
+  return null;
+}
+
+router.post('/internal/clients/:id/auto-remediation', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { enabled, dailyLimit } = req.body || {};
+    const invalid = validateAutoRemediationRequest({ enabled, dailyLimit, site: existing });
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const site = await updateSiteAutoRemediation({ siteId, enabled, dailyLimit });
+
+    await recordAuditEvent(req, {
+      action: enabled ? 'tenant.auto_remediation_enabled' : 'tenant.auto_remediation_disabled',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { enabled, dailyLimit, repo: `${site.repo_owner}/${site.repo_name}` },
+      success: true,
+    });
+
+    res.json({
+      id: site.id,
+      autoRemediationEnabled: site.auto_remediation_enabled,
+      autoRemediationDailyLimit: site.auto_remediation_daily_limit,
+    });
   } catch (e) { next(e); }
 });
 

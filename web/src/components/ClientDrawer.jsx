@@ -3,7 +3,7 @@ import { api, timeAgo } from '../api.js';
 import {
   Building, Globe, Clock, CheckCircle2, AlertTriangle, GitBranch, Key, Mail, Lock,
   FolderPlus, RefreshCw, ShieldCheck, Settings, Sliders, PauseCircle, PlayCircle,
-  Trash2, AlertOctagon, HelpCircle, DollarSign, User,
+  Trash2, AlertOctagon, HelpCircle, DollarSign, User, Bot,
 } from 'lucide-react';
 import Drawer from './Drawer.jsx';
 import Tabs from './Tabs.jsx';
@@ -374,6 +374,14 @@ function AiConfigTab({ client, onReload }) {
 
   const [businessValuesOpen, setBusinessValuesOpen] = useState(false);
 
+  // The unattended auto-remediation loop's switch (server/db.js's
+  // updateSiteAutoRemediation). enabled and dailyLimit save together because
+  // the server takes them together — see that route's comment.
+  const [autoOn, setAutoOn] = useState(!!client.autoRemediationEnabled);
+  const [autoLimit, setAutoLimit] = useState(client.autoRemediationDailyLimit ?? 30);
+  const [autoSaving, setAutoSaving] = useState(false);
+  const [autoError, setAutoError] = useState(null);
+
   const changeOauthLevel = async (value) => {
     const previous = oauthLevel;
     setOauthLevel(value);
@@ -407,6 +415,26 @@ function AiConfigTab({ client, onReload }) {
     }
   };
 
+  const saveAutoRemediation = async (nextOn, nextLimit) => {
+    if (!Number.isInteger(nextLimit) || nextLimit < 0) return;
+    const prevOn = autoOn;
+    const prevLimit = autoLimit;
+    setAutoOn(nextOn);
+    setAutoLimit(nextLimit);
+    setAutoSaving(true);
+    setAutoError(null);
+    try {
+      await api.clients.setAutoRemediation(client.id, nextOn, nextLimit);
+      onReload();
+    } catch (err) {
+      setAutoOn(prevOn);
+      setAutoLimit(prevLimit);
+      setAutoError(err.message || 'Could not save.');
+    } finally {
+      setAutoSaving(false);
+    }
+  };
+
   const recalculateFaqBaseline = async () => {
     setFaqBaselineBusy(true);
     setFaqBaselineError(null);
@@ -423,6 +451,55 @@ function AiConfigTab({ client, onReload }) {
 
   return (
     <div className="space-y-5">
+      {/* Autonomous fixes — the switch for agents/lib/auto-remediation.js.
+          First in this tab because it's the only setting here that decides
+          whether this site's agents act on their own at all; everything
+          below tunes behavior that only matters once they do.
+
+          The no-repo case states its reason inline and disables the toggle
+          rather than letting the click fail against the server's own guard —
+          engineering lesson button-state-visibility. */}
+      <div>
+        <div className="flex items-center gap-2">
+          <Bot size={12} className="text-slate-400 shrink-0" />
+          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Autonomous fixes</span>
+          <button
+            type="button"
+            onClick={() => saveAutoRemediation(!autoOn, autoLimit)}
+            disabled={autoSaving || !client.repoConnected}
+            className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg border transition disabled:opacity-50 disabled:cursor-not-allowed ${
+              autoOn
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-slate-50 text-slate-500 border-slate-200'
+            }`}
+          >
+            {autoSaving ? 'Saving…' : autoOn ? 'On' : 'Off'}
+          </button>
+          {autoOn && (
+            <>
+              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0">Max/day</span>
+              <input
+                type="number" min="0" value={autoLimit} disabled={autoSaving}
+                onChange={(e) => setAutoLimit(Number(e.target.value))}
+                onBlur={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isInteger(n) && n >= 0 && n !== (client.autoRemediationDailyLimit ?? 30)) saveAutoRemediation(autoOn, n);
+                }}
+                className="w-16 text-[10px] font-bold text-slate-700 border border-slate-200/80 rounded-lg px-2 py-1.5 bg-white disabled:opacity-60"
+              />
+            </>
+          )}
+        </div>
+        <p className="text-[10px] font-medium text-slate-500 mt-2 leading-relaxed">
+          {!client.repoConnected
+            ? 'No GitHub repository is connected for this site, so autonomous fixes would have nowhere to open a pull request. Connect a repo first.'
+            : autoOn
+              ? `Every morning this site's safe-tier fixes are drafted, validated and pushed as pull requests — up to ${autoLimit} a day — without anyone clicking anything. A human still reviews and merges every PR; nothing is ever merged automatically.`
+              : 'This site\'s agents will keep finding and recommending fixes, but nothing ships until someone acts on each one in the Action Center.'}
+        </p>
+        {autoError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{autoError}</div>}
+      </div>
+
       {/* OAuth "Connect" ceiling — the max permission_level this client's
           OAuth grants (server/routes/oauth-consent.js) can ever reach.
           'admin' deliberately isn't an option; see OAUTH_POLICY_OPTIONS. */}

@@ -224,6 +224,28 @@ export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   return rows[0];
 }
 
+// The unattended auto-remediation loop's per-site switch and daily ceiling
+// (migrations 089 and 101), read by agents/lib/auto-remediation.js.
+//
+// Until this existed, `auto_remediation_enabled` was read in exactly one
+// place and written in NONE — no route, no UI, no script — so the only way
+// to turn the autonomous loop on was a hand-written SQL UPDATE against
+// production. That is why the loop had never run for any site: not because
+// anyone decided against it, but because nothing could flip the switch.
+//
+// Both fields update together and are validated by the caller
+// (routes/clients.js, platform_admin only): enabling a site and setting its
+// ceiling are one decision, and splitting them would allow the intermediate
+// state nobody wants — enabled with a stale limit somebody else set.
+export async function updateSiteAutoRemediation({ siteId, enabled, dailyLimit }) {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = $1, auto_remediation_daily_limit = $2 WHERE id = $3 RETURNING *`,
+    [enabled, dailyLimit, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 // The site's real author/byline identity (migration 090) — read by
 // generators/schema.js (populates Article/BlogPosting/NewsArticle's
 // `author` field) and generators/expand-content.js (drafts a real, on-page

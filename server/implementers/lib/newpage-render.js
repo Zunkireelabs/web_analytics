@@ -48,8 +48,18 @@ function frontMatter(fields, site) {
   return lines.join('\n');
 }
 
-export function renderLandingPageBody(content, site) {
+// `permalink` (every renderer below) is the page's real public URL path,
+// resolved by frontend.js from the site's own newContentTargets.urlPattern
+// config — null whenever that config is absent or unusable, in which case it
+// is simply omitted and the build decides the URL exactly as it does today.
+// It is what puts a new page into a build-time-generated sitemap at the right
+// URL (see url-file-map.js's resolveNewContentUrl) with no second draft, no
+// second PR, and no edit to a sitemap file that in the Eleventy case doesn't
+// exist in the repo at all.
+export function renderLandingPageBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
   ], site);
@@ -64,8 +74,10 @@ export function renderLandingPageBody(content, site) {
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
-export function renderBlogOutlineBody(content, site) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
@@ -104,8 +116,10 @@ export function renderBlogOutlineBody(content, site) {
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
@@ -125,8 +139,10 @@ export function renderDirectAnswerBody(content, site) {
 // generators/translation.js) — a minimal new page with the real translated
 // title/description/content. A reviewer adapts layout/includes on the real
 // PR as needed, same as landing-page/blog-outline.
-export function renderTranslationBody(content, site) {
+export function renderTranslationBody(content, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
@@ -231,10 +247,16 @@ function renderSection(section, site, headingLevel = 2) {
   return projected || `${'#'.repeat(headingLevel)} ${section.heading}\n\n${section.body || ''}`;
 }
 
-export function renderCompliancePageBody(content, preserved = {}, site) {
+export function renderCompliancePageBody(content, preserved = {}, site, { permalink = null, layout = null } = {}) {
   const front = frontMatter([
-    ['layout', preserved.layout],
-    ['permalink', preserved.permalink],
+    // An existing page's own layout always wins, same reasoning as permalink
+    // below — overwriting a real page must not restyle it.
+    ['layout', preserved.layout || layout],
+    // An existing page's own permalink always wins — overwriting a real,
+    // already-linked page must never move its live URL (see
+    // extractPreservedFrontMatter below). The resolved one only applies to
+    // the genuinely-new-file case, where there is no existing URL to keep.
+    ['permalink', preserved.permalink || permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription],
   ], site);

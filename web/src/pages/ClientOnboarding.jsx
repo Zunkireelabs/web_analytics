@@ -5,7 +5,7 @@ import Modal from '../components/Modal.jsx';
 import ClientDrawer from '../components/ClientDrawer.jsx';
 import {
   Building, Globe, Clock, GitBranch, Mail, Lock, Plus, Search, Filter,
-  ChevronRight, Users as UsersIcon, Activity,
+  ChevronRight, Users as UsersIcon, Activity, Bot,
 } from 'lucide-react';
 
 const inputCls = 'w-full text-base sm:text-xs border border-slate-200/80 rounded-xl px-3.5 py-2.5 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#6C63FF]/10 focus:border-[#6C63FF] transition duration-150 font-medium text-slate-800 placeholder:text-slate-400';
@@ -205,6 +205,7 @@ export default function ClientOnboarding() {
       total: list.length,
       pendingRegistrations: (requests || []).length,
       reposConnected: list.filter((c) => c.repoConnected).length,
+      autonomous: list.filter((c) => c.autoRemediationEnabled).length,
       awaitingIntegrations: list.filter((c) => !c.connected).length,
       activeBaselines: list.filter((c) => c.baselined).length,
     };
@@ -257,10 +258,13 @@ export default function ClientOnboarding() {
       />
 
       {/* Top summary */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <KpiCard label="Registered Clients" value={kpis.total} icon={Building} />
         <KpiCard label="Pending Registrations" value={kpis.pendingRegistrations} icon={UsersIcon} />
         <KpiCard label="Connected Repositories" value={kpis.reposConnected} icon={GitBranch} />
+        {/* Distinct from Connected Repositories on purpose — a repo is the
+            capability, this is how many sites actually act on it unattended. */}
+        <KpiCard label="Autonomous Sites" value={kpis.autonomous} icon={Bot} />
         <KpiCard label="Awaiting Integrations" value={kpis.awaitingIntegrations} icon={Clock} />
         <KpiCard label="Active Baselines" value={kpis.activeBaselines} icon={Activity} />
       </div>
@@ -361,13 +365,28 @@ export default function ClientOnboarding() {
                         </div>
                       </td>
                       <td className="px-4 py-2">
-                        {c.repoConnected ? (
-                          <span className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border border-slate-200 text-slate-500 bg-slate-50 flex items-center gap-1 w-fit">
-                            <GitBranch size={9} /> Connected
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-semibold text-slate-300">Not connected</span>
-                        )}
+                        {/* Repo AND autonomy together: a connected repo only
+                            means this site CAN receive PRs, not that anything
+                            is actually acting on its own. Without the second
+                            badge the list reads as "wired up" for a site whose
+                            agents ship nothing unattended. */}
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {c.repoConnected ? (
+                            <span className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border border-slate-200 text-slate-500 bg-slate-50 flex items-center gap-1 w-fit">
+                              <GitBranch size={9} /> Connected
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold text-slate-300">Not connected</span>
+                          )}
+                          {c.autoRemediationEnabled && (
+                            <span
+                              title={`Ships up to ${c.autoRemediationDailyLimit ?? 30} safe fixes a day as pull requests, unattended`}
+                              className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-700 bg-emerald-50 flex items-center gap-1 w-fit"
+                            >
+                              <Bot size={9} /> Auto
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-2">
                         <span className="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">{oauthLabel}</span>
