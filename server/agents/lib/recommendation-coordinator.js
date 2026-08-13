@@ -1,4 +1,4 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, closeStaleRecommendations, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -176,6 +176,15 @@ export async function syncFromGrounded(siteId, grounded) {
       batchRotatedAgentIds: grounded.batchRotatedAgentIds,
     });
   }
+  // Direct evidence, not absence-of-evidence: unlike closeStaleRecommendations
+  // above (which infers "fixed" from a page's continued silence, gated on
+  // rotation batching so silence isn't mistaken for resolution),
+  // droppedRecommendations are pages buildRecommendations actually looked at
+  // THIS run and proved unfixable. Marked immediately rather than left to a
+  // rotation sweep that would never re-select a page that no longer exists.
+  if (grounded.droppedRecommendations?.length) {
+    await markRecommendationsUnfixable(siteId, grounded.droppedRecommendations);
+  }
 }
 
 // Manual "re-check now" action on a single open recommendation — the
@@ -272,6 +281,12 @@ export async function getRecommendations(siteId) {
         // button. See engineering lesson button-state-visibility: state the
         // reason inline rather than only on hover.
         blockedReason: r.blocked_reason || null,
+        // WHY it's blocked, for the UI to pick different copy/tone by —
+        // 'our-config' (actionable: give the exact command), 'awaiting-
+        // derivation' (nothing to do, will clear on its own), 'site-fact' (a
+        // real architectural constraint, e.g. a shared programmatic
+        // template). See store/recommendations.js's classifyBlockedKind.
+        blockedKind: r.blocked_kind || null,
       };
     });
   const lastAnalyzedAt = {};

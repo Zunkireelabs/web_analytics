@@ -88,6 +88,21 @@ export async function buildRecommendations(siteId) {
   const agentCheckedKeys = new Set(); // `${agentId}::${page}`
   const linkCrawlCheckedKeys = new Set(); // broken-link-fix only: narrower than technical-seo's own batch, since crawlInternalLinks caps total hrefs checked independently of which pages are in the batch
   const batchRotatedAgentIds = new Set();
+  // Direct evidence gathered THIS run that a candidate cannot ever be fixed
+  // (soft-404, a mapped file confirmed gone, adapter data confirmed never
+  // ready) — distinct from simply being absent from detectedKeys, which only
+  // means "not re-checked," not "checked and proven gone." Passed to
+  // syncFromGrounded so it can mark these 'unfixable' immediately rather than
+  // leaving them to closeStaleRecommendations' rotation-gated sweep, which
+  // would never re-select a page that no longer exists and so would never
+  // close it — the mechanism that kept 6 /docs/* rows open on site 1
+  // indefinitely.
+  const droppedRecommendations = [];
+  const DROP_REASONS = {
+    'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
+    'file-missing': 'The file this page was mapped to no longer exists in the repository.',
+    'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
+  };
 
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
@@ -114,7 +129,16 @@ export async function buildRecommendations(siteId) {
       // render a tenant's Action Center near-empty and read as "my site is
       // healthy" when it means "we never configured your repo".
       const gate = await gates.evaluate(action.generatorId, action.params);
-      if (gate.drop) continue;
+      if (gate.drop) {
+        // 'unknown' (no soft-404 signal, no route match, no candidate file —
+        // recommendation-gates.js has no such drop reason today, but stays
+        // defensive) is not direct evidence, so it must not be reported here;
+        // only genuinely proven-gone reasons.
+        if (DROP_REASONS[gate.drop] && action.params?.page) {
+          droppedRecommendations.push({ generatorId: action.generatorId, page: recommendationPageKey({ generatorId: action.generatorId, params: action.params }), reason: DROP_REASONS[gate.drop] });
+        }
+        continue;
+      }
       const blockedReason = gate.blockedReason;
       detectedKeys.add(`${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`);
       if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
@@ -135,5 +159,5 @@ export async function buildRecommendations(siteId) {
       });
     }
   }
-  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds };
+  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations };
 }

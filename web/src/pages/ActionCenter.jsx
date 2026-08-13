@@ -124,6 +124,34 @@ function titleFor(item) {
   return item.tag;
 }
 
+// WHY a recommendation is blocked reads very differently depending on kind
+// (server/store/recommendations.js's classifyBlockedKind): 'our-config' is
+// something the tenant can act on right now; 'awaiting-derivation' means the
+// system is already working on it unattended and there's nothing to click;
+// 'site-fact' is a real architectural constraint (e.g. a shared programmatic
+// template), not a gap. Showing all three under one "Blocked" amber banner —
+// as this used to — reads as "something is wrong here" even for the middle
+// case, where nothing is. Falls back to the 'our-config' framing (the
+// original blockedReason text, unornamented) for any older row that predates
+// blocked_kind, or a kind this UI doesn't recognize yet.
+const BLOCKED_KIND_META = {
+  'our-config': {
+    icon: Lock, badge: 'Blocked — setup needed', heading: "Can't be drafted yet",
+    className: 'amber',
+  },
+  'awaiting-derivation': {
+    icon: Clock, badge: 'Being set up automatically', heading: 'Nothing to do — this will unblock on its own',
+    className: 'blue',
+  },
+  'site-fact': {
+    icon: Layers, badge: "Can't be drafted here", heading: 'How this page is built',
+    className: 'amber',
+  },
+};
+function blockedMetaFor(item) {
+  return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
+}
+
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
   approved: 'approved', branch_pushed: 'branch pushed', merged_to_stage: 'merged to stage',
@@ -780,11 +808,17 @@ export default function ActionCenter() {
                               {/* A blocked recommendation can't be drafted at all (the server 422s),
                                   so it must not wear the "Safe — auto-eligible" badge that promises
                                   the opposite. The reason itself is stated in the detail panel. */}
-                              {item.blockedReason ? (
-                                <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-100 text-amber-600">
-                                  <Lock size={8} /> Blocked
-                                </span>
-                              ) : item.riskTier === 'safe' && (
+                              {item.blockedReason ? (() => {
+                                const meta = blockedMetaFor(item);
+                                const BlockedIcon = meta.icon;
+                                return (
+                                  <span className={`shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                                    meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
+                                  }`}>
+                                    <BlockedIcon size={8} /> {meta.className === 'blue' ? 'In progress' : 'Blocked'}
+                                  </span>
+                                );
+                              })() : item.riskTier === 'safe' && (
                                 <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                                   <ShieldCheck size={8} /> Safe
                                 </span>
@@ -923,11 +957,17 @@ export default function ActionCenter() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
-                          {selectedRecommendation.blockedReason ? (
-                            <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-50 border border-amber-100 text-amber-600">
-                              <Lock size={9} /> Blocked — setup needed
-                            </span>
-                          ) : selectedRecommendation.riskTier === 'safe' ? (
+                          {selectedRecommendation.blockedReason ? (() => {
+                            const meta = blockedMetaFor(selectedRecommendation);
+                            const BlockedIcon = meta.icon;
+                            return (
+                              <span className={`flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
+                              }`}>
+                                <BlockedIcon size={9} /> {meta.badge}
+                              </span>
+                            );
+                          })() : selectedRecommendation.riskTier === 'safe' ? (
                             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                               <ShieldCheck size={9} /> Safe — auto-eligible
                             </span>
@@ -954,15 +994,20 @@ export default function ActionCenter() {
                           routes/action-center.js) — this states WHY, and what to do
                           about it, instead of leaving the user to discover it by
                           clicking a button that always fails. */}
-                      {selectedRecommendation.blockedReason && (
-                        <div className="flex items-start gap-2.5 bg-amber-50/70 border border-amber-150 rounded-2xl p-4">
-                          <Lock size={13} className="text-amber-600 shrink-0 mt-0.5" />
-                          <div className="min-w-0">
-                            <div className="text-[10px] font-black uppercase tracking-widest text-amber-700 mb-1">Can't be drafted yet</div>
-                            <p className="text-xs font-medium text-amber-900/85 leading-relaxed">{selectedRecommendation.blockedReason}</p>
+                      {selectedRecommendation.blockedReason && (() => {
+                        const meta = blockedMetaFor(selectedRecommendation);
+                        const BlockedIcon = meta.icon;
+                        const blue = meta.className === 'blue';
+                        return (
+                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${blue ? 'bg-sky-50/70 border-sky-150' : 'bg-amber-50/70 border-amber-150'}`}>
+                            <BlockedIcon size={13} className={`shrink-0 mt-0.5 ${blue ? 'text-sky-600' : 'text-amber-600'}`} />
+                            <div className="min-w-0">
+                              <div className={`text-[10px] font-black uppercase tracking-widest mb-1 ${blue ? 'text-sky-700' : 'text-amber-700'}`}>{meta.heading}</div>
+                              <p className={`text-xs font-medium leading-relaxed ${blue ? 'text-sky-900/85' : 'text-amber-900/85'}`}>{selectedRecommendation.blockedReason}</p>
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       <div>
                         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Found By</div>
@@ -1030,11 +1075,18 @@ export default function ActionCenter() {
                         {generatingId === selectedRecommendation.id ? 'Drafting…' : 'Preview Draft Only'}
                       </button>
                     )}
-                    {selectedRecommendation.blockedReason ? (
-                      <span className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-amber-700 bg-amber-50 border border-amber-150">
-                        <Lock size={12} /> Blocked — resolve the setup above
-                      </span>
-                    ) : (
+                    {selectedRecommendation.blockedReason ? (() => {
+                      const meta = blockedMetaFor(selectedRecommendation);
+                      const BlockedIcon = meta.icon;
+                      const blue = meta.className === 'blue';
+                      return (
+                        <span className={`flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl border ${
+                          blue ? 'text-sky-700 bg-sky-50 border-sky-150' : 'text-amber-700 bg-amber-50 border-amber-150'
+                        }`}>
+                          <BlockedIcon size={12} /> {blue ? 'In progress — nothing to do' : 'Blocked — resolve the setup above'}
+                        </span>
+                      );
+                    })() : (
                       <button
                         onClick={() => selectedRecommendation.riskTier === 'safe' ? approveAndShip(selectedRecommendation) : generate(selectedRecommendation)}
                         disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
