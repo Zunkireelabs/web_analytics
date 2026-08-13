@@ -106,11 +106,21 @@ export async function autoRemediateSafeRecommendations(siteId) {
     getDraftedFindingIds(siteId),
     countDraftsBySourceToday(siteId, SOURCE, site.timezone || 'UTC'),
   ]);
-  // A design-blocked recommendation is already forced to risk_tier 'manual'
-  // by recommendation-coordinator.js, so this existing 'safe' filter also
-  // excludes it — no separate design check is needed here, and no future
-  // unattended caller can forget one.
-  const eligible = rows.filter((r) => r.risk_tier === 'safe' && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
+  // blocked_reason is checked HERE rather than trusted to be reflected in
+  // risk_tier. The previous comment argued the check was redundant because
+  // recommendation-coordinator.js demotes every blocked recommendation to
+  // 'manual' — but the live table disagrees: site 1 currently has 45 open
+  // rows with risk_tier='safe' AND a non-null blocked_reason, re-detected as
+  // recently as this morning's run. Whatever writes them, the effect is that
+  // this loop would draft an item generateDraft is guaranteed to 422, three
+  // in a row would trip the circuit breaker, and the site's whole run would
+  // stop early having shipped nothing.
+  //
+  // A blocked recommendation is exactly what "unattended must not touch this"
+  // means, so the unattended path now asks the question directly instead of
+  // inferring the answer from a second column that can disagree.
+  const eligible = rows.filter((r) => r.risk_tier === 'safe' && !r.blocked_reason
+    && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
   // can't consume budget slots it isn't due for. Only the unattended path

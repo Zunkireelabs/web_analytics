@@ -388,3 +388,29 @@ describe('autoRemediateSafeRecommendations — blog pacing', () => {
     assert.deepEqual(calls.generated, ['f1']);
   });
 });
+
+// Regression: the live table has rows that are 'safe' AND blocked at the same
+// time, which the old "risk_tier is enough" assumption said was impossible.
+describe('autoRemediateSafeRecommendations — blocked recommendations', () => {
+  beforeEach(reset);
+
+  test('never attempts a safe-tier recommendation that carries a blocked_reason', async () => {
+    recommendations = [
+      { ...rec(1), blocked_reason: 'No url_file_map entry resolves this page to a file.' },
+      rec(2),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f2'], 'the blocked row would 422 and burn a circuit-breaker slot');
+  });
+
+  test('a run of blocked rows cannot trip the circuit breaker', async () => {
+    recommendations = [1, 2, 3, 4].map((i) => ({ ...rec(i), blocked_reason: 'design not verified' }));
+    recommendations.push(rec(5));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, null, 'blocked rows must be filtered out, not attempted and failed');
+    assert.equal(result.shipped, 1);
+  });
+});
