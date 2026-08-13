@@ -22,7 +22,13 @@ let cache = null;
 
 async function loadAll() {
   if (cache) return cache;
-  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !NON_IMPLEMENTER_FILES.has(f));
+  // The `.test.js` exclusion is not cosmetic: without it this readdir picks
+  // up frontend.test.js, and the `await import()` below EXECUTES it — running
+  // a node:test suite inside the production server process on the first
+  // draft apply/preview. The skip-warning further down only fires after that
+  // import already ran. Matches agents/registry.js, generators/registry.js
+  // and adapters/registry.js, which all already filter this way.
+  const files = readdirSync(HERE).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js') && !NON_IMPLEMENTER_FILES.has(f));
 
   const implementers = new Map();
   const byGeneratorId = new Map();
