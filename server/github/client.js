@@ -4,6 +4,8 @@
 // simplest and safest shape for a single-repo, PAT-scoped pilot (see
 // server/implementers/ for what calls these).
 
+import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken } from './credentials.js';
+
 const API_BASE = 'https://api.github.com';
 
 // GitHub's Code Search REST API (/search/code, used by searchCodeForString
@@ -19,19 +21,12 @@ const API_BASE = 'https://api.github.com';
 // facebook/react for the literal string "useState" — a definitely-indexed,
 // definitely-present string — via GitHub's own public repo, ruling out a
 // per-repo indexing or visibility explanation.
-function searchToken(site) {
-  const envVar = site.github_pat_env_var || 'GITHUB_PAT';
-  return process.env[`${envVar}_SEARCH`] || process.env.GITHUB_SEARCH_PAT || null;
-}
+// (The credential rules themselves now live in ./credentials.js — see that
+// file for why they were consolidated out of here.)
 
-function isFineGrainedToken(token) {
-  return typeof token === 'string' && token.startsWith('github_pat_');
-}
-
-function authHeaders(site, { forSearch = false } = {}) {
-  const envVar = site.github_pat_env_var || 'GITHUB_PAT';
-  const token = (forSearch && searchToken(site)) || process.env[envVar];
-  if (!token) throw new Error(`No GitHub PAT set in env var "${envVar}"`);
+async function authHeaders(site, { forSearch = false } = {}) {
+  const token = await resolveGithubToken(site, { forSearch });
+  if (!token) throw new Error(`No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`);
   return {
     Authorization: `token ${token}`,
     Accept: 'application/vnd.github+json',
@@ -47,7 +42,7 @@ function repoPath(site) {
 async function githubRequest(site, method, path, body, { forSearch = false } = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: { ...authHeaders(site, { forSearch }), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   return res;
@@ -293,8 +288,8 @@ export async function getRepoTarball(site, ref) {
 // repo's default branch, results may miss files that exist there but
 // haven't been indexed yet.
 export async function searchCodeForString(site, literal, { maxResults = 5 } = {}) {
-  const envVar = site.github_pat_env_var || 'GITHUB_PAT';
-  const token = searchToken(site) || process.env[envVar];
+  const envVar = githubTokenEnvVar(site);
+  const token = await resolveGithubToken(site, { forSearch: true });
   if (isFineGrainedToken(token)) {
     throw new Error(
       `Code search would silently return 0 results with a fine-grained PAT — set ` +

@@ -1,5 +1,6 @@
 import { getSiteById } from '../store/read.js';
 import { getDefaultBranchSha, getTokenExpiry } from '../github/client.js';
+import { resolveGithubToken, githubTokenEnvVar } from '../github/credentials.js';
 
 // How far ahead to start warning. Long enough that a person has time to
 // generate a replacement and update both copies of it (the app's env and the
@@ -28,8 +29,8 @@ export async function check(site) {
       recoveryAction: 'Run `npm run connect-repo` to attach a GitHub repo to this site.',
     };
   }
-  const envVar = full.github_pat_env_var || 'GITHUB_PAT';
-  if (!process.env[envVar]) {
+  const envVar = githubTokenEnvVar(full);
+  if (!await resolveGithubToken(full)) {
     return {
       ok: false,
       authStatus: 'not-configured',
