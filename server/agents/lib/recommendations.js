@@ -8,6 +8,7 @@ import { recommendationPageKey } from './recommendation-coordinator.js';
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
+import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
@@ -126,6 +127,62 @@ export async function buildRecommendations(siteId) {
     return healed || currentSite;
   };
 
+  // Soft-404 detection for pages we are about to report as unmapped.
+  //
+  // zunkireelabs.com returns its HOMEPAGE, with HTTP 200, for ANY unknown path
+  // — verified against a URL invented for the test. That is an ordinary static/
+  // SPA fallback, and it means a URL an agent picked up from GSC or a crawl can
+  // look perfectly alive while pointing at nothing. Three such /docs/* URLs were
+  // sitting in site 1's Action Center asking to be mapped to a file that does
+  // not, and never will, exist.
+  //
+  // Reporting those as "add a url_file_map entry" is worse than dropping them:
+  // it asks for work that cannot be done. Dropping (rather than blocking) also
+  // leaves them out of detectedKeys, so any already-open row closes on the next
+  // sync — the same treatment the file-exists gate below gives a mapped page
+  // whose file has vanished.
+  //
+  // Reuses technical-seo-analysis.js's fingerprint rather than a second
+  // implementation: fetch one deliberately-nonexistent path, then compare each
+  // candidate's normalized body against it. An exact match is evidence, not a
+  // heuristic guess.
+  let softNotFoundFingerprint;      // undefined = not fetched yet, null = unavailable
+  let softNotFoundDiscriminates;    // guard, see below
+  const softNotFoundCache = new Map();
+  const isPageSoftNotFound = async (pageUrl) => {
+    if (softNotFoundCache.has(pageUrl)) return softNotFoundCache.get(pageUrl);
+    if (softNotFoundFingerprint === undefined) {
+      let origin = null;
+      try { origin = new URL(pageUrl).origin; } catch { origin = null; }
+      softNotFoundFingerprint = origin ? await fetchSoftNotFoundFingerprint(origin).catch(() => null) : null;
+
+      // A genuinely client-rendered SPA serves the same shell for EVERY route,
+      // real or not, so the fingerprint would match real pages too and this
+      // check would delete the entire Action Center. Prove it discriminates
+      // first, using a page this site has a real file mapping for — if even
+      // that looks like the 404 fallback, the signal is meaningless here and is
+      // abandoned rather than trusted.
+      const known = Object.keys(site?.url_file_map?.pages || {})[0];
+      if (softNotFoundFingerprint && known) {
+        let knownUrl = null;
+        try { knownUrl = new URL(known, new URL(pageUrl).origin).href; } catch { knownUrl = null; }
+        softNotFoundDiscriminates = knownUrl
+          ? !(await isSoftNotFound(knownUrl, softNotFoundFingerprint).catch(() => true))
+          : false;
+        if (!softNotFoundDiscriminates) {
+          console.warn(`[recommendations] site ${siteId}: a known-real page matches the 404 fallback fingerprint — treating the soft-404 signal as unusable for this site.`);
+        }
+      } else {
+        softNotFoundDiscriminates = false;
+      }
+    }
+    if (!softNotFoundFingerprint || !softNotFoundDiscriminates) return false;
+    const result = await isSoftNotFound(pageUrl, softNotFoundFingerprint).catch(() => false);
+    if (result) console.log(`[recommendations] site ${siteId}: ${pageUrl} renders the site's 404 fallback — dropping its recommendation instead of asking for a file mapping.`);
+    softNotFoundCache.set(pageUrl, result);
+    return result;
+  };
+
   const items = [];
   const lastAnalyzedAt = {};
   // Every generatorId+page this run's agents still flag, independent of the
@@ -224,6 +281,8 @@ export async function buildRecommendations(siteId) {
         && !isPageMapped(site, action.params.page, action.generatorId)) {
         site = await healUnmappedPage(site, action.params.page, action.generatorId);
         if (!isPageMapped(site, action.params.page, action.generatorId)) {
+          // Before asking anyone to map it, make sure the page is real.
+          if (await isPageSoftNotFound(action.params.page)) continue;
           mappingBlockedReason = `No url_file_map entry resolves ${action.params.page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
         }
       }

@@ -135,7 +135,7 @@ function normalizeBody(text) {
 // its status + body, so real internal links can be compared against what
 // "doesn't exist" actually looks like on this specific site. Returns null on
 // any failure — soft-404 detection is additive, never blocks the real crawl.
-async function fetchSoftNotFoundFingerprint(origin) {
+export async function fetchSoftNotFoundFingerprint(origin) {
   let hostname;
   try { hostname = new URL(origin).hostname; } catch { return null; }
   if (isPrivateOrLocalHost(hostname)) return null;
@@ -157,7 +157,7 @@ async function fetchSoftNotFoundFingerprint(origin) {
 // does — that's not brokenness, so it's never compared against the
 // fingerprint. Anything else matching the fingerprint's exact status + body
 // is treated as a soft 404: it 200'd, but with the "nothing's here" content.
-async function isSoftNotFound(url, fingerprint) {
+export async function isSoftNotFound(url, fingerprint) {
   if (!fingerprint) return false;
   try { if (new URL(url).pathname === '/') return false; } catch { return false; }
 
