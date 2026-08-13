@@ -298,6 +298,30 @@ jobs:
               fi
             done
 
+            # ── Data Analyst Agent nightly pipeline ──────────────────────────
+            # The container's CMD only starts uvicorn, so the API serves fine
+            # while the pipeline that actually PRODUCES analysis never runs.
+            # That is not hypothetical: staging had 16k metric observations and
+            # 253 insights but zero analyst_recommendations and zero
+            # investigations, because scripts/run_nightly_pipeline.py had no
+            # trigger anywhere — only a commented-out suggestion in
+            # data-analyst-agent/docker-compose.yml.
+            #
+            # It also starves the Node side: server/cron.js syncs analyst
+            # recommendations into the Action Center at 04:00 UTC, with a
+            # comment describing "data-analyst-agent's own 03:00 UTC nightly
+            # cycle" that nothing was scheduling. 03:00 keeps that documented
+            # hour, and the one-hour gap before the sync.
+            #
+            # Installed idempotently on every deploy (filter out the old line,
+            # append the current one) so a redeploy can't stack duplicates and
+            # a changed path corrects itself.
+            echo "Installing Data Analyst nightly pipeline cron..."
+            NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
+            (crontab -l 2>/dev/null | grep -v 'run_nightly_pipeline'; echo "0 3 * * * $NIGHTLY_CMD") | crontab -
+            echo "Data Analyst nightly pipeline scheduled (03:00 UTC daily):"
+            crontab -l | grep run_nightly_pipeline
+
       - name: Verify Health
         run: |
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_DOMAIN }}")
