@@ -47,9 +47,43 @@ ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS execution_status TEXT;
 -- migration existed (they all defaulted to 'manual'). Mirrors
 -- agents/lib/risk-tiers.js's SAFE_GENERATOR_IDS exactly — keep these two in
 -- sync if the safe list ever changes.
-UPDATE recommendations SET risk_tier = 'safe'
-WHERE recommendation_type IN (
-  'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
-  'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
-  'open-graph', 'expand-content', 'blog-outline'
-) AND risk_tier != 'safe';
+--
+-- This directory has NO migration-tracking table: run.js applies every .sql
+-- file on every deploy (see 100_recommendations_design_blocked.sql for the
+-- full explanation). So a data statement here is not a one-time backfill —
+-- it re-executes forever, against rows written long after it was authored.
+-- It must therefore be written to CONVERGE on the current invariant, not to
+-- restate the invariant as it stood the day it was written.
+--
+-- That is exactly how this statement corrupted live data. It predates
+-- blocked_reason (added in migration 100), so it knew nothing about it, and
+-- every deploy promoted open-but-blocked rows of these types back to 'safe'
+-- — manufacturing the contradictory safe+blocked state that the unattended
+-- shipping loop then had to defend against. The guards below restore the
+-- invariant "blocked_reason IS NOT NULL => risk_tier = 'manual'", which
+-- migration 108 also enforces structurally as a CHECK constraint. If you add
+-- a data statement to this directory, guard it the same way.
+-- The guard has to be applied dynamically, because this file sorts BEFORE the
+-- migration that creates the column it guards on (100). Two real orderings:
+--   - fresh database: 077b just created an empty recommendations table, so
+--     there is nothing to backfill and skipping is correct;
+--   - existing database mid-upgrade to 100: rows exist but blocked_reason
+--     does not yet, and those rows were already backfilled by this same
+--     statement on every previous deploy, so skipping is correct there too.
+-- Every deploy after 100 has the column and takes the guarded path.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'recommendations' AND column_name = 'blocked_reason'
+  ) THEN
+    UPDATE recommendations SET risk_tier = 'safe'
+    WHERE recommendation_type IN (
+      'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
+      'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
+      'open-graph', 'expand-content', 'blog-outline'
+    ) AND risk_tier != 'safe'
+      AND status = 'open'
+      AND blocked_reason IS NULL;
+  END IF;
+END $$;
