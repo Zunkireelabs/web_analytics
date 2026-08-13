@@ -778,7 +778,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
   }
 
-  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Resolves any marker in markerMap that isn't already in the live file —

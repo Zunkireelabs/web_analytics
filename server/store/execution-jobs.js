@@ -68,6 +68,23 @@ export async function getQueuedComponentTemplateJob(siteId, actionType) {
   return rows[0] || null;
 }
 
+// Sentinel stored in params.componentKeys for a whole-site design-profile
+// job, so getQueuedComponentTemplateJob's existing "is one already pending"
+// check works unchanged for it. Not an action type — deliberately a reserved
+// name no COMPONENT_TEMPLATE_KEY will ever collide with.
+export const DESIGN_PROFILE_JOB_KEY = '__design-profile__';
+
+// Derives the SITE'S whole design language (design-agent/lib/design-profile.js),
+// which every per-component template is then projected from. Takes no action
+// types — the whole site is the scope, which is exactly what makes one of
+// these worth more than N component-template jobs.
+export async function createDesignProfileJob(siteId, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, {
+    requestedBy,
+    params: { mode: 'design-profile', componentKeys: [DESIGN_PROFILE_JOB_KEY], pageUrl: pageUrl || null },
+  });
+}
+
 export async function createComponentTemplateJob(siteId, componentKeys, { requestedBy, pageUrl } = {}) {
   return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
 }

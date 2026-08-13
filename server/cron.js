@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites } from './job.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 
@@ -225,6 +225,25 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
+
+  // Analyst -> Action Center sync. Fires at 04:00 UTC, an hour after
+  // data-analyst-agent's own 03:00 UTC nightly cycle
+  // (ingest_schedule_hour_utc), so it reads a completed night's insights
+  // rather than racing a run in progress. Scheduled in UTC explicitly, not
+  // the site timezone, because it is pinned to that service's schedule.
+  const analystSync = process.env.ANALYST_SYNC_CRON_SCHEDULE || '0 4 * * *';
+  if (!cron.validate(analystSync)) {
+    console.error(`[cron] invalid ANALYST_SYNC_CRON_SCHEDULE "${analystSync}" — analyst sync NOT scheduled.`);
+  } else {
+    cron.schedule(analystSync, async () => {
+      try {
+        await runAnalystSyncForAllSites();
+      } catch (err) {
+        console.error('[cron] analyst sync error:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log(`[cron] analyst -> Action Center sync scheduled "${analystSync}" (UTC)`);
+  }
 
   // Stale audit-run reaper — independent safety net alongside the same
   // reapStaleAuditRuns() call at server startup (server/index.js). Startup

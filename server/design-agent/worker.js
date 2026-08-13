@@ -2,7 +2,7 @@ import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../st
 import { createDesignAgentHandler } from './openhands-handler.js';
 import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
-import { persistDerivedComponentTemplates } from '../implementers/lib/design-drift.js';
+import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 
@@ -31,6 +31,7 @@ export async function processOneJob({
   siteId = null,
   getSiteByIdFn = getSiteById,
   persistTemplates = persistDerivedComponentTemplates,
+  persistProfile = persistDesignProfile,
 } = {}) {
   const job = await claimNextDesignAgentJob(siteId);
   if (!job) return null;
@@ -51,6 +52,19 @@ export async function processOneJob({
     // fails, this job is a failure — the site is no better off than before it ran
     // — and the next draft attempt should queue a fresh derivation rather than
     // trust a 'completed' row that changed nothing.
+    // A design-profile job persists the profile AND projects every
+    // design-sensitive template from it in one pass — one analysis, the
+    // site's whole design-sensitive surface. Same "inside the try, before the
+    // status transition" placement as component-templates below: if
+    // persisting fails, the job is a failure and the next attempt re-queues.
+    if (job.params?.mode === 'design-profile' && outcome?.designProfile) {
+      const site = await getSiteByIdFn(job.site_id);
+      if (!site) throw new Error(`site ${job.site_id} no longer exists — cannot save the derived design profile`);
+      const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
+      if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
+      await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
+    }
+
     if (job.params?.mode === 'component-templates' && outcome?.componentTemplates) {
       const site = await getSiteByIdFn(job.site_id);
       if (!site) throw new Error(`site ${job.site_id} no longer exists — cannot save derived component templates`);

@@ -226,161 +226,133 @@ describe('templateActionRequiresRow', () => {
 describe('resolveOrCreateComponentTemplate', () => {
   const baseSite = { id: 1, name: 'Test Site', repo_owner: 'acme', repo_name: 'acme-web', design_agent_enabled: true, url_file_map: {} };
 
-  // The fast path requires the template to be VERIFIED, not merely present.
-  // This test previously used an unstamped template and asserted ok:true —
-  // which was the bug: an unverified template short-circuited the Design
-  // Agent here, then got 422'd by the gate in generateDraft, permanently,
-  // with nothing able to re-derive it.
   const verifiedWrapper = {
     wrapper: '<div>{{BODY}}</div>',
     verifiedAt: '2026-08-01T00:00:00.000Z',
     verifiedBy: 'design-agent',
   };
 
-  test('returns an existing VERIFIED template immediately without touching the Design Agent', async () => {
+  // A minimal but usable site design language. Templates are now PROJECTIONS
+  // of this rather than separately derived markup, so most of what this
+  // function does is decide whether the site has design knowledge yet.
+  const PROFILE = {
+    version: 1,
+    styling: 'tailwind',
+    typography: { heading: { item: 'text-lg font-medium' }, body: 'text-gray-600', link: 'text-blue-600' },
+    layout: { container: 'max-w-3xl mx-auto', prose: 'prose' },
+    components: {},
+    derivedAt: '2026-08-01T00:00:00.000Z',
+    derivedBy: 'design-agent',
+  };
+  const siteWithProfile = (extra = {}) => ({
+    ...baseSite,
+    url_file_map: { siteRoot: { designProfile: PROFILE, ...(extra.siteRoot || {}) } },
+  });
+  const noopDeps = () => ({
+    saveConfig: async ({ urlFileMap }) => ({ id: 1, url_file_map: urlFileMap }),
+    recordAudit: async () => {},
+    enqueueProfileDerivation: async () => { throw new Error('should not queue — the site already has a profile'); },
+    enqueueDerivation: async () => { throw new Error('should not queue a per-type derivation'); },
+    findQueuedDerivation: async () => null,
+  });
+
+  test('returns an existing VERIFIED template immediately', async () => {
     const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: verifiedWrapper } } } };
-    const createHandler = () => { throw new Error('should never be called — a verified template already exists'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', noopDeps());
     assert.equal(result.ok, true);
     assert.equal(result.source, 'existing');
-    assert.equal(result.template.wrapper, '<div>{{BODY}}</div>');
   });
 
-  test('an existing UNVERIFIED template queues re-derivation instead of being accepted', async () => {
-    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
-    const enqueued = [];
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
-      createHandler: () => { throw new Error('must not run an OpenHands session on the hot path'); },
-      enqueueDerivation: async (siteId, keys) => { enqueued.push([siteId, keys]); },
-      findQueuedDerivation: async () => null,
+  test('PROJECTS a missing template from the site design profile — no repo analysis', async () => {
+    // The architecture: one site-wide analysis, many component projections.
+    // A site that knows its own design language gains a new design-sensitive
+    // content type instantly, without another Design Agent session.
+    let saved = null;
+    const result = await resolveOrCreateComponentTemplate(siteWithProfile(), 'faq', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'design-profile');
+    assert.match(result.template.wrapper, /max-w-3xl mx-auto/, 'uses the site\'s real container');
+    assert.match(result.template.row, /text-lg font-medium/, 'uses the site\'s real heading style');
+    assert.equal(result.template.verifiedBy, 'design-agent', 'a projection carries provenance like any other template');
+    assert.ok(saved.siteRoot.componentTemplates.faq, 'the projection is persisted, not recomputed every call');
+  });
+
+  test('an UNVERIFIED existing template is replaced by a projection when a profile exists', async () => {
+    const site = siteWithProfile({ siteRoot: { componentTemplates: { faq: { wrapper: '<dl>{{ROWS}}</dl>' } } } });
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', noopDeps());
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'design-profile');
+  });
+
+  test('every projectable type resolves from ONE profile', async () => {
+    for (const actionType of ['faq', 'qa-content', 'expand-content', 'internal-links', 'content-wrapper']) {
+      const result = await resolveOrCreateComponentTemplate(siteWithProfile(), actionType, noopDeps());
+      assert.equal(result.ok, true, `${actionType} should project`);
+      assert.equal(result.source, 'design-profile');
+    }
+  });
+
+  test('with NO profile, queues a whole-site design derivation, not a per-type one', async () => {
+    // The key architectural assertion: the missing thing is the site's design
+    // language, so that is what gets derived — one job that yields every
+    // projectable template, not one job per content type.
+    const queued = [];
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async (siteId, opts) => { queued.push([siteId, opts]); },
     });
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'derivation-queued');
-    assert.deepEqual(enqueued, [[1, ['content-wrapper']]], 'queued by ACTION TYPE, matching what the job stores');
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0][0], 1);
+    assert.match(result.detail, /design language/i);
   });
 
-  test('does not queue a second job when one is already pending for that action type', async () => {
-    // resolveOrCreate sits on generateDraft's hot path — without this check a
-    // single daily run against a blocked site would queue dozens of jobs for
-    // work already pending.
-    const site = { ...baseSite, url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } } };
-    const enqueued = [];
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
-      createHandler: () => { throw new Error('should never be called'); },
-      enqueueDerivation: async (...args) => { enqueued.push(args); },
+  test('does not queue a second profile derivation when one is already pending', async () => {
+    const queued = [];
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+      ...noopDeps(),
       findQueuedDerivation: async () => ({ id: 99 }),
+      enqueueProfileDerivation: async (...a) => { queued.push(a); },
     });
     assert.equal(result.reason, 'derivation-queued');
-    assert.deepEqual(enqueued, []);
-  });
-
-  test('an unverified template on a site without the Design Agent reports not-available, not queued', async () => {
-    // Nothing can re-derive it, so promising "queued, resolves shortly" would
-    // be a lie.
-    const site = {
-      ...baseSite, design_agent_enabled: false,
-      url_file_map: { siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div>{{BODY}}</div>' } } } },
-    };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
-      createHandler: () => { throw new Error('should never be called'); },
-      enqueueDerivation: async () => { throw new Error('should never queue'); },
-    });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'not-available');
+    assert.deepEqual(queued, []);
   });
 
   test('action type with no component-template concept short-circuits', async () => {
-    const createHandler = () => { throw new Error('should never be called'); };
-    const result = await resolveOrCreateComponentTemplate(baseSite, 'meta-title', { createHandler });
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'meta-title', noopDeps());
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'no-concept');
   });
 
-  test('site without design_agent_enabled cannot auto-create, and never calls the handler', async () => {
-    const site = { ...baseSite, design_agent_enabled: false };
-    const createHandler = () => { throw new Error('should never be called'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+  test('site without design_agent_enabled reports not-available, and queues nothing', async () => {
+    const result = await resolveOrCreateComponentTemplate({ ...baseSite, design_agent_enabled: false }, 'faq', noopDeps());
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'not-available');
   });
 
-  test('site with no repo configured cannot auto-create', async () => {
-    const site = { ...baseSite, repo_owner: null, repo_name: null };
-    const createHandler = () => { throw new Error('should never be called'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
+  test('site with no repo configured reports not-available', async () => {
+    const result = await resolveOrCreateComponentTemplate({ ...baseSite, repo_owner: null, repo_name: null }, 'faq', noopDeps());
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'not-available');
   });
 
-  test('derives, validates, and auto-saves a new template with no manual confirm step', async () => {
-    const site = { ...baseSite };
-    const derived = { wrapper: '<div class="prose">{{BODY}}</div>' };
-    const createHandler = () => async (job) => {
-      assert.equal(job.site_id, site.id);
-      assert.deepEqual(job.params.componentKeys, ['content-wrapper']);
-      return { componentTemplates: { 'content-wrapper': derived } };
-    };
-    let saved = null;
-    const saveConfig = async ({ siteId, urlFileMap }) => { saved = { siteId, urlFileMap }; return { id: siteId, url_file_map: urlFileMap }; };
-    let audited = null;
-    const recordAudit = async (req, event) => { audited = { req, event }; };
-
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordAudit });
-
-    assert.equal(result.ok, true);
-    assert.equal(result.source, 'design-agent');
-    assert.equal(result.justCreated, true);
-    assert.equal(result.template.wrapper, derived.wrapper);
-    assert.equal(result.template.verifiedBy, 'design-agent');
-    assert.equal(saved.siteId, site.id);
-    assert.equal(saved.urlFileMap.siteRoot.componentTemplates.contentWrapper.wrapper, derived.wrapper);
-    assert.equal(audited.event.action, 'tenant.component_template_auto_created');
-    assert.equal(audited.req.userId, null, 'no human triggered this — system actor, not a staff user');
-  });
-
-  test('a derived template missing its required placeholder is rejected, not saved, and recorded to agent_fix_memory', async () => {
-    const site = { ...baseSite };
-    const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
-    const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
-    let recorded = null;
-    const recordFixOutcomeFn = async (args) => { recorded = args; return 'memory-id-123'; };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'invalid-placeholders');
-    assert.equal(recorded.generatorId, 'design-agent-component-templates');
-    assert.equal(recorded.siteId, site.id);
-    assert.equal(recorded.outcome, 'success');
-    assert.equal(recorded.problemSignature, 'missing-placeholders:content-wrapper');
-    assert.match(recorded.symptoms, /content-wrapper/);
-  });
-
-  test('a memory-write failure while recording a rejected template never blocks the caller', async () => {
-    const site = { ...baseSite };
-    const createHandler = () => async () => ({ componentTemplates: { 'content-wrapper': { wrapper: '<div>no body slot here</div>' } } });
-    const saveConfig = async () => { throw new Error('should never be called — invalid template must not be saved'); };
-    const recordFixOutcomeFn = async () => { throw new Error('DB is down'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig, recordFixOutcomeFn });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'invalid-placeholders');
-  });
-
-  test('a Design Agent failure is reported, never thrown, and nothing is saved', async () => {
-    const site = { ...baseSite };
-    const createHandler = () => async () => { throw new Error('OpenHands task failed: simulated infra error'); };
-    const saveConfig = async () => { throw new Error('should never be called'); };
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler, saveConfig });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'design-agent-error');
-  });
-
-  test('the handler returning nothing for the requested action type is treated as not-derived, not a crash', async () => {
-    const site = { ...baseSite };
-    const createHandler = () => async () => ({ componentTemplates: {} });
-    const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', { createHandler });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'not-derived');
+  test('an unusable profile is treated as no profile at all', async () => {
+    // A half-derived profile must not silently produce half-designed markup.
+    const queued = [];
+    const site = { ...baseSite, url_file_map: { siteRoot: { designProfile: { version: 1 } } } };
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async (...a) => { queued.push(a); },
+    });
+    assert.equal(result.reason, 'derivation-queued');
+    assert.equal(queued.length, 1);
   });
 });
+
 
 describe('extractLiteralClassNames', () => {
   test('collects deduped class tokens from wrapper + row', () => {

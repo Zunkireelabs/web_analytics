@@ -5,7 +5,7 @@ Python bridge already used for agents/clustering.py (see server/cron.js),
 and the same LLM/Agent/Conversation shape validated in design-agent-poc's
 run_poc.py (Step 1).
 
-Two modes, chosen by argv[2] (default "fixture-demo" — matches every
+Three modes, chosen by argv[2] (default "fixture-demo" — matches every
 existing call site/test that only ever passes argv[1]):
 
 - "fixture-demo" (Step 6D): runs against argv[1], a throwaway temp-directory
@@ -37,6 +37,16 @@ existing call site/test that only ever passes argv[1]):
   (server/implementers/lib/design-drift.js's resolveOrCreateComponentTemplate)
   re-checks every entry against the exact same placeholder contract before
   ever saving it — no human review step anywhere in this path, by design.
+
+- "design-profile": also runs against a real tenant repo checkout, also
+  read-only. Derives the site's WHOLE design language once — typography,
+  colour, spacing, layout, component conventions (cards, buttons, accordions,
+  lists, article body), responsive breakpoints — reported on the final result
+  line as `designProfile`. This is the SOURCE the Node side projects every
+  per-component template from (design-agent/lib/design-profile.js), which is
+  why it does not take an action-type list: the whole site is the scope. It
+  replaces the need to re-analyse the repo once per content type, and is what
+  stops each design-sensitive generator inventing its own presentation.
 
 Prints two kinds of sentinel lines the Node handler looks for:
 - CONTAINER_PREFIX, as soon as the container exists — captured eagerly (the
@@ -181,6 +191,75 @@ def build_component_templates_task(action_types, lessons=None):
     return "\n".join(lines)
 
 
+DESIGN_PROFILE_SCHEMA = (
+    '{\n'
+    '  "styling": "tailwind" | "css-modules" | "plain-css" | "unknown",\n'
+    '  "framework": "<the site\'s framework/SSG, or null>",\n'
+    '  "typography": {\n'
+    '    "heading": {"section": "<classes for a major section heading>", "item": "<classes for a repeating item heading, e.g. an FAQ question>"},\n'
+    '    "body": "<classes for normal body copy>",\n'
+    '    "link": "<classes for an inline text link>"\n'
+    '  },\n'
+    '  "color": {"text": "...", "muted": "...", "accent": "...", "surface": "...", "border": "..."},\n'
+    '  "spacing": {"section": "<vertical spacing for a page section>", "itemGap": "<spacing between repeated items>"},\n'
+    '  "layout": {"container": "<the site\'s content container/width constraint>", "prose": "<long-form article wrapper, if any>"},\n'
+    '  "components": {\n'
+    '    "accordion": {"wrapper": "...", "item": "...", "trigger": "...", "panel": "..."} | null,\n'
+    '    "card": {"wrapper": "...", "body": "..."} | null,\n'
+    '    "list": {"wrapper": "...", "item": "...", "divider": "..."} | null,\n'
+    '    "button": {"primary": "...", "secondary": "..."} | null,\n'
+    '    "articleBody": {"wrapper": "<what wraps a blog post / article body>"} | null\n'
+    '  },\n'
+    '  "responsive": {"breakpoints": ["sm", "md", "lg"]},\n'
+    '  "evidence": {"files": ["<real paths you derived this from>"], "notes": "<one short sentence>"}\n'
+    '}'
+)
+
+
+def build_design_profile_task(lessons=None):
+    """Derive the site's WHOLE design language, once, rather than one
+    component's markup.
+
+    This is the source the Node side (design-agent/lib/design-profile.js)
+    projects every design-sensitive component template from, so it has to
+    describe the site's reusable vocabulary — typography, colour, spacing,
+    layout, and the component conventions (cards, buttons, accordions, lists,
+    article body) — not any single block's markup. Getting this right once
+    means a new content type needs no new repo analysis at all.
+    """
+    lines = [
+        "This directory is a real, complete checkout of a website's actual source "
+        "repository. This is a READ-ONLY analysis task — do not create, edit, or "
+        "delete any file, do not run any git commands, do not commit or push.\n",
+        "Your job is to describe this website's DESIGN LANGUAGE as a whole: the "
+        "reusable presentation vocabulary its pages are built from. You are not "
+        "describing any one block or page.\n",
+        "Work it out from the real source: identify the framework and build tool, "
+        "how styling is organised (Tailwind / CSS modules / plain CSS / something "
+        "else), where reusable components and layouts live, and which classes and "
+        "markup patterns recur across MANY pages rather than appearing once.\n",
+        "Cover: typography (headings at each level, body copy, links), colour "
+        "(text, muted text, accent, surfaces, borders), spacing (section rhythm, "
+        "gaps between repeated items), layout (content container/width, long-form "
+        "article wrapper), the component conventions this site actually uses "
+        "(cards, buttons, accordions/disclosures, lists, how a blog post or "
+        "article body is presented), and which responsive breakpoints appear.\n",
+        "ABSOLUTE RULE: every class name and markup pattern you report must "
+        "actually appear in this repository's real source. Never invent a class "
+        "name, and never copy one from a framework's documentation. If this site "
+        "genuinely has no example of something (no accordion, say), report null "
+        "for it rather than inventing one — a missing pattern is a real, useful "
+        "answer and downstream code handles it correctly.\n",
+        "Report only presentation vocabulary. Do not include page content, copy, "
+        "product names, or anything specific to this business.\n",
+        "When you are done, respond with ONLY a JSON object (no prose, no code "
+        "fence) shaped exactly like:\n" + DESIGN_PROFILE_SCHEMA,
+    ]
+    task = "\n".join(lines)
+    block = _lessons_block(lessons)
+    return task + "\n" + block if block else task
+
+
 def _extract_json_object(text):
     """Lenient JSON extraction from an LLM's final message — same tolerance
     server/llm.js's extractJson gives JS callers (strip a code fence, or pull
@@ -254,6 +333,12 @@ def main() -> int:
             action_types = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
             lessons = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else []
             task = build_component_templates_task(action_types, lessons)
+        elif mode == "design-profile":
+            # argv[3] is unused for this mode (there is nothing to scope it to
+            # — the whole site IS the scope); argv[4] stays the lessons array
+            # so the argument positions match component-templates mode exactly.
+            lessons = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else []
+            task = build_design_profile_task(lessons)
         else:
             task = FIXTURE_DEMO_TASK
 
@@ -283,6 +368,19 @@ def main() -> int:
                     result = {"status": "error", "detail": "Agent did not report a parseable componentTemplates JSON object."}
                 else:
                     result["componentTemplates"] = component_templates
+            elif mode == "design-profile":
+                message_text = _last_agent_message_text(conversation)
+                parsed = _extract_json_object(message_text)
+                # The agent returns the profile as the bare object. Accept a
+                # {"designProfile": {...}} envelope too, since that is the
+                # shape it sometimes mirrors back from the schema block.
+                profile = None
+                if isinstance(parsed, dict):
+                    profile = parsed.get("designProfile") if isinstance(parsed.get("designProfile"), dict) else parsed
+                if not profile or not profile.get("typography"):
+                    result = {"status": "error", "detail": "Agent did not report a parseable design profile with typography."}
+                else:
+                    result["designProfile"] = profile
 
         print(RESULT_PREFIX + json.dumps(result))
         return 0 if result["status"] == "ok" else 1
