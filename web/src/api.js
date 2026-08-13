@@ -94,6 +94,7 @@ export const api = {
 
   copilot: {
     ask: (conversationId, message) => req('/copilot/ask', { method: 'POST', body: JSON.stringify({ conversationId, message }) }),
+    greeting: () => req('/copilot/greeting'),
     conversations: () => req('/copilot/conversations'),
     messages: (conversationId) => req(`/copilot/conversations/${conversationId}/messages`),
   },
@@ -133,8 +134,6 @@ export const api = {
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     recalculateFaqBaseline: (id) => req(`/internal/clients/${id}/recalculate-faq-baseline`, { method: 'POST' }),
-    regenerateComponentTemplate: (id, actionType, pageUrl) => req(`/internal/clients/${id}/component-templates/${actionType}/regenerate`, { method: 'POST', body: JSON.stringify({ pageUrl }) }),
-    confirmComponentTemplate: (id, actionType, template) => req(`/internal/clients/${id}/component-templates/${actionType}/confirm`, { method: 'POST', body: JSON.stringify({ template }) }),
     growthSummary: () => req('/internal/clients/growth-summary'),
     signupRequests: {
       list: () => req('/internal/signup-requests'),
@@ -276,6 +275,7 @@ export const api = {
     previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
     rollback: (id) => req(`/action-center/drafts/${id}/rollback`, { method: 'POST' }),
     executeSafeFixes: (limit) => req('/action-center/execute-safe-fixes', { method: 'POST', body: JSON.stringify({ limit }) }),
+    latestExecutionJob: () => req('/action-center/execution-jobs/latest'),
     approveAndShip: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/approve-and-ship`, { method: 'POST' }),
     recheckRecommendation: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/recheck`, { method: 'POST' }),
     getExecutionJob: (id) => req(`/action-center/execution-jobs/${id}`),

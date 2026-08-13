@@ -37,7 +37,7 @@ import { getSiteById } from '../store/read.js';
 import { createComponentTemplateJob } from '../store/execution-jobs.js';
 import { processOneJob } from '../design-agent/worker.js';
 import { createDesignAgentHandler } from '../design-agent/openhands-handler.js';
-import { buildComponentTemplateProposalsFromJob } from '../design-agent/component-template-proposal.js';
+import { validatePlaceholders, checkTemplateFreshness } from '../implementers/lib/design-drift.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -73,7 +73,7 @@ async function checkDockerAndImage() {
 async function main() {
   console.log(`componentTemplates real-repo validation — ${new Date().toISOString()}`);
   console.log(`Target: site #${SITE_ID}, componentKeys=${JSON.stringify(COMPONENT_KEYS)}`);
-  console.log('This run is READ-ONLY: no /confirm, no url_file_map write, no branch/commit/PR — see this file\'s header.\n');
+  console.log('This run is READ-ONLY: no url_file_map write, no branch/commit/PR — see this file\'s header.\n');
 
   const siteBefore = await getSiteById(SITE_ID);
   if (!siteBefore) throw new Error(`Site #${SITE_ID} not found.`);
@@ -105,15 +105,23 @@ async function main() {
     const componentTemplates = finalRow?.result?.componentTemplates || {};
     record('agent reported at least one componentTemplates entry', Object.keys(componentTemplates).length > 0, JSON.stringify(Object.keys(componentTemplates)));
 
-    const proposals = await buildComponentTemplateProposalsFromJob(finalRow, { pageUrl: LIVE_PAGE_URL });
+    // Same two checks resolveOrCreateComponentTemplate itself applies in
+    // production (design-drift.js) — validatePlaceholders is the hard
+    // reject, checkTemplateFreshness against the real live page is
+    // informational only here (missingClasses reported, never blocks),
+    // matching that function's own fail-open discipline on freshness.
     for (const actionType of COMPONENT_KEYS) {
-      const proposal = proposals[actionType];
-      if (!proposal) { record(`proposal for "${actionType}"`, false, 'not reported by the agent'); continue; }
-      record(`proposal for "${actionType}" passes validation (placeholders + real-class check)`, proposal.ok, proposal.ok ? `missingClasses=${JSON.stringify(proposal.missingClasses)}` : proposal.error);
-      if (proposal.ok) {
-        console.log(`\n--- proposed "${actionType}" template ---`);
-        console.log(JSON.stringify(proposal.proposedTemplate, null, 2));
-      }
+      const template = componentTemplates[actionType];
+      if (!template) { record(`proposal for "${actionType}"`, false, 'not reported by the agent'); continue; }
+
+      const placeholderCheck = validatePlaceholders(actionType, template);
+      if (!placeholderCheck.ok) { record(`proposal for "${actionType}" passes validation (placeholders + real-class check)`, false, placeholderCheck.error); continue; }
+
+      const freshness = await checkTemplateFreshness({ pageUrl: LIVE_PAGE_URL, templateEntry: template });
+      const missingClasses = freshness.ok ? freshness.missingClasses || [] : [];
+      record(`proposal for "${actionType}" passes validation (placeholders + real-class check)`, true, `missingClasses=${JSON.stringify(missingClasses)}`);
+      console.log(`\n--- proposed "${actionType}" template ---`);
+      console.log(JSON.stringify(template, null, 2));
     }
   } finally {
     if (jobId) {

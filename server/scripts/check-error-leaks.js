@@ -52,8 +52,15 @@ const ALLOWED_PATH_PATTERNS = [
 // console.error/console.warn is skipped UNLESS it also builds a separate
 // string later reused elsewhere, which this simple per-line check can't see
 // — acceptable given the stated regex-net tradeoff above.
+//
+// Also matches `log.(error|warn|log)(...)` — an injectable-logger seam
+// (e.g. `{ log = console } = deps`, recommendation-gates.js) used so tests
+// can assert on log output without touching real console. It defaults to
+// console at runtime, so it's the same logging call under a different name,
+// not a second interpolation site. Confirmed false positive on
+// recommendation-gates.js:83/122/185 before this was added.
 function isLoggingLine(line) {
-  return /console\.(error|warn)\(/.test(line) || /\blogInternal\(/.test(line);
+  return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\(/.test(line) || /\blogInternal\(/.test(line);
 }
 
 // `String(err.message || ...).includes('SOME_CODE')` is a content check

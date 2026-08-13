@@ -37,6 +37,54 @@ export async function createDesignAgentJob(siteId, recommendationId, { requested
 // design-drift.js/marker-merge.js action-type strings, e.g. ['faq',
 // 'expand-content']) travels in `params` for the worker's handler to read
 // off the claimed job row.
+// Is there already an unfinished componentTemplates derivation pending for
+// this site + component key? Used by design-drift.js's
+// resolveOrCreateComponentTemplate to enqueue at most ONE outstanding
+// re-derivation per site+key: that function sits on generateDraft's hot path,
+// so without this check every draft attempt against a site with an unverified
+// template would queue another job for work already pending — a single daily
+// run would add dozens.
+//
+// Matched on ACTION TYPE ('expand-content'), not the componentTemplates key
+// ('expandContent') — createComponentTemplateJob stores whatever its
+// `componentKeys` argument was, and every caller passes action types. The two
+// vocabularies are identical for faq/qaContent-style names and differ for the
+// hyphenated ones, so querying by the wrong one would silently never match
+// and re-queue forever.
+//
+// Treats both 'queued' and 'executing' as pending: a job a worker has already
+// claimed is still going to produce the template.
+//
+// jsonb_exists() rather than the `?` operator, which node-postgres parses as
+// a placeholder and would break the query.
+export async function getQueuedComponentTemplateJob(siteId, actionType) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate' AND status IN ('queued', 'executing')
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT 1`,
+    [siteId, actionType]
+  );
+  return rows[0] || null;
+}
+
+// Sentinel stored in params.componentKeys for a whole-site design-profile
+// job, so getQueuedComponentTemplateJob's existing "is one already pending"
+// check works unchanged for it. Not an action type — deliberately a reserved
+// name no COMPONENT_TEMPLATE_KEY will ever collide with.
+export const DESIGN_PROFILE_JOB_KEY = '__design-profile__';
+
+// Derives the SITE'S whole design language (design-agent/lib/design-profile.js),
+// which every per-component template is then projected from. Takes no action
+// types — the whole site is the scope, which is exactly what makes one of
+// these worth more than N component-template jobs.
+export async function createDesignProfileJob(siteId, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, {
+    requestedBy,
+    params: { mode: 'design-profile', componentKeys: [DESIGN_PROFILE_JOB_KEY], pageUrl: pageUrl || null },
+  });
+}
+
 export async function createComponentTemplateJob(siteId, componentKeys, { requestedBy, pageUrl } = {}) {
   return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
 }
@@ -49,16 +97,24 @@ export async function createComponentTemplateJob(siteId, componentKeys, { reques
 // never both claim the same job. Returns null (not a rejected promise) when
 // the queue is empty, same "empty is a normal outcome" convention as the
 // rest of this file's read helpers.
-export async function claimNextDesignAgentJob() {
+//
+// siteId is optional and defaults to unscoped (every real worker.js
+// deployment polls globally, across every tenant, by design). It exists so
+// a caller that already knows it only ever wants ITS OWN site's jobs — in
+// practice, worker.test.js's fixtures — can't accidentally claim (and
+// fake-complete with a mock handler) some other site's real queued job.
+export async function claimNextDesignAgentJob(siteId = null) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows: candidates } = await client.query(
       `SELECT id FROM execution_jobs
        WHERE kind = 'design_generate' AND status = 'queued'
+         AND ($1::int IS NULL OR site_id = $1)
        ORDER BY id
        FOR UPDATE SKIP LOCKED
-       LIMIT 1`
+       LIMIT 1`,
+      [siteId]
     );
     if (!candidates[0]) {
       await client.query('COMMIT');
@@ -133,6 +189,23 @@ export async function getTodayExecutionStats(siteId) {
     [siteId]
   );
   return { shipped: Number(rows[0].shipped), failed: Number(rows[0].failed) };
+}
+
+// The most recent bulk run for a site, in the same shape getExecutionJob
+// returns. Exists because "Execute Today's Safe Fixes" is a synchronous
+// request that can outlive the browser's own 5-minute fetch ceiling (see
+// web/src/api.js's REQUEST_TIMEOUT_MS) once a batch is large enough — the
+// server finishes the job regardless, but the client that started it never
+// receives the response and so has no job id to ask about. This is how it
+// finds the run it already started.
+export async function getLatestBulkExecutionJob(siteId) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND trigger = 'bulk'
+     ORDER BY id DESC LIMIT 1`,
+    [siteId]
+  );
+  return rows[0] ? getExecutionJob(siteId, rows[0].id) : null;
 }
 
 export async function getExecutionJob(siteId, id) {

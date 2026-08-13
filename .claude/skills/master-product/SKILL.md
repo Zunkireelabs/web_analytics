@@ -764,8 +764,27 @@ growth tooling — same page for staff and clients alike"). The default
 post-login landing page (`App.jsx`'s `/` redirect) is `/ai-growth`, for the
 same reason.
 
-**What's still genuinely internal-only**: AI Copilot (`server/routes/copilot.js`)
-and the Clients console (`/clients`, `server/routes/clients.js`) still carry
+**Updated again — the AI Copilot is no longer internal-only.**
+`server/routes/copilot.js` dropped its `requirePlatformRole('platform_admin')`
+gate and now carries only `requireAuth`, like the rest of the growth tooling;
+`web/src/App.jsx` renders the Copilot launcher and panel for every
+authenticated session. Data scope is unchanged and still session-derived
+(`req.siteId`), and the agentic loop's tool schemas are
+`additionalProperties: false` with no site parameter, so the model cannot
+reach another tenant. Two things were added alongside that opening:
+- `server/agents/lib/copilot-greeting.js` — `GET /api/copilot/greeting` plus
+  `systemPromptFor`, giving one chat surface two audiences (platform admin =
+  operational vocabulary; site owner = plain English, internal identifiers
+  forbidden). `users.display_name` (migration 102) backs the greeting, with a
+  deliberate refusal to greet role addresses by mailbox name.
+- `checkInspectableUrl`/`siteInspectHostnames` in `agents/lib/agentic-orchestrator.js`
+  — the `inspect_*` tools fetch a model-supplied URL server-side, which became
+  an SSRF exposure the moment untrusted users could drive the conversation.
+  Now allowlisted to the tenant's own domain (allowlist, not a private-range
+  blocklist, and not a bare `endsWith`).
+
+**What's still genuinely internal-only**: the Clients console
+(`/clients`, `server/routes/clients.js`) still carries
 `requireAuth, requireInternalSite` — `COMPANY_SITE_ID` (env var) names the
 one `sites.id` that counts as "internal," and that middleware still 404s any
 other site's session for those two surfaces only. `GET /api/me`'s
@@ -922,6 +941,41 @@ pending manager budget approval as of this writing.
 `COMPETITOR_LANGUAGE_CODE`, `COMPETITOR_PROVIDER`, `PAGESPEED_API_KEY`,
 `AI_RECOMMENDATION_ENABLED`, `AI_RECOMMENDATION_MODEL`, `COMPANY_SITE_ID`
 (the internal-only feature-flag gate), `FIX_VERIFY_DELAY_HOURS`.
+
+**Design-verification gate (added alongside the Copilot change).** Draft
+generation for the five action types that render through a `componentTemplates`
+entry (`faq`, `expand-content`, `internal-links`, `qa-content`,
+`content-wrapper`) is now HARD-GATED on that template having been verified
+against the site's real design. `generateDraft` (`routes/action-center.js`)
+used to call `resolveOrCreateComponentTemplate` best-effort and fall back to
+`marker-merge.js`'s zero-config `DEFAULT_*` templates when the Design Agent was
+off/unavailable — that fail-open path is what let never-verified templates
+reach apply time and fail there. Now:
+- Templates carry provenance inside the JSONB itself (`verifiedAt`/`verifiedBy`/
+  `verifiedRef`, stamped by `stampTemplateVerification`); no migration was
+  needed because every existing reader touches only `.wrapper`/`.row`. An
+  unstamped template reads as unverified, which is honest — none were checked.
+- `generateDraft` throws 422 `reason: 'design-unverified'` — one choke point
+  covering the manual UI, the MCP tool, the execution engine, and unattended
+  auto-remediation alike.
+- `buildRecommendations` marks such items `designBlockedReason` and
+  `recommendation-coordinator.js` demotes them to `risk_tier: 'manual'`, which
+  is the single mechanism keeping them out of every unattended path. They stay
+  VISIBLE (unlike the url_file_map/file-exists gates, which drop their items) —
+  a real detected issue we can't yet auto-fix must not silently vanish.
+- `npm run verify-component-templates -- --site-id N [--apply]` is the way out
+  of the blocked state: it runs the real `checkTemplateFreshness` against a live
+  page and stamps only templates that genuinely pass.
+
+**Unattended auto-remediation is now bounded and ends at a PR.**
+`agents/lib/auto-remediation.js` previously looped every open safe-tier
+candidate with no cap (survivable only because `auto_remediation_enabled` is
+false everywhere). It now enforces `sites.auto_remediation_daily_limit`
+(migration 101, default 30, counted in the site's own timezone), trips a
+circuit breaker after 3 consecutive failures, and extends the chain through
+`openDraftPr` — deliberately never merging. The existing PR-status poller
+(`cron.js`, `:20` each hour) is what flips a draft to `implemented` once a
+human merges on GitHub.
 
 **Design conventions worth reusing for any similarly internal, pluggable
 feature**: an auto-discovery registry over a fixed directory instead of

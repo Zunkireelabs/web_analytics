@@ -81,6 +81,41 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            # Same reserved-prefix rule as GH_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+
+            # ── Design Agent worker ─────────────────────────────────────────
+            # The design-agent-worker container's ONLY env source is this file
+            # (docker-compose's `env_file: .env`, plus NODE_ENV), and this step
+            # rewrites the file wholesale — so a variable missing here is
+            # missing in the container, permanently. LLM_API_KEY was missing,
+            # which is why every real Design Agent job for site 1 has failed.
+            #
+            # server/design-agent/python/design_task.py reads it via
+            # os.getenv("LLM_API_KEY") and builds its LLM BEFORE opening the
+            # DockerWorkspace, so an unset key resolves to None, the container
+            # starts normally, and the job only dies on the first model call —
+            # ~40s in, reported as a generic "Design Agent job failed
+            # unexpectedly" with the real cause only in the container's stdout.
+            #
+            # Reuses the existing OPENAI_API_KEY secret rather than adding a
+            # new one: design_task.py's own default model is gpt-4o-mini, the
+            # same provider this deployment already uses. Note that Design
+            # Agent runs therefore bill to the same OpenAI key as the reports.
+            LLM_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            LLM_MODEL=${{ vars.DESIGN_AGENT_LLM_MODEL || 'gpt-4o-mini' }}
+
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Shares OPENAI_API_KEY above but requires this separate flag
             # before it fires (server/agents/ai-recommendation.js) — a
@@ -262,6 +297,41 @@ jobs:
                 exit 1
               fi
             done
+
+            # ── Data Analyst Agent nightly pipeline ──────────────────────────
+            # The container's CMD only starts uvicorn, so the API serves fine
+            # while the pipeline that actually PRODUCES analysis never runs.
+            # That is not hypothetical: staging had 16k metric observations and
+            # 253 insights but zero analyst_recommendations and zero
+            # investigations, because scripts/run_nightly_pipeline.py had no
+            # trigger anywhere — only a commented-out suggestion in
+            # data-analyst-agent/docker-compose.yml.
+            #
+            # It also starves the Node side: server/cron.js syncs analyst
+            # recommendations into the Action Center, and that sync has been
+            # running nightly carrying nothing.
+            #
+            # 22:00 UTC, and the hour is load-bearing. The app's cron runs in
+            # TZ (Asia/Kolkata), so its 07:00 morning run — detect, ship, mail
+            # — is 01:30 UTC. The chain has to COMPLETE before that:
+            #   22:00 UTC  this pipeline
+            #   00:00 UTC  analyst -> Action Center sync (server/cron.js)
+            #   01:30 UTC  morning run consumes it, same day
+            # An earlier draft of this used 03:00 UTC, which is 08:30 in
+            # Asia/Kolkata — after the run it was meant to feed.
+            #
+            # CRON_TZ is set explicitly rather than trusting the host's local
+            # time, since the offset from the app's TZ is the entire reason
+            # this hour works.
+            #
+            # Installed idempotently on every deploy (filter out the old line,
+            # append the current one) so a redeploy can't stack duplicates and
+            # a changed path or hour corrects itself.
+            echo "Installing Data Analyst nightly pipeline cron..."
+            NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
+            (crontab -l 2>/dev/null | grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$'; echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
+            echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
+            crontab -l | grep run_nightly_pipeline
 
       - name: Verify Health
         run: |

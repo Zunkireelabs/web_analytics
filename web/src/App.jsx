@@ -188,8 +188,13 @@ export default function App() {
 
       {/* The AI Copilot is the primary way to interact with the platform —
           reachable from anywhere via this floating trigger, not tucked into
-          one page. Internal-only, same gate as AI Growth/Action Center. */}
-      {isInternal && !copilotOpen && (
+          one page. Available to EVERY authenticated session, staff and client
+          alike (the server route dropped its platform_admin-only gate to
+          match). It is not the same experience for both: the greeting and the
+          answering prompt adapt to who is asking (server/agents/lib/
+          copilot-greeting.js), while the data stays scoped to the session's
+          own site either way. */}
+      {!copilotOpen && (
         <button type="button" onClick={() => setCopilotOpen(true)}
           className="fixed bottom-6 right-6 z-20 w-14 h-14 rounded-full text-white text-xl shadow-lg
                      hover:scale-105 transition-transform focus-visible:outline focus-visible:outline-2
@@ -199,7 +204,7 @@ export default function App() {
           ✦
         </button>
       )}
-      {isInternal && <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />}
+      <CopilotPanel open={copilotOpen} onClose={() => setCopilotOpen(false)} />
     </div>
   );
 }

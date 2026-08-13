@@ -1,14 +1,23 @@
 name: Rendering Validation
 
-# Phase 2 of the Rendering Validation Gate (see check-rendered-output.mjs,
-# same directory, in the zunkiree-analytics app) — installed once per client
-# repo by that app's server/scripts/install-rendering-workflow.js. Runs the
-# real site build in GitHub's own sandboxed runner (never on the analytics
-# app's own infrastructure) and checks the real rendered HTML output for
-# raw Markdown / unresolved template syntax that should have been rendered
-# away. The job name below ("rendering-validation") must stay in sync with
-# implementers/lib/rendering-gate.js's CLIENT_BUILD_CHECK_NAME — that's the
-# exact string the analytics app looks up via the GitHub Check Runs API.
+# The Rendering Validation Gate (see check-rendered-output.mjs and
+# check-family-siblings.mjs, same directory, in the zunkiree-analytics app)
+# — installed once per client repo by that app's
+# server/scripts/install-rendering-workflow.js. Runs the real site build in
+# GitHub's own sandboxed runner (never on the analytics app's own
+# infrastructure). The job name below ("rendering-validation") must stay in
+# sync with implementers/lib/rendering-gate.js's CLIENT_BUILD_CHECK_NAME —
+# that's the exact string the analytics app looks up via the GitHub Check
+# Runs API.
+#
+# Two checks, against two different questions:
+#   1. check-rendered-output.mjs — does the PR's own build render CLEANLY
+#      (no raw Markdown, no unresolved template syntax)? Built once, at HEAD.
+#   2. check-family-siblings.mjs — for any shared, data-driven template
+#      family (Eleventy pagination and the same shape elsewhere), did a
+#      change LEAK into sibling pages that share the template? This needs
+#      TWO builds — the PR's merge base and its head — to diff against, so
+#      the site is built twice into separate output directories.
 
 on:
   pull_request:
@@ -20,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -28,8 +39,37 @@ jobs:
       - name: Install dependencies
         run: __INSTALL_COMMAND__
 
-      - name: Build site
+      - name: Build site (HEAD)
         run: __BUILD_COMMAND__
 
       - name: Check rendered output for raw Markdown / unresolved template syntax
         run: node scripts/check-rendered-output.mjs "__OUTPUT_DIR__"
+
+      # A second, separate checkout of the merge base — not a branch switch
+      # in place, so the HEAD build output above is never disturbed. Only
+      # runs when this is actually a PR (a push to the default branch has no
+      # base to diff against, and nothing to compare siblings to).
+      - name: Checkout merge base
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add /tmp/rendering-validation-base "${{ github.event.pull_request.base.sha }}"
+
+      - name: Install dependencies (base)
+        if: github.event_name == 'pull_request'
+        working-directory: /tmp/rendering-validation-base
+        run: __INSTALL_COMMAND__
+
+      - name: Build site (merge base)
+        if: github.event_name == 'pull_request'
+        working-directory: /tmp/rendering-validation-base
+        run: __BUILD_COMMAND__
+
+      - name: Check for leakage into sibling pages of a shared template
+        if: github.event_name == 'pull_request'
+        run: >
+          node scripts/check-family-siblings.mjs
+          "${{ github.workspace }}"
+          "/tmp/rendering-validation-base/__OUTPUT_DIR__"
+          "__OUTPUT_DIR__"
+          "${{ github.event.pull_request.base.sha }}"
+          "${{ github.event.pull_request.head.sha }}"

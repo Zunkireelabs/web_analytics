@@ -4,7 +4,7 @@ import { callLLM } from '../llm.js';
 import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
   getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
-  getLatestLayoutSuggestion, saveLayoutSuggestion,
+  getLatestLayoutSuggestion, saveLayoutSuggestion, addKeywordGap,
 } from '../store/data-analyst.js';
 import { createActionCenterRecommendationForGap } from '../agents/lib/analyst-seo-mapping.js';
 
@@ -57,6 +57,29 @@ router.put('/internal/keywords/:siteId/gaps/:gapId', async (req, res, next) => {
     }
 
     res.json({ ...updated, actionCenter });
+  } catch (e) { next(e); }
+});
+
+// Add a keyword to grow on. Seeds a keyword_gaps row (source='manual') that
+// then travels the identical approve -> recommendation -> draft path a
+// clustering-discovered gap does, so this adds an entry point, not a second
+// pipeline. Approving it is still the existing PUT below — adding a keyword
+// is not the same decision as acting on it.
+router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
+  try {
+    const { topic, reason, priority } = req.body || {};
+    if (!topic || !String(topic).trim()) {
+      return res.status(400).json({ error: 'topic is required.' });
+    }
+    if (priority && !['high', 'medium', 'low'].includes(priority)) {
+      return res.status(400).json({ error: 'priority must be high, medium or low.' });
+    }
+    const gap = await addKeywordGap(req.params.siteId, {
+      topic,
+      reason: reason || 'Added manually as a keyword to grow on.',
+      priority: priority || 'medium',
+    });
+    res.status(gap.alreadyExisted ? 200 : 201).json(gap);
   } catch (e) { next(e); }
 });
 
