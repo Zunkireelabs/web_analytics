@@ -6,6 +6,7 @@ import {
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
+  contentWrapperAvailability, filterTemplateToLiveClasses,
 } from './design-drift.js';
 
 const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
@@ -210,6 +211,95 @@ describe('componentTemplateVerification', () => {
   });
 });
 
+describe('contentWrapperAvailability — a looser rule for the one type with a real fallback', () => {
+  // newpage-render.js's wrapInSiteProse already degrades gracefully:
+  // configured template -> project from the profile -> bare body. The gate
+  // used to insist on a stored template regardless, which is what blocked 28
+  // real blog-outline recommendations on site 1 while the apply path had a
+  // perfectly good fallback ready to use.
+  const PROFILE = {
+    version: 1, styling: 'tailwind',
+    typography: { body: 'text-gray-600', heading: { item: 'text-lg font-medium' } },
+    layout: { container: 'max-w-3xl' }, components: {},
+    derivedAt: '2026-08-01T00:00:00.000Z', derivedBy: 'design-agent',
+  };
+
+  test('a verified stored template still wins, same as every other type', () => {
+    const site = {
+      url_file_map: { siteRoot: { componentTemplates: {
+        contentWrapper: stampTemplateVerification({ wrapper: '<div>{{BODY}}</div>' }, { verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK }),
+      } } },
+    };
+    const v = componentTemplateVerification(site, componentTemplateActionTypeFor('blog-outline'));
+    assert.equal(v.ok, true);
+    assert.equal(v.componentKey, 'contentWrapper');
+  });
+
+  test('no stored template, but a usable design profile — ok, apply-time projection will cover it', () => {
+    const site = { url_file_map: { siteRoot: { designProfile: PROFILE } } };
+    const v = componentTemplateVerification(site, componentTemplateActionTypeFor('blog-outline'));
+    assert.equal(v.ok, true);
+    assert.equal(v.reason, 'projectable-from-profile');
+  });
+
+  test('neither a stored template nor a profile — genuinely blocked, with an honest reason', () => {
+    const site = { url_file_map: {} };
+    const v = componentTemplateVerification(site, componentTemplateActionTypeFor('blog-outline'));
+    assert.equal(v.ok, false);
+    assert.equal(v.reason, 'design-language-not-derived');
+    assert.match(v.detail, /Design Agent has been queued/);
+    assert.doesNotMatch(v.detail, /No component template is configured/,
+      'must not show the old misleading message — a human was never asked to configure one');
+  });
+
+  test('every OTHER action type keeps the strict rule — a usable profile does not silently unblock faq', () => {
+    const site = { url_file_map: { siteRoot: { designProfile: PROFILE } } };
+    const v = componentTemplateVerification(site, 'faq');
+    assert.equal(v.ok, false, 'faq/qa-content/expand-content/internal-links still require an actual stored template');
+  });
+});
+
+describe('filterTemplateToLiveClasses', () => {
+  const css = '.max-w-none{a}.pb-16{a}.md\\:pb-24{a}';
+
+  test('drops classes the live CSS does not define, keeps the ones it does', () => {
+    const template = { wrapper: '<div class="prose prose-lg max-w-none pb-16 md:pb-24">{{BODY}}</div>' };
+    const { template: filtered, dropped } = filterTemplateToLiveClasses(template, css);
+    assert.equal(filtered.wrapper, '<div class="max-w-none pb-16 md:pb-24">{{BODY}}</div>');
+    assert.deepEqual(dropped.sort(), ['prose', 'prose-lg']);
+  });
+
+  test('drops the whole class attribute when nothing survives, rather than emitting class=""', () => {
+    const template = { wrapper: '<div class="prose prose-lg">{{BODY}}</div>' };
+    const { template: filtered } = filterTemplateToLiveClasses(template, css);
+    assert.equal(filtered.wrapper, '<div>{{BODY}}</div>');
+  });
+
+  test('never touches a placeholder token or an Alpine :class binding', () => {
+    const template = {
+      wrapper: '<div :class="{ \'x\': open }" class="prose">{{ROWS}}</div>',
+      row: '<span class="{{FOO}} prose">{{QUESTION}}</span>',
+    };
+    const { template: filtered } = filterTemplateToLiveClasses(template, css);
+    assert.match(filtered.wrapper, /:class="\{ 'x': open \}"/, 'the Alpine binding must be left completely alone');
+    assert.match(filtered.row, /\{\{FOO\}\}/, 'a placeholder token is never treated as a real class to check');
+  });
+
+  test('leaves a template with no class attributes at all untouched', () => {
+    const template = { wrapper: '<div>{{BODY}}</div>' };
+    const { template: filtered, dropped } = filterTemplateToLiveClasses(template, css);
+    assert.equal(filtered.wrapper, template.wrapper);
+    assert.deepEqual(dropped, []);
+  });
+
+  test('a template with no row (content-wrapper shape) is filtered without erroring on the missing field', () => {
+    const template = { wrapper: '<div class="prose">{{BODY}}</div>' };
+    const { template: filtered } = filterTemplateToLiveClasses(template, css);
+    assert.equal(filtered.wrapper, '<div>{{BODY}}</div>');
+    assert.equal('row' in filtered, false);
+  });
+});
+
 describe('templateActionRequiresRow', () => {
   test('true for the repeating-row action types', () => {
     assert.equal(templateActionRequiresRow('faq'), true);
@@ -328,6 +418,74 @@ describe('resolveOrCreateComponentTemplate', () => {
       assert.equal(result.ok, true, `${actionType} should project`);
       assert.equal(result.source, 'design-profile');
     }
+  });
+
+  // The trap this closes: a projection composes from designProfile fields
+  // (e.g. layout.prose), and those can describe a class the site's shipped
+  // CSS never actually defines — zunkireelabs.com's real profile would carry
+  // `prose prose-lg prose-gray max-w-none` for layout.prose, but
+  // @tailwindcss/typography is not installed there, so .prose* ships zero
+  // rules. Stamping that unconditionally would "unblock" a contentWrapper
+  // recommendation with a wrapper that renders invisibly.
+  describe('projections are verified against the live site before being trusted', () => {
+    // siteWithProfile only ever merges extra.siteRoot, so website_domain has
+    // to be applied on top of its result, not passed through it.
+    const liveSite = (extra = {}) => ({ ...siteWithProfile(extra), website_domain: 'zunkireelabs.com' });
+    const html = '<html><head><link rel="stylesheet" href="/main.css"></head></html>';
+
+    test('a projection whose classes are all live is stamped freshness-check, the strongest evidence', async () => {
+      // max-w-3xl mx-auto (container) and text-lg/text-gray-600/text-blue-600
+      // (typography) are all "live" here — only prose is missing, and this
+      // scenario checks content-wrapper, which composes container + prose.
+      // Use a profile with no prose reference so nothing needs filtering.
+      const site = liveSite({
+        siteRoot: { designProfile: { ...PROFILE, layout: { container: 'max-w-3xl mx-auto' } } },
+      });
+      let saved = null;
+      const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
+        ...noopDeps(),
+        saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; },
+        fetchPage: async () => html,
+        fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}',
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.source, 'design-profile');
+      assert.equal(result.template.verifiedBy, 'freshness-check', 'live evidence beats the unconditional design-agent stamp');
+      assert.equal(result.template.verifiedRef, 'https://zunkireelabs.com');
+      assert.equal(saved.siteRoot.componentTemplates.contentWrapper.verifiedBy, 'freshness-check');
+    });
+
+    test('a projection referencing a class the live site does not ship is filtered, not stamped as-is', async () => {
+      // The exact zunkireelabs.com shape: layout.prose composes into the
+      // wrapper, but .prose ships zero rules.
+      const site = liveSite({
+        siteRoot: { designProfile: { ...PROFILE, layout: { container: 'max-w-3xl mx-auto', prose: 'prose prose-lg' } } },
+      });
+      let saved = null;
+      const result = await resolveOrCreateComponentTemplate(site, 'content-wrapper', {
+        ...noopDeps(),
+        saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; },
+        fetchPage: async () => html,
+        fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}', // no .prose or .prose-lg
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.source, 'design-profile');
+      assert.equal(result.template.verifiedBy, 'freshness-check', 'the FILTERED template still gets real live evidence');
+      assert.doesNotMatch(result.template.wrapper, /\bprose\b/, 'the class the live site does not ship must not survive');
+      assert.match(result.template.wrapper, /max-w-3xl mx-auto/, 'classes that DO ship are preserved');
+      assert.deepEqual(saved.siteRoot.componentTemplates.contentWrapper.droppedClasses.sort(), ['prose', 'prose-lg']);
+    });
+
+    test('an unreachable live site falls back to the unconditional design-agent stamp, not a crash', async () => {
+      const site = liveSite();
+      const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+        ...noopDeps(),
+        fetchPage: async () => null,
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.source, 'design-profile');
+      assert.equal(result.template.verifiedBy, 'design-agent', 'no live evidence available — falls back exactly as before this existed');
+    });
   });
 
   test('with NO profile, queues a whole-site design derivation, not a per-type one', async () => {

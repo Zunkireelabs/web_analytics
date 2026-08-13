@@ -170,6 +170,59 @@ function classExistsInCss(cls, css) {
   return false;
 }
 
+// Rebuilds every literal `class="..."` attribute in a template, keeping only
+// the tokens that resolve in the given CSS. Field/HTML structure, Alpine
+// bindings (`:class="..."`, which this never touches — same exclusion as
+// extractLiteralClassNames) and placeholders are all left exactly as they
+// were; only the class LIST inside a real `class="..."` attribute changes,
+// and an attribute left with nothing live is dropped entirely rather than
+// emitted empty.
+//
+// This is the answer to a real trap in the projection path: composing a new
+// component template from a site's designProfile can propose classes the
+// profile recorded but the site's shipped CSS does not currently define — on
+// zunkireelabs.com specifically, `profile.layout.prose` would be
+// `prose prose-lg prose-gray max-w-none`, and `.prose*` genuinely ships zero
+// rules (@tailwindcss/typography is not installed). Stamping that
+// unconditionally would "unblock" a recommendation with a wrapper that
+// renders invisibly — worse than staying blocked, because it looks fixed.
+//
+// Filtering to what actually ships is not a downgrade of intent: those same
+// prose classes have no effect on the LIVE site either, so a filtered
+// wrapper renders identically to what a real page on this site renders
+// today. The dropped classes are worth recording for the audit trail and for
+// a future, honest recommendation ("install @tailwindcss/typography") — that
+// recommendation belongs to the client repo, not to this pipeline.
+export function filterTemplateToLiveClasses(template, css) {
+  const dropped = new Set();
+  // A fresh instance, not the shared module-level CLASS_ATTR_RE: that one is
+  // driven with exec() elsewhere and .replace() on a global regex advances
+  // lastIndex too, so sharing it risks the two use sites interleaving badly
+  // under any future reentrancy. The leading `\s*` is captured too so a
+  // fully-emptied attribute can remove its own preceding space along with
+  // itself, rather than leaving `<div >`.
+  const classAttrRe = /\s*(?<!:)\bclass="([^"]*)"/g;
+  const filterOne = (html) => {
+    if (!html) return html;
+    return html.replace(classAttrRe, (full, classList) => {
+      const kept = classList.split(/\s+/).filter((token) => {
+        if (!token) return false;
+        if (token.includes('{{')) return true; // never touch a placeholder token
+        const live = classExistsInCss(token, css);
+        if (!live) dropped.add(token);
+        return live;
+      });
+      return kept.length ? ` class="${kept.join(' ')}"` : '';
+    });
+  };
+  const filtered = {
+    ...template,
+    wrapper: filterOne(template.wrapper),
+    ...(template.row !== undefined ? { row: filterOne(template.row) } : {}),
+  };
+  return { template: filtered, dropped: [...dropped] };
+}
+
 // Single source of truth for "is this stored template still real" — fetches
 // the exact live page this draft is about to publish to (not some other
 // reference page), so the check reflects the exact CSS that page will
@@ -198,7 +251,10 @@ export async function checkTemplateFreshness({ pageUrl, templateEntry, fetchPage
 
   const css = cssParts.join('\n');
   const missingClasses = classes.filter((cls) => !classExistsInCss(cls, css));
-  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes };
+  // `css` is included so a caller with a stale result can filter the template
+  // down to what actually ships (filterTemplateToLiveClasses) without a
+  // second fetch of the exact same stylesheets.
+  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes, css };
 }
 
 // The same placeholder contract marker-merge.js's renderFaqHtml/
@@ -329,7 +385,9 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
   const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: template, fetchPage, fetchStylesheet })
     .catch((err) => ({ ok: false, error: err.message }));
   if (!freshness.ok) return { ok: false, reason: 'unreachable', error: freshness.error };
-  if (freshness.stale) return { ok: false, reason: 'stale', missingClasses: freshness.missingClasses };
+  // css is carried through so a caller can filterTemplateToLiveClasses and
+  // re-verify without a second round trip to the exact same stylesheets.
+  if (freshness.stale) return { ok: false, reason: 'stale', missingClasses: freshness.missingClasses, css: freshness.css };
 
   // A template with no literal classes at all (e.g. a bare `<dl>{{ROWS}}</dl>`)
   // passes the freshness check vacuously — there is nothing to disprove. It
@@ -380,8 +438,53 @@ export function componentTemplateActionTypeFor(generatorId) {
 export function componentTemplateVerification(site, actionType) {
   const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
   if (!componentKey) return { ok: true, reason: 'no-concept', componentKey: null };
+  // 'content-wrapper' has its own, looser rule — see contentWrapperAvailability
+  // just below for why a stricter check here would contradict what the apply
+  // path actually does.
+  if (actionType === 'content-wrapper') return contentWrapperAvailability(site);
   const template = site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
   return { ...isTemplateVerified(actionType, template), componentKey, actionType };
+}
+
+// The gate for 'content-wrapper' specifically, separated out because the
+// strict rule above is stricter than what actually happens at apply time.
+//
+// newpage-render.js's wrapInSiteProse already degrades gracefully: configured
+// template -> project one from the design profile -> bare unwrapped body. A
+// usable design profile is therefore already enough for a net-new page to
+// render with real site styling, with no stored componentTemplates entry
+// required at all — the gate was the only place still insisting on one. That
+// mismatch is exactly what blocked 28 real, shippable blog-outline
+// recommendations on site 1: the gate said "no component template is
+// configured for this site yet" while the apply path had a perfectly good
+// fallback ready to use.
+//
+// So this asks the honest question: can wrapInSiteProse produce SOMETHING
+// better than a bare body right now? Yes if either a verified template
+// exists, or the site has a usable profile to project from at apply time (the
+// projection now runs the same live-CSS check resolveOrCreateComponentTemplate
+// does above, so "usable" here is not a blank check — see that function's
+// projection branch for the verification itself). Only when neither exists is
+// this genuinely blocked, and the message says the true reason: a design
+// language that hasn't been derived yet, not a template that was never
+// "configured" by a human who was never asked to configure one.
+export function contentWrapperAvailability(site) {
+  const componentKey = COMPONENT_TEMPLATE_KEY['content-wrapper'];
+  const template = site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
+  const verified = isTemplateVerified('content-wrapper', template);
+  if (verified.ok) return { ...verified, componentKey, actionType: 'content-wrapper' };
+
+  if (isProfileUsable(getDesignProfile(site))) {
+    return { ok: true, reason: 'projectable-from-profile', componentKey, actionType: 'content-wrapper' };
+  }
+
+  return {
+    ok: false,
+    reason: 'design-language-not-derived',
+    detail: "This site's design language hasn't been derived yet — the Design Agent has been queued to learn it from the repository. No action needed; this will unblock automatically once that finishes.",
+    componentKey,
+    actionType: 'content-wrapper',
+  };
 }
 
 // LEARN side of the loop this module's RETRIEVE half
@@ -720,10 +823,73 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // template must satisfy — a projection is not trusted just because it was
     // composed locally.
     if (projected && validatePlaceholders(actionType, projected).ok) {
-      const stamped = stampTemplateVerification(projected, {
-        verifiedBy: TEMPLATE_VERIFIED_BY.DESIGN_AGENT,
-        verifiedRef: profile.derivedRef ?? null,
-      });
+      // NEVER STAMP A PROJECTION WITHOUT LIVE EVIDENCE WHEN A LIVE URL EXISTS.
+      //
+      // A projection composes from designProfile fields the Design Agent
+      // recorded, and those can go stale exactly like repo-derived markup
+      // does — or worse, describe a class the site's CSS pipeline never
+      // shipped in the first place. Concretely: zunkireelabs.com's profile
+      // would record layout.prose as `prose prose-lg prose-gray max-w-none`
+      // (read straight off blog-post.njk/glossary-term.njk), but
+      // @tailwindcss/typography is not installed there, so .prose* ships
+      // zero rules. Stamping that unconditionally would "unblock" a
+      // contentWrapper recommendation with a wrapper that renders invisibly
+      // — worse than staying blocked, since it looks fixed.
+      //
+      // So a projection with a live page to check against is checked, same as
+      // an existing template above. Three outcomes:
+      //   - passes as-is: stamp FRESHNESS_CHECK, the strongest evidence.
+      //   - some classes are missing: filter them out and re-check what
+      //     remains — this is fidelity, not a downgrade, since those same
+      //     classes have no effect on the real site's own live pages either.
+      //   - genuinely unreachable (no live URL, or a network blip): fall back
+      //     to the old unconditional DESIGN_AGENT stamp, since that is still
+      //     strictly better evidence than nothing for a site we cannot check.
+      let finalTemplate = projected;
+      let verifiedBy = TEMPLATE_VERIFIED_BY.DESIGN_AGENT;
+      let verifiedRef = profile.derivedRef ?? null;
+      let droppedClasses;
+
+      const pageUrl = sitePageUrl(site);
+      if (pageUrl) {
+        const checked = await verifyTemplateAgainstLiveSite(actionType, projected, { pageUrl, fetchPage, fetchStylesheet })
+          .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+
+        if (checked.ok) {
+          finalTemplate = checked.stamped;
+          verifiedBy = null; // already stamped by verifyTemplateAgainstLiveSite
+        } else if (checked.reason === 'stale') {
+          // checked.css is the exact concatenated stylesheet text
+          // checkTemplateFreshness already fetched for this check — reused
+          // here rather than re-fetched, since it is the same page.
+          const filtered = filterTemplateToLiveClasses(projected, checked.css || '');
+          const reChecked = validatePlaceholders(actionType, filtered.template).ok
+            ? await verifyTemplateAgainstLiveSite(actionType, filtered.template, { pageUrl, fetchPage, fetchStylesheet })
+                .catch(() => ({ ok: false }))
+            : { ok: false };
+          if (reChecked.ok) {
+            finalTemplate = reChecked.stamped;
+            verifiedBy = null;
+            droppedClasses = filtered.dropped;
+          }
+          // If even the filtered version doesn't verify (e.g. every class was
+          // stripped and validatePlaceholders now fails, or the CSS fetch
+          // itself failed), finalTemplate/verifiedBy/verifiedRef stay at
+          // their DESIGN_AGENT defaults above — still a projection, just
+          // without a live-evidence upgrade.
+        }
+        // 'unreachable' and 'invalid-placeholders' both fall through to the
+        // DESIGN_AGENT defaults untouched — this branch already re-validated
+        // placeholders before verifying, so 'invalid-placeholders' here would
+        // only mean the LIVE check disagreed, which should never happen.
+      }
+
+      const stamped = verifiedBy
+        ? stampTemplateVerification(finalTemplate, { verifiedBy, verifiedRef })
+        : finalTemplate;
+      if (droppedClasses?.length) {
+        stamped.droppedClasses = droppedClasses; // audit trail only — inert to every reader, same as verifiedBy/verifiedRef
+      }
       const urlFileMap = {
         ...site.url_file_map,
         siteRoot: {
@@ -738,7 +904,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
         targetId: String(site.id),
         tenantSiteId: site.id,
         tenantName: site.name,
-        metadata: { actionType, componentKey, from: 'design-profile' },
+        metadata: { actionType, componentKey, from: 'design-profile', verifiedBy: stamped.verifiedBy, droppedClasses: droppedClasses?.length ?? 0 },
         success: true,
       }).catch(() => {});
       return { ok: true, template: stamped, source: 'design-profile', componentKey, justCreated: true };
