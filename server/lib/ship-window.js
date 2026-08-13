@@ -10,7 +10,16 @@
 // cron entry and its catch-up guard both read it from here, because a
 // hand-mirrored copy of this hour is exactly the kind of constant this
 // codebase has already had go stale twice.
-export const SHIP_HOUR_LOCAL = Number(process.env.SHIP_HOUR_LOCAL || 13);
+//
+// 07:00, matching CRON_SCHEDULE: detection and shipping are now one morning
+// run (cron.js), so the day's work lands in a single pass — gather, open the
+// PRs, send the mail. The 13:00 split this replaced existed to give "a single
+// moment a human could expect to review a day's work" instead of branches
+// appearing at whatever hour analysis happened to finish; one 07:00 run
+// serves that intent more directly than two runs six hours apart did. The
+// review itself is unchanged and still happens on the PR, which is where
+// autonomy has always ended.
+export const SHIP_HOUR_LOCAL = Number(process.env.SHIP_HOUR_LOCAL || 7);
 
 // Whether a site is eligible to have work SHIPPED at all. Deliberately keyed
 // on the repo, not on GSC/GA4 (listConnectedSites' filter): a site with

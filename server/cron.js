@@ -34,6 +34,26 @@ export function startCron() {
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
       }
+
+      // Shipping runs in the SAME morning pass, immediately after detection,
+      // unless SHIP_CRON_SCHEDULE explicitly asks for a separate hour (see
+      // below). Sequential rather than a second cron entry at the same hour on
+      // purpose: two entries firing at 07:00 would race, and shipping would
+      // read a recommendations table detection had not finished filling.
+      //
+      // Deliberately outside the try above — a detection failure for one site
+      // must not cost every OTHER site its PRs, which is the same per-tenant
+      // isolation runAutoRemediationForAllSites already applies internally.
+      if (!process.env.SHIP_CRON_SCHEDULE) {
+        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+        try {
+          const results = await runAutoRemediationForAllSites();
+          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+        } catch (err) {
+          console.error('[cron] autonomous shipping run error:', err.message);
+        }
+      }
     },
     { timezone: tz }
   );
@@ -200,17 +220,17 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
 
-  // THE SHIPPING RUN. The daily job above (07:00) only DETECTS — it fills the
-  // recommendations table and stops. This is the half that turns those
-  // recommendations into a real branch + PR for every opted-in tenant,
-  // highest severity first and bounded by each site's own daily budget.
-  //
-  // Separate from CRON_SCHEDULE on purpose: detection wants to run as soon as
-  // GSC's data is final, whereas shipping wants a predictable hour a human can
-  // expect to review a batch at. Tying both to one schedule is what made
-  // branches appear the instant an agent noticed something.
-  const shipSchedule = process.env.SHIP_CRON_SCHEDULE || `0 ${SHIP_HOUR_LOCAL} * * *`;
-  if (!cron.validate(shipSchedule)) {
+  // OPT-IN SEPARATE SHIPPING HOUR. By default shipping is chained onto the
+  // morning detection run above, so the day is one pass: gather, open the
+  // PRs, send the mail. Setting SHIP_CRON_SCHEDULE moves shipping back out to
+  // its own hour for a deployment that wants detection and shipping apart —
+  // e.g. to put a review window between them. Set SHIP_HOUR_LOCAL to the same
+  // hour when you do, or the catch-up guard below will disagree with the cron
+  // about when the day's work was owed.
+  const shipSchedule = process.env.SHIP_CRON_SCHEDULE;
+  if (!shipSchedule) {
+    console.log(`[cron] autonomous shipping chained to the daily run (set SHIP_CRON_SCHEDULE to separate them)`);
+  } else if (!cron.validate(shipSchedule)) {
     console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
   } else {
     cron.schedule(shipSchedule, async () => {

@@ -6,10 +6,10 @@ const withRepo = { id: 1, repo_owner: 'acme', repo_name: 'site-a', timezone: 'As
 const noRepo = { id: 2, repo_owner: null, repo_name: null, timezone: 'Asia/Kolkata' };
 
 // A fixed instant, so these assertions don't drift with the wall clock.
-// 2026-08-12T04:00:00Z is 09:30 in Asia/Kolkata (UTC+5:30) — before the 13:00
-// ship hour — and 18:00 in Pacific/Kiritimati (UTC+14) — after it. One instant,
+// 2026-08-12T00:00:00Z is 05:30 in Asia/Kolkata (UTC+5:30) — before the 07:00
+// ship hour — and 14:00 in Pacific/Kiritimati (UTC+14) — after it. One instant,
 // two opposite answers, which is the whole point of doing this per site.
-const MORNING_IST = new Date('2026-08-12T04:00:00Z');
+const MORNING_IST = new Date('2026-08-12T00:00:00Z');
 const AFTERNOON_IST = new Date('2026-08-12T09:00:00Z'); // 14:30 IST
 
 describe('isShippable', () => {
@@ -23,9 +23,9 @@ describe('isShippable', () => {
 
 describe('hourInTimezone', () => {
   test('resolves the same instant to different local hours per tenant', () => {
-    assert.equal(hourInTimezone('Asia/Kolkata', MORNING_IST), 9);
-    assert.equal(hourInTimezone('Pacific/Kiritimati', MORNING_IST), 18);
-    assert.equal(hourInTimezone('UTC', MORNING_IST), 4);
+    assert.equal(hourInTimezone('Asia/Kolkata', MORNING_IST), 5);
+    assert.equal(hourInTimezone('Pacific/Kiritimati', MORNING_IST), 14);
+    assert.equal(hourInTimezone('UTC', MORNING_IST), 0);
   });
 });
 
@@ -60,7 +60,10 @@ describe('isShipCatchupOwed', () => {
     assert.equal(isShipCatchupOwed({ site: noTz, alreadyShippedToday: 0, fallbackTimezone: 'Pacific/Kiritimati', now: MORNING_IST }), true);
   });
 
-  test('defaults the ship hour to 13:00', () => {
-    assert.equal(SHIP_HOUR_LOCAL, 13);
+  // Shipping is chained onto the 07:00 detection run (cron.js), so the guard's
+  // hour has to match CRON_SCHEDULE's — a guard that still believed in 13:00
+  // would call the day's work "not owed yet" for six hours after it was.
+  test('defaults the ship hour to 07:00, matching the daily run', () => {
+    assert.equal(SHIP_HOUR_LOCAL, 7);
   });
 });
