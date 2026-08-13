@@ -82,16 +82,31 @@ describe('createOpenHandsHandler — success path', () => {
 });
 
 describe('createOpenHandsHandler — failure paths', () => {
-  test('throws with the parsed detail when the task reports status:"error" (exit 1)', async () => {
+  // The contract changed deliberately: the thrown message now NAMES THE STAGE in
+  // developer-authored text (a UserFacingError), because worker.js persists that
+  // onto the job row and it is the only thing an operator can read without
+  // shelling into the container. The task's own detail is preserved on `cause`,
+  // where it reaches the internal log but never the job row.
+  test('names the stage, and keeps the task\'s own detail on cause', async () => {
     const handler = handlerWithStub('fake-design-task-fail.js');
-    await assert.rejects(handler({ id: 1 }), /stub: task failed on purpose/);
+    const err = await handler({ id: 1 }).then(() => null, (e) => e);
+
+    assert.ok(err, 'handler must reject');
+    assert.equal(err.userFacing, true);
+    assert.match(err.message, /could not analyse this site's repository/i);
+    assert.match(err.cause.message, /stub: task failed on purpose/, 'the real detail must still be reachable');
+    assert.doesNotMatch(err.message, /stub: task failed on purpose/, 'raw task output must not reach the persisted message');
   });
 
   test('throws a diagnosable error when the subprocess crashes before a container even exists', async () => {
     const dockerLog = tempLogPath('docker');
     await withTestLogs({ DESIGN_AGENT_TEST_DOCKER_LOG: dockerLog }, async () => {
       const handler = handlerWithStub('fake-design-task-crash.js');
-      await assert.rejects(handler({ id: 2 }), /OpenHands task failed/);
+      const err = await handler({ id: 2 }).then(() => null, (e) => e);
+      assert.equal(err.userFacing, true);
+      assert.match(err.message, /exited \(code \d+\) without producing a result/i, 'the exit code is safe to name');
+      assert.match(err.cause.message, /^stderr: /, 'stderr is preserved for the internal log');
+      assert.doesNotMatch(err.message, /stderr/i, 'stderr can carry tokens — it must never reach the persisted message');
       // Nothing to clean up — the backstop must not fire on a null container id.
       assert.equal(fs.existsSync(dockerLog), false, 'docker backstop should not run when no container id was ever seen');
     });
@@ -167,7 +182,7 @@ describe('createOpenHandsHandler — timeout / forced termination', () => {
       async () => {
         const handler = handlerWithStub('fake-design-task-hang-honor-sigterm.js', { timeoutMs: 300, killGraceMs: 2000 });
         const startedAt = Date.now();
-        await assert.rejects(handler({ id: 6 }), /timed out/i);
+        await assert.rejects(handler({ id: 6 }), /without finishing and was stopped/i);
         const elapsedMs = Date.now() - startedAt;
 
         // Should resolve close to timeoutMs, not wait out the full killGraceMs
@@ -192,7 +207,7 @@ describe('createOpenHandsHandler — timeout / forced termination', () => {
       async () => {
         const handler = handlerWithStub('fake-design-task-hang-ignore-sigterm.js', { timeoutMs: 300, killGraceMs: 400 });
         const startedAt = Date.now();
-        await assert.rejects(handler({ id: 7 }), /timed out/i);
+        await assert.rejects(handler({ id: 7 }), /without finishing and was stopped/i);
         const elapsedMs = Date.now() - startedAt;
 
         // Must have waited out roughly timeoutMs + killGraceMs before the

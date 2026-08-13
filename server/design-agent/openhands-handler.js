@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { getSiteById } from '../store/read.js';
+import { UserFacingError } from '../lib/errors.js';
 import { checkoutRepoTarball } from './repo-checkout.js';
 import { findRelevantMemory } from '../agent-memory.js';
 
@@ -146,7 +147,15 @@ export function createOpenHandsHandler({
     const workspaceDir = await mkdtemp(join(tmpdir(), 'design-agent-'));
     let containerId = null;
     try {
-      await workspaceSource(workspaceDir, job);
+      // Naming this stage matters more than the others: it is the first thing
+      // that touches the network (a GitHub tarball of the tenant's repo for the
+      // real handlers), so a revoked or expired PAT surfaces here — and did so
+      // indistinguishably from every other failure before this.
+      try {
+        await workspaceSource(workspaceDir, job);
+      } catch (err) {
+        throw new UserFacingError("The Design Agent could not fetch this site's repository. Check that the site's GitHub token is valid and still has access to the configured repo.", { cause: err });
+      }
 
       const env = {
         ...process.env,
@@ -162,13 +171,23 @@ export function createOpenHandsHandler({
       });
 
       if (timedOut) {
-        throw new Error(`OpenHands task timed out after ${timeoutMs}ms and was terminated`);
+        // Stage-naming, deliberately free of interpolated exception text so it
+        // is safe to persist and show — worker.js surfaces UserFacingError
+        // messages onto the job row, which is the only place an operator can
+        // read them without shelling into the container.
+        throw new UserFacingError(`The Design Agent ran for ${Math.round(timeoutMs / 1000)}s without finishing and was stopped. The site's repository analysis is taking longer than the configured limit.`);
       }
       if (!result) {
-        throw new Error(`OpenHands task failed: process exited (code ${code}) with no result line${stderrTail ? ` — stderr: ${stderrTail}` : ''}`);
+        // The exit code is safe to name; stderrTail is NOT — it can carry
+        // tokens, hostnames and provider errors — so it stays in the internal
+        // log only, reachable via the correlation id worker.js records.
+        throw new UserFacingError(`The Design Agent's analysis process exited (code ${code}) without producing a result. This usually means its container or Python environment could not start — see the worker logs for this job's reference id.`, { cause: new Error(`stderr: ${stderrTail || '(empty)'}`) });
       }
       if (result.status !== 'ok') {
-        throw new Error(`OpenHands task failed: ${result.detail || 'unknown error'}`);
+        // result.detail is the Python task's own structured message, not a raw
+        // exception, so naming the stage is safe; the detail itself still goes
+        // to the internal log rather than the job row.
+        throw new UserFacingError("The Design Agent finished but reported that it could not analyse this site's repository.", { cause: new Error(`OpenHands detail: ${result.detail || 'unknown error'}`) });
       }
       return { jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates };
     } finally {

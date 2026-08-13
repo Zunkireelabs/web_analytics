@@ -85,8 +85,20 @@ export async function processOneJob({
     await finishExecutionJob(job.id, { status: 'completed', result: outcome || null });
     return { jobId: job.id, status: 'completed', result: outcome };
   } catch (err) {
+    // A UserFacingError is developer-authored text with no interpolated
+    // exception detail (see lib/errors.js) — the one kind of message this
+    // codebase already trusts to reach a customer. Preferring it here is what
+    // lets a job say WHICH stage failed instead of only "failed unexpectedly".
+    //
+    // That distinction is not cosmetic. Job 2696 on site 1 ran 43.8s and then
+    // failed with the generic text, and because the real cause exists only in
+    // this container's stdout, it could not be diagnosed from the database at
+    // all — days later it was still unknown whether the repo checkout, Docker,
+    // or the model call had broken. The internal log and its correlation id are
+    // still written either way; this only decides how much the job row itself
+    // can honestly say.
     const { message, id } = safeMessage('design-agent.worker.processOneJob', err, 'Design Agent job failed unexpectedly.');
-    await appendJobLog(job.id, `Job failed: ${message} (ref: ${id})`);
+    await appendJobLog(job.id, `Job failed: ${err?.userFacing ? err.message : message} (ref: ${id})`);
     await finishExecutionJob(job.id, { status: 'failed' });
     return { jobId: job.id, status: 'failed', error: err.message };
   }
