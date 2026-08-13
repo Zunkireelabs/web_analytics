@@ -305,12 +305,23 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
 
-  // Analyst -> Action Center sync. Fires at 04:00 UTC, an hour after
-  // data-analyst-agent's own 03:00 UTC nightly cycle
-  // (ingest_schedule_hour_utc), so it reads a completed night's insights
-  // rather than racing a run in progress. Scheduled in UTC explicitly, not
-  // the site timezone, because it is pinned to that service's schedule.
-  const analystSync = process.env.ANALYST_SYNC_CRON_SCHEDULE || '0 4 * * *';
+  // Analyst -> Action Center sync. Ordering is the whole point of the hour
+  // chosen here, and it is easy to get wrong because the two halves of this
+  // file run on different clocks: the morning run is scheduled in the app's
+  // TZ (Asia/Kolkata by default), while this and the Python pipeline are
+  // pinned to UTC.
+  //
+  // The full chain, in UTC:
+  //   22:00  data-analyst-agent nightly pipeline (host crontab, deploy-staging.yml)
+  //   00:00  this sync — carries the night's recommendations into the Action Center
+  //   01:30  the morning run (07:00 Asia/Kolkata) detects, ships and mails
+  //
+  // It used to fire at 04:00 UTC, which is 09:30 Asia/Kolkata — ninety minutes
+  // AFTER the morning run had already opened the day's PRs, so analyst findings
+  // sat unused until the next day. Two hours ahead of the run now, rather than
+  // one, because the pipeline it reads is the long pole (forecasts, ML, LLM
+  // narration) and a slow night must not push its output past the run.
+  const analystSync = process.env.ANALYST_SYNC_CRON_SCHEDULE || '0 0 * * *';
   if (!cron.validate(analystSync)) {
     console.error(`[cron] invalid ANALYST_SYNC_CRON_SCHEDULE "${analystSync}" — analyst sync NOT scheduled.`);
   } else {

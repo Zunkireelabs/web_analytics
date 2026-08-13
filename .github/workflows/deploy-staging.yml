@@ -308,18 +308,29 @@ jobs:
             # data-analyst-agent/docker-compose.yml.
             #
             # It also starves the Node side: server/cron.js syncs analyst
-            # recommendations into the Action Center at 04:00 UTC, with a
-            # comment describing "data-analyst-agent's own 03:00 UTC nightly
-            # cycle" that nothing was scheduling. 03:00 keeps that documented
-            # hour, and the one-hour gap before the sync.
+            # recommendations into the Action Center, and that sync has been
+            # running nightly carrying nothing.
+            #
+            # 22:00 UTC, and the hour is load-bearing. The app's cron runs in
+            # TZ (Asia/Kolkata), so its 07:00 morning run — detect, ship, mail
+            # — is 01:30 UTC. The chain has to COMPLETE before that:
+            #   22:00 UTC  this pipeline
+            #   00:00 UTC  analyst -> Action Center sync (server/cron.js)
+            #   01:30 UTC  morning run consumes it, same day
+            # An earlier draft of this used 03:00 UTC, which is 08:30 in
+            # Asia/Kolkata — after the run it was meant to feed.
+            #
+            # CRON_TZ is set explicitly rather than trusting the host's local
+            # time, since the offset from the app's TZ is the entire reason
+            # this hour works.
             #
             # Installed idempotently on every deploy (filter out the old line,
             # append the current one) so a redeploy can't stack duplicates and
-            # a changed path corrects itself.
+            # a changed path or hour corrects itself.
             echo "Installing Data Analyst nightly pipeline cron..."
             NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
-            (crontab -l 2>/dev/null | grep -v 'run_nightly_pipeline'; echo "0 3 * * * $NIGHTLY_CMD") | crontab -
-            echo "Data Analyst nightly pipeline scheduled (03:00 UTC daily):"
+            (crontab -l 2>/dev/null | grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$'; echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
+            echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
             crontab -l | grep run_nightly_pipeline
 
       - name: Verify Health
