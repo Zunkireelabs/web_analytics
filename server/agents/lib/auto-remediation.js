@@ -111,20 +111,34 @@ export async function autoRemediateSafeRecommendations(siteId) {
       const approved = await approveAndPublishDraft(siteId, draft.id, { userId: null });
       if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
 
-      // Open the PR, and STOP. This loop deliberately never merges and never
-      // calls markDraftImplemented: a human reviewing and merging on GitHub is
-      // the intended final gate, and the existing PR-status poller
-      // (cron.js's ':20 past the hour' runPrStatusPollForAllSites) is what
-      // flips the draft to 'implemented' once that merge actually happens.
-      // So the unattended chain ends at a reviewable PR, by design.
+      // Ensure the chain ends at an OPEN PR, and STOP. This loop deliberately
+      // never merges and never calls markDraftImplemented: a human reviewing and
+      // merging on GitHub is the intended final gate, and the existing PR-status
+      // poller (cron.js's ':20 past the hour' runPrStatusPollForAllSites) flips
+      // the draft to 'implemented' once that merge actually happens.
       //
-      // A failure HERE is different in kind from a failure above: the branch
-      // is already pushed and the work is real, it just isn't proposed yet.
-      // Counting it as shipped would overstate what landed, so it counts as a
-      // failure — but the draft is left at 'branch_pushed', where the manual
-      // "Open PR" button in Action Center can still finish it without
-      // regenerating anything.
-      await openDraftPr(siteId, draft.id);
+      // Only when approveAndPublishDraft did NOT already open it. That function
+      // ends in markDraftPrOpened whenever the implementer exposes mergeToStage,
+      // which every real one does — so for the normal path the PR exists before
+      // this line is reached. Calling openDraftPr anyway made it throw "Draft
+      // not found, or has no pushed branch yet" (it requires status
+      // 'branch_pushed', and the draft is already 'pr_opened'), which was caught
+      // below and counted the item as FAILED even though its PR was open and
+      // correct.
+      //
+      // That was not a cosmetic miscount. Three consecutive successes tripped
+      // the circuit breaker and halted the rest of the day's run — so with the
+      // real 30-item budget the loop would have stopped after 3 shipped items
+      // every single day, reporting them all as failures. Caught on the first
+      // real end-to-end run: draft 698 opened PR #47 and was recorded as a
+      // failure.
+      //
+      // A genuine failure here is still different in kind from one above: the
+      // branch is pushed and the work is real, it just isn't proposed yet.
+      // Counting that as shipped would overstate what landed, so it stays a
+      // failure — and the draft is left at 'branch_pushed', where the manual
+      // "Open PR" button can finish it without regenerating anything.
+      if (!approved.pr_number) await openDraftPr(siteId, draft.id);
 
       shipped++;
       consecutiveFailures = 0;

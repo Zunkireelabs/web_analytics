@@ -17,6 +17,7 @@ let site;
 let spentToday;
 const calls = { generated: [], approved: [], prsOpened: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
+let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the normal production path)
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
@@ -27,6 +28,7 @@ function reset() {
   calls.approved = [];
   calls.prsOpened = [];
   failOn = () => false;
+  approveOpensPr = false;
 }
 reset();
 
@@ -57,7 +59,13 @@ mock.module(resolve('../../routes/action-center.js'), {
     },
     approveAndPublishDraft: async (siteId, draftId) => {
       calls.approved.push(draftId);
-      return { id: draftId, branch_name: `auto/${draftId}` };
+      // approveAndPublishDraft ends in markDraftPrOpened whenever the resolved
+      // implementer exposes mergeToStage — which every real one does — so in
+      // production it usually returns with the PR ALREADY open. `approveOpensPr`
+      // switches between that and the rarer stopped-at-branch_pushed shape.
+      return approveOpensPr
+        ? { id: draftId, branch_name: `auto/${draftId}`, pr_number: 47 }
+        : { id: draftId, branch_name: `auto/${draftId}` };
     },
     openDraftPr: async (siteId, draftId) => {
       calls.prsOpened.push(draftId);
@@ -194,5 +202,46 @@ describe('auto-remediation — circuit breaker', () => {
     assert.equal(result.shipped, 3);
     assert.equal(result.failed, 3);
     assert.equal(result.attempted, 6, 'every candidate was still attempted');
+  });
+});
+
+
+// Regression guard for a bug found on the first real end-to-end run, where
+// draft 698 opened PR #47 on zunkireelabs-web and was recorded as a FAILURE.
+//
+// approveAndPublishDraft ends in markDraftPrOpened for every real implementer,
+// so the PR is normally already open by the time this loop's own openDraftPr
+// call is reached. That call requires status 'branch_pushed' and the draft is
+// 'pr_opened', so it threw, and the catch counted a fully successful item as
+// failed. Three consecutive successes then tripped the circuit breaker — with
+// the real 30-item budget the loop would have halted after 3 shipped items
+// every day while reporting them all as failures.
+describe('when approveAndPublishDraft already opened the PR (the normal path)', () => {
+  beforeEach(() => { reset(); approveOpensPr = true; });
+
+  test('does not try to open the PR a second time', async () => {
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.prsOpened, [], 'the PR already exists — opening it again throws');
+    assert.equal(result.shipped, 1);
+    assert.equal(result.failed, 0);
+  });
+
+  test('three successes in a row do NOT trip the circuit breaker', async () => {
+    recommendations = [rec(1), rec(2), rec(3), rec(4)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 4, 'every item ships');
+    assert.equal(result.stoppedReason, null, 'the breaker must not fire on successes');
+  });
+
+  test('still opens the PR when approve stopped at a pushed branch', async () => {
+    approveOpensPr = false;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.prsOpened, ['d-f1'], 'this path still needs the explicit open');
+    assert.equal(result.shipped, 1);
   });
 });
