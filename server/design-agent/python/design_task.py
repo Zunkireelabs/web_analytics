@@ -387,7 +387,28 @@ def main() -> int:
         print(RESULT_PREFIX + json.dumps({"status": "error", "detail": str(err)}))
         return 1
     except Exception as err:  # noqa: BLE001 — any SDK/LLM/Docker failure maps to a failed job, not a crash
-        print(RESULT_PREFIX + json.dumps({"status": "error", "detail": str(err)}))
+        # `errorClass` is a structured, closed-vocabulary hint for the Node
+        # side (lib/failure-classification.js), NOT free text. Without it an
+        # environment fault here — no Docker daemon, an unpullable sandbox
+        # image, a missing model key — arrives as an ordinary "error" result
+        # and is classified as AGENT_LOGIC, i.e. "our agent reasoned badly",
+        # when in fact nothing ever ran and an engineer must fix the host.
+        # Confirmed live: a machine with Docker stopped reported exactly
+        # "Docker is not available", and was classed as an agent-logic fault.
+        # This is a trusted INTERNAL channel (our own script), which is why
+        # matching on it is legitimate where matching a third-party provider's
+        # message text would not be.
+        text = str(err).lower()
+        if "docker" in text or "daemon" in text:
+            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
+        elif "api key" in text or "unauthorized" in text or "authentication" in text:
+            error_class = "ENVIRONMENT_MODEL_AUTH"
+        else:
+            error_class = None
+        payload = {"status": "error", "detail": str(err)}
+        if error_class:
+            payload["errorClass"] = error_class
+        print(RESULT_PREFIX + json.dumps(payload))
         return 1
 
 
