@@ -81,6 +81,27 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── Design Agent worker ─────────────────────────────────────────
+            # The design-agent-worker container's ONLY env source is this file
+            # (docker-compose's `env_file: .env`, plus NODE_ENV), and this step
+            # rewrites the file wholesale — so a variable missing here is
+            # missing in the container, permanently. LLM_API_KEY was missing,
+            # which is why every real Design Agent job for site 1 has failed.
+            #
+            # server/design-agent/python/design_task.py reads it via
+            # os.getenv("LLM_API_KEY") and builds its LLM BEFORE opening the
+            # DockerWorkspace, so an unset key resolves to None, the container
+            # starts normally, and the job only dies on the first model call —
+            # ~40s in, reported as a generic "Design Agent job failed
+            # unexpectedly" with the real cause only in the container's stdout.
+            #
+            # Reuses the existing OPENAI_API_KEY secret rather than adding a
+            # new one: design_task.py's own default model is gpt-4o-mini, the
+            # same provider this deployment already uses. Note that Design
+            # Agent runs therefore bill to the same OpenAI key as the reports.
+            LLM_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            LLM_MODEL=${{ vars.DESIGN_AGENT_LLM_MODEL || 'gpt-4o-mini' }}
+
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Shares OPENAI_API_KEY above but requires this separate flag
             # before it fires (server/agents/ai-recommendation.js) — a
