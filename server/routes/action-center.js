@@ -6,7 +6,7 @@ import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-import { createExecutionJob, createDesignAgentJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
+import { createExecutionJob, createDesignAgentJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
@@ -802,12 +802,36 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
   }
 }
 
+// How many safe-tier recommendations one manual "Execute Today's Safe Fixes"
+// click ships. THE one definition — the Action Center UI reads it back off
+// /action-center/execution-stats/today rather than keeping its own copy, and
+// sends no limit of its own, so the number on the button and the number the
+// server actually ships cannot disagree. (Before this, 15 was written once
+// here and three more times in ActionCenter.jsx.)
+//
+// Raised from 15 to 30 on request. What actually bounds risk here is
+// per-item and unchanged by the count: only 'safe'-tier generators are
+// eligible (agents/lib/risk-tiers.js), the Quality Gate runs inside
+// generateDraft with a bounded regeneration attempt, approveAndPublishDraft
+// re-validates before the PR opens, every item lands on ONE shared branch/PR
+// a human still has to merge, and a failure on one item never stops the rest.
+// So the batch size changes throughput, not what can reach a repo.
+//
+// What it DOES change is wall-clock: 30 items each doing an LLM draft plus a
+// GitHub push can outrun the browser's own 5-minute fetch ceiling
+// (web/src/api.js's REQUEST_TIMEOUT_MS) on a slow run. The server finishes
+// the job either way, so the client recovers via
+// /action-center/execution-jobs/latest below rather than reporting a failure
+// that didn't happen — without that, raising this number would have made
+// failed items LESS visible, not more.
+export const SAFE_FIX_BATCH_LIMIT = 30;
+
 // "Execute Today's Safe Fixes" — picks up to `limit` open, safe-tier
 // recommendations not already claimed by another job, ships each one via
 // the chain above under ONE execution_jobs row. A failure on one item
 // doesn't stop the rest; the job's final branch/PR reflect whatever the
 // last successful item produced (they all share the same batch branch/PR).
-export async function executeSafeFixes(siteId, { userId, limit = 15 } = {}) {
+export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
   const recs = await listOpenSafeRecommendations(siteId, limit);
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
   if (recs.length === 0) {
@@ -892,6 +916,28 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   }
 });
 
+// MUST stay above the '/:id' route below — Express matches in declaration
+// order, and 'latest' would otherwise be parsed as an :id.
+//
+// Recovery path for a bulk run whose HTTP response the browser gave up on
+// (see getLatestBulkExecutionJob): the server finished the job, so the
+// per-item failure detail the Action Center wants to render already exists;
+// this is how a client that lost its response gets back to it. Returns the
+// same { shipped, failed, job } summary shape executeSafeFixes itself
+// resolves with, recomputed from the persisted per-item rows, so the UI can
+// render one banner without caring which path produced it.
+router.get('/action-center/execution-jobs/latest', async (req, res, next) => {
+  try {
+    const job = await getLatestBulkExecutionJob(req.siteId);
+    if (!job) return res.json({ job: null, shipped: 0, failed: 0 });
+    res.json({
+      job,
+      shipped: job.items.filter((i) => i.status === 'approved').length,
+      failed: job.items.filter((i) => i.status === 'failed').length,
+    });
+  } catch (e) { next(e); }
+});
+
 // Per-item detail for a bulk/single execution job — what executeSafeFixes'
 // and approveAndShipRecommendation's summary counts don't show: which
 // recommendations failed and why (execution_job_recommendations.error).
@@ -903,9 +949,12 @@ router.get('/action-center/execution-jobs/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// batchLimit rides along on the stats the Action Center already loads on
+// mount, so the UI can label its Execute Safe Fixes button with the real
+// server-side cap instead of hardcoding a copy that silently drifts.
 router.get('/action-center/execution-stats/today', async (req, res, next) => {
   try {
-    res.json(await getTodayExecutionStats(req.siteId));
+    res.json({ ...(await getTodayExecutionStats(req.siteId)), batchLimit: SAFE_FIX_BATCH_LIMIT });
   } catch (e) { next(e); }
 });
 

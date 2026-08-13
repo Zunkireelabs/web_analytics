@@ -183,6 +183,10 @@ export default function ActionCenter() {
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
   const [executionJobDetail, setExecutionJobDetail] = useState(null);
+  // True only while re-fetching a bulk run whose HTTP response the browser
+  // abandoned — the work itself is still fine, so this must never read as an
+  // error state (see executeSafeFixes' catch).
+  const [recoveringExecution, setRecoveringExecution] = useState(false);
   const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [recheckingId, setRecheckingId] = useState(null);
@@ -214,7 +218,12 @@ export default function ActionCenter() {
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
   }).catch(() => setDrafts([]));
 
-  const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed }
+  const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed, batchLimit }
+  // The server's real cap (routes/action-center.js's SAFE_FIX_BATCH_LIMIT),
+  // not a copy of it. Null until the mount fetch lands, which is why the
+  // button below falls back to the plain eligible count rather than a
+  // hardcoded guess for that first moment.
+  const safeFixBatchLimit = todayStats?.batchLimit ?? null;
   const loadTodayStats = () => api.actionCenter.todayExecutionStats().then(setTodayStats).catch(() => {});
 
   useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, []);
@@ -280,24 +289,56 @@ export default function ActionCenter() {
     }
   };
 
-  // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to 15)
-  // through the existing Generate -> Submit -> Approve chain automatically,
-  // one execution job, one shared branch/PR. Manual-tier recommendations
-  // (landing pages, pricing, nav, etc.) are never included — they always
-  // need the stepped flow below.
+  // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to the
+  // server's SAFE_FIX_BATCH_LIMIT) through the existing Generate -> Submit ->
+  // Approve chain automatically, one execution job, one shared branch/PR.
+  // Manual-tier recommendations (landing pages, pricing, nav, etc.) are never
+  // included — they always need the stepped flow below.
+  //
+  // Sends NO limit on purpose: the cap is the server's to decide (see
+  // routes/action-center.js's SAFE_FIX_BATCH_LIMIT), and this component reads
+  // the same number back via todayStats.batchLimit purely to label the button.
+  // Passing one from here is what let the UI promise 15 while the server was
+  // free to ship a different number.
   const executeSafeFixes = async () => {
     setExecutingSafeFixes(true);
     setError(null);
     setExecutionResult(null);
     setExecutionJobDetail(null);
     try {
-      const result = await api.actionCenter.executeSafeFixes(15);
+      const result = await api.actionCenter.executeSafeFixes();
       setExecutionResult(result);
       loadRecs();
       loadDrafts();
       loadTodayStats();
     } catch (e) {
-      setError(e.message || 'Execute Safe Fixes failed');
+      // A batch big enough to outrun web/src/api.js's 5-minute fetch ceiling
+      // aborts HERE while the server keeps going and finishes the job — so
+      // this is not a failure, and reporting it as one would hide the very
+      // per-item PR failures this banner exists to show. Recover by asking
+      // for the run we already started (it's the site's latest bulk job) and
+      // rendering its real, persisted result instead.
+      const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+      if (timedOut) {
+        setRecoveringExecution(true);
+        try {
+          const recovered = await api.actionCenter.latestExecutionJob();
+          if (recovered.job) {
+            setExecutionResult(recovered);
+            loadRecs();
+            loadDrafts();
+            loadTodayStats();
+          } else {
+            setError('The safe-fix run is still going. It will finish on the server — reload in a few minutes to see the result.');
+          }
+        } catch {
+          setError('The safe-fix run is still going on the server. Reload in a few minutes to see which fixes shipped and which failed.');
+        } finally {
+          setRecoveringExecution(false);
+        }
+      } else {
+        setError(e.message || 'Execute Safe Fixes failed');
+      }
     } finally {
       setExecutingSafeFixes(false);
     }
@@ -435,6 +476,13 @@ export default function ActionCenter() {
         </div>
       )}
 
+      {recoveringExecution && (
+        <div className="text-xs font-semibold text-slate-600 bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 leading-relaxed flex items-center gap-2">
+          <Zap size={14} className="text-slate-400 shrink-0 animate-pulse" />
+          <span>This batch is taking longer than the browser will wait — the run is still going on the server. Fetching its result…</span>
+        </div>
+      )}
+
       {executionResult && (
         <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed">
           <div className="flex items-center justify-between gap-2">
@@ -466,8 +514,12 @@ export default function ActionCenter() {
             </span>
           </div>
 
+          {/* Scrolls rather than truncates: a full batch can fail every item,
+              and a silently cut-off list would read as "only these failed."
+              Every failure stays reachable, the banner just stops pushing the
+              rest of the page down. */}
           {executionJobDetail && (
-            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5">
+            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5 max-h-80 overflow-y-auto">
               {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => {
                 const Row = it.draft_id ? 'button' : 'div';
                 return (
@@ -584,12 +636,14 @@ export default function ActionCenter() {
               <button
                 onClick={executeSafeFixes}
                 disabled={executingSafeFixes || safeEligibleCount === 0}
-                title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
+                title={safeEligibleCount === 0
+                  ? 'No safe-tier recommendations open right now'
+                  : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
                 className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer ml-auto shrink-0"
                 style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
               >
                 <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
-                {executingSafeFixes ? '…' : Math.min(15, safeEligibleCount)}
+                {executingSafeFixes ? '…' : Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)}
               </button>
 
               {/* Live "today" counters — distinct from the Zap button's live
