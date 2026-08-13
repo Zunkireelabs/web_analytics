@@ -182,7 +182,15 @@ export async function checkClientBuildStatus(site, ref, getCheckRuns = getCheckR
   if (run.conclusion !== 'success') {
     return {
       ok: false, reason: 'client-build-check-failed',
-      error: `"${CLIENT_BUILD_CHECK_NAME}" check on "${ref}" concluded "${run.conclusion}" — the real built page likely contains raw Markdown or unresolved template syntax. Open the PR's Checks tab for details before merging.`,
+      // Two independent things can fail inside this one check run (they run
+      // as steps in the same job — see rendering-validation-templates/
+      // workflow.yml): the built HTML still has raw Markdown/unresolved
+      // template syntax, OR a change leaked into sibling pages of a shared,
+      // data-driven template family (check-family-siblings.mjs). Either way
+      // the check run's own conclusion already fails closed here — this is
+      // just an honest error message pointing at both possible causes rather
+      // than naming only the first one that used to exist.
+      error: `"${CLIENT_BUILD_CHECK_NAME}" check on "${ref}" concluded "${run.conclusion}" — either the real built page contains raw Markdown/unresolved template syntax, or a change leaked into sibling pages of a shared template family. Open the PR's Checks tab for details before merging.`,
     };
   }
   return { ok: true };
