@@ -3,7 +3,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
+import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 
@@ -32,6 +33,26 @@ export function startCron() {
         console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
+      }
+
+      // Shipping runs in the SAME morning pass, immediately after detection,
+      // unless SHIP_CRON_SCHEDULE explicitly asks for a separate hour (see
+      // below). Sequential rather than a second cron entry at the same hour on
+      // purpose: two entries firing at 07:00 would race, and shipping would
+      // read a recommendations table detection had not finished filling.
+      //
+      // Deliberately outside the try above — a detection failure for one site
+      // must not cost every OTHER site its PRs, which is the same per-tenant
+      // isolation runAutoRemediationForAllSites already applies internally.
+      if (!process.env.SHIP_CRON_SCHEDULE) {
+        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+        try {
+          const results = await runAutoRemediationForAllSites();
+          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+        } catch (err) {
+          console.error('[cron] autonomous shipping run error:', err.message);
+        }
       }
     },
     { timezone: tz }
@@ -199,6 +220,48 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] hourly catch-up guard scheduled (fires at :05 each hour)');
 
+  // OPT-IN SEPARATE SHIPPING HOUR. By default shipping is chained onto the
+  // morning detection run above, so the day is one pass: gather, open the
+  // PRs, send the mail. Setting SHIP_CRON_SCHEDULE moves shipping back out to
+  // its own hour for a deployment that wants detection and shipping apart —
+  // e.g. to put a review window between them. Set SHIP_HOUR_LOCAL to the same
+  // hour when you do, or the catch-up guard below will disagree with the cron
+  // about when the day's work was owed.
+  const shipSchedule = process.env.SHIP_CRON_SCHEDULE;
+  if (!shipSchedule) {
+    console.log(`[cron] autonomous shipping chained to the daily run (set SHIP_CRON_SCHEDULE to separate them)`);
+  } else if (!cron.validate(shipSchedule)) {
+    console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
+  } else {
+    cron.schedule(shipSchedule, async () => {
+      console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+      try {
+        const results = await runAutoRemediationForAllSites();
+        const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+        console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] autonomous shipping run error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] autonomous shipping scheduled "${shipSchedule}" (${tz})`);
+  }
+
+  // Catch-up guard for the shipping run above — the same role the :05 guard
+  // plays for the morning job, and for the same recorded reason: cron is not a
+  // reliable trigger on a machine that sleeps, and this app runs on one. A
+  // missed 13:00 fire would otherwise cost a full day's PR silently. Fires at
+  // :35 to stay clear of the other four hourly sweeps. Per-site gating (has
+  // this site's own ship hour passed, did it already produce work today) lives
+  // in the job, not here, because it depends on each site's timezone.
+  cron.schedule('35 * * * *', async () => {
+    try {
+      await runAutoRemediationCatchupForAllSites(tz);
+    } catch (err) {
+      console.error('[cron] autonomous shipping catch-up error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] autonomous shipping catch-up scheduled (fires at :35 each hour)');
+
   // Verify stage — independent of the hourly catch-up guard above (that one
   // is a per-site "has today's report run" check; this is a per-row
   // "is this fix_verifications check due" check). Fires every hour, every
@@ -213,6 +276,22 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] fix verification scheduled (fires at :10 each hour)');
 
+  // Impact measurement — the same per-row due check as fix verification above,
+  // asking the other question about a merged fix: not "is the issue gone" but
+  // "what did it do to real Search Console numbers". Its rows come due ~31 days
+  // after a merge (28 days of post-merge data plus GSC's own 3-day lag), so
+  // this sweep is almost always a no-op and is cheap when it isn't. Hourly
+  // rather than daily for the same reason as the verification sweep: a merge
+  // can land at any hour, so nothing should wait for a fixed morning gate.
+  cron.schedule('40 * * * *', async () => {
+    try {
+      await runFixImpactMeasurementsForAllSites();
+    } catch (err) {
+      console.error('[cron] fix impact measurement error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] fix impact measurement scheduled (fires at :40 each hour)');
+
   // PR-status polling fallback — independent safety net alongside the
   // GitHub webhook (routes/webhooks.js) for sites where the webhook was
   // never registered or a delivery was missed, so a merged PR's drafts
@@ -225,6 +304,36 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
+
+  // Analyst -> Action Center sync. Ordering is the whole point of the hour
+  // chosen here, and it is easy to get wrong because the two halves of this
+  // file run on different clocks: the morning run is scheduled in the app's
+  // TZ (Asia/Kolkata by default), while this and the Python pipeline are
+  // pinned to UTC.
+  //
+  // The full chain, in UTC:
+  //   22:00  data-analyst-agent nightly pipeline (host crontab, deploy-staging.yml)
+  //   00:00  this sync — carries the night's recommendations into the Action Center
+  //   01:30  the morning run (07:00 Asia/Kolkata) detects, ships and mails
+  //
+  // It used to fire at 04:00 UTC, which is 09:30 Asia/Kolkata — ninety minutes
+  // AFTER the morning run had already opened the day's PRs, so analyst findings
+  // sat unused until the next day. Two hours ahead of the run now, rather than
+  // one, because the pipeline it reads is the long pole (forecasts, ML, LLM
+  // narration) and a slow night must not push its output past the run.
+  const analystSync = process.env.ANALYST_SYNC_CRON_SCHEDULE || '0 0 * * *';
+  if (!cron.validate(analystSync)) {
+    console.error(`[cron] invalid ANALYST_SYNC_CRON_SCHEDULE "${analystSync}" — analyst sync NOT scheduled.`);
+  } else {
+    cron.schedule(analystSync, async () => {
+      try {
+        await runAnalystSyncForAllSites();
+      } catch (err) {
+        console.error('[cron] analyst sync error:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log(`[cron] analyst -> Action Center sync scheduled "${analystSync}" (UTC)`);
+  }
 
   // Stale audit-run reaper — independent safety net alongside the same
   // reapStaleAuditRuns() call at server startup (server/index.js). Startup

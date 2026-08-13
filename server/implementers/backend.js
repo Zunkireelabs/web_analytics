@@ -10,6 +10,8 @@ import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/h
 import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
 import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
+import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
+import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
@@ -686,7 +688,7 @@ async function previewLiveBrokenLinkFix(site, draft) {
 // is the one way a human's already-confirmed choice re-enters this — passed
 // through from routes/action-center.js after a prior 'render-mode-uncertain'
 // stop, never persisted as site config.
-async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = baseBranch(site)) {
+async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = baseBranch(site), { discoverRoutes = discoverPaginationRoutes } = {}) {
   const page = draft.content?.page || draft.input?.page;
 
   // analytics-install installs a tracking script SITEWIDE (GA4/Meta Pixel) —
@@ -706,6 +708,31 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     return isSitewideInstall
       ? { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.layoutTemplate is not configured — set it via `npm run connect-repo` before this can be applied.' }
       : { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${page || '(no page)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
+  }
+
+  // SHARED-TEMPLATE SAFETY BACKSTOP.
+  //
+  // filePath above came from resolveFile — an explicit url_file_map entry, an
+  // exact page or a regex pattern. That config can be stale, copy-pasted from
+  // another URL, or simply predate the site's route families being
+  // understood; page-resolution.js's resolver already rejects a mapping like
+  // this at the RECOMMENDATION stage when it can prove the target is a
+  // discovered pagination route's own generator template. This is the same
+  // check at the APPLY stage — the backstop that makes a mis-mapped
+  // `pages[]`/`patterns[]` entry non-fatal to the SITE rather than fatal to
+  // every other page that shares the file it points at. isSitewideInstall's
+  // siteRoot.layoutTemplate target is exempt by construction (its shared
+  // target IS the design), so it never even asks the question.
+  //
+  // The decision itself lives in action-scope.js's checkSharedTemplateWrite,
+  // not here — backend.js's own import graph cannot be exercised under
+  // node:test's module mocking (see backend.test.js's header comment), so the
+  // actual logic needs to live somewhere unit-testable.
+  if (!isSitewideInstall) {
+    const refusal = await checkSharedTemplateWrite(site, page, draft.action_type, filePath, {
+      discoverRoutes, matchRoute: matchPaginationRoute,
+    });
+    if (refusal) return { ok: false, ...refusal };
   }
 
   const markerMap = resolveMarkers(site, page, draft.action_type);
@@ -778,7 +805,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
   }
 
-  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates);
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile);
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Resolves any marker in markerMap that isn't already in the live file —

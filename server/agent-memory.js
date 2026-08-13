@@ -1,6 +1,8 @@
 import { query } from './db.js';
 import { sanitizeForCustomer } from './lib/errors.js';
+
 import { classifyForSweep } from './agents/lib/lesson-producers.js';
+
 
 // Single authoritative shared learning/memory store for every agent in this
 // platform (migration 097) — replaces fix_lessons (content-generation
@@ -454,9 +456,13 @@ export async function recordFixOutcome({
     [category, scope, executionPermission, siteId, generatorId, problemSignature,
       sanitizeLessonText(symptoms), sanitizeLessonText(rootCause),
       sanitizeLessonText(affectedPattern), sanitizeLessonText(fixStrategy), sanitizeLessonText(fixPattern),
+
       validationRuleId, sourceType, sourceRef,
       siteFingerprint ? JSON.stringify(siteFingerprint) : null,
       repairRecipe ? JSON.stringify(repairRecipe) : null],
+
+      validationRuleId, sourceType, sourceRef],
+
   );
   clearCache();
   return rows[0].id;

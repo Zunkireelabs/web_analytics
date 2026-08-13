@@ -87,12 +87,40 @@ async function main() {
   await createBranch(site, branchName, baseSha);
 
   const workflowContent = renderWorkflow({ defaultBranch: baseBranch, installCommand, buildCommand, outputDir });
-  const scriptContent = readFileSync(join(TEMPLATE_DIR, 'check-rendered-output.mjs'), 'utf8');
+  const cleanOutputScript = readFileSync(join(TEMPLATE_DIR, 'check-rendered-output.mjs'), 'utf8');
+  const siblingsScript = readFileSync(join(TEMPLATE_DIR, 'check-family-siblings.mjs'), 'utf8');
 
-  await commitFilesAtomic(site, branchName, [
-    { path: '.github/workflows/rendering-validation.yml', content: workflowContent },
-    { path: 'scripts/check-rendered-output.mjs', content: scriptContent },
-  ], 'Action Center: install Rendering Validation Gate (Phase 2 — real build check)');
+  try {
+    await commitFilesAtomic(site, branchName, [
+      { path: '.github/workflows/rendering-validation.yml', content: workflowContent },
+      { path: 'scripts/check-rendered-output.mjs', content: cleanOutputScript },
+      { path: 'scripts/check-family-siblings.mjs', content: siblingsScript },
+    ], 'Action Center: install the Rendering Validation Gate (clean-build + sibling non-leakage checks)');
+  } catch (err) {
+    // Writing under .github/workflows/ is a DIFFERENT, narrower GitHub
+    // permission than writing anywhere else in the repo — a fine-grained PAT
+    // needs its "Workflows" permission explicitly granted (Read and write),
+    // and a classic PAT needs the `workflow` OAuth scope, neither of which
+    // "Contents: Read and write" implies. Confirmed empirically installing
+    // this on zunkireelabs-web: committing the two plain .mjs scripts alone
+    // succeeded with the exact same token; only adding the workflow.yml path
+    // under .github/workflows/ produced this 403, with GitHub's own generic
+    // "Resource not accessible by personal access token" message giving no
+    // hint that a SPECIFIC permission (not general repo write access) is
+    // what's missing. Diagnosed here once so the next person doesn't have to
+    // re-derive it from GitHub's docs.
+    if (/403/.test(err.message) && /create tree/.test(err.message)) {
+      throw new Error(
+        `${err.message}\n\nThis specific 403 almost always means the token can write to the repo in general but `
+        + 'lacks GitHub\'s separate "Workflows" permission, which is required to create or modify anything under '
+        + '.github/workflows/ — a fine-grained PAT needs "Workflows: Read and write" added under its repository '
+        + 'permissions (github.com/settings/personal-access-tokens), a classic PAT needs the `workflow` scope. '
+        + 'Update the token, then re-run this script — createBranch/commitFilesAtomic are idempotent, so it is '
+        + 'safe to retry.'
+      );
+    }
+    throw err;
+  }
 
   const existing = await listOpenPullRequestsForBranch(site, branchName);
   if (existing.length > 0) {
@@ -103,10 +131,15 @@ async function main() {
   const { url } = await openPullRequest(site, {
     branch: branchName,
     title: 'Action Center: install Rendering Validation Gate workflow',
-    body: 'Adds `.github/workflows/rendering-validation.yml` and `scripts/check-rendered-output.mjs`.\n\n'
-      + 'On every PR, this builds the site and fails the check if the real rendered HTML output still '
-      + 'contains raw Markdown syntax or unresolved template tags — the client-repo-build half of the '
-      + 'Action Center\'s two-layer Rendering Validation Gate.\n\n'
+    body: 'Adds `.github/workflows/rendering-validation.yml`, `scripts/check-rendered-output.mjs` and '
+      + '`scripts/check-family-siblings.mjs`.\n\n'
+      + 'On every PR, this builds the site and runs two checks against the real rendered HTML output — the '
+      + 'client-repo-build half of the Action Center\'s Rendering Validation Gate:\n\n'
+      + '1. **Clean build** — fails if the output still contains raw Markdown syntax or unresolved template tags.\n'
+      + '2. **Sibling non-leakage** — for any shared, data-driven template family (e.g. this site\'s '
+      + '`/glossary/*`, `/compare/*`, `/locations/*`), builds the PR twice (merge base and head) and fails if '
+      + 'more than one page in a family changed, unless a commit in the PR contains `[family-write]` to declare '
+      + 'that intentional. Proves a page-specific fix did not leak into every page sharing that template.\n\n'
       + 'Review the diff and merge into the default branch to enable it. Afterward, consider making '
       + '"rendering-validation" a required status check in this repo\'s branch protection settings so a '
       + 'red check actually blocks merging (GitHub Settings → Branches — this PAT does not have '

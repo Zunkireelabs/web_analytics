@@ -1,4 +1,4 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, listOpenRecommendations, closeStaleRecommendations, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
@@ -99,22 +99,73 @@ export function recommendationPageKey(item) {
 // built BEFORE buildRecommendations' draftedFindingIds filter specifically
 // so a finding with an unshipped draft still counts as "detected" here and
 // its recommendation row is never closed out from under a pending draft.
+// A blocked recommendation is forced to 'manual' regardless of what
+// risk-tiers.js says about its generator.
+//
+// This used to claim that demoting the tier was *sufficient* to keep blocked
+// items out of the unattended chain, so no second filter was needed anywhere.
+// That was wrong, and the live table proved it: site 1 accumulated 45 rows
+// that were risk_tier='safe' AND blocked. Demotion is only sufficient if this
+// function is the last word on risk_tier, and it was not — migration 078's
+// re-running backfill overwrote the tier behind it (now guarded, and forbidden
+// outright by migration 108's CHECK constraint).
+//
+// So the invariant is now asserted in four places on purpose, and each one
+// should stay: here (the writer), migration 108 (the database), and both
+// unattended selectors — auto-remediation.js's eligibility filter and
+// listOpenSafeRecommendations. A safety property that only one layer enforces
+// is a safety property one bug away from being gone.
+//
+// Blocker-agnostic on purpose. It started as design-verification only, and now
+// also carries "no url_file_map entry for this page" (see
+// buildRecommendations). Any future blocker gets the same treatment for free by
+// setting item.blockedReason, rather than each one inventing its own way to
+// stay out of the autonomous path — which is exactly how one of them would
+// eventually forget to.
+function blockedRiskTier(item) {
+  return item.blockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
+}
+
 export async function syncFromGrounded(siteId, grounded) {
   for (const item of grounded.items) {
     if (!item.generatorId) continue; // buildRecommendations already filters these, but stay defensive
     const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
     if (existing) {
-      if (existing.finding_ids.includes(item.id)) continue; // already merged this exact finding, nothing new
+      if (existing.finding_ids.includes(item.id)) {
+        // Nothing new about the *finding* — finding ids are deterministic
+        // (e.g. `geo-signals:${page}:${label}`), so re-detecting the same
+        // issue yields the same id every run and re-merging it is churn.
+        //
+        // Block state is a different thing entirely: it is recomputed from
+        // live site and repo state on every sync, not carried by the finding.
+        // Returning early here meant that for any recommendation the agents
+        // keep re-detecting — which is most of them — the block never
+        // refreshed in either direction. A template that got verified stayed
+        // blocked; a row corrupted to 'safe' by migration 078 stayed
+        // corrupted. Refresh just that, then skip the merge as before.
+        await refreshRecommendationBlockState(existing.id, {
+          blockedReason: item.blockedReason ?? null,
+          riskTier: blockedRiskTier(item),
+        });
+        continue;
+      }
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,
+        // Refreshed on every sync, both directions: a template that has since
+        // been verified clears the block automatically (back to its real risk
+        // tier), and one that regresses re-blocks — no manual unblock step,
+        // and no stale "blocked" banner outliving the thing that caused it.
+        blockedReason: item.blockedReason ?? null,
+        riskTier: blockedRiskTier(item),
       });
     } else {
       await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
-        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: riskTierForGenerator(item.generatorId),
+        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: blockedRiskTier(item),
+        blockedReason: item.blockedReason ?? null,
       });
     }
   }
@@ -124,6 +175,15 @@ export async function syncFromGrounded(siteId, grounded) {
       linkCrawlCheckedKeys: grounded.linkCrawlCheckedKeys,
       batchRotatedAgentIds: grounded.batchRotatedAgentIds,
     });
+  }
+  // Direct evidence, not absence-of-evidence: unlike closeStaleRecommendations
+  // above (which infers "fixed" from a page's continued silence, gated on
+  // rotation batching so silence isn't mistaken for resolution),
+  // droppedRecommendations are pages buildRecommendations actually looked at
+  // THIS run and proved unfixable. Marked immediately rather than left to a
+  // rotation sweep that would never re-select a page that no longer exists.
+  if (grounded.droppedRecommendations?.length) {
+    await markRecommendationsUnfixable(siteId, grounded.droppedRecommendations);
   }
 }
 
@@ -214,6 +274,19 @@ export async function getRecommendations(siteId) {
         tag: r.issue, generatorId: r.recommendation_type, bucket, category,
         reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
         riskTier: r.risk_tier,
+        // Non-null means Action Center should show this as "blocked pending
+        // design verification" with this exact reason, and must not offer a
+        // Generate Draft affordance — generateDraft would 422 anyway (that's
+        // the real gate), but a button that always fails is worse than no
+        // button. See engineering lesson button-state-visibility: state the
+        // reason inline rather than only on hover.
+        blockedReason: r.blocked_reason || null,
+        // WHY it's blocked, for the UI to pick different copy/tone by —
+        // 'our-config' (actionable: give the exact command), 'awaiting-
+        // derivation' (nothing to do, will clear on its own), 'site-fact' (a
+        // real architectural constraint, e.g. a shared programmatic
+        // template). See store/recommendations.js's classifyBlockedKind.
+        blockedKind: r.blocked_kind || null,
       };
     });
   const lastAnalyzedAt = {};

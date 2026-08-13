@@ -3,10 +3,12 @@ import { requireAuth } from './login.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
+import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
-import { createExecutionJob, createDesignAgentJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
+import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
+import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
 import { getLatestAgentRuns } from '../agents/lib/fresh-runs.js';
 import { saveAgentRun } from '../store/agent-runs.js';
@@ -25,11 +27,12 @@ import {
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
-import { resolveOrCreateComponentTemplate } from '../implementers/lib/design-drift.js';
-import { COMPLIANCE_ACTION_TYPES, FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
+import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
+import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
+import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
 import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
@@ -131,9 +134,10 @@ async function buildRenderModeHint(siteId, actionType, page) {
 // single generic 'content-wrapper' key (see frontend.js's
 // COMPLIANCE_ACTION_TYPES and newpage-render.js's renderCompliancePageBody)
 // rather than each having their own.
-function componentTemplateActionTypeFor(generatorId) {
-  return COMPLIANCE_ACTION_TYPES.has(generatorId) ? 'content-wrapper' : generatorId;
-}
+// (moved to implementers/lib/design-drift.js, next to COMPONENT_TEMPLATE_KEY,
+// so this gate and the recommendation-visibility gate in
+// agents/lib/recommendations.js share one definition and cannot drift apart —
+// re-exported from there, imported at the top of this file.)
 
 const router = Router();
 router.use(requireAuth);
@@ -185,6 +189,12 @@ export async function refreshRecommendations(siteId, { start, end }) {
   } else {
     await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
   }
+  // Same up-front template repair as the morning run (job.js): stamp any
+  // existing-but-unstamped component template that the live CSS still backs,
+  // so a manual refresh shows what is genuinely blocked rather than what was
+  // merely never stamped. Never fatal.
+  await repairSiteTemplates(siteId)
+    .catch((err) => console.warn(`[action-center] site ${siteId} component-template repair failed:`, err.message));
   const grounded = await buildRecommendations(siteId);
   await syncFromGrounded(siteId, grounded);
   await autoRemediateSafeRecommendations(siteId).catch((err) => console.error(`[action-center] site ${siteId} auto-remediation failed:`, err.message));
@@ -237,6 +247,95 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }
   }
 
+  // Design verification runs BEFORE the generator does, not after.
+  // It used to sit below the Quality Gate loop, which meant a
+  // design-blocked site burned a full LLM generation on every manual
+  // Generate Draft click and then threw 422 on content it had already
+  // paid for and could never persist. Nothing about the gate itself
+  // needs the generated content — it is a structural/provenance check on
+  // the site config — so the cheap check goes first.
+  //
+  // `effectiveSite` is still produced here and consumed by the Rendering
+  // Validation Gate further down, which is why this block resolves the
+  // template rather than only verifying it.
+  // Design Agent, stage — find-or-create the real, site-specific
+  // componentTemplate this generator's output needs to render styled,
+  // BEFORE this recommendation ever becomes a reviewable draft. Replaces
+  // the old manual "Seed missing templates" staff step entirely: the first
+  // recommendation of a new content type on a given site pays the one-time
+  // cost of a real Design Agent (Docker/OpenHands) session against that
+  // site's actual repo, right here; every recommendation after that for the
+  // same site+type reuses the saved template instantly (resolveOrCreate...'s
+  // own fast path).
+  //
+  // This stage USED to be best-effort: a site with design_agent_enabled off,
+  // no repo configured, or a failed Design Agent run still got a draft, just
+  // rendered with marker-merge.js/newpage-render.js's zero-config DEFAULT_*
+  // fallback template. That fail-open behaviour is precisely what let
+  // never-verified templates reach apply time and fail there, and it is now
+  // a HARD GATE (the verification block directly below): for an action type
+  // that HAS a component-template concept, an unverified template means NO
+  // draft. The DEFAULT_* fallbacks still exist and still render — they are
+  // simply no longer considered good enough to publish styled content into
+  // a real customer's live site unreviewed.
+  // resolveOrCreateComponentTemplate itself already no-ops safely (reason:
+  // 'no-concept') for any generatorId with no componentTemplates key at
+  // all — no need to pre-filter which ones apply here. The resolved
+  // template is merged into a local `effectiveSite` snapshot (rather than
+  // re-fetching from the DB) so the render step right below sees it
+  // immediately, even on the very same call that just derived+saved it.
+  let effectiveSite = await getSiteById(siteId);
+  if (effectiveSite) {
+    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId))
+      .catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
+    if (templateResult?.ok && templateResult.template) {
+      effectiveSite = {
+        ...effectiveSite,
+        url_file_map: {
+          ...effectiveSite.url_file_map,
+          siteRoot: {
+            ...effectiveSite.url_file_map?.siteRoot,
+            componentTemplates: {
+              ...effectiveSite.url_file_map?.siteRoot?.componentTemplates,
+              [templateResult.componentKey]: templateResult.template,
+            },
+          },
+        },
+      };
+    }
+
+    // The gate. Structural + provenance only (no network call — see
+    // design-drift.js's isTemplateVerified), so this is safe on the hot path
+    // that every manual click, MCP tool call, execution-engine item and
+    // unattended auto-remediation attempt already funnels through. Placing it
+    // HERE rather than at each of those four call sites is deliberate: one
+    // choke point, no way to route around it.
+    //
+    // 'no-concept' action types (meta-title, schema, canonical, sitemap,
+    // robots-fix, ...) return ok:true and are unaffected — they have no CSS
+    // component that can drift, so there is nothing to verify and nothing to
+    // block. Only the five keys in COMPONENT_TEMPLATE_KEY are gated.
+    const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
+    if (!verification.ok) {
+      // When the resolver has just QUEUED a re-derivation, say so instead of
+      // repeating isTemplateVerified's generic "never been verified" text and
+      // telling the operator to go run the Design Agent by hand. The state is
+      // self-healing now; a message implying manual work is both wrong and
+      // the exact instinct that produced the stuck templates in the first
+      // place.
+      const queued = templateResult?.reason === 'derivation-queued';
+      const message = queued
+        ? `${templateResult.detail} Retry this draft once it completes.`
+        : `${verification.detail} Run the Design Agent for this site to verify its "${verification.actionType}" template before ${generatorId} drafts can be generated.`;
+      throw httpError(422, message, {
+        reason: queued ? 'design-derivation-queued' : 'design-unverified',
+        actionType: verification.actionType,
+        componentKey: verification.componentKey,
+        verificationReason: queued ? 'derivation-queued' : verification.reason,
+      });
+    }
+  }
+
   // The Quality Gate — stage 1 of Generate -> Validate -> Auto-fix ->
   // Validate again. Never persist a draft (and never let schema/PR steps
   // downstream see one) that's still outline instructions, placeholder
@@ -263,6 +362,21 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
+    // A REFUSAL, not a fault — see auto-remediation.js's circuit breaker.
+    //
+    // Two attempts that both produced unclean content is a statement about
+    // THIS item's content, not about system health: the next recommendation
+    // may well generate perfectly. The breaker exists for faults where every
+    // subsequent attempt is also doomed (revoked token, moved default branch),
+    // and this is not one.
+    //
+    // Flagged explicitly rather than by status code because 502 is the honest
+    // HTTP answer here — the generator is upstream of us and it did not
+    // produce usable output — and the breaker's 4xx heuristic would otherwise
+    // read that as a systemic failure. Three unlucky items in a row would then
+    // halt a 30-item day with 27 shippable candidates untouched.
+    err.refusal = true;
+    err.reason = 'quality-gate-exhausted';
     throw err;
   }
 
@@ -299,47 +413,6 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     }).catch((err) => console.error(`[action-center] failed to record auto-fix memory for ${generatorId}/${patternId}:`, err.message))));
   }
 
-  // Design Agent, stage — find-or-create the real, site-specific
-  // componentTemplate this generator's output needs to render styled,
-  // BEFORE this recommendation ever becomes a reviewable draft. Replaces
-  // the old manual "Seed missing templates" staff step entirely: the first
-  // recommendation of a new content type on a given site pays the one-time
-  // cost of a real Design Agent (Docker/OpenHands) session against that
-  // site's actual repo, right here; every recommendation after that for the
-  // same site+type reuses the saved template instantly (resolveOrCreate...'s
-  // own fast path). Best-effort and never blocks draft creation — a site
-  // with design_agent_enabled off, no repo configured, or a failed Design
-  // Agent run still gets a draft, just with the safe zero-config fallback
-  // marker-merge.js/newpage-render.js already have for "no template
-  // configured" (this is nothing new for those callers; it's the exact
-  // same fallback path a site with no componentTemplates at all already
-  // takes today).
-  // resolveOrCreateComponentTemplate itself already no-ops safely (reason:
-  // 'no-concept') for any generatorId with no componentTemplates key at
-  // all — no need to pre-filter which ones apply here. The resolved
-  // template is merged into a local `effectiveSite` snapshot (rather than
-  // re-fetching from the DB) so the render step right below sees it
-  // immediately, even on the very same call that just derived+saved it.
-  let effectiveSite = await getSiteById(siteId);
-  if (effectiveSite) {
-    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId))
-      .catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
-    if (templateResult?.ok && templateResult.template) {
-      effectiveSite = {
-        ...effectiveSite,
-        url_file_map: {
-          ...effectiveSite.url_file_map,
-          siteRoot: {
-            ...effectiveSite.url_file_map?.siteRoot,
-            componentTemplates: {
-              ...effectiveSite.url_file_map?.siteRoot?.componentTemplates,
-              [templateResult.componentKey]: templateResult.template,
-            },
-          },
-        },
-      };
-    }
-  }
 
   // Rendering Validation Gate, stage — for the net-new-content action types
   // (frontend.js's FRONTEND_ACTION_TYPES: compliance pages, landing pages,
@@ -875,38 +948,6 @@ export async function approveAndShipRecommendation(siteId, recommendationId, { u
   return result.draft;
 }
 
-// Step 6A: creates a queued Design Agent job for a single recommendation.
-// No worker exists yet — the job sits in status='queued' until a later
-// step adds the OpenHands worker that polls execution_jobs for
-// kind='design_generate' rows. Gated on sites.design_agent_enabled so this
-// is strictly opt-in per tenant from day one, even though nothing
-// downstream consumes the row yet.
-export async function createDesignGenerateJob(siteId, recommendationId, { userId } = {}) {
-  const site = await getSiteById(siteId);
-  if (!site?.design_agent_enabled) {
-    const err = new Error('Design Agent is not enabled for this site.');
-    err.status = 403;
-    throw err;
-  }
-  const rec = await getRecommendationById(siteId, recommendationId);
-  if (!rec) { const err = new Error('Recommendation not found'); err.status = 404; throw err; }
-  if (rec.status !== 'open') {
-    const err = new Error('Only open recommendations can be sent to the Design Agent.');
-    err.status = 400;
-    throw err;
-  }
-  return createDesignAgentJob(siteId, recommendationId, { requestedBy: userId });
-}
-
-router.post('/action-center/recommendations/:id/design-generate', async (req, res, next) => {
-  try {
-    res.json(await createDesignGenerateJob(req.siteId, req.params.id, { userId: req.userId }));
-  } catch (e) {
-    if (e.status) return respondWithStatusError(res, e, 'Could not start the Design Agent right now — try again shortly.');
-    next(e);
-  }
-});
-
 router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   try {
     res.json(await executeSafeFixes(req.siteId, { userId: req.userId, limit: req.body?.limit }));
@@ -999,6 +1040,24 @@ async function finalizeImplemented(siteId, draftId, site) {
       await runSiteDiscoveryIfDue(site);
     } catch (err) {
       console.error(`[action-center] post-implement site discovery failed for site ${siteId}:`, err.message);
+    }
+    // The merge is the only moment we know a fix is genuinely live, and the
+    // only moment the "before" window is still cleanly defined — so the
+    // measurement is scheduled here rather than reconstructed later from
+    // draft timestamps. agents/lib/fix-impact.js fills it in ~31 days on
+    // (28 days of post-merge data + GSC's own 3-day finalization lag).
+    //
+    // Best-effort by design: this is a reporting/learning signal, and failing
+    // to schedule it must never make a genuinely merged fix look unmerged.
+    try {
+      await scheduleImpactMeasurement(siteId, {
+        draftId: draft.id,
+        pageUrl: draft.content?.page || draft.input?.page || null,
+        generatorId: draft.action_type,
+        mergedAt: new Date(),
+      });
+    } catch (err) {
+      console.error(`[action-center] could not schedule impact measurement for draft ${draftId}:`, err.message);
     }
   }
   return draft;
@@ -1127,7 +1186,19 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
       missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
     });
   }
-  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });
+  // Provenance for the reviewer: what actually renders this page, whether
+  // it's shared, and what a change would affect (page-resolution.js). Never
+  // fatal — a failed resolution here must not block a draft whose actual
+  // apply just succeeded; the draft simply carries no provenance, same as
+  // before this existed. page-level generators only (no `page` means a
+  // site-level target like analytics-install, which is out of scope for
+  // this — its shared target is the design, not something to warn about).
+  const targetProvenance = page
+    ? await resolvePageSource(site, page, draft.action_type).catch(() => null)
+    : null;
+  return markDraftBranchPushed(siteId, draft.id, {
+    branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles, targetProvenance,
+  });
 }
 
 router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {

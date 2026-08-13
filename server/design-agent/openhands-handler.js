@@ -6,7 +6,17 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { getSiteById } from '../store/read.js';
+import { UserFacingError } from '../lib/errors.js';
 import { checkoutRepoTarball } from './repo-checkout.js';
+import { findRelevantMemory } from '../agent-memory.js';
+
+// Shared generatorId in agent_fix_memory (097) for every Design Agent
+// component-templates write/read — this module's own RETRIEVE lookup below
+// and design-drift.js's LEARN write (resolveOrCreateComponentTemplate, the
+// sole autonomous path that creates or verifies a componentTemplate) both
+// tag/filter by this same id, so there is exactly one learning history per
+// site.
+export const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -137,7 +147,15 @@ export function createOpenHandsHandler({
     const workspaceDir = await mkdtemp(join(tmpdir(), 'design-agent-'));
     let containerId = null;
     try {
-      await workspaceSource(workspaceDir, job);
+      // Naming this stage matters more than the others: it is the first thing
+      // that touches the network (a GitHub tarball of the tenant's repo for the
+      // real handlers), so a revoked or expired PAT surfaces here — and did so
+      // indistinguishably from every other failure before this.
+      try {
+        await workspaceSource(workspaceDir, job);
+      } catch (err) {
+        throw new UserFacingError("The Design Agent could not fetch this site's repository. Check that the site's GitHub token is valid and still has access to the configured repo.", { cause: err });
+      }
 
       const env = {
         ...process.env,
@@ -148,18 +166,28 @@ export function createOpenHandsHandler({
       };
 
       const { result, code, timedOut, stderrTail } = await runDesignTaskProcess({
-        pythonBin, scriptPath, workspaceDir, extraArgs: buildArgs(job), env, timeoutMs, killGraceMs,
+        pythonBin, scriptPath, workspaceDir, extraArgs: await buildArgs(job), env, timeoutMs, killGraceMs,
         onContainerId: (id) => { containerId = id; },
       });
 
       if (timedOut) {
-        throw new Error(`OpenHands task timed out after ${timeoutMs}ms and was terminated`);
+        // Stage-naming, deliberately free of interpolated exception text so it
+        // is safe to persist and show — worker.js surfaces UserFacingError
+        // messages onto the job row, which is the only place an operator can
+        // read them without shelling into the container.
+        throw new UserFacingError(`The Design Agent ran for ${Math.round(timeoutMs / 1000)}s without finishing and was stopped. The site's repository analysis is taking longer than the configured limit.`);
       }
       if (!result) {
-        throw new Error(`OpenHands task failed: process exited (code ${code}) with no result line${stderrTail ? ` — stderr: ${stderrTail}` : ''}`);
+        // The exit code is safe to name; stderrTail is NOT — it can carry
+        // tokens, hostnames and provider errors — so it stays in the internal
+        // log only, reachable via the correlation id worker.js records.
+        throw new UserFacingError(`The Design Agent's analysis process exited (code ${code}) without producing a result. This usually means its container or Python environment could not start — see the worker logs for this job's reference id.`, { cause: new Error(`stderr: ${stderrTail || '(empty)'}`) });
       }
       if (result.status !== 'ok') {
-        throw new Error(`OpenHands task failed: ${result.detail || 'unknown error'}`);
+        // result.detail is the Python task's own structured message, not a raw
+        // exception, so naming the stage is safe; the detail itself still goes
+        // to the internal log rather than the job row.
+        throw new UserFacingError("The Design Agent finished but reported that it could not analyse this site's repository.", { cause: new Error(`OpenHands detail: ${result.detail || 'unknown error'}`) });
       }
       return { jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates };
     } finally {
@@ -176,33 +204,96 @@ export function createOpenHandsHandler({
 // spawn/stdout-parsing/timeout/SIGKILL-escalation/backstop cleanup — is the
 // exact same createOpenHandsHandler machinery above, just parameterized
 // differently.
-// getSiteByIdFn/checkoutRepoTarballFn are injectable (default to the real
-// store/read.js + repo-checkout.js implementations) so tests can stub the
-// DB lookup and the real GitHub tarball download independently, same
+// getSiteByIdFn/checkoutRepoTarballFn/findRelevantMemoryFn are injectable
+// (default to the real store/read.js, repo-checkout.js, and
+// agent-memory.js implementations) so tests can stub the DB lookup, the
+// real GitHub tarball download, and the memory lookup independently, same
 // dependency-injection convention as pythonBin/scriptPath/dockerBin above.
-export function createComponentTemplateHandler({ getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, ...options } = {}) {
+export function createComponentTemplateHandler({
+  getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, findRelevantMemoryFn = findRelevantMemory, ...options
+} = {}) {
   return createOpenHandsHandler({
     ...options,
     workspaceSource: async (destDir, job) => {
       const site = await getSiteByIdFn(job.site_id);
       await checkoutRepoTarballFn(site, destDir);
     },
-    buildArgs: (job) => ['component-templates', JSON.stringify(job.params?.componentKeys || [])],
+    // RETRIEVE — same shape as withAgentMemory (agent-memory.js): scope:
+    // 'client', clientFacing: true (category='code' rows structurally
+    // unreachable), no category filter, so any past design-agent lesson
+    // recorded by design-drift.js's LEARN write surfaces here. Never lets a
+    // memory-table failure block the job — same defensive no-op-on-error
+    // convention withAgentMemory itself uses.
+    buildArgs: async (job) => {
+      const lessons = await findRelevantMemoryFn({
+        scope: 'client', siteId: job.site_id, generatorId: DESIGN_AGENT_GENERATOR_ID, clientFacing: true, limit: 5,
+      }).catch((err) => {
+        console.warn(`[design-agent] memory lookup failed for site ${job.site_id}, continuing without it: ${err.message}`);
+        return [];
+      });
+      const lessonsForPrompt = lessons.map((l) => ({
+        symptoms: l.symptoms,
+        rootCause: l.rootCause,
+        fixPattern: l.executionPermission === 'auto' ? l.fixPattern : null,
+      }));
+      return ['component-templates', JSON.stringify(job.params?.componentKeys || []), JSON.stringify(lessonsForPrompt)];
+    },
+  });
+}
+
+// Website-level design derivation — the SOURCE every per-component template
+// is projected from (design-agent/lib/design-profile.js).
+//
+// Same machinery as createComponentTemplateHandler above (real repo checkout,
+// read-only analysis, memory-augmented prompt), differing only in mode and in
+// taking no action-type list: there is nothing to scope it to, because the
+// whole site is the scope. That is the architectural point — one analysis per
+// site instead of one per content type, so a new design-sensitive generator
+// needs no new repo analysis at all.
+export function createDesignProfileHandler({
+  getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, findRelevantMemoryFn = findRelevantMemory, ...options
+} = {}) {
+  return createOpenHandsHandler({
+    ...options,
+    workspaceSource: async (destDir, job) => {
+      const site = await getSiteByIdFn(job.site_id);
+      await checkoutRepoTarballFn(site, destDir);
+    },
+    buildArgs: async (job) => {
+      const lessons = await findRelevantMemoryFn({
+        scope: 'client', siteId: job.site_id, generatorId: DESIGN_AGENT_GENERATOR_ID, clientFacing: true, limit: 5,
+      }).catch((err) => {
+        console.warn(`[design-agent] memory lookup failed for site ${job.site_id}, continuing without it: ${err.message}`);
+        return [];
+      });
+      const lessonsForPrompt = lessons.map((l) => ({
+        symptoms: l.symptoms,
+        rootCause: l.rootCause,
+        fixPattern: l.executionPermission === 'auto' ? l.fixPattern : null,
+      }));
+      // argv[3] is a placeholder so the argument positions stay identical to
+      // component-templates mode — the Python side ignores it for this mode.
+      return ['design-profile', '[]', JSON.stringify(lessonsForPrompt)];
+    },
   });
 }
 
 // The worker (worker.js's main()) claims ANY kind='design_generate' job
 // regardless of what it's for — this is the single dispatch point that
-// routes each claimed job to the right handler based on job.params.mode,
-// so the worker's poll loop itself never needs to know how many kinds of
-// design_generate job exist. Falls back to the fixture-demo handler for
-// jobs with no params.mode (or an unrecognized one) — the original Step
-// 6A/6C/6D trigger (routes/action-center.js's design-generate route) never
-// sets params.mode at all.
+// routes each claimed job to the right handler based on job.params.mode, so
+// the worker's poll loop itself never needs to know how many kinds of
+// design_generate job exist. In production, the only source of these jobs
+// is component-templates mode via resolveOrCreateComponentTemplate's
+// synchronous handler call (never queued through execution_jobs at all —
+// see that function). The fixture-demo fallback (no params.mode) exists for
+// the dev-only verify-design-agent-docker.js/verify-component-templates-
+// real-repo.js scripts that exercise this queue+worker machinery directly.
 export function createDesignAgentHandler(options = {}) {
   const fixtureDemoHandler = createOpenHandsHandler(options);
   const componentTemplateHandler = createComponentTemplateHandler(options);
+  const designProfileHandler = createDesignProfileHandler(options);
   return async function dispatchingHandler(job) {
+    if (job.params?.mode === 'design-profile') return designProfileHandler(job);
     if (job.params?.mode === 'component-templates') return componentTemplateHandler(job);
     return fixtureDemoHandler(job);
   };

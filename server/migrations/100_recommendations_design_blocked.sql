@@ -1,0 +1,41 @@
+-- Design-verification gate (implementers/lib/design-drift.js's
+-- componentTemplateVerification + routes/action-center.js's generateDraft).
+--
+-- A recommendation whose action type needs a component template (faq,
+-- expand-content, internal-links, qa-content, content-wrapper) can no longer
+-- become a draft until that template has been verified against the site's
+-- real design. Before this, such a recommendation was drafted anyway using
+-- marker-merge.js's zero-config DEFAULT_* fallback and typically failed at
+-- apply time — a silent, repeated waste that read to the user as "the agent
+-- keeps trying the same broken fix."
+--
+-- The blocked recommendation deliberately stays VISIBLE and open rather than
+-- being filtered out of buildRecommendations the way the url_file_map /
+-- file-exists / adapter-data gates drop their items: those three mean "this
+-- can never apply, stop showing it," whereas this one means "this is a real
+-- detected issue we are not yet allowed to auto-fix" — hiding it would lose
+-- a genuine finding. It is surfaced with a reason and forced to the 'manual'
+-- risk tier (recommendation-coordinator.js) so it stays out of the
+-- unattended safe-fix chain while remaining actionable by a human.
+--
+-- NULL = not blocked, which is the correct reading for every existing row.
+--
+-- Named `blocked_reason`, not `design_blocked_reason`: the design gate was the
+-- first blocker to need this, but not the only one (a missing url_file_map entry
+-- now uses the same column — see 103, and buildRecommendations). The column was
+-- briefly named for the design gate specifically; it is named for what it holds
+-- instead, because this file has never reached `stage` and so nothing deployed
+-- depends on the old name.
+--
+-- Deliberately NOT renamed by a later migration. This directory has no
+-- migration-tracking table — every file re-runs on every `npm run migrate`, and
+-- idempotency comes solely from IF NOT EXISTS guards. An `ADD COLUMN IF NOT
+-- EXISTS design_blocked_reason` here plus a `RENAME` in 103 therefore does not
+-- converge: 100 re-creates the old column on the next run, 103 sees the new one
+-- already present and skips, and the database ends up with BOTH. Verified by
+-- running the directory twice. The only stable form is for each file to declare
+-- the end state it wants directly.
+ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS recommendations_blocked_idx
+  ON recommendations (site_id) WHERE blocked_reason IS NOT NULL;

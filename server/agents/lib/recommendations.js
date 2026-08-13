@@ -5,10 +5,7 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
-import { isPageMapped, resolveAdapter, resolveFile } from '../../implementers/lib/url-file-map.js';
-import { isDataReady } from '../../implementers/adapters/data-array-content.js';
-import { getFileContent } from '../../github/client.js';
-import { baseBranch } from '../../implementers/lib/github-ops.js';
+import { createRecommendationGates } from './recommendation-gates.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -49,26 +46,26 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, draftedFindingIds, catByAgent, site] = await Promise.all([
+  const [runs, draftedFindingIds, catByAgent, loadedSite] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
     getSiteById(siteId),
   ]);
+  // Every gate that decides whether a candidate is real, and whether it may
+  // enter the unattended chain, now lives in recommendation-gates.js — shared
+  // with the analyst writers in analyst-seo-mapping.js, which previously had no
+  // gates at all and could mint a safe, unblocked recommendation for a page
+  // with no file mapping or no page at all.
+  //
+  // It owns the per-pass caches too (one repo tree, one read per unique file,
+  // one soft-404 fingerprint), and `gates.site` is the reassignable site row:
+  // healing persists newly-discovered url_file_map entries, and later findings
+  // in the same pass must see them, or two findings on one page would each try
+  // to heal it and the second would still read the stale map.
+  const gates = createRecommendationGates(siteId, loadedSite);
   const lookupQuery = makeQueryLookup(siteId);
-  // One real GitHub read per unique data file for this whole refresh, no
-  // matter how many candidate pages share it (e.g. every /locations/:city/
-  // page routes through the same locations.js) — same caching idiom
-  // audit-url-file-map.js already uses, so isDataReady below stays cheap
-  // even across a large candidate-page pool.
-  const dataFileCache = new Map(); // `${path}@${ref}` -> file | null
-  const cachedFetchFile = async (site, path, ref) => {
-    const key = `${path}@${ref}`;
-    if (dataFileCache.has(key)) return dataFileCache.get(key);
-    const file = await getFileContent(site, path, ref).catch(() => null);
-    dataFileCache.set(key, file);
-    return file;
-  };
+
   const items = [];
   const lastAnalyzedAt = {};
   // Every generatorId+page this run's agents still flag, independent of the
@@ -91,6 +88,21 @@ export async function buildRecommendations(siteId) {
   const agentCheckedKeys = new Set(); // `${agentId}::${page}`
   const linkCrawlCheckedKeys = new Set(); // broken-link-fix only: narrower than technical-seo's own batch, since crawlInternalLinks caps total hrefs checked independently of which pages are in the batch
   const batchRotatedAgentIds = new Set();
+  // Direct evidence gathered THIS run that a candidate cannot ever be fixed
+  // (soft-404, a mapped file confirmed gone, adapter data confirmed never
+  // ready) — distinct from simply being absent from detectedKeys, which only
+  // means "not re-checked," not "checked and proven gone." Passed to
+  // syncFromGrounded so it can mark these 'unfixable' immediately rather than
+  // leaving them to closeStaleRecommendations' rotation-gated sweep, which
+  // would never re-select a page that no longer exists and so would never
+  // close it — the mechanism that kept 6 /docs/* rows open on site 1
+  // indefinitely.
+  const droppedRecommendations = [];
+  const DROP_REASONS = {
+    'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
+    'file-missing': 'The file this page was mapped to no longer exists in the repository.',
+    'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
+  };
 
   for (const run of runs) {
     lastAnalyzedAt[run.agentId] = run.createdAt;
@@ -104,60 +116,30 @@ export async function buildRecommendations(siteId) {
     for (const f of run.findings) {
       const action = f.recommendedAction;
       if (!action?.generatorId) continue;
-      // A page-scoped finding whose page has no real deploy target (no
-      // url_file_map entry, no adapter route) can never actually be
-      // applied — surfacing it as an "auto-eligible" recommendation only
-      // for it to fail with "No url_file_map entry matches..." at
-      // approve/apply time. Skip it entirely (not added to detectedKeys
-      // either) so any already-open recommendation for it closes out on
-      // the next sync instead of staying stuck. See
-      // implementers/lib/url-file-map.js's isPageMapped and
-      // scripts/audit-url-file-map.js, which surfaces this same gap
-      // proactively for a whole site's config.
-      // broken-link-fix is excluded: computeBrokenLinkFixMerge (backend.js)
-      // has its own GitHub code-search fallback for exactly the pages this
-      // check would flag, so "not in url_file_map" isn't fatal for it the
-      // way it is for every other generatorId here.
-      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site
-        && !isPageMapped(site, action.params.page, action.generatorId)) continue;
-      // isPageMapped above only proves url_file_map SYNTACTICALLY resolves a
-      // path (an exact `pages[]` entry, or a `patterns[]` regex match) — it
-      // never confirms that resolved file genuinely exists in the repo. A
-      // generic catch-all pattern (e.g. `^/([a-z0-9-]+)/?$` -> "src/pages/
-      // $1.njk") matches any URL that merely LOOKS like a real page, and
-      // many static-site nginx configs make that trivially true for URLs
-      // that were never real: a `try_files ... /index.html` SPA fallback
-      // (this codebase's own nginx/static.conf, and a common Eleventy/Vite
-      // deploy pattern) returns HTTP 200 for literally any path, so a
-      // crawl/GSC-discovered URL for a renamed or nonexistent page still
-      // looks "live." Real incident: zunkireelabs.com/ai-agents/ (a soft-404
-      // — no template anywhere sets that permalink) matched the generic
-      // pattern to a nonexistent src/pages/ai-agents.njk, and the resulting
-      // recommendation showed "SAFE — AUTO-ELIGIBLE" right up until someone
-      // approved it. Verified live here, once per unique file per refresh
-      // (cachedFetchFile below already dedupes/caches this exact call for
-      // isDataReady) — skip the same as an unmapped page rather than let an
-      // unverified guess reach the UI as "safe." Adapter-routed pages
-      // (resolveFile returns null for those) are unaffected; their own
-      // adapter validates itself below.
-      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site) {
-        const filePath = resolveFile(site, action.params.page);
-        if (filePath && !(await cachedFetchFile(site, filePath, baseBranch(site)))) continue;
+      // Every gate — net-new target, url_file_map (with healing), soft-404,
+      // file-exists, adapter-data, design verification — in one call, shared
+      // with the other writers to this table. See recommendation-gates.js for
+      // why each one drops or blocks.
+      //
+      // drop = not real or never actionable: discard it, and deliberately do
+      // NOT add it to detectedKeys, so any already-open row closes on the next
+      // sync. blockedReason = real issue on a real page we are not configured
+      // to fix automatically yet: keep it visible carrying the reason, and let
+      // blockedRiskTier demote it to the manual tier. Dropping those would
+      // render a tenant's Action Center near-empty and read as "my site is
+      // healthy" when it means "we never configured your repo".
+      const gate = await gates.evaluate(action.generatorId, action.params);
+      if (gate.drop) {
+        // 'unknown' (no soft-404 signal, no route match, no candidate file —
+        // recommendation-gates.js has no such drop reason today, but stays
+        // defensive) is not direct evidence, so it must not be reported here;
+        // only genuinely proven-gone reasons.
+        if (DROP_REASONS[gate.drop] && action.params?.page) {
+          droppedRecommendations.push({ generatorId: action.generatorId, page: recommendationPageKey({ generatorId: action.generatorId, params: action.params }), reason: DROP_REASONS[gate.drop] });
+        }
+        continue;
       }
-      // isPageMapped above only confirms a ROUTE exists (a file, or an
-      // adapter configured for this actionType) — for data-array-content
-      // specifically, that route can be configured while the adapter's own
-      // data still has nothing for this exact page (e.g. a location with
-      // no `services.web-development` entry yet). Checked here, not just
-      // inside the adapter's own apply(), so a recommendation that can
-      // never actually apply stops resurfacing every refresh — the same
-      // "known dead end" a human would eventually notice and stop
-      // clicking, minus the frustration of noticing it themselves.
-      if (action.generatorId !== 'broken-link-fix' && action.params?.page && site) {
-        const adapterConfig = resolveAdapter(site, action.params.page, action.generatorId);
-        if (adapterConfig?.id === 'data-array-content'
-          && !(await isDataReady(site, action.params.page, adapterConfig, cachedFetchFile, baseBranch(site)))) continue;
-      }
+      const blockedReason = gate.blockedReason;
       detectedKeys.add(`${action.generatorId}::${recommendationPageKey({ generatorId: action.generatorId, params: action.params })}`);
       if (draftedFindingIds.has(f.id)) continue; // a draft already exists — show it only in the Drafts tab, don't resurface here until it's deleted or the agent's own next re-check organically drops it
       const params = { ...action.params };
@@ -173,8 +155,9 @@ export async function buildRecommendations(siteId) {
         tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
         bucket, category,
+        blockedReason,
       });
     }
   }
-  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds };
+  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations };
 }

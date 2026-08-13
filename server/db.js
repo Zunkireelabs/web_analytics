@@ -93,7 +93,7 @@ export async function updateSiteConnection({ siteId, gscProperty, ga4PropertyId,
 // for the Action Center's "apply approved draft as a PR" flow (see
 // server/scripts/connect-repo.js, migration 028). Same partial-update shape
 // as updateSiteConnection above — only fields actually passed are touched.
-export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap }) {
+export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, urlFileMap }) {
   const fields = [];
   const values = [];
   let i = 1;
@@ -105,6 +105,8 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   if (repoDefaultBranch !== undefined) set('repo_default_branch', repoDefaultBranch);
   if (techStack !== undefined) set('tech_stack', techStack);
   if (githubPatEnvVar !== undefined) set('github_pat_env_var', githubPatEnvVar);
+  // null is meaningful here — it moves a site back off the App onto its PAT.
+  if (githubAppInstallationId !== undefined) set('github_app_installation_id', githubAppInstallationId);
   if (urlFileMap !== undefined) set('url_file_map', JSON.stringify(urlFileMap));
 
   if (!fields.length) throw new Error('updateSiteRepoConfig: nothing to update.');
@@ -232,6 +234,28 @@ export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   const { rows } = await query(
     `UPDATE sites SET visible_faq_cap = $1 WHERE id = $2 RETURNING *`,
     [visibleFaqCap, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// The unattended auto-remediation loop's per-site switch and daily ceiling
+// (migrations 089 and 101), read by agents/lib/auto-remediation.js.
+//
+// Until this existed, `auto_remediation_enabled` was read in exactly one
+// place and written in NONE — no route, no UI, no script — so the only way
+// to turn the autonomous loop on was a hand-written SQL UPDATE against
+// production. That is why the loop had never run for any site: not because
+// anyone decided against it, but because nothing could flip the switch.
+//
+// Both fields update together and are validated by the caller
+// (routes/clients.js, platform_admin only): enabling a site and setting its
+// ceiling are one decision, and splitting them would allow the intermediate
+// state nobody wants — enabled with a stale limit somebody else set.
+export async function updateSiteAutoRemediation({ siteId, enabled, dailyLimit }) {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = $1, auto_remediation_daily_limit = $2 WHERE id = $3 RETURNING *`,
+    [enabled, dailyLimit, siteId]
   );
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];

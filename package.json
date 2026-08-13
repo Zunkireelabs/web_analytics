@@ -13,6 +13,8 @@
     "connect-site": "node server/scripts/connect-site.js",
     "connect-repo": "node server/scripts/connect-repo.js",
     "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
+    "verify-component-templates": "node server/scripts/verify-component-templates.js",
+    "verify-github-app": "node server/scripts/verify-github-app.js",
     "bootstrap-structural-markers": "node server/scripts/bootstrap-structural-markers.js",
     "install-rendering-workflow": "node server/scripts/install-rendering-workflow.js",
     "check-env-parity": "node server/scripts/check-env-parity.js",

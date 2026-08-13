@@ -22,10 +22,18 @@ import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
+import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 import { getImplementedFindingIds } from './store/drafts.js';
+
+import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
+import { getImplementedFindingIds, countDraftsBySourceToday } from './store/drafts.js';
+import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
+import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
+
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
@@ -177,6 +185,18 @@ export async function runDailyAgentAnalysisForSite(site) {
   const events = await detectNotificationEvents(site.id, { trendWeek });
   await deliverToAllChannels(site.id, events);
 
+  // Verify any existing-but-unstamped component templates against the live
+  // site BEFORE grounding findings, so the list this run produces reflects
+  // what is genuinely blocked. The design gate inside buildRecommendations is
+  // pure and in-memory by design, so it can only read the stamps that already
+  // exist — a template stamped later, at draft time, leaves every affected
+  // recommendation showing as blocked for a full day.
+  //
+  // Never fatal, and never a reason to skip detection: this is an
+  // opportunistic upgrade of some rows from "blocked" to "actionable".
+  await repairSiteTemplates(site.id)
+    .catch((err) => console.warn(`[job] site ${site.id} component-template repair failed:`, err.message));
+
   const recommendations = await buildRecommendations(site.id);
 
   // Cross-client learned repair, BEFORE anything is persisted: an issue this
@@ -190,12 +210,22 @@ export async function runDailyAgentAnalysisForSite(site) {
 
   await syncFromGrounded(site.id, grounded)
     .catch((err) => console.error(`[job] site ${site.id} recommendation coordinator sync failed:`, err.message));
+
   await autoRemediateSafeRecommendations(site.id)
     .catch((err) => console.error(`[job] site ${site.id} auto-remediation failed:`, err.message));
   // Deliberately the PRE-repair list, not `grounded`. A repaired item's issue
   // is still genuinely live on the site until a human merges its PR, so the
   // watchlist must keep tracking it — dropping it here would mark the problem
   // as handled before anything actually shipped.
+
+  // Deliberately does NOT auto-remediate here. Detection and shipping are two
+  // separate schedules now: this morning run only DETECTS (fills the
+  // recommendations table), and runAutoRemediationForAllSites ships what it
+  // found on its own later trigger (cron.js, 13:00 site-local by default).
+  // Splitting them is what makes the day's PR a reviewable batch that lands at
+  // a predictable hour, instead of branches appearing the instant an agent
+  // happens to notice something.
+
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
   const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
     .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });
@@ -708,6 +738,135 @@ export async function runHourlyCatchupForAllSites(tz) {
 // the exact flagged page, real re-run of the exact check that flagged it —
 // see agents/lib/fix-verification.js). Due-ness is per-row (verify_after),
 // not per-site, so this runs once globally rather than per connected site.
+// Carries the 3am Analyst cycle's output into the Action Center.
+//
+// data-analyst-agent runs its full nightly pipeline at 03:00 UTC
+// (ingest_schedule_hour_utc) — collectors, forecasts, insights, including
+// forecast_risk insights that predict a decline before it shows up in
+// reporting. Until now none of that reached the Action Center: the only ways
+// an insight could become a recommendation were a human clicking approve on
+// one item at a time. Every night's analysis simply sat in the Analyst page.
+//
+// Creates recommendations only, never drafts, so analyst findings flow
+// through the same risk-tier/auto-remediation machinery as every agent
+// finding rather than getting their own parallel autonomy path.
+//
+// Best-effort per site and never throws: the Analyst is a separate service,
+// and it being down must not take the rest of the schedule with it.
+export async function runAnalystSyncForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0 };
+
+  for (const site of sites) {
+    try {
+      const insights = await fetchAnalystInsights(site.id);
+      if (!insights.length) continue;
+      const result = await syncAnalystInsightsToActionCenter(site.id, insights, { site });
+      totals.sites++;
+      totals.created += result.created;
+      totals.skipped += result.skipped;
+      totals.ineligible += result.ineligible;
+      if (result.created) {
+        console.log(`[job] analyst sync: site ${site.id} "${site.name}" created ${result.created} recommendation(s) from nightly insights.`);
+      }
+    } catch (err) {
+      console.error(`[job] analyst sync failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  if (totals.created) console.log(`[job] analyst sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// Reads the Analyst service's own insights endpoint. Kept here rather than
+// importing routes/dataAnalyst.js's callPython, which is request-scoped and
+// not exported — one small fetch is cheaper than restructuring that module.
+async function fetchAnalystInsights(siteId) {
+  const base = process.env.DATA_ANALYST_AGENT_INTERNAL_URL || 'http://127.0.0.1:8000';
+  const url = new URL(`/clients/${siteId}/insights`, base);
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`analyst insights returned HTTP ${res.status}`);
+  const body = await res.json();
+  return Array.isArray(body) ? body : (body?.insights || []);
+}
+
+// The SHIPPING half of the day, deliberately separated from the DETECTION
+// half (runDailyAgentAnalysisForSite, 07:00). This is what turns the
+// recommendations that morning found into a real branch + PR, highest
+// priority first: listOpenRecommendations already orders high -> medium ->
+// low, and auto-remediation takes the first N within the site's daily budget
+// off that ordered list, so severity ordering needs no second implementation
+// here.
+//
+// Per-site isolation is the point of the loop: one tenant's revoked token,
+// conflicted batch branch, or unreachable repo must never stop another
+// tenant's PR from being opened. Same shape as every other *ForAllSites
+// runner in this file.
+//
+// Repo-connected rather than listConnectedSites' GSC/GA4 filter — the same
+// choice runPrStatusPollForAllSites makes below, and for the same reason:
+// whether a site can have work SHIPPED depends on repo_owner/repo_name.
+// A site with analytics but no repo has nothing to push to, and
+// autoRemediateSafeRecommendations' own auto_remediation_enabled gate stays
+// the real opt-in on top of that.
+export async function runAutoRemediationForAllSites() {
+  const sites = (await listSites()).filter(isShippable);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const result = await autoRemediateSafeRecommendations(site.id);
+      if (result.attempted || result.shipped) {
+        console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
+      }
+      results.push({ siteId: site.id, ...result });
+    } catch (err) {
+      console.error(`[job] auto-remediation failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
+// Catch-up guard for the shipping run above, mirroring runHourlyCatchupForAllSites'
+// role for the morning job. Recorded engineering lesson
+// (job-scheduling-reliability): cron alone is not a reliable trigger on a
+// machine that sleeps, and this app is in fact hosted on one — a missed 13:00
+// fire would otherwise mean a whole day with no PR and nothing to notice it.
+//
+// "Already ran today" is measured the same way auto-remediation measures its
+// own budget — drafts it created today in the SITE's timezone — rather than a
+// new state column, so the guard can never disagree with the thing it guards.
+// A site that legitimately had zero candidates at 13:00 re-checks cheaply each
+// hour, which is the same trade the narrative guard already makes, and is
+// useful rather than wasteful: a recommendation detected later in the day
+// still ships the same day, onto the same batch branch/PR.
+export async function runAutoRemediationCatchupForAllSites(tz) {
+  const sites = (await listSites()).filter(isShippable);
+  for (const site of sites) {
+    try {
+      const alreadyShippedToday = await countDraftsBySourceToday(site.id, 'auto-remediation', site.timezone || tz);
+      if (!isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone: tz })) continue;
+
+      const result = await autoRemediateSafeRecommendations(site.id);
+      if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
+    } catch (err) {
+      console.error(`[job] auto-remediation catch-up failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+}
+
+// Impact measurement's due-sweep, the sibling of runFixVerificationsForAllSites
+// below. Also global rather than per-site: due-ness is per ROW (28 days after
+// that draft's own merge), not per site, so there is nothing to iterate sites
+// for. See agents/lib/fix-impact.js for why the delay is as long as it is.
+export async function runFixImpactMeasurementsForAllSites() {
+  try {
+    return await runDueImpactMeasurements();
+  } catch (err) {
+    console.error('[job] fix impact measurement failed:', err.message);
+    return [];
+  }
+}
+
 export async function runFixVerificationsForAllSites() {
   try {
     const results = await runDueVerifications();
