@@ -347,6 +347,21 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     const err = new Error(`This recommendation could not be generated cleanly (incomplete/invalid content after ${MAX_GENERATION_ATTEMPTS} attempts) — try again shortly.`);
     err.status = 502;
     err.userFacing = true;
+    // A REFUSAL, not a fault — see auto-remediation.js's circuit breaker.
+    //
+    // Two attempts that both produced unclean content is a statement about
+    // THIS item's content, not about system health: the next recommendation
+    // may well generate perfectly. The breaker exists for faults where every
+    // subsequent attempt is also doomed (revoked token, moved default branch),
+    // and this is not one.
+    //
+    // Flagged explicitly rather than by status code because 502 is the honest
+    // HTTP answer here — the generator is upstream of us and it did not
+    // produce usable output — and the breaker's 4xx heuristic would otherwise
+    // read that as a systemic failure. Three unlucky items in a row would then
+    // halt a 30-item day with 27 shippable candidates untouched.
+    err.refusal = true;
+    err.reason = 'quality-gate-exhausted';
     throw err;
   }
 

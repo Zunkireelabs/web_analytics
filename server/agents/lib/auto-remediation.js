@@ -14,6 +14,21 @@ const SOURCE = 'auto-remediation';
 // failures and buries the real cause in noise.
 const CONSECUTIVE_FAILURE_LIMIT = 3;
 
+// The refusal counterpart, and deliberately much looser.
+//
+// A refusal is the no-fabrication policy working, so refusing is never wrong
+// and must never trip the failure breaker. But a long unbroken run of them
+// still means this site has nothing it can honestly ship right now, and
+// grinding through the rest of a 30-item budget to refuse each one costs a
+// generation call apiece and buries the signal. Stopping at 8 keeps the run
+// cheap while staying far enough above the "a few unlucky items in a row"
+// range that a genuinely productive day is never cut short.
+//
+// Reported as its own stoppedReason, never as 'circuit-breaker': to an
+// operator those mean opposite things. One says the system is broken; this
+// one says the system is working and correctly has nothing to say.
+const CONSECUTIVE_REFUSAL_LIMIT = 8;
+
 // Generators that publish net-new content on a cadence rather than fixing an
 // existing page, and so are paced instead of merely budgeted. The daily
 // budget answers "how much work per day"; this answers "how often does this
@@ -154,6 +169,7 @@ export async function autoRemediateSafeRecommendations(siteId) {
   // declined three items honestly is not read as three things going wrong.
   let refused = 0;
   let consecutiveFailures = 0;
+  let consecutiveRefusals = 0;
   let stoppedReason = null;
   let attempted = 0;
 
@@ -161,6 +177,11 @@ export async function autoRemediateSafeRecommendations(siteId) {
     if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
       stoppedReason = 'circuit-breaker';
       console.error(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_FAILURE_LIMIT} consecutive failures — stopping this site's run early to avoid burning the daily budget on a systemic fault. ${budgeted.length - attempted} candidate(s) left untouched and still open.`);
+      break;
+    }
+    if (consecutiveRefusals >= CONSECUTIVE_REFUSAL_LIMIT) {
+      stoppedReason = 'refusal-streak';
+      console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${budgeted.length - attempted} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
     attempted++;
@@ -211,7 +232,11 @@ export async function autoRemediateSafeRecommendations(siteId) {
       if (!approved.pr_number) await openDraftPr(siteId, draft.id);
 
       shipped++;
+      // Both streaks reset: a success is evidence against a systemic fault AND
+      // against "this site has nothing it can honestly ship", so neither
+      // counter should carry across it.
       consecutiveFailures = 0;
+      consecutiveRefusals = 0;
     } catch (err) {
       failed++;
       // A REFUSAL is not a fault, and must not feed the circuit breaker.
@@ -230,12 +255,24 @@ export async function autoRemediateSafeRecommendations(siteId) {
       // tripped the breaker, and halted with 0 shipped and 35 shippable
       // candidates untouched — every day, silently, while the machinery was
       // working exactly as designed.
-      const isRefusal = err?.userFacing === true && err?.status >= 400 && err?.status < 500;
+      //
+      // Two ways to be a refusal, in priority order. The explicit `refusal`
+      // flag is the one a thrower should set, because it says what it means;
+      // the 4xx heuristic stays as the compatibility path for the many
+      // generators that only set { status, userFacing }. The flag is checked
+      // first so a refusal can carry a 5xx status where that is the honest
+      // HTTP answer — the Quality Gate's exhaustion is a 502 because the
+      // generator is upstream of us, but it is still a statement about one
+      // item's content, not about system health.
+      const isRefusal = err?.refusal === true
+        || (err?.userFacing === true && err?.status >= 400 && err?.status < 500);
       if (isRefusal) {
         refused++;
         consecutiveFailures = 0;
+        consecutiveRefusals++;
       } else {
         consecutiveFailures++;
+        consecutiveRefusals = 0;
       }
       console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }

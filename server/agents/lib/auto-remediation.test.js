@@ -19,6 +19,11 @@ let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
+// (attemptNumber) => Error | null — full control over what generateDraft
+// throws, for the cases where the shape of the error is what's under test
+// (an explicit `refusal` flag on a 5xx, an unflagged 5xx) rather than merely
+// whether it threw. Returning null lets the attempt succeed.
+let generateError;
 let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the normal production path)
 
 function reset() {
@@ -32,8 +37,11 @@ function reset() {
   calls.prsOpened = [];
   failOn = () => false;
   refuseOn = () => false;
+  generateError = () => null;
+  generateAttempts = 0;
   approveOpensPr = false;
 }
+let generateAttempts;
 reset();
 
 function rec(id, { riskTier = 'safe', type = 'meta-title' } = {}) {
@@ -58,6 +66,8 @@ mock.module(resolve('../../store/read.js'), {
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
     generateDraft: async (siteId, { generatorId, findingId }) => {
+      const custom = generateError(++generateAttempts);
+      if (custom) throw custom;
       // The shape real generators use to decline an item honestly — e.g. schema.js's
       // "had no real data on the page" and expand-content.js's ungrounded-citations
       // refusal, both { status: 400, userFacing: true }.
@@ -441,4 +451,60 @@ describe('autoRemediateSafeRecommendations — blocked recommendations', () => {
       assert.equal(result.stoppedReason, null, 'an ineligible row is skipped, never attempted-and-failed');
     });
   }
+});
+
+// The breaker distinguishes a systemic FAULT from an honest REFUSAL. Getting
+// that wrong in either direction is expensive: counting refusals as failures
+// halts a working system, and counting failures as refusals grinds a broken
+// one through its whole budget.
+describe('autoRemediateSafeRecommendations — refusal vs failure classification', () => {
+  beforeEach(reset);
+
+  test('an explicit refusal flag beats the status heuristic, even on a 5xx', async () => {
+    // The Quality Gate's exhaustion throws 502 — the honest HTTP answer, since
+    // the generator is upstream of us — but it is a statement about one item's
+    // content, not about system health. Before the explicit flag, three
+    // unlucky items in a row halted a 30-item day.
+    generateError = () => Object.assign(new Error('could not be generated cleanly'), {
+      status: 502, userFacing: true, refusal: true, reason: 'quality-gate-exhausted',
+    });
+    recommendations = [1, 2, 3, 4].map((i) => rec(i));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.attempted, 4, 'all four must be attempted — none of these is a systemic fault');
+    assert.equal(result.refused, 4);
+    assert.equal(result.stoppedReason, null);
+  });
+
+  test('a genuine 5xx with no refusal flag still trips the breaker', async () => {
+    // The other direction: an unflagged server error is exactly what the
+    // breaker is for, and must keep tripping at three.
+    generateError = () => Object.assign(new Error('upstream exploded'), { status: 500 });
+    recommendations = [1, 2, 3, 4, 5].map((i) => rec(i));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'circuit-breaker');
+    assert.equal(result.attempted, 3);
+  });
+
+  test('a long run of honest refusals stops the run, but not as a fault', async () => {
+    generateError = () => Object.assign(new Error('no real data on the page'), { status: 422, userFacing: true });
+    recommendations = Array.from({ length: 12 }, (_, i) => rec(i + 1));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'refusal-streak',
+      'never circuit-breaker — to an operator those mean opposite things');
+    assert.equal(result.attempted, 8);
+    assert.equal(result.refused, 8);
+  });
+
+  test('a success resets the refusal streak', async () => {
+    // One clean generation in the middle of a long refusal run.
+    generateError = (n) => (n === 5 ? null : Object.assign(new Error('declined'), { status: 422, userFacing: true }));
+    recommendations = Array.from({ length: 14 }, (_, i) => rec(i + 1));
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.equal(result.attempted, 13, 'the streak restarts after the success, so 4 + 1 + 8 are attempted');
+  });
 });
