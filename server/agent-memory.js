@@ -460,9 +460,6 @@ export async function recordFixOutcome({
       validationRuleId, sourceType, sourceRef,
       siteFingerprint ? JSON.stringify(siteFingerprint) : null,
       repairRecipe ? JSON.stringify(repairRecipe) : null],
-
-      validationRuleId, sourceType, sourceRef],
-
   );
   clearCache();
   return rows[0].id;
