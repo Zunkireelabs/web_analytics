@@ -357,9 +357,21 @@ jobs:
             # Installed idempotently on every deploy (filter out the old line,
             # append the current one) so a redeploy can't stack duplicates and
             # a changed path or hour corrects itself.
+            #
+            # `crontab -l` exits 1 (not just empty output) when the deploy
+            # user has no crontab yet — true on every server's first run of
+            # this step. Under this script's `set -eo pipefail`, that exit
+            # code alone (regardless of the `2>/dev/null`, which only silences
+            # stderr, not the exit status) killed the whole subshell before it
+            # ever reached the two `echo`s below, so `crontab -` received
+            # empty input and the entire deploy died here — after every
+            # container had already deployed and passed its health check.
+            # `|| true` on both the read and the grep (which also exits 1 on
+            # an empty/no-match input) makes "nothing to carry over" a normal
+            # outcome instead of a fatal one.
             echo "Installing Data Analyst nightly pipeline cron..."
             NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
-            (crontab -l 2>/dev/null | grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$'; echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
             echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
             crontab -l | grep run_nightly_pipeline
 
