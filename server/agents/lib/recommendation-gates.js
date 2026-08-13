@@ -111,7 +111,13 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // Never fatal: this is an opportunistic upgrade of a recommendation from
     // "blocked" to "actionable". A rate-limited or unreachable repo must leave
     // the finding visible-and-blocked, not take down the whole pass.
-    const healed = await healFn(site, pageUrl, actionType, { fetchTree: cachedFetchTree })
+    //
+    // `routes` (this pass's already-discovered pagination families, see
+    // paginationRouteFor below) is passed straight through to
+    // autoHealFileMapping's own shared-target veto — it is the strongest and
+    // cheapest of that veto's checks, and this is the one call site that
+    // already has the routes cached.
+    const healed = await healFn(site, pageUrl, actionType, { fetchTree: cachedFetchTree, routes: paginationRoutes })
       .catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a file mapping for ${pageUrl}: ${err.message}`);
         return null;
@@ -221,17 +227,26 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     const pageGated = generatorId !== 'broken-link-fix' && !!page;
 
     if (pageGated && !isPageMapped(site, page, generatorId)) {
-      await healUnmappedPage(page, generatorId);
-      if (!isPageMapped(site, page, generatorId)) {
-        // Before asking anyone to map it, make sure the page is real.
-        if (await isPageSoftNotFound(page)) return { drop: 'soft-404', blockedReason: null };
-        // A GENERATED page has no per-page file by construction, so telling
-        // someone to add a mapping is asking for the wrong fix. Say what
-        // actually produces the page and where a fix would have to go.
-        const generated = await paginationRouteFor(page);
-        mappingBlockedReason = generated
-          ? paginationBlockedReason(generated, generatorId)
-          : `No url_file_map entry resolves ${page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
+      // Classify BEFORE attempting to heal, not after. Healing is a write
+      // (autoHealFileMapping persists a url_file_map entry); asking "is this
+      // page a known generated-route family" first means a page that is
+      // genuinely a shared-template instance gets diagnosed as one — and its
+      // recommendation gets the true reason immediately — without ever
+      // depending on healing's own veto to reject a candidate match by luck.
+      // The two are not fully redundant: healUnmappedPage's own veto (via
+      // sharedTargetVeto) still applies for candidates this pass's route scan
+      // did not discover (e.g. the repo scan failed this run), so it stays as
+      // the second line of defense, not a decision this branch second-guesses.
+      const generated = await paginationRouteFor(page);
+      if (generated) {
+        mappingBlockedReason = paginationBlockedReason(generated, generatorId);
+      } else {
+        await healUnmappedPage(page, generatorId);
+        if (!isPageMapped(site, page, generatorId)) {
+          // Before asking anyone to map it, make sure the page is real.
+          if (await isPageSoftNotFound(page)) return { drop: 'soft-404', blockedReason: null };
+          mappingBlockedReason = `No url_file_map entry resolves ${page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
+        }
       }
     }
 

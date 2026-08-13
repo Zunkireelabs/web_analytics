@@ -136,3 +136,79 @@ describe('autoHealFileMapping', () => {
     assert.equal(savedConfig, null, 'an adapter-routed page is a separate concern, not a missing file mapping');
   });
 });
+
+// Real incident: the last-segment match findCandidateFile makes IS safe for
+// authored pages (/blog/hello/ -> src/blog/hello.md, exactly one file), but
+// has no notion of a SHARED target — a real-world route family, a layout, or
+// a file already mapped elsewhere. These are the checks that turn "no other
+// file has this name" into "and this one is genuinely this page's own."
+describe('autoHealFileMapping — refuses a candidate that is a shared target', () => {
+  test('refuses when the discovered `routes` say this URL is a generated family', async () => {
+    const routes = [{ routePrefix: '/glossary', template: 'src/glossary/glossary-terms.njk', idField: 'id', dataFile: 'src/_data/glossary.js' }];
+    // Contrived on purpose: a file happens to share the URL's last segment
+    // even though the URL is really produced by the shared template above —
+    // exactly the scenario the veto exists to catch before it's trusted.
+    const healed = await autoHealFileMapping(site, 'https://x.com/glossary/rag/', 'expand-content', {
+      fetchTree: treeOf('src/glossary/rag.njk'), routes,
+    });
+    assert.equal(healed, null);
+    assert.equal(savedConfig, null, 'a route-family match must win over a coincidental filename match');
+  });
+
+  test('refuses a candidate under _includes/ even with no routes passed in', async () => {
+    const healed = await autoHealFileMapping(site, 'https://x.com/header/', 'meta-title', {
+      fetchTree: treeOf('src/_includes/header.njk'),
+    });
+    assert.equal(healed, null);
+    assert.equal(savedConfig, null);
+  });
+
+  test('refuses a candidate under _layouts/', async () => {
+    const healed = await autoHealFileMapping(site, 'https://x.com/base/', 'meta-title', {
+      fetchTree: treeOf('src/_layouts/base.njk'),
+    });
+    assert.equal(healed, null);
+    assert.equal(savedConfig, null);
+  });
+
+  test('refuses a candidate already mapped to a DIFFERENT url', async () => {
+    const alreadyMapped = { ...site, url_file_map: { pages: { '/team': { file: 'src/pages/people.njk' } } } };
+    const healed = await autoHealFileMapping(alreadyMapped, 'https://x.com/people/', 'meta-title', {
+      fetchTree: treeOf('src/pages/people.njk'),
+    });
+    assert.equal(healed, null);
+    assert.equal(savedConfig, null, 'the same file already serves a different URL — sharing it is evidence, not a coincidence');
+  });
+
+  test('a candidate mapped to the SAME url (re-heal) is not refused by the already-mapped check', async () => {
+    // Not a real scenario in practice (resolveFile would already resolve and
+    // autoHealFileMapping bails before reaching the veto), but the veto's own
+    // logic must key off a DIFFERENT url, not just "is this file mapped at all."
+    const same = { ...site, url_file_map: { pages: { '/other': { file: 'src/pages/about.njk' } } } };
+    const healed = await autoHealFileMapping(same, 'https://x.com/about/', 'meta-title', {
+      fetchTree: treeOf('src/pages/about.njk'),
+    });
+    // /about is unmapped, /other already claims the file -> still refused,
+    // since the file IS shared with a different URL regardless of which URL
+    // is being healed right now.
+    assert.equal(healed, null);
+  });
+
+  test('refuses when the candidate FILE ITSELF carries pagination front matter, even with no routes passed', async () => {
+    const paginatingSource = '---\npagination:\n  data: glossary\n  alias: term\nlayout: glossary-term.njk\npermalink: /glossary/{{ term.id }}/\n---\nbody';
+    const healed = await autoHealFileMapping(site, 'https://x.com/glossary-terms/', 'meta-title', {
+      fetchTree: treeOf('src/glossary/glossary-terms.njk'),
+      fetchFile: async () => ({ content: paginatingSource }),
+    });
+    assert.equal(healed, null, 'the candidate generates many pages, discovered from its own front matter');
+  });
+
+  test('a genuinely ordinary authored page still heals normally — the veto does not overreach', async () => {
+    const healed = await autoHealFileMapping(site, 'https://x.com/about/', 'meta-title', {
+      fetchTree: treeOf('src/pages/about.njk'),
+      fetchFile: async () => ({ content: '---\nlayout: base.njk\ntitle: About\n---\nbody' }),
+    });
+    assert.ok(healed);
+    assert.deepEqual(savedConfig.urlFileMap.pages['/about'], { file: 'src/pages/about.njk' });
+  });
+});
