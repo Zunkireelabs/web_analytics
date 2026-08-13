@@ -159,7 +159,11 @@ function escapeForCssSelector(cls) {
 // input counts as a non-match: a name with nothing after it has no rule body,
 // so it is not a real selector.
 const IDENT_CONTINUATION = /[A-Za-z0-9_\-\\]/;
-function classExistsInCss(cls, css) {
+// Exported so other repair/detection logic that needs to ask "does the live
+// CSS define this exact class" can reuse the same real-selector-boundary
+// evidence bar instead of a second, potentially-drifting implementation —
+// see agents/lib/prerequisite-repair.js's missing-Tailwind-typography check.
+export function classExistsInCss(cls, css) {
   const needle = `.${escapeForCssSelector(cls)}`;
   let idx = css.indexOf(needle);
   while (idx !== -1) {
