@@ -38,21 +38,10 @@ export async function autoRemediateSafeRecommendations(siteId) {
   let failed = 0;
   for (const rec of candidates) {
     try {
-      const draft = await generateDraft(siteId, {
-        generatorId: rec.recommendation_type, params: rec.params, source: 'auto-remediation', findingId: rec.finding_ids[0],
+      await shipDraftForRecommendation(siteId, {
+        generatorId: rec.recommendation_type, params: rec.params,
+        findingId: rec.finding_ids[0], source: 'auto-remediation',
       });
-
-      const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);
-      if (autoSelected) {
-        const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
-        if (updated) draft.content = updated.content;
-      }
-
-      const submitted = await submitDraftForApproval(siteId, draft.id);
-      if (!submitted) throw new Error('Draft was not in a submittable state');
-
-      const approved = await approveAndPublishDraft(siteId, draft.id, { userId: null });
-      if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
       shipped++;
     } catch (err) {
       failed++;
@@ -60,4 +49,42 @@ export async function autoRemediateSafeRecommendations(siteId) {
     }
   }
   return { attempted: candidates.length, shipped, failed };
+}
+
+// The one path from "we decided to fix this" to "a real branch exists",
+// extracted verbatim from the loop above rather than reimplemented.
+//
+// It is shared with agents/lib/learned-repair.js's cross-client interception
+// deliberately: that path acts on evidence borrowed from another client, so
+// it is the LAST thing that should get its own subtly-different copy of the
+// draft -> submit -> approve -> push chain. One path means one set of gates
+// (Quality Gate and its bounded regeneration inside generateDraft, then the
+// rendering gate, second Quality Gate, implementer preview and exact-match
+// refusal inside approveAndPublishDraft), and no way for a future change to
+// harden one caller and miss the other.
+//
+// `memoryRefId` binds the specific agent_fix_memory row being reused onto the
+// draft, so fix-verification.js's later live re-check feeds success or
+// failure back to THAT row rather than to "some fix for this generator".
+// Null for the ordinary same-site path, which lets generateDraft do its own
+// lookup exactly as before.
+//
+// Throws on any failure — callers decide what a failure means (auto-
+// remediation leaves the recommendation open; the learned-repair path also
+// records a failed reuse against the memory it borrowed).
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, memoryRefId = null }) {
+  const draft = await generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId });
+
+  const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
+  if (autoSelected) {
+    const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
+    if (updated) draft.content = updated.content;
+  }
+
+  const submitted = await submitDraftForApproval(siteId, draft.id);
+  if (!submitted) throw new Error('Draft was not in a submittable state');
+
+  const approved = await approveAndPublishDraft(siteId, draft.id, { userId: null });
+  if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
+  return approved;
 }

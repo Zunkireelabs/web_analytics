@@ -1,6 +1,9 @@
 import { callLLMForJson } from './llm.js';
 
-// Shared classify/extract logic for engineering_fix_lessons (migration 087).
+// Shared classify/extract logic for code-bug lessons — stored as
+// category='code', scope='repo' rows in agent_fix_memory (migration 097).
+// (This used to target the standalone engineering_fix_lessons table, 087,
+// which f40fa76 consolidated away; that table is now dead.)
 // Used by both server/scripts/backfill-engineering-lessons.js (one-time, walks
 // full git history) and server/scripts/extract-branch-lesson.js (ongoing,
 // runs against a single fix/* branch's diff before its PR is created) — one
@@ -17,7 +20,7 @@ const CLASSIFY_SYSTEM = `You review a git commit or a full PR branch diff from a
 
 Say NO (not a code bug fix) if the change is:
 - A new feature or capability addition, even if it also fixes something minor as a side effect
-- A pure content/copy/SEO-generator prompt fix (that belongs in the separate fix_lessons table, not this one)
+- A pure content/copy/SEO-generator prompt fix (that is a client-facing content lesson, not a code lesson)
 - A docs-only, formatting-only, or dependency-bump-only change
 - A merge commit or a revert with no independent content of its own
 

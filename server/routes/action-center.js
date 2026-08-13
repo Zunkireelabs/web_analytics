@@ -16,7 +16,7 @@ import { runQualityGate } from '../generators/lib/quality-gate.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
 import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
 import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
-import { categoryForPattern, rootCauseForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
+import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import {
@@ -212,7 +212,14 @@ router.get('/action-center/generators', async (req, res, next) => {
 // reuses this exact logic instead of duplicating it. Throws with a `.status`
 // (400/404) for the route below to map to a response — same convention
 // runAgent() (server/agents/runner.js) already uses.
-export async function generateDraft(siteId, { generatorId, params, source, findingId } = {}) {
+// `memoryRefId` (optional) is supplied only by the cross-client learned-repair
+// path (agents/lib/learned-repair.js), which has ALREADY chosen the specific
+// agent_fix_memory row it is acting on — the whole decision to draft at all
+// came from that row. Letting the lookup below run instead would bind the
+// draft to whatever this site's own closest match happens to be, and the
+// later verification outcome would then be credited to the wrong memory.
+// Every other caller omits it and gets today's behavior unchanged.
+export async function generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId: presetMemoryRefId = null } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -282,6 +289,13 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       affectedPattern: `${generatorId} generation output matching Quality Gate pattern "${patternId}" (${categoryForPattern(patternId)}).`,
       fixStrategy: `Avoid "${patternId}" on the first attempt` +
         `${rootCauseForPattern(patternId) ? ` — ${rootCauseForPattern(patternId)}` : ''}.`,
+      // The actionable half. fix_strategy describes what went wrong for a
+      // human reading the row; fix_pattern is the directive withAgentMemory
+      // inlines into a future generator's prompt once this lesson is trusted
+      // enough to be promoted to 'auto'. Client-agnostic by construction —
+      // see fixDirectiveForPattern — which is what makes it safe on a
+      // cross-tenant row.
+      fixPattern: fixDirectiveForPattern(patternId),
     }).catch((err) => console.error(`[action-center] failed to record auto-fix memory for ${generatorId}/${patternId}:`, err.message))));
   }
 
@@ -380,10 +394,10 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // same lookup via withAgentMemory (server/llm.js) — this is a second,
   // uncached call because it needs the specific top match's id, not just
   // rendered prompt text.
-  const memoryMatch = await findRelevantMemory({
+  const memoryMatch = presetMemoryRefId ? [] : await findRelevantMemory({
     category: topLevelCategoryForGenerator(generatorId), scope: 'client', siteId, generatorId, clientFacing: true, limit: 1,
   }).catch((err) => { console.error(`[action-center] agent_fix_memory lookup failed for ${generatorId}:`, err.message); return []; });
-  const memoryRefId = memoryMatch[0]?.id ?? null;
+  const memoryRefId = presetMemoryRefId ?? (memoryMatch[0]?.id ?? null);
 
   const draft = await createDraft(siteId, {
     actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId, gateResolvedPatterns,

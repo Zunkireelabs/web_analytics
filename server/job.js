@@ -24,6 +24,7 @@ import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 import { getImplementedFindingIds } from './store/drafts.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
@@ -177,10 +178,24 @@ export async function runDailyAgentAnalysisForSite(site) {
   await deliverToAllChannels(site.id, events);
 
   const recommendations = await buildRecommendations(site.id);
-  await syncFromGrounded(site.id, recommendations)
+
+  // Cross-client learned repair, BEFORE anything is persisted: an issue this
+  // platform has already proven it can fix — on this site or another one —
+  // gets repaired into a real PR here, and never becomes an Action Center row
+  // at all. Anything without proven, applicable evidence falls through
+  // untouched. Fails open to today's exact behavior on any error, since a
+  // learning optimization must never be able to lose a real finding.
+  const grounded = await interceptWithLearnedRepairs(site.id, recommendations)
+    .catch((err) => { console.error(`[job] site ${site.id} learned repair failed:`, err.message); return recommendations; });
+
+  await syncFromGrounded(site.id, grounded)
     .catch((err) => console.error(`[job] site ${site.id} recommendation coordinator sync failed:`, err.message));
   await autoRemediateSafeRecommendations(site.id)
     .catch((err) => console.error(`[job] site ${site.id} auto-remediation failed:`, err.message));
+  // Deliberately the PRE-repair list, not `grounded`. A repaired item's issue
+  // is still genuinely live on the site until a human merges its PR, so the
+  // watchlist must keep tracking it — dropping it here would mark the problem
+  // as handled before anything actually shipped.
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
   const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
     .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });

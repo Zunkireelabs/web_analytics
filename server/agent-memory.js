@@ -1,4 +1,6 @@
 import { query } from './db.js';
+import { sanitizeForCustomer } from './lib/errors.js';
+import { classifyForSweep } from './agents/lib/lesson-producers.js';
 
 // Single authoritative shared learning/memory store for every agent in this
 // platform (migration 097) — replaces fix_lessons (content-generation
@@ -110,6 +112,167 @@ export async function findRelevantMemory({
   return ranked;
 }
 
+// Retirement. `deprecated` has been in the CHECK constraint and in every read
+// filter since migration 097, but nothing has ever written it — so a lesson
+// could only ever be quarantined as WRONG (flagged_for_review, via two
+// consecutive failed reuses), never retired as OBSOLETE. Those are different
+// things: a lesson about a generator that no longer exists isn't incorrect,
+// it just has nothing left to apply to, and leaving it 'trusted' means it
+// keeps consuming one of withAgentMemory's five prompt slots forever.
+export async function deprecateMemory(id, reason) {
+  const { rows } = await query(
+    `UPDATE agent_fix_memory
+     SET status = 'deprecated',
+         root_cause = COALESCE(root_cause, '') || $2,
+         updated_at = now()
+     WHERE id = $1 AND status != 'deprecated'
+     RETURNING id`,
+    [id, ` [deprecated: ${reason}]`],
+  );
+  clearCache();
+  return rows[0]?.id ?? null;
+}
+
+// Retires only lessons whose producer is EXPLICITLY declared retired in
+// agents/lib/lesson-producers.js.
+//
+// The previous version of this function deprecated any lesson whose
+// generator_id was absent from generators/registry.js. That was wrong, and
+// wrong in the most damaging possible direction: run against live data it
+// would have retired exactly one row, and that row was the Design Agent's
+// component-template lesson — a first-class, actively-written memory that the
+// autonomous Design Agent workflow depends on, whose producer is not a
+// generator and therefore was never going to be in that registry. Worse, that
+// producer's source file does not exist on every branch, so the same sweep
+// could delete or preserve the same real memory depending on which checkout
+// it happened to run from.
+//
+// So obsolescence is now positive-only. `knownGeneratorIds` is still accepted
+// and still feeds the "active" determination, but nothing can be swept for
+// merely being absent from it. Unrecognised producers are returned separately
+// for a human to classify rather than deleted.
+//
+// Returns { retired, skipped } — skipped carries every row that was NOT
+// retired along with the reason, so enabling this on a schedule later is a
+// decision made against real evidence rather than hope.
+export async function deprecateObsoleteMemories(knownGeneratorIds = []) {
+  const known = [...(knownGeneratorIds || [])].filter(Boolean);
+
+  const { rows } = await query(
+    `SELECT id, generator_id FROM agent_fix_memory
+     WHERE status != 'deprecated' AND generator_id IS NOT NULL`,
+  );
+
+  const retired = [];
+  const skipped = [];
+  for (const row of rows) {
+    const verdict = classifyForSweep(row, known);
+    if (!verdict.obsolete) {
+      skipped.push({ id: row.id, generatorId: row.generator_id, status: verdict.status, reason: verdict.reason });
+      continue;
+    }
+    const id = await deprecateMemory(row.id, verdict.reason);
+    if (id) retired.push(id);
+  }
+
+  const unknown = skipped.filter((s) => s.status === 'unknown');
+  if (unknown.length) {
+    console.warn(`[agent-memory] ${unknown.length} lesson(s) have an unrecognised producer and were LEFT IN PLACE: `
+      + `${[...new Set(unknown.map((u) => u.generatorId))].join(', ')}. Declare them in agents/lib/lesson-producers.js.`);
+  }
+  return { retired, skipped };
+}
+
+// Cross-client retrieval — the ONLY function here permitted to return a row
+// learned on a DIFFERENT site than the caller's.
+//
+// Kept as its own function rather than a mode flag on findRelevantMemory
+// above, because that one runs inside withAgentMemory on every generator LLM
+// call: making it conditionally cross-tenant would put the riskiest behavior
+// in the hottest, least-reviewed path. Here the strictness is visible in one
+// place.
+//
+// Every clause is a safety requirement, not an optimization:
+//   status='trusted' + execution_permission='auto'  — the existing promotion
+//     ladder (TRUST_THRESHOLD occurrences) must already have vouched for it.
+//   category != 'code' AND scope != 'repo'          — same wall
+//     findRelevantMemory enforces; a repo-engineering lesson must never reach
+//     a client's website.
+//   repair_recipe IS NOT NULL                       — there is an executable
+//     chain, not just prose.
+//   site_fingerprint IS NOT NULL                    — excludes every row
+//     learned before fingerprints existed. A legacy row has no evidence about
+//     WHERE it worked, so it can never be portable.
+//   failed_reuse_count = 0                          — stricter than
+//     findRelevantMemory's flagged_for_review exclusion: for cross-client
+//     execution, a SINGLE past failure anywhere disqualifies permanently. The
+//     lesson stays usable for prompt injection; it just stops being allowed
+//     to act on a stranger's repository.
+//
+// The distinct-site evidence requirement is computed in JS because
+// reuse_history is JSONB and the question ("did this succeed on at least N
+// sites that aren't this one?") doesn't express cleanly in the existing
+// query shape. It is the single most important guard here: "worked twice on
+// one site" is evidence the fix is right, not evidence it is PORTABLE.
+//
+// Returns raw-ish candidates including site_fingerprint; applicability
+// matching itself lives in agents/lib/learned-repair.js so this module keeps
+// its documented no-heavy-imports property.
+export async function findPortableRepairs({
+  problemSignature, category = null, targetSiteId = null, minDistinctSites = 2, limit = 5,
+} = {}) {
+  if (!problemSignature) return [];
+
+  const { rows } = await query(
+    `SELECT * FROM agent_fix_memory
+     WHERE status = 'trusted'
+       AND execution_permission = 'auto'
+       AND category != 'code'
+       AND scope IN ('client', 'global')
+       AND repair_recipe IS NOT NULL
+       AND site_fingerprint IS NOT NULL
+       AND failed_reuse_count = 0
+       AND ($1::text IS NULL OR category = $1)
+       AND lower(problem_signature) = lower($2)
+     ORDER BY confidence DESC, successful_reuse_count DESC
+     LIMIT 20`,
+    [category, problemSignature],
+  );
+
+  return rows
+    .map((row) => ({ row, distinctSites: distinctSuccessSites(row, targetSiteId) }))
+    .filter(({ distinctSites }) => distinctSites.length >= minDistinctSites)
+    .slice(0, limit)
+    .map(({ row, distinctSites }) => ({
+      id: row.id,
+      generatorId: row.generator_id,
+      problemSignature: row.problem_signature,
+      siteFingerprint: Array.isArray(row.site_fingerprint) ? row.site_fingerprint : [],
+      repairRecipe: row.repair_recipe,
+      confidence: Number(row.confidence),
+      successfulReuseCount: row.successful_reuse_count,
+      provenSiteCount: distinctSites.length,
+    }));
+}
+
+// Sites (other than the target) where this memory has a RECORDED SUCCESSFUL
+// reuse. Deliberately counts reuse_history successes rather than
+// successful_reuse_count, because that counter can't tell one site's repeated
+// success apart from several sites' — which is exactly the distinction that
+// makes a lesson portable rather than merely correct.
+//
+// The learning site itself is included via its own site_id: a row's first
+// success is what created it, and that site is real evidence too.
+function distinctSuccessSites(row, targetSiteId) {
+  const sites = new Set();
+  if (row.site_id != null && row.site_id !== targetSiteId) sites.add(row.site_id);
+  const history = Array.isArray(row.reuse_history) ? row.reuse_history : [];
+  for (const h of history) {
+    if (h?.outcome === 'success' && h.siteId != null && h.siteId !== targetSiteId) sites.add(h.siteId);
+  }
+  return [...sites];
+}
+
 function countTrailingFailures(history) {
   let n = 0;
   for (let i = history.length - 1; i >= 0; i--) {
@@ -198,12 +361,54 @@ async function promoteOccurrence(id) {
 //                                 inserts a new 'candidate' row.
 //   memoryRefId null, failure -> nothing existing to update and no new
 //                                 pattern was actually validated — no-op.
+// Applied to every free-text field on the INSERT path below, never on read.
+//
+// This table is CROSS-TENANT by design: a row written with site_id NULL is
+// retrievable by every other client's generators through withAgentMemory
+// (server/llm.js). That makes any client-identifying text written here a real
+// cross-client leak, not a theoretical one — draft-lesson-extraction.js used
+// to quote a human's verbatim draft corrections straight into `symptoms`,
+// which is exactly the shape this guards against now that it describes edits
+// instead.
+//
+// Three layers, in order of specificity:
+//   1. sanitizeForCustomer (lib/errors.js) — the existing whole-string
+//      redaction for provider errors, HTTP statuses and stack frames. Reused
+//      rather than reimplemented so this can never drift from the leak
+//      patterns the rest of the app already enforces.
+//   2. URLs and email addresses -> placeholders. A URL is the single most
+//      identifying thing a lesson can carry, and migration 097's own column
+//      comment already requires affected_pattern to be "a generalized
+//      description, never a literal URL/file/client".
+//   3. Long quoted runs -> <quoted-content>. A quoted span over ~80 chars is
+//      almost always reproduced client copy rather than a described pattern.
+//
+// Redacts rather than rejects: a lesson with its URL stripped is still a
+// useful pattern, whereas dropping the write loses the learning entirely. The
+// NOT NULL columns therefore always receive a non-empty string.
+export function sanitizeLessonText(text) {
+  if (typeof text !== 'string' || !text) return text;
+  const deLeaked = sanitizeForCustomer(text, '(redacted — contained internal error detail)');
+  return deLeaked
+    .replace(/\bhttps?:\/\/\S+/gi, '<url>')
+    .replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, '<email>')
+    .replace(/"([^"]{80,})"/g, '"<quoted-content>"');
+}
+
 export async function recordFixOutcome({
   memoryRefId = null,
   category, scope = 'client', siteId = null, generatorId = null,
   problemSignature, symptoms, rootCause = null, affectedPattern, fixStrategy, fixPattern = null,
   validationRuleId = null, outcome, agentId = null, notes = null,
   sourceType = 'runtime-auto', sourceRef = null,
+  // Cross-client repair (migration 099). Both default null, which is what
+  // every existing caller passes implicitly — a row without them behaves
+  // exactly as it does today (advisory prompt injection only) and is
+  // structurally excluded from findPortableRepairs above. Only
+  // fix-verification.js's learnFromOutcome supplies them, because a live
+  // re-check of the real page is the only signal strong enough to justify
+  // acting on someone else's site.
+  siteFingerprint = null, repairRecipe = null,
 }) {
   if (outcome !== 'success' && outcome !== 'failure') {
     throw new Error(`Unknown fix outcome "${outcome}" — expected "success" or "failure"`);
@@ -238,11 +443,20 @@ export async function recordFixOutcome({
   const { rows } = await query(
     `INSERT INTO agent_fix_memory
        (category, scope, execution_permission, site_id, generator_id, problem_signature, symptoms, root_cause,
-        affected_pattern, fix_strategy, fix_pattern, validation_rule_id, source_type, source_ref)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        affected_pattern, fix_strategy, fix_pattern, validation_rule_id, source_type, source_ref,
+        site_fingerprint, repair_recipe)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb)
      RETURNING id`,
-    [category, scope, executionPermission, siteId, generatorId, problemSignature, symptoms, rootCause,
-      affectedPattern, fixStrategy, fixPattern, validationRuleId, sourceType, sourceRef],
+    // problem_signature is deliberately NOT sanitized: it is the exact
+    // retrieval key both this function's own dedup lookups above and every
+    // reader match on, and it is already a generated slug
+    // (`${generatorId}:${tags}`), never free prose.
+    [category, scope, executionPermission, siteId, generatorId, problemSignature,
+      sanitizeLessonText(symptoms), sanitizeLessonText(rootCause),
+      sanitizeLessonText(affectedPattern), sanitizeLessonText(fixStrategy), sanitizeLessonText(fixPattern),
+      validationRuleId, sourceType, sourceRef,
+      siteFingerprint ? JSON.stringify(siteFingerprint) : null,
+      repairRecipe ? JSON.stringify(repairRecipe) : null],
   );
   clearCache();
   return rows[0].id;
