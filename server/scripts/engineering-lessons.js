@@ -98,7 +98,7 @@ function parseArgs(argv) {
 
 function printBlock(lessons) {
   if (!lessons.length) {
-    console.log('No engineering_fix_lessons matched. (This means no known lesson, or the keyword heuristic missed it — rerun with --all to check by eye.)');
+    console.log('No engineering lessons matched. (This means no known lesson, or the keyword heuristic missed it — rerun with --all to check by eye.)');
     return;
   }
   console.log('Known engineering issues for this type of code — do not repeat these:');

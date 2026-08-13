@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { sanitizeForCustomer } from './lib/errors.js';
 
 // Single authoritative shared learning/memory store for every agent in this
 // platform (migration 097) — replaces fix_lessons (content-generation
@@ -198,6 +199,40 @@ async function promoteOccurrence(id) {
 //                                 inserts a new 'candidate' row.
 //   memoryRefId null, failure -> nothing existing to update and no new
 //                                 pattern was actually validated — no-op.
+// Applied to every free-text field on the INSERT path below, never on read.
+//
+// This table is CROSS-TENANT by design: a row written with site_id NULL is
+// retrievable by every other client's generators through withAgentMemory
+// (server/llm.js). That makes any client-identifying text written here a real
+// cross-client leak, not a theoretical one — draft-lesson-extraction.js used
+// to quote a human's verbatim draft corrections straight into `symptoms`,
+// which is exactly the shape this guards against now that it describes edits
+// instead.
+//
+// Three layers, in order of specificity:
+//   1. sanitizeForCustomer (lib/errors.js) — the existing whole-string
+//      redaction for provider errors, HTTP statuses and stack frames. Reused
+//      rather than reimplemented so this can never drift from the leak
+//      patterns the rest of the app already enforces.
+//   2. URLs and email addresses -> placeholders. A URL is the single most
+//      identifying thing a lesson can carry, and migration 097's own column
+//      comment already requires affected_pattern to be "a generalized
+//      description, never a literal URL/file/client".
+//   3. Long quoted runs -> <quoted-content>. A quoted span over ~80 chars is
+//      almost always reproduced client copy rather than a described pattern.
+//
+// Redacts rather than rejects: a lesson with its URL stripped is still a
+// useful pattern, whereas dropping the write loses the learning entirely. The
+// NOT NULL columns therefore always receive a non-empty string.
+export function sanitizeLessonText(text) {
+  if (typeof text !== 'string' || !text) return text;
+  const deLeaked = sanitizeForCustomer(text, '(redacted — contained internal error detail)');
+  return deLeaked
+    .replace(/\bhttps?:\/\/\S+/gi, '<url>')
+    .replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, '<email>')
+    .replace(/"([^"]{80,})"/g, '"<quoted-content>"');
+}
+
 export async function recordFixOutcome({
   memoryRefId = null,
   category, scope = 'client', siteId = null, generatorId = null,
@@ -241,8 +276,14 @@ export async function recordFixOutcome({
         affected_pattern, fix_strategy, fix_pattern, validation_rule_id, source_type, source_ref)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING id`,
-    [category, scope, executionPermission, siteId, generatorId, problemSignature, symptoms, rootCause,
-      affectedPattern, fixStrategy, fixPattern, validationRuleId, sourceType, sourceRef],
+    // problem_signature is deliberately NOT sanitized: it is the exact
+    // retrieval key both this function's own dedup lookups above and every
+    // reader match on, and it is already a generated slug
+    // (`${generatorId}:${tags}`), never free prose.
+    [category, scope, executionPermission, siteId, generatorId, problemSignature,
+      sanitizeLessonText(symptoms), sanitizeLessonText(rootCause),
+      sanitizeLessonText(affectedPattern), sanitizeLessonText(fixStrategy), sanitizeLessonText(fixPattern),
+      validationRuleId, sourceType, sourceRef],
   );
   clearCache();
   return rows[0].id;
