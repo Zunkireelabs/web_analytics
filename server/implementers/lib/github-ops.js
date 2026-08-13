@@ -22,6 +22,27 @@ export function baseBranch(site) {
 // it — that's accepted, not a bug (see openPrForBranch's PR body, which
 // surfaces this to the human reviewer). UTC date, so behavior is identical
 // regardless of server locale/deploy region.
+// Every failure below is PERSISTED — pushDraftBranch's message lands in
+// drafts.apply_error, the two PR openers' in drafts.merge_error — and is then
+// read by a human days later trying to work out why a draft is stuck. The
+// sanitized text alone cannot answer that: safeMessage deliberately replaces the
+// real error (which may carry tokens, hostnames or status codes) with fixed
+// customer-safe wording, and the only copy of the real cause is a server log
+// line keyed by the id it returns. Dropping that id, as these three call sites
+// did, made a stuck draft undiagnosable from the database.
+//
+// Real case: site 1 had four drafts sitting 'approved' with branch_name NULL for
+// three days, all reading "This change could not be pushed to a branch right
+// now", with nothing to correlate against the logs.
+//
+// The id is an opaque correlation key, not sensitive — worker.js's job logs
+// already surface it the same way ("Job failed: … (ref: …)"). This keeps the two
+// consistent.
+function persistedFailure(context, err, fallback) {
+  const { message, id } = safeMessage(context, err, fallback);
+  return { ok: false, reason: 'github-error', error: `${message} (ref: ${id})` };
+}
+
 export function batchBranchName(site, date = new Date()) {
   const day = date.toISOString().slice(0, 10); // YYYY-MM-DD, UTC
   return `action-center/batch-${site.id}-${day}`;
@@ -114,8 +135,7 @@ export async function pushDraftBranch(site, draft, files, target) {
 
     return { ok: true, branchName };
   } catch (err) {
-    const { message } = safeMessage('github-ops.pushDraftBranch', err, 'This change could not be pushed to a branch right now — our team has been notified.');
-    return { ok: false, reason: 'github-error', error: message };
+    return persistedFailure('github-ops.pushDraftBranch', err, 'This change could not be pushed to a branch right now — our team has been notified.');
   }
 }
 
@@ -142,8 +162,7 @@ export async function openRollbackPr(site, draft, branchName) {
     });
     return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
-    const { message } = safeMessage('github-ops.openRollbackPr', err, 'This rollback pull request could not be opened right now — our team has been notified.');
-    return { ok: false, reason: 'github-error', error: message };
+    return persistedFailure('github-ops.openRollbackPr', err, 'This rollback pull request could not be opened right now — our team has been notified.');
   }
 }
 
@@ -172,7 +191,6 @@ export async function openPrForBranch(site, draft, branchName) {
     });
     return { ok: true, prNumber: number, prUrl: url, reused: false };
   } catch (err) {
-    const { message } = safeMessage('github-ops.openPrForBranch', err, 'This pull request could not be opened right now — our team has been notified.');
-    return { ok: false, reason: 'github-error', error: message };
+    return persistedFailure('github-ops.openPrForBranch', err, 'This pull request could not be opened right now — our team has been notified.');
   }
 }

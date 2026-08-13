@@ -151,14 +151,20 @@ export async function approveDraft(siteId, id, approvedBy) {
 // isn't re-derivable from url_file_map alone) rather than re-resolving live
 // on every preview click. null/undefined for every other action type, same
 // as before this param existed.
-export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null }) {
+// targetProvenance is page-resolution.js's resolvePageSource() output for
+// this draft's target — what actually renders the page, whether that's
+// shared, and what editing it would affect. null for anything the caller
+// couldn't or didn't resolve (e.g. site-level generators with no single
+// page), same as appliedFiles above.
+export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null, targetProvenance = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, render_mode = $5,
        apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
-       content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END
+       content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END,
+       target_provenance = COALESCE($7::jsonb, target_provenance)
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null]
+    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null, targetProvenance ? JSON.stringify(targetProvenance) : null]
   );
   return rows[0] || null;
 }
@@ -510,6 +516,60 @@ export async function hasDraftSince(siteId, source, actionType, since) {
     [siteId, source, actionType, since]
   );
   return rows.length > 0;
+}
+
+// How many drafts a given source has created for this site since the start of
+// today IN THE SITE'S OWN TIMEZONE — the daily budget the unattended
+// auto-remediation loop spends against (agents/lib/auto-remediation.js).
+//
+// The timezone matters and is not decoration: sites.timezone defaults to
+// Asia/Kolkata while the server may run anywhere, so counting against UTC
+// midnight would roll the budget over mid-afternoon for an Indian client and
+// let a single day ship close to two full budgets. `AT TIME ZONE $3` does the
+// conversion in Postgres against the same clock the row was written with,
+// rather than reconstructing a local midnight in JS and hoping the two agree
+// across a DST boundary.
+//
+// Counts every draft the source created today regardless of what became of it
+// (shipped, failed at apply, abandoned): the budget is a cap on how much
+// unattended WORK the system does per day, not on how much of it succeeded —
+// otherwise a site failing every attempt would retry without limit, which is
+// exactly the runaway the cap exists to prevent.
+export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = $2
+        AND (created_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, source, timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+// Whether a draft of `actionType` was created for this site within the last
+// `days` days — the evidence behind auto-remediation.js's publishing-cadence
+// gap (sites.blog_min_gap_days, migration 107).
+//
+// Deliberately counts drafts from ANY source, not just 'auto-remediation'.
+// The gap exists so the site publishes at a believable rhythm, and a reader
+// or a crawler cannot tell whether a post was triggered by the unattended
+// loop or by a human clicking Execute Today's Safe Fixes. A human who ships
+// a blog manually today has already used this window; the agent respecting
+// that is the point, and the human stays free to ship again immediately
+// because this gap is only ever consulted by the unattended path.
+//
+// Abandoned drafts don't count — an abandoned post was never published, so
+// it should not hold the window open against a real one.
+export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 'UTC') {
+  if (!days || days <= 0) return false;
+  const { rows } = await query(
+    `SELECT EXISTS (
+       SELECT 1 FROM drafts
+        WHERE site_id = $1 AND action_type = $2 AND status <> 'abandoned'
+          AND (created_at AT TIME ZONE $4)::date > (now() AT TIME ZONE $4)::date - $3::int
+     ) AS found`,
+    [siteId, actionType, days, timezone]
+  );
+  return Boolean(rows[0]?.found);
 }
 
 // Every finding_id with at least one implemented draft — finding ids are

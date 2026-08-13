@@ -28,7 +28,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   XCircle,
-  RefreshCw
+  RefreshCw,
+  Lock
 } from 'lucide-react';
 
 const GENERATOR_META = {
@@ -123,6 +124,34 @@ function titleFor(item) {
   return item.tag;
 }
 
+// WHY a recommendation is blocked reads very differently depending on kind
+// (server/store/recommendations.js's classifyBlockedKind): 'our-config' is
+// something the tenant can act on right now; 'awaiting-derivation' means the
+// system is already working on it unattended and there's nothing to click;
+// 'site-fact' is a real architectural constraint (e.g. a shared programmatic
+// template), not a gap. Showing all three under one "Blocked" amber banner —
+// as this used to — reads as "something is wrong here" even for the middle
+// case, where nothing is. Falls back to the 'our-config' framing (the
+// original blockedReason text, unornamented) for any older row that predates
+// blocked_kind, or a kind this UI doesn't recognize yet.
+const BLOCKED_KIND_META = {
+  'our-config': {
+    icon: Lock, badge: 'Blocked — setup needed', heading: "Can't be drafted yet",
+    className: 'amber',
+  },
+  'awaiting-derivation': {
+    icon: Clock, badge: 'Being set up automatically', heading: 'Nothing to do — this will unblock on its own',
+    className: 'blue',
+  },
+  'site-fact': {
+    icon: Layers, badge: "Can't be drafted here", heading: 'How this page is built',
+    className: 'amber',
+  },
+};
+function blockedMetaFor(item) {
+  return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
+}
+
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
   approved: 'approved', branch_pushed: 'branch pushed', merged_to_stage: 'merged to stage',
@@ -183,6 +212,10 @@ export default function ActionCenter() {
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
   const [executionJobDetail, setExecutionJobDetail] = useState(null);
+  // True only while re-fetching a bulk run whose HTTP response the browser
+  // abandoned — the work itself is still fine, so this must never read as an
+  // error state (see executeSafeFixes' catch).
+  const [recoveringExecution, setRecoveringExecution] = useState(false);
   const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [recheckingId, setRecheckingId] = useState(null);
@@ -214,7 +247,12 @@ export default function ActionCenter() {
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
   }).catch(() => setDrafts([]));
 
-  const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed }
+  const [todayStats, setTodayStats] = useState(null); // null | { shipped, failed, batchLimit }
+  // The server's real cap (routes/action-center.js's SAFE_FIX_BATCH_LIMIT),
+  // not a copy of it. Null until the mount fetch lands, which is why the
+  // button below falls back to the plain eligible count rather than a
+  // hardcoded guess for that first moment.
+  const safeFixBatchLimit = todayStats?.batchLimit ?? null;
   const loadTodayStats = () => api.actionCenter.todayExecutionStats().then(setTodayStats).catch(() => {});
 
   useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, []);
@@ -280,24 +318,56 @@ export default function ActionCenter() {
     }
   };
 
-  // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to 15)
-  // through the existing Generate -> Submit -> Approve chain automatically,
-  // one execution job, one shared branch/PR. Manual-tier recommendations
-  // (landing pages, pricing, nav, etc.) are never included — they always
-  // need the stepped flow below.
+  // Phase 4 M3 — bulk-ships every open, safe-tier recommendation (up to the
+  // server's SAFE_FIX_BATCH_LIMIT) through the existing Generate -> Submit ->
+  // Approve chain automatically, one execution job, one shared branch/PR.
+  // Manual-tier recommendations (landing pages, pricing, nav, etc.) are never
+  // included — they always need the stepped flow below.
+  //
+  // Sends NO limit on purpose: the cap is the server's to decide (see
+  // routes/action-center.js's SAFE_FIX_BATCH_LIMIT), and this component reads
+  // the same number back via todayStats.batchLimit purely to label the button.
+  // Passing one from here is what let the UI promise 15 while the server was
+  // free to ship a different number.
   const executeSafeFixes = async () => {
     setExecutingSafeFixes(true);
     setError(null);
     setExecutionResult(null);
     setExecutionJobDetail(null);
     try {
-      const result = await api.actionCenter.executeSafeFixes(15);
+      const result = await api.actionCenter.executeSafeFixes();
       setExecutionResult(result);
       loadRecs();
       loadDrafts();
       loadTodayStats();
     } catch (e) {
-      setError(e.message || 'Execute Safe Fixes failed');
+      // A batch big enough to outrun web/src/api.js's 5-minute fetch ceiling
+      // aborts HERE while the server keeps going and finishes the job — so
+      // this is not a failure, and reporting it as one would hide the very
+      // per-item PR failures this banner exists to show. Recover by asking
+      // for the run we already started (it's the site's latest bulk job) and
+      // rendering its real, persisted result instead.
+      const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+      if (timedOut) {
+        setRecoveringExecution(true);
+        try {
+          const recovered = await api.actionCenter.latestExecutionJob();
+          if (recovered.job) {
+            setExecutionResult(recovered);
+            loadRecs();
+            loadDrafts();
+            loadTodayStats();
+          } else {
+            setError('The safe-fix run is still going. It will finish on the server — reload in a few minutes to see the result.');
+          }
+        } catch {
+          setError('The safe-fix run is still going on the server. Reload in a few minutes to see which fixes shipped and which failed.');
+        } finally {
+          setRecoveringExecution(false);
+        }
+      } else {
+        setError(e.message || 'Execute Safe Fixes failed');
+      }
     } finally {
       setExecutingSafeFixes(false);
     }
@@ -435,6 +505,13 @@ export default function ActionCenter() {
         </div>
       )}
 
+      {recoveringExecution && (
+        <div className="text-xs font-semibold text-slate-600 bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 leading-relaxed flex items-center gap-2">
+          <Zap size={14} className="text-slate-400 shrink-0 animate-pulse" />
+          <span>This batch is taking longer than the browser will wait — the run is still going on the server. Fetching its result…</span>
+        </div>
+      )}
+
       {executionResult && (
         <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed">
           <div className="flex items-center justify-between gap-2">
@@ -466,8 +543,12 @@ export default function ActionCenter() {
             </span>
           </div>
 
+          {/* Scrolls rather than truncates: a full batch can fail every item,
+              and a silently cut-off list would read as "only these failed."
+              Every failure stays reachable, the banner just stops pushing the
+              rest of the page down. */}
           {executionJobDetail && (
-            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5">
+            <div className="mt-3 pt-3 border-t border-emerald-100 space-y-1.5 max-h-80 overflow-y-auto">
               {executionJobDetail.items.filter((it) => it.status === 'failed').map((it) => {
                 const Row = it.draft_id ? 'button' : 'div';
                 return (
@@ -584,12 +665,14 @@ export default function ActionCenter() {
               <button
                 onClick={executeSafeFixes}
                 disabled={executingSafeFixes || safeEligibleCount === 0}
-                title={safeEligibleCount === 0 ? 'No safe-tier recommendations open right now' : `Ship up to 15 of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
+                title={safeEligibleCount === 0
+                  ? 'No safe-tier recommendations open right now'
+                  : `Ship up to ${safeFixBatchLimit ?? safeEligibleCount} of ${safeEligibleCount} safe recommendations — one branch, one PR, no per-item clicks`}
                 className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer ml-auto shrink-0"
                 style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}
               >
                 <Zap size={11} className={executingSafeFixes ? 'animate-pulse' : ''} />
-                {executingSafeFixes ? '…' : Math.min(15, safeEligibleCount)}
+                {executingSafeFixes ? '…' : Math.min(safeFixBatchLimit ?? safeEligibleCount, safeEligibleCount)}
               </button>
 
               {/* Live "today" counters — distinct from the Zap button's live
@@ -722,7 +805,20 @@ export default function ActionCenter() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
-                              {item.riskTier === 'safe' && (
+                              {/* A blocked recommendation can't be drafted at all (the server 422s),
+                                  so it must not wear the "Safe — auto-eligible" badge that promises
+                                  the opposite. The reason itself is stated in the detail panel. */}
+                              {item.blockedReason ? (() => {
+                                const meta = blockedMetaFor(item);
+                                const BlockedIcon = meta.icon;
+                                return (
+                                  <span className={`shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full ${
+                                    meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
+                                  }`}>
+                                    <BlockedIcon size={8} /> {meta.className === 'blue' ? 'In progress' : 'Blocked'}
+                                  </span>
+                                );
+                              })() : item.riskTier === 'safe' && (
                                 <span className="shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                                   <ShieldCheck size={8} /> Safe
                                 </span>
@@ -861,7 +957,17 @@ export default function ActionCenter() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <h3 className="text-sm font-black text-slate-900 leading-tight">{titleFor(selectedRecommendation)}</h3>
-                          {selectedRecommendation.riskTier === 'safe' ? (
+                          {selectedRecommendation.blockedReason ? (() => {
+                            const meta = blockedMetaFor(selectedRecommendation);
+                            const BlockedIcon = meta.icon;
+                            return (
+                              <span className={`flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                                meta.className === 'blue' ? 'bg-sky-50 border border-sky-100 text-sky-600' : 'bg-amber-50 border border-amber-100 text-amber-600'
+                              }`}>
+                                <BlockedIcon size={9} /> {meta.badge}
+                              </span>
+                            );
+                          })() : selectedRecommendation.riskTier === 'safe' ? (
                             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600">
                               <ShieldCheck size={9} /> Safe — auto-eligible
                             </span>
@@ -884,6 +990,25 @@ export default function ActionCenter() {
                     </div>
 
                     <div className="p-6 space-y-4">
+                      {/* The server already refuses to draft this (422 in
+                          routes/action-center.js) — this states WHY, and what to do
+                          about it, instead of leaving the user to discover it by
+                          clicking a button that always fails. */}
+                      {selectedRecommendation.blockedReason && (() => {
+                        const meta = blockedMetaFor(selectedRecommendation);
+                        const BlockedIcon = meta.icon;
+                        const blue = meta.className === 'blue';
+                        return (
+                          <div className={`flex items-start gap-2.5 rounded-2xl p-4 border ${blue ? 'bg-sky-50/70 border-sky-150' : 'bg-amber-50/70 border-amber-150'}`}>
+                            <BlockedIcon size={13} className={`shrink-0 mt-0.5 ${blue ? 'text-sky-600' : 'text-amber-600'}`} />
+                            <div className="min-w-0">
+                              <div className={`text-[10px] font-black uppercase tracking-widest mb-1 ${blue ? 'text-sky-700' : 'text-amber-700'}`}>{meta.heading}</div>
+                              <p className={`text-xs font-medium leading-relaxed ${blue ? 'text-sky-900/85' : 'text-amber-900/85'}`}>{selectedRecommendation.blockedReason}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       <div>
                         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Found By</div>
                         <p className="text-xs font-bold text-slate-700">{selectedRecommendation.agentName || activeMeta?.label}</p>
@@ -950,20 +1075,33 @@ export default function ActionCenter() {
                         {generatingId === selectedRecommendation.id ? 'Drafting…' : 'Preview Draft Only'}
                       </button>
                     )}
-                    <button
-                      onClick={() => selectedRecommendation.riskTier === 'safe' ? approveAndShip(selectedRecommendation) : generate(selectedRecommendation)}
-                      disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
-                      className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md disabled:opacity-60 cursor-pointer"
-                      style={selectedRecommendation.riskTier === 'safe'
-                        ? { background: 'linear-gradient(135deg,#10b981,#059669)' }
-                        : { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
-                    >
-                      {selectedRecommendation.riskTier === 'safe' ? (
-                        <><Zap size={12} /> {shippingId === selectedRecommendation.id ? 'Shipping…' : 'Approve & Ship'}</>
-                      ) : (
-                        generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'
-                      )}
-                    </button>
+                    {selectedRecommendation.blockedReason ? (() => {
+                      const meta = blockedMetaFor(selectedRecommendation);
+                      const BlockedIcon = meta.icon;
+                      const blue = meta.className === 'blue';
+                      return (
+                        <span className={`flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl border ${
+                          blue ? 'text-sky-700 bg-sky-50 border-sky-150' : 'text-amber-700 bg-amber-50 border-amber-150'
+                        }`}>
+                          <BlockedIcon size={12} /> {blue ? 'In progress — nothing to do' : 'Blocked — resolve the setup above'}
+                        </span>
+                      );
+                    })() : (
+                      <button
+                        onClick={() => selectedRecommendation.riskTier === 'safe' ? approveAndShip(selectedRecommendation) : generate(selectedRecommendation)}
+                        disabled={generatingId === selectedRecommendation.id || shippingId === selectedRecommendation.id}
+                        className="flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md disabled:opacity-60 cursor-pointer"
+                        style={selectedRecommendation.riskTier === 'safe'
+                          ? { background: 'linear-gradient(135deg,#10b981,#059669)' }
+                          : { background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
+                      >
+                        {selectedRecommendation.riskTier === 'safe' ? (
+                          <><Zap size={12} /> {shippingId === selectedRecommendation.id ? 'Shipping…' : 'Approve & Ship'}</>
+                        ) : (
+                          generatingId === selectedRecommendation.id ? 'Drafting Fix…' : 'Generate Solution Draft'
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : (

@@ -66,21 +66,49 @@ const GENERATOR_COLORS = {
   'alt-text': '#f472b6',
 };
 
-// Kept in sync with server/store/drafts.js's MERGE_MANDATORY_TYPES — every
+// Must match server/store/drafts.js's MERGE_MANDATORY_TYPES EXACTLY — every
 // type here has a real merge-to-stage strategy, so "mark implemented
 // manually" (the legacy bypass button) must never show for it.
-const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service'];
+//
+// This is a hand-maintained mirror of a server constant, and it had already
+// drifted: qa-content, analytics-install, breadcrumbs, schema-repair and
+// alt-text were added server-side but never here, so this modal offered
+// "Mark Implemented manually" for all five while markDraftImplemented()'s
+// own `NOT (action_type = ANY($3))` guard silently refused the update — a
+// button that could only ever fail. Re-synced below; if you add a type to
+// the server list, add it here in the same commit.
+//
+// duplicate-id-fix is deliberately absent from BOTH lists even though it now
+// has a real merge strategy: it's the one type whose implementer legitimately
+// refuses (see PARTIAL_AUTO_APPLY_TYPES), and a human applying those
+// refusals by hand still needs the manual bypass.
+const MERGE_MANDATORY_TYPES = ['meta-title', 'faq', 'llms-txt', 'schema', 'internal-links', 'landing-page', 'blog-outline', 'translation', 'security-headers', 'html-lang', 'viewport', 'canonical', 'robots-fix', 'open-graph', 'broken-link-fix', 'redirect-fix', 'expand-content', 'qa-content', 'analytics-install', 'sitemap', 'cookie-policy', 'privacy-policy', 'terms-of-service', 'breadcrumbs', 'schema-repair', 'alt-text'];
 
 // Generator ids with NO implementer registered at all, by deliberate design
-// (see each generator's own file — duplicate-id-fix.js, geo-audit.js): the
-// safe fix genuinely can't be known from a static page fetch (every CSS
-// selector / JS call / anchor that might reference a renamed id, e.g.), so
-// these only ever produce a plan for a developer to apply by hand in their
-// own repo — never a real file diff or branch. Kept in sync with
-// server/implementers/*.js's `handles` arrays (nothing there lists these
-// two ids) so the UI never invites an action that can only ever 404 with
-// "No implementer wired".
-const ADVISORY_ONLY_TYPES = ['duplicate-id-fix', 'geo-audit'];
+// (see generators/geo-audit.js): the output is a report for a human to read,
+// never a file diff or a branch. Kept in sync with
+// server/implementers/*.js's `handles` arrays (nothing there lists this id)
+// so the UI never invites an action that can only ever fail with "No
+// implementer wired".
+//
+// duplicate-id-fix used to be listed here and no longer is. That was correct
+// when written (2026-08-06), but 2026-08-07 added
+// implementers/lib/duplicate-id-inject.js and put 'duplicate-id-fix' into
+// backend.js's `handles` — the list here was never updated, which left the
+// backend's real push/preview/merge path unreachable, since the human's
+// "Push Branch" click is its only entry point (risk-tiers.js keeps this
+// generator at 'manual' tier, so the Execute Safe Fixes auto-chain never
+// reaches it either). See PARTIAL_AUTO_APPLY_TYPES below.
+const ADVISORY_ONLY_TYPES = ['geo-audit'];
+
+// Has a real implementer, but one that only auto-applies a narrow,
+// provably-safe subset and deliberately REFUSES the rest rather than
+// guessing (duplicate-id-fix: only an SVG paint-def id referenced solely by
+// `url(#id)` inside its own <svg>; anything a CSS rule, JS call, or #anchor
+// might reference refuses, all-or-nothing per draft). So the push path is
+// offered — it genuinely works for that shape — but never presented as
+// guaranteed, and the manual fallback stays available for the refusals.
+const PARTIAL_AUTO_APPLY_TYPES = ['duplicate-id-fix'];
 
 const STATUS_INFO = {
   draft: { label: 'Draft · never published', color: '#6366f1', bg: '#6366f10c', border: '#6366f120' },
@@ -656,12 +684,24 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                   <div className="text-xs text-slate-600 bg-slate-50 border border-slate-150 rounded-2xl p-4 leading-relaxed flex items-start gap-2.5">
                     <AlertTriangle size={16} className="text-slate-400 shrink-0 mt-0.5" />
                     <p>
-                      This is an advisory fix plan, not an automatic file change — the safe rename can't be confirmed from a static page fetch alone (every CSS selector, JS call, and anchor link that might reference these ids would need checking). Copy the plan above and apply it by hand in your own repo, then mark this draft implemented.
+                      This is a report, not a file change — there's nothing here to push to your repo. Read the findings above and use the prioritized fix list to decide what to act on; each item names the generator that can draft the real fix for it.
                     </p>
                   </div>
                 </div>
               ) : (
               <div className="mt-5 pt-5 border-t border-slate-100">
+                  {/* Sets the expectation BEFORE the click rather than
+                      letting a refusal come back as a bare error — the
+                      refusal is the designed-for outcome here, not a fault
+                      (see PARTIAL_AUTO_APPLY_TYPES above). */}
+                  {PARTIAL_AUTO_APPLY_TYPES.includes(draft.action_type) && draft.status !== 'implemented' && (
+                    <div className="text-xs text-amber-800 bg-amber-50/70 border border-amber-100 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
+                      <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+                      <p>
+                        Only part of this plan can be applied automatically: a duplicate id on an SVG gradient/clip/mask that nothing outside its own <code>&lt;svg&gt;</code> references. If any id in the plan is referenced by a CSS selector, a JS call, or an <code>#anchor</code>, Push Branch will refuse the whole draft rather than half-rename the page — apply those by hand and mark this draft implemented instead.
+                      </p>
+                    </div>
+                  )}
                   {draft.status === 'branch_pushed' && (
                     <div className="text-xs text-indigo-700 bg-indigo-50/60 border border-indigo-100/50 rounded-2xl p-4 mb-4 leading-relaxed flex items-start gap-2.5">
                       <GitBranch size={16} className="text-indigo-500 shrink-0 mt-0.5" />

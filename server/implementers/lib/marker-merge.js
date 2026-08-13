@@ -1,3 +1,4 @@
+import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 // Marker-based splice — the only merge strategy this codebase uses for
 // editing an EXISTING page's real template file, because it never requires
 // parsing or understanding an unknown site's real templating syntax
@@ -535,12 +536,24 @@ function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
 //
 // `componentTemplates` is the calling site's
 // url_file_map.siteRoot.componentTemplates ({faq,expandContent,
-// internalLinks,qaContent}, each optional) — falls back per-type to the
-// DEFAULT_* templates above when a site hasn't configured its own yet.
-// qaContent's own DEFAULT_QA_TEMPLATE is the only one designed to be safe
-// to leave unconfigured indefinitely (see its comment) — the others are
-// safe-but-generic fallbacks a site is expected to eventually replace.
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}) {
+// internalLinks,qaContent}, each optional).
+//
+// `designProfile` (optional) is the site's whole design language
+// (design-agent/lib/design-profile.js). When a specific template is absent,
+// a projection from that profile is used BEFORE any DEFAULT_* fallback —
+// that ordering is the point. The DEFAULT_* templates are generic markup
+// invented here, so two generators falling back to them on the same site
+// present content in two different visual languages, neither of which is the
+// site's. A projection is the site's own typography, spacing and component
+// conventions. DEFAULT_* now only applies to a site with no design knowledge
+// at all.
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null) {
+  // Resolved per call rather than precomputed: only the branch that actually
+  // renders visible HTML for this action type ever needs one.
+  const templateFor = (actionType_, configured, fallback) =>
+    configured
+    || (designProfile ? projectComponentTemplate(designProfile, actionType_) : null)
+    || fallback;
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
     if (!content.selectedTitle) {
@@ -553,7 +566,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
 
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
-    const visible = renderFaqHtml(content.items, componentTemplates.faq || DEFAULT_FAQ_TEMPLATE);
+    const visible = renderFaqHtml(content.items, templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE));
     const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
     if (mode === 'schema-only') {
       if (!schema) return { ok: false, error: 'This FAQ draft has no schema/JSON-LD data to publish in schema-only mode.' };
@@ -587,7 +600,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'internal-links') {
     if (mode === 'schema-only') return { ok: false, error: '"internal-links" has no schema-only representation.' };
     if (!content.suggestions?.length) return { ok: false, error: 'This internal-links draft has no suggestions to apply.' };
-    return { ok: true, values: { links: renderLinksHtml(content.suggestions, componentTemplates.internalLinks || DEFAULT_LINKS_TEMPLATE) } };
+    return { ok: true, values: { links: renderLinksHtml(content.suggestions, templateFor('internal-links', componentTemplates.internalLinks, DEFAULT_LINKS_TEMPLATE)) } };
   }
 
   if (actionType === 'canonical') {
@@ -621,13 +634,13 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'expand-content') {
     if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
     if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
-    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, componentTemplates.expandContent || DEFAULT_EXPAND_TEMPLATE) } };
+    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE)) } };
   }
 
   if (actionType === 'qa-content') {
     if (mode === 'schema-only') return { ok: false, error: '"qa-content" has no schema-only representation.' };
     if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
-    return { ok: true, values: { qaContent: renderQaHtml(content.items, componentTemplates.qaContent || DEFAULT_QA_TEMPLATE) } };
+    return { ok: true, values: { qaContent: renderQaHtml(content.items, templateFor('qa-content', componentTemplates.qaContent, DEFAULT_QA_TEMPLATE)) } };
   }
 
   if (actionType === 'analytics-install') {

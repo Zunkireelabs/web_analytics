@@ -57,7 +57,7 @@ async function main() {
   const siteId = Number(flags['site-id']);
   if (!siteId) {
     throw new Error(
-      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--url-file-map path.json]'
+      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--url-file-map path.json]'
     );
   }
 
@@ -71,10 +71,21 @@ async function main() {
   if (flags['default-branch'] != null) update.repoDefaultBranch = flags['default-branch'];
   if (flags['tech-stack'] != null) update.techStack = flags['tech-stack'];
   if (flags['github-pat-env-var'] != null) update.githubPatEnvVar = flags['github-pat-env-var'];
+  // The tenant installs the GitHub App on their own repo and GitHub assigns an
+  // installation id; passing it here switches this site off PAT auth entirely
+  // (see server/github/credentials.js). 'none' moves it back to its PAT.
+  if (flags['github-app-installation-id'] != null) {
+    update.githubAppInstallationId = flags['github-app-installation-id'] === 'none'
+      ? null
+      : Number(flags['github-app-installation-id']);
+    if (update.githubAppInstallationId !== null && !Number.isInteger(update.githubAppInstallationId)) {
+      throw new Error('--github-app-installation-id must be an integer (or "none" to clear it).');
+    }
+  }
   if (flags['url-file-map'] != null) update.urlFileMap = JSON.parse(readFileSync(flags['url-file-map'], 'utf8'));
 
   if (!Object.keys(update).length) {
-    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --url-file-map.');
+    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
   }
 
   const updated = await updateSiteRepoConfig({ siteId, ...update });
@@ -85,6 +96,7 @@ async function main() {
   if (update.repoDefaultBranch !== undefined) console.log(`  repo_default_branch → ${updated.repo_default_branch}`);
   if (update.techStack !== undefined) console.log(`  tech_stack → ${updated.tech_stack}`);
   if (update.githubPatEnvVar !== undefined) console.log(`  github_pat_env_var → ${updated.github_pat_env_var}`);
+  if (update.githubAppInstallationId !== undefined) console.log(`  github_app_installation_id → ${updated.github_app_installation_id ?? '(none — uses PAT)'}`);
   if (update.urlFileMap !== undefined) console.log('  url_file_map → updated');
 
   if (updated.repo_owner && updated.repo_name) {

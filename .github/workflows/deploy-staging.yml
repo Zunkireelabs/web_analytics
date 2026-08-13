@@ -37,7 +37,16 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 20m
+          # 20m was enough for a warm-cache build. A cold cache (e.g. right
+          # after a disk-space `docker system prune` on the VPS) reinstalls
+          # data-analyst-agent's Python ML dependencies (scikit-learn,
+          # transformers, sentence-transformers) from scratch with no cached
+          # layers — a real deploy on 2026-08-13 got through git pull, image
+          # build, and dependency install, then died on "exporting layers" at
+          # the 20m mark, one step from finishing. 35m covers a full cold
+          # build with headroom; a normal warm-cache deploy still finishes in
+          # its usual few minutes and never gets close to this ceiling.
+          command_timeout: 35m
           script: |
             # Without this, a failed step (e.g. `docker compose build` running
             # out of disk space) doesn't stop the script — it falls through to
@@ -59,6 +68,14 @@ jobs:
             fi
 
             cd "$DIR"
+            # Force the remote back to SSH every deploy: a previous deploy
+            # (2026-08-13) set origin to an HTTPS+PAT URL, which persists in
+            # this checkout's .git/config across deploys since the bootstrap
+            # clone above only runs once. Without this line, reverting the
+            # script's own clone command back to SSH silently did nothing —
+            # the existing checkout kept using the stale HTTPS remote and
+            # kept 403'ing.
+            git remote set-url origin git@github.com:${{ github.repository }}.git
             git fetch origin
             git checkout stage
             git pull origin stage
@@ -80,6 +97,41 @@ jobs:
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
+
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            # Same reserved-prefix rule as GH_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+
+            # ── Design Agent worker ─────────────────────────────────────────
+            # The design-agent-worker container's ONLY env source is this file
+            # (docker-compose's `env_file: .env`, plus NODE_ENV), and this step
+            # rewrites the file wholesale — so a variable missing here is
+            # missing in the container, permanently. LLM_API_KEY was missing,
+            # which is why every real Design Agent job for site 1 has failed.
+            #
+            # server/design-agent/python/design_task.py reads it via
+            # os.getenv("LLM_API_KEY") and builds its LLM BEFORE opening the
+            # DockerWorkspace, so an unset key resolves to None, the container
+            # starts normally, and the job only dies on the first model call —
+            # ~40s in, reported as a generic "Design Agent job failed
+            # unexpectedly" with the real cause only in the container's stdout.
+            #
+            # Reuses the existing OPENAI_API_KEY secret rather than adding a
+            # new one: design_task.py's own default model is gpt-4o-mini, the
+            # same provider this deployment already uses. Note that Design
+            # Agent runs therefore bill to the same OpenAI key as the reports.
+            LLM_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            LLM_MODEL=${{ vars.DESIGN_AGENT_LLM_MODEL || 'gpt-4o-mini' }}
 
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Shares OPENAI_API_KEY above but requires this separate flag
@@ -156,6 +208,31 @@ jobs:
             REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
             REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
 
+            # Catch-all: EVERY outbound email from this host goes here instead
+            # of its real recipient (server/report/email.js's getTransporter
+            # wraps the shared transporter, so no sender can bypass it). The
+            # original recipient is preserved in the subject and an
+            # X-Original-To header.
+            #
+            # This is what resolves the hazard the Cron block below describes:
+            # staging's 07:00/Thursday schedule is deliberately live, and real
+            # client sites now share this database, so without a redirect the
+            # daily pipeline would email real clients from an environment that
+            # still changes daily. Deliberately absent from deploy.yml —
+            # production must reach real recipients.
+            #
+            # Invitation and password-reset mail is EXEMPT (see email.js's
+            # REDIRECT_EXEMPT): each is addressed to one person who just
+            # requested that exact link, so redirecting it protects nobody and
+            # silently breaks the thing they asked for. Everything
+            # system-initiated — daily reports, notifications, sales leads —
+            # is still redirected here.
+            #
+            # Consequence worth knowing: an invitation sent from staging
+            # contains a STAGING link, so only invite people you actually
+            # want landing in staging while this host is the live one.
+            EMAIL_REDIRECT_TO=${{ vars.EMAIL_REDIRECT_TO || 'yukta@zunkireelabs.com' }}
+
             # ── Dashboard auth (staging) ────────────────────────────────────
             SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
@@ -194,8 +271,13 @@ jobs:
             # against runStartupCatchup() re-running real ingestion/weekly/
             # executive jobs (and re-emailing) on every redeploy-triggered
             # restart; it's unrelated to the recurring schedule itself.
-            # Revisit before onboarding any real/test client onto the
-            # staging database — its cron being live would email them too.
+            # Real client sites DO now share this database, so the "its cron
+            # being live would email them too" hazard this used to warn about
+            # is real rather than hypothetical. It is handled by
+            # EMAIL_REDIRECT_TO above, which sends every outbound message here
+            # to one internal address instead of its real recipient — not by
+            # this schedule being safe. Do not remove that redirect while this
+            # cron stays live and real clients remain in this database.
             CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
             DISABLE_CRON=false
             DISABLE_CATCHUP=true
@@ -262,6 +344,53 @@ jobs:
                 exit 1
               fi
             done
+
+            # ── Data Analyst Agent nightly pipeline ──────────────────────────
+            # The container's CMD only starts uvicorn, so the API serves fine
+            # while the pipeline that actually PRODUCES analysis never runs.
+            # That is not hypothetical: staging had 16k metric observations and
+            # 253 insights but zero analyst_recommendations and zero
+            # investigations, because scripts/run_nightly_pipeline.py had no
+            # trigger anywhere — only a commented-out suggestion in
+            # data-analyst-agent/docker-compose.yml.
+            #
+            # It also starves the Node side: server/cron.js syncs analyst
+            # recommendations into the Action Center, and that sync has been
+            # running nightly carrying nothing.
+            #
+            # 22:00 UTC, and the hour is load-bearing. The app's cron runs in
+            # TZ (Asia/Kolkata), so its 07:00 morning run — detect, ship, mail
+            # — is 01:30 UTC. The chain has to COMPLETE before that:
+            #   22:00 UTC  this pipeline
+            #   00:00 UTC  analyst -> Action Center sync (server/cron.js)
+            #   01:30 UTC  morning run consumes it, same day
+            # An earlier draft of this used 03:00 UTC, which is 08:30 in
+            # Asia/Kolkata — after the run it was meant to feed.
+            #
+            # CRON_TZ is set explicitly rather than trusting the host's local
+            # time, since the offset from the app's TZ is the entire reason
+            # this hour works.
+            #
+            # Installed idempotently on every deploy (filter out the old line,
+            # append the current one) so a redeploy can't stack duplicates and
+            # a changed path or hour corrects itself.
+            #
+            # `crontab -l` exits 1 (not just empty output) when the deploy
+            # user has no crontab yet — true on every server's first run of
+            # this step. Under this script's `set -eo pipefail`, that exit
+            # code alone (regardless of the `2>/dev/null`, which only silences
+            # stderr, not the exit status) killed the whole subshell before it
+            # ever reached the two `echo`s below, so `crontab -` received
+            # empty input and the entire deploy died here — after every
+            # container had already deployed and passed its health check.
+            # `|| true` on both the read and the grep (which also exits 1 on
+            # an empty/no-match input) makes "nothing to carry over" a normal
+            # outcome instead of a fatal one.
+            echo "Installing Data Analyst nightly pipeline cron..."
+            NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
+            echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
+            crontab -l | grep run_nightly_pipeline
 
       - name: Verify Health
         run: |

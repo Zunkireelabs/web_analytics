@@ -1,15 +1,14 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { hasVisibleFaqSignal } from '../implementers/lib/render-inspector.js';
-import { COMPONENT_TEMPLATE_KEY, checkTemplateFreshness, proposeUpdatedTemplate, templateActionRequiresRow } from '../implementers/lib/design-drift.js';
-import { createComponentTemplateJob, getExecutionJob } from '../store/execution-jobs.js';
-import { buildComponentTemplateProposalsFromJob } from '../design-agent/component-template-proposal.js';
 import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
@@ -56,6 +55,8 @@ router.get('/internal/clients', async (req, res, next) => {
       authorRole: s.author_role,
       authorUrl: s.author_url,
       requireVisibleByline: s.require_visible_byline,
+      autoRemediationEnabled: s.auto_remediation_enabled,
+      autoRemediationDailyLimit: s.auto_remediation_daily_limit,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -457,6 +458,120 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+
+// Consent for cross-client learned repair (migration 099): may this site be
+// fixed automatically using a repair whose evidence comes from a DIFFERENT
+// client's site.
+//
+// platform_admin only, inherited from this router's own
+// requirePlatformRole('platform_admin') — not re-declared, same as every
+// route in this file. That gate is the point here rather than an
+// implementation detail: the blast radius is a real pull request against this
+// client's repository, justified by something that happened on someone
+// else's.
+//
+// Enabling is refused unless auto_remediation_enabled is already on. The two
+// are separate consents and interceptWithLearnedRepairs requires both, so
+// allowing this one alone would produce a setting that reads as enabled and
+// can never do anything — the silent-inert failure this feature is most prone
+// to. Disabling is always allowed.
+router.post('/internal/clients/:id/learned-repair', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false.' });
+    if (enabled && !existing.auto_remediation_enabled) {
+      return res.status(400).json({
+        error: 'Autonomous fixes are off for this site, so learned cross-client repairs could never run. Enable autonomous fixes first.',
+      });
+    }
+
+    const site = await updateSiteLearnedRepair({ siteId, enabled });
+
+    await recordAuditEvent(req, {
+      action: enabled ? 'tenant.learned_repair_enabled' : 'tenant.learned_repair_disabled',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { enabled },
+      success: true,
+    });
+
+    res.json({ id: site.id, learnedRepairEnabled: site.learned_repair_enabled });
+  } catch (e) { next(e); }
+});
+
+// The switch for the unattended auto-remediation loop
+// (agents/lib/auto-remediation.js): draft -> approve -> push branch -> open
+// PR, every morning, with no human in the loop until the PR review itself.
+//
+// platform_admin only — inherited from this router's own
+// requirePlatformRole('platform_admin') at the top of the file, not
+// re-declared here, same as every other route in this file. That is
+// deliberate for this one: the blast radius is real pull requests against a
+// customer's own repository, so it is not a tenant-level self-service
+// setting.
+//
+// Enabling is REFUSED when the site has no repo wired. Without that guard
+// the switch would appear to work and then do nothing every morning —
+// auto-remediation would run, reach approveAndPublishDraft, and fail per
+// item with a GitHub error, burning the daily budget on a misconfiguration
+// rather than saying so once, here, at the moment someone asks for it.
+// (Live at the time of writing: 3 of 4 real client sites had no
+// repo_owner/repo_name at all.)
+// Exported and pure so the rules that decide whether a site may run
+// unattended are unit-testable without an HTTP layer (this repo has no
+// supertest convention). Returns null when the request is acceptable, or the
+// customer-facing reason it isn't.
+export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
+  if (typeof enabled !== 'boolean') return 'enabled must be true or false.';
+  // Matches migration 101's own CHECK (>= 0) rather than inventing a second,
+  // stricter bound the DB wouldn't enforce.
+  if (!Number.isInteger(dailyLimit) || dailyLimit < 0) return 'dailyLimit must be a non-negative integer.';
+  // Only blocks ENABLING. Disabling a site that somehow lost its repo config
+  // must always be allowed — refusing to turn autonomy off would be the
+  // wrong way round.
+  if (enabled && !(site?.repo_owner && site?.repo_name)) {
+    return 'This site has no GitHub repository connected, so autonomous fixes would have nowhere to open a pull request. Connect a repo first, then enable autonomy.';
+  }
+  return null;
+}
+
+router.post('/internal/clients/:id/auto-remediation', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { enabled, dailyLimit } = req.body || {};
+    const invalid = validateAutoRemediationRequest({ enabled, dailyLimit, site: existing });
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const site = await updateSiteAutoRemediation({ siteId, enabled, dailyLimit });
+
+    await recordAuditEvent(req, {
+      action: enabled ? 'tenant.auto_remediation_enabled' : 'tenant.auto_remediation_disabled',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { enabled, dailyLimit, repo: `${site.repo_owner}/${site.repo_name}` },
+      success: true,
+    });
+
+    res.json({
+      id: site.id,
+      autoRemediationEnabled: site.auto_remediation_enabled,
+      autoRemediationDailyLimit: site.auto_remediation_daily_limit,
+    });
+
+  } catch (e) { next(e); }
+});
+
 // The site's real author/byline identity (migration 090) — a human,
 // staff-confirmed fact, never inferred. Once set, schema.js and
 // expand-content.js's author-byline focus draft the real thing instead of a
@@ -542,156 +657,6 @@ router.post('/internal/clients/:id/recalculate-faq-baseline', async (req, res, n
     });
 
     res.json({ id: updated.id, visibleFaqBaseline: updated.visible_faq_baseline, pagesScanned, pagesWithFaq });
-  } catch (e) { next(e); }
-});
-
-// Design-drift check + regeneration proposal (implementers/lib/design-drift.js)
-// for the three action types whose visible output comes from a stored
-// componentTemplates snapshot (faq/expand-content/internal-links) rather
-// than a live-rendered site component — see that module's own comment for
-// why only these three can go stale at all. `pageUrl` is staff-supplied
-// (a real page they've noticed the issue on, or any live page using this
-// component) rather than auto-selected, since which page is "representative"
-// isn't something to guess. Read-only: never writes anything — saving a
-// proposal is the separate /confirm route below, requiring an explicit
-// human review first (see design-drift.js's own comment on why an
-// auto-extracted template is a proposal, not an auto-apply).
-router.post('/internal/clients/:id/component-templates/:actionType/regenerate', async (req, res, next) => {
-  try {
-    const siteId = Number(req.params.id);
-    const { actionType } = req.params;
-    const { pageUrl } = req.body || {};
-    const site = await getSiteById(siteId);
-    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
-    if (!pageUrl) return res.status(400).json({ error: 'pageUrl is required — a real, live page currently using this component.' });
-
-    const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
-    if (!componentKey) return res.status(400).json({ error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` });
-    const oldTemplate = site.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null;
-    if (!oldTemplate) return res.status(400).json({ error: `No componentTemplates.${componentKey} is configured for this site yet — nothing to regenerate.` });
-
-    const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: oldTemplate });
-    if (!freshness.ok) return res.status(502).json({ error: freshness.error });
-    if (!freshness.stale) return res.json({ stale: false, message: 'This template still matches the live design on that page — no changes needed.' });
-
-    // Design Agent path (server/design-agent/): real repo checkout + an
-    // isolated OpenHands run, replacing the single-page LLM call below, for
-    // design_agent_enabled sites — real source files instead of one page's
-    // rendered HTML. Docker+agent runs take minutes, not the length of one
-    // HTTP request, so this creates a job and returns immediately; the
-    // result is polled via the design-jobs route below, and still only ever
-    // reaches url_file_map through the same human-reviewed /confirm route —
-    // proposal shape (component-template-proposal.js's
-    // buildComponentTemplateProposal) matches what this route already
-    // returns for the non-Design-Agent path.
-    if (site.design_agent_enabled) {
-      const job = await createComponentTemplateJob(siteId, [actionType], { requestedBy: req.userId, pageUrl });
-      return res.status(202).json({
-        async: true, jobId: job.id, status: job.status,
-        message: `Design Agent job ${job.id} created — poll GET /internal/clients/${siteId}/component-templates/design-jobs/${job.id} for the result.`,
-      });
-    }
-
-    const proposal = await proposeUpdatedTemplate({ pageUrl, actionType, oldTemplate, missingClasses: freshness.missingClasses });
-    if (!proposal.ok) return res.status(422).json({ error: proposal.error, missingClasses: freshness.missingClasses });
-
-    res.json({ stale: true, missingClasses: freshness.missingClasses, oldTemplate, proposedTemplate: proposal.template });
-  } catch (e) { next(e); }
-});
-
-// Polls a Design Agent componentTemplates job created by /regenerate or
-// /seed below. Read-only — returns the job's real current status, and once
-// completed, a proposal per requested action type (built the same way as
-// the synchronous /regenerate response, via buildComponentTemplateProposal)
-// for staff to review before saving through the existing /confirm route.
-router.get('/internal/clients/:id/component-templates/design-jobs/:jobId', async (req, res, next) => {
-  try {
-    const siteId = Number(req.params.id);
-    const jobId = Number(req.params.jobId);
-    const job = await getExecutionJob(siteId, jobId);
-    if (!job || job.kind !== 'design_generate') return res.status(404).json({ error: `No Design Agent job ${jobId} found for site ${siteId}.` });
-
-    if (job.status !== 'completed') {
-      return res.json({ jobId: job.id, status: job.status, logs: job.logs });
-    }
-    const pageUrl = job.params?.pageUrl || null;
-    const proposals = await buildComponentTemplateProposalsFromJob(job, { pageUrl });
-    res.json({ jobId: job.id, status: job.status, proposals });
-  } catch (e) { next(e); }
-});
-
-// Seeds componentTemplates for every action type this site has NO stored
-// entry for yet (today: a fully manual, hand-authored onboarding step — see
-// design-drift.js's own comment on componentTemplates being "captured once,
-// at onboarding"). One job requests every missing key at once (one real
-// repo checkout, one agent run, multiple derived templates) rather than one
-// job per key. Same result path as /regenerate above: poll via
-// GET .../design-jobs/:jobId, save via the existing /confirm route — never
-// auto-saved.
-router.post('/internal/clients/:id/component-templates/seed', async (req, res, next) => {
-  try {
-    const siteId = Number(req.params.id);
-    const { pageUrl } = req.body || {};
-    const site = await getSiteById(siteId);
-    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
-    if (!site.design_agent_enabled) return res.status(400).json({ error: 'Design Agent is not enabled for this site.' });
-    if (!site.repo_owner || !site.repo_name) return res.status(400).json({ error: 'Site has no repo_owner/repo_name configured — connect a repo first.' });
-
-    const existing = site.url_file_map?.siteRoot?.componentTemplates || {};
-    const missingActionTypes = Object.keys(COMPONENT_TEMPLATE_KEY).filter((actionType) => !existing[COMPONENT_TEMPLATE_KEY[actionType]]);
-    if (!missingActionTypes.length) {
-      return res.json({ message: 'Every component-template key already has a configured entry — nothing to seed.', missingActionTypes: [] });
-    }
-
-    const job = await createComponentTemplateJob(siteId, missingActionTypes, { requestedBy: req.userId, pageUrl: pageUrl || null });
-    res.status(202).json({
-      async: true, jobId: job.id, status: job.status, missingActionTypes,
-      message: `Design Agent job ${job.id} created — poll GET /internal/clients/${siteId}/component-templates/design-jobs/${job.id} for the result.`,
-    });
-  } catch (e) { next(e); }
-});
-
-// Saves a reviewed-and-approved template proposal from the /regenerate route
-// above into site.url_file_map.siteRoot.componentTemplates — the one place a
-// staff member's approval is required before an auto-extracted template can
-// affect every future draft of this action type sitewide.
-router.post('/internal/clients/:id/component-templates/:actionType/confirm', async (req, res, next) => {
-  try {
-    const siteId = Number(req.params.id);
-    const { actionType } = req.params;
-    const { template } = req.body || {};
-    const site = await getSiteById(siteId);
-    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
-
-    const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
-    if (!componentKey) return res.status(400).json({ error: `"${actionType}" has no component-template concept — only ${Object.keys(COMPONENT_TEMPLATE_KEY).join(', ')} do.` });
-    if (!template?.wrapper || (templateActionRequiresRow(actionType) && !template?.row)) {
-      return res.status(400).json({ error: `template.wrapper is required${templateActionRequiresRow(actionType) ? ', and template.row is required for this action type' : ''}.` });
-    }
-
-    const urlFileMap = {
-      ...site.url_file_map,
-      siteRoot: {
-        ...site.url_file_map?.siteRoot,
-        componentTemplates: {
-          ...site.url_file_map?.siteRoot?.componentTemplates,
-          [componentKey]: template,
-        },
-      },
-    };
-    const updated = await updateSiteRepoConfig({ siteId, urlFileMap });
-
-    await recordAuditEvent(req, {
-      action: 'tenant.component_template_updated',
-      targetType: 'site',
-      targetId: String(siteId),
-      tenantSiteId: siteId,
-      tenantName: site.name,
-      metadata: { actionType, componentKey },
-      success: true,
-    });
-
-    res.json({ id: updated.id, componentKey, template: updated.url_file_map?.siteRoot?.componentTemplates?.[componentKey] });
   } catch (e) { next(e); }
 });
 

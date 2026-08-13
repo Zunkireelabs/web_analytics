@@ -24,6 +24,49 @@ const PATTERN_INFO = {
   'empty-section': { category: 'empty-content', rootCause: 'The model returned an empty or non-answer body/answer for a section it claimed to have written.' },
 };
 
+// The one thing a generator can actually ACT on next time, as opposed to
+// being told what went wrong. agent-memory.js's withAgentMemory only inlines
+// a lesson's fix_pattern into a generator's prompt ("Fix: ...") once that
+// lesson has been promoted to execution_permission='auto'; without a
+// fix_pattern it can only ever render the advisory form ("...[advisory — do
+// not repeat this]").
+//
+// Before this existed, ZERO of the 58 rows in agent_fix_memory had a
+// fix_pattern, so that branch was unreachable dead code and every lesson the
+// platform had ever learned reached a prompt as a warning rather than as a
+// correction.
+//
+// Deliberately scoped to Quality Gate patterns and nothing else. These are
+// the only lessons whose fix is genuinely client-agnostic: the rule for
+// "don't leave a TODO marker" is identical for every tenant, so it is safe on
+// a cross-tenant row. The fix for a content lesson learned from a human's
+// edit is NOT — it is that client's own copy, which must never be replayed
+// into another client's prompt (see draft-lesson-extraction.js). Those stay
+// advisory on purpose, and that is a correctness decision rather than a gap.
+const FIX_DIRECTIVE = {
+  'todo-marker': 'Never emit TODO/TBD/FIXME markers — write the finished text, or omit the section entirely.',
+  'lorem-ipsum': 'Never emit lorem-ipsum filler — every sentence must be grounded in the real page content given.',
+  'placeholder-bracket': 'Never emit "[Insert X here]"-style brackets — supply the real value, or leave the field out.',
+  'template-braces': 'Never leave an unfilled "{{variable}}" — substitute the real value before returning.',
+  'outline-heading': 'Write real body copy, never outline scaffolding like "Section 1:" or "Introduction:".',
+  'instructional-filler': 'Write the actual content, never a meta-instruction describing what should be written there.',
+  'llm-meta-commentary': "Write in the site's own voice — never refer to yourself as an AI or narrate your process.",
+  'llm-refusal': 'Complete the draft from the evidence given; if it is genuinely insufficient, return fewer fields rather than a refusal.',
+  'nav-leakage': 'Use only the page\'s main body text — never navigation, header, or footer boilerplate.',
+  'author-placeholder': 'Never invent a byline. Omit author attribution entirely when no real author profile is configured.',
+  'duplicate-paragraph': 'Each section must say something distinct — never repeat a paragraph across sections.',
+  'schema-missing-context': 'Every JSON-LD block must include "@context": "https://schema.org".',
+  'schema-missing-type': 'Every JSON-LD block must include an "@type".',
+  'schema-missing-required-field': "Include every field Google's guidelines require for the @type being emitted.",
+  'empty-section': 'Never return an empty or non-answer body — omit the section instead of shipping a placeholder one.',
+};
+
+// null (not a generic string) when unknown: a lesson with no real directive
+// must stay advisory rather than carry invented guidance into a prompt.
+export function fixDirectiveForPattern(patternId) {
+  return FIX_DIRECTIVE[patternId] || null;
+}
+
 export function categoryForPattern(patternId) {
   return PATTERN_INFO[patternId]?.category || 'content-correction';
 }
