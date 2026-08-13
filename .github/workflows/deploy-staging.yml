@@ -68,6 +68,14 @@ jobs:
             fi
 
             cd "$DIR"
+            # Force the remote back to SSH every deploy: a previous deploy
+            # (2026-08-13) set origin to an HTTPS+PAT URL, which persists in
+            # this checkout's .git/config across deploys since the bootstrap
+            # clone above only runs once. Without this line, reverting the
+            # script's own clone command back to SSH silently did nothing —
+            # the existing checkout kept using the stale HTTPS remote and
+            # kept 403'ing.
+            git remote set-url origin git@github.com:${{ github.repository }}.git
             git fetch origin
             git checkout stage
             git pull origin stage
