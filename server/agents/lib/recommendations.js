@@ -13,6 +13,7 @@ import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
+import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason } from '../../implementers/lib/pagination-routes.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
@@ -183,6 +184,25 @@ export async function buildRecommendations(siteId) {
     return result;
   };
 
+  // Generated-page detection, so an unmappable URL gets an accurate reason
+  // instead of "add a url_file_map entry" — see implementers/lib/pagination-routes.js.
+  // Discovered once per refresh (a repo-tree read plus one fetch per paginating
+  // template) and only when something is actually about to be reported unmapped.
+  let paginationRoutes;
+  const paginationRouteFor = async (pageUrl) => {
+    if (paginationRoutes === undefined) {
+      paginationRoutes = await discoverPaginationRoutes(site, { fetchTree: cachedFetchTree })
+        .catch((err) => {
+          console.warn(`[recommendations] site ${siteId}: could not scan for generated routes: ${err.message}`);
+          return [];
+        });
+      if (paginationRoutes.length) {
+        console.log(`[recommendations] site ${siteId}: found ${paginationRoutes.length} generated route family(ies): ${paginationRoutes.map((r) => r.routePrefix + '/*').join(', ')}`);
+      }
+    }
+    return matchPaginationRoute(pageUrl, paginationRoutes);
+  };
+
   const items = [];
   const lastAnalyzedAt = {};
   // Every generatorId+page this run's agents still flag, independent of the
@@ -283,7 +303,13 @@ export async function buildRecommendations(siteId) {
         if (!isPageMapped(site, action.params.page, action.generatorId)) {
           // Before asking anyone to map it, make sure the page is real.
           if (await isPageSoftNotFound(action.params.page)) continue;
-          mappingBlockedReason = `No url_file_map entry resolves ${action.params.page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
+          // A GENERATED page has no per-page file by construction, so telling
+          // someone to add a mapping is asking for the wrong fix. Say what
+          // actually produces the page and where a fix would have to go.
+          const generated = await paginationRouteFor(action.params.page);
+          mappingBlockedReason = generated
+            ? paginationBlockedReason(generated, action.generatorId)
+            : `No url_file_map entry resolves ${action.params.page} to a file in this site's repo, and it could not be discovered automatically. Add a mapping via 'npm run connect-repo' (or 'npm run audit-url-file-map -- --site-id <id>' to see every gap) before this can be applied.`;
         }
       }
       // isPageMapped above only proves url_file_map SYNTACTICALLY resolves a
