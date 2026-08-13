@@ -32,6 +32,7 @@ import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/fro
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
+import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
 import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
@@ -1171,7 +1172,19 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
       missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
     });
   }
-  return markDraftBranchPushed(siteId, draft.id, { branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles });
+  // Provenance for the reviewer: what actually renders this page, whether
+  // it's shared, and what a change would affect (page-resolution.js). Never
+  // fatal — a failed resolution here must not block a draft whose actual
+  // apply just succeeded; the draft simply carries no provenance, same as
+  // before this existed. page-level generators only (no `page` means a
+  // site-level target like analytics-install, which is out of scope for
+  // this — its shared target is the design, not something to warn about).
+  const targetProvenance = page
+    ? await resolvePageSource(site, page, draft.action_type).catch(() => null)
+    : null;
+  return markDraftBranchPushed(siteId, draft.id, {
+    branchName: result.branchName, implementerId, renderMode: result.renderMode, appliedFiles: result.appliedFiles, targetProvenance,
+  });
 }
 
 router.post('/action-center/drafts/:id/push-branch', async (req, res, next) => {

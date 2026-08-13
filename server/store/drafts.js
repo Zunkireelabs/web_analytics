@@ -151,14 +151,20 @@ export async function approveDraft(siteId, id, approvedBy) {
 // isn't re-derivable from url_file_map alone) rather than re-resolving live
 // on every preview click. null/undefined for every other action type, same
 // as before this param existed.
-export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null }) {
+// targetProvenance is page-resolution.js's resolvePageSource() output for
+// this draft's target — what actually renders the page, whether that's
+// shared, and what editing it would affect. null for anything the caller
+// couldn't or didn't resolve (e.g. site-level generators with no single
+// page), same as appliedFiles above.
+export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null, targetProvenance = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, render_mode = $5,
        apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
-       content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END
+       content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END,
+       target_provenance = COALESCE($7::jsonb, target_provenance)
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null]
+    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null, targetProvenance ? JSON.stringify(targetProvenance) : null]
   );
   return rows[0] || null;
 }
