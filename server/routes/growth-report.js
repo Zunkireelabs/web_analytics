@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from './login.js';
+import { requireAuth, requirePlatformRole } from './login.js';
 import { buildGrowthReport, getMetricLatestValue, GROWTH_TARGET_METRICS } from '../agents/lib/growth-report.js';
 import { setGrowthTarget, getGrowthTargetHistory } from '../store/growth-targets.js';
 import { getSiteById } from '../store/read.js';
@@ -14,6 +14,21 @@ router.use(requireAuth);
 router.get('/growth-report', async (req, res, next) => {
   try {
     res.json(await buildGrowthReport(req.siteId));
+  } catch (e) { next(e); }
+});
+
+// Staff-only Milestones view of another client's site — the Milestones page
+// (web/src/pages/GrowthReport.jsx) defaults to the caller's own site via the
+// route above, but an internal admin can pick a different client from its
+// picker, which re-fetches through here instead. Same requirePlatformRole
+// gate (isInternal + platform_admin role, see server/routes/login.js) as the
+// other staff-only cross-tenant routes (server/routes/keywords.js's
+// /internal/keywords/:siteId/... family) — mirrored exactly rather than
+// inventing a separate check, and :siteId is only ever trusted because this
+// gate ran first.
+router.get('/internal/growth-report/:siteId', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    res.json(await buildGrowthReport(req.params.siteId));
   } catch (e) { next(e); }
 });
 

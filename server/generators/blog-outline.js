@@ -1,6 +1,7 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
+import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -26,6 +27,9 @@ const DEFAULT_WINDOW_DAYS = 90;
 // below) rather than shipped as a draft — matches this repo's "regenerate
 // until complete, never publish a stub" rule for net-new content.
 const MIN_TOTAL_WORDS = 800;
+// Trimmed, not the whole page — grounding context for a prompt, same reason
+// and size as qa-content.js's/direct-answer.js's own bodyText slice.
+const GROUNDING_EXCERPT_CHARS = 3000;
 
 function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
@@ -72,8 +76,23 @@ export async function generate({ siteId, params }) {
   const candidates = otherPages.map((p) => p.dim_value);
   const candidateSet = new Set(candidates);
 
+  // Best-effort, not a hard gate — same reasoning as direct-answer.js: this
+  // drafts a net-new page, so a homepage fetch failure must not block a
+  // legitimate topic draft. When it succeeds, real fetched text about the
+  // business replaces "treat it as a creative draft" as the only thing
+  // stopping the model from inventing facts/offerings that don't exist.
+  const homepage = domain ? `https://${domain}/` : null;
+  const fetched = homepage ? await analyzePageUrl(homepage).catch(() => ({ ok: false })) : { ok: false };
+  const grounded = fetched.ok && hasSufficientGroundingContent(fetched.analysis);
+  const groundingExcerpt = grounded ? fetched.analysis.bodyText.slice(0, GROUNDING_EXCERPT_CHARS) : null;
+
   const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
-    `topic — this is a fresh piece, not based on an existing page, so treat it as a creative draft, not a fact-check. ` +
+    `topic — this is a fresh piece, not based on an existing page. ` +
+    (groundingExcerpt
+      ? 'Any claim about this specific business (its services, offerings, or policies) must be grounded ONLY in the ' +
+        '"Real site content" text given below — never invent one. General topic knowledge not specific to this ' +
+        'business is fine to write from. '
+      : 'Treat it as a creative draft, not a fact-check about this specific business. ') +
     `This must be a finished article a reader could publish as-is: at least ${MIN_TOTAL_WORDS} words total across ` +
     'all sections, each section a real paragraph (or several) of substantive prose — never headings with bullet ' +
     'notes, placeholder text, or "write about X here" instructions in place of the actual writing. If internal-link ' +
@@ -81,7 +100,9 @@ export async function generate({ siteId, params }) {
     'list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
     '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
-  const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
+  const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}` +
+    (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
+    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });

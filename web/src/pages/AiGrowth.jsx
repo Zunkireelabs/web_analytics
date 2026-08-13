@@ -1,9 +1,22 @@
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import OrchestrationDiagram from '../components/orchestration/OrchestrationDiagram.jsx';
 import AgentDetailPanel from '../components/orchestration/AgentDetailPanel.jsx';
 import LiveActivityRail from '../components/orchestration/LiveActivityRail.jsx';
 import GrowthScores from '../components/GrowthScores.jsx';
+import ExecutiveSummaryPanel from '../components/ExecutiveSummaryPanel.jsx';
+import CompetitorLeaderboard from '../components/CompetitorLeaderboard.jsx';
+import AuthorityScoreCard from '../components/AuthorityScoreCard.jsx';
+import ReferringDomainsCard from '../components/ReferringDomainsCard.jsx';
+import CompetitorBacklinkCard from '../components/CompetitorBacklinkCard.jsx';
+import CompetitorRankingCard from '../components/CompetitorRankingCard.jsx';
+import AiRecommendationCard from '../components/AiRecommendationCard.jsx';
+import GeoIntelligenceCard from '../components/GeoIntelligenceCard.jsx';
+import GeoScorecard from '../components/GeoScorecard.jsx';
+import ActivityFeed from '../components/ActivityFeed.jsx';
+import ChangesTimeline from '../components/ChangesTimeline.jsx';
+import DraftModal from '../components/DraftModal.jsx';
 import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
 import {
   Play,
@@ -11,16 +24,23 @@ import {
   Cpu,
   Activity,
   CheckCircle,
+  CheckCircle2,
   Workflow,
   BrainCircuit,
   AlertTriangle,
   RotateCw,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Target,
   Globe,
   FileText,
   Database,
-  Send
+  Send,
+  History,
+  Bot,
+  ScrollText,
+  Clock
 } from 'lucide-react';
 
 const FALLBACK_POLL_MS = 45000;
@@ -43,13 +63,39 @@ const SIGNAL_STAGES = [
   { label: 'Reports', icon: Send, color: CATEGORY.meta.color },
 ];
 
-export default function AiGrowth() {
-  const [agents, setAgents] = useState(null); 
+// Run-status badge styling for the Platform Operations section (Agent
+// Taskforce / Execution Timeline) — migrated as-is from admin/AiOperationsCenter.jsx.
+const OPS_RUN_STATUS = {
+  ok: { color: '#059669', bg: '#ecfdf5', border: '#a7f3d0', label: 'Healthy', icon: CheckCircle2 },
+  'insufficient-data': { color: '#d97706', bg: '#fffbeb', border: '#fde68a', label: 'Idle', icon: Clock },
+  error: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', label: 'Failed', icon: AlertTriangle },
+  null: { color: '#94a3b8', bg: '#f8fafc', border: '#e2e8f0', label: 'Never run', icon: Clock },
+};
+
+export default function AiGrowth({ isInternal }) {
+  const [agents, setAgents] = useState(null);
   const [activity, setActivity] = useState(null);
   const [selected, setSelected] = useState(null);
-  const [runningAgents, setRunningAgents] = useState(new Map()); 
+  const [runningAgents, setRunningAgents] = useState(new Map());
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
+
+  // Draft/fix modal — same pattern Command Center / Action Center use:
+  // a generator draft opened from a card (GeoScorecard's "view report" here)
+  // renders in this shared modal.
+  const [activeDraft, setActiveDraft] = useState(null);
+
+  // Operations History collapsible (migrated from the old Command Center).
+  const [showOpsHistory, setShowOpsHistory] = useState(false);
+
+  // Admin/internal-only platform operations data — Agent Taskforce,
+  // Execution Timeline, Model Status (migrated from admin/AiOperationsCenter.jsx).
+  // Fetched only for isInternal sessions, same gate that page used to have.
+  const [ops, setOps] = useState(null);
+  useEffect(() => {
+    if (!isInternal) return;
+    api.opsCenter.get().then(setOps).catch(() => setOps(null));
+  }, [isInternal]);
 
   // View state: 'console' (live intelligence runner, default) or 'diagram' (system graph)
   const [viewMode, setViewMode] = useState('console');
@@ -108,6 +154,66 @@ export default function AiGrowth() {
   useEffect(() => {
     api.commandCenter.get().then(setCcData).catch(() => setCcData(null));
   }, []);
+
+  // Free Common Crawl "Referring Domains" card — its own independent fetch
+  // (migrated as-is from the old Command Center), not folded into ccData /
+  // api.commandCenter.get(), so it stays exactly what server/routes/
+  // commoncrawl-backlinks.js already exposes.
+  const [ccBacklinks, setCcBacklinks] = useState(null); // null = loading
+  const [ccDomainUnresolved, setCcDomainUnresolved] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api.sites().then(([site]) => {
+      if (cancelled) return;
+      const domain = site?.website_domain
+        ? site.website_domain.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '')
+        : null;
+      if (!domain) { setCcDomainUnresolved(true); return; }
+      return api.commonCrawlBacklinks.summary(domain).then((summary) => {
+        if (!cancelled) setCcBacklinks(summary);
+      });
+    }).catch(() => {
+      if (!cancelled) setCcBacklinks({ status: 'insufficient-data', message: 'Could not load referring domain data right now.' });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Deep-link target from a clicked notification (NotificationBell.jsx) —
+  // /ai-orchestration?highlight=<findingId> or ?highlight=health-score for a
+  // health-drop alert (no single finding to point at). Findings themselves
+  // no longer render as cards on this page (that grid was Command Center's
+  // duplicate of this page's own Live Agent Findings Feed), so a specific
+  // findingId is resolved to its owning agent, then rung on that agent's
+  // card in the Live Agent Findings Feed if one has been revealed.
+  const [searchParams] = useSearchParams();
+  const highlightId = searchParams.get('highlight');
+  const [highlightActive, setHighlightActive] = useState(true);
+
+  // Resolve a findingId (from a notification) to the real agent that owns
+  // it, so the matching card in the Live Agent Findings Feed can be rung —
+  // there's no per-finding card on this page anymore to ring directly.
+  const highlightedAgentId = useMemo(() => {
+    if (!highlightId || highlightId === 'health-score' || !ccData) return null;
+    const owningFinding = ccData.criticalIssues?.find((f) => f.id === highlightId)
+      || ccData.discoveries?.find((f) => f.id === highlightId)
+      || ccData.growthOpportunities?.find((f) => f.id === highlightId);
+    const owningWatchlistItem = !owningFinding && ccData.watchlist?.find((w) => w.findingId === highlightId);
+    return owningFinding?.agentId || owningWatchlistItem?.agentId || null;
+  }, [highlightId, ccData]);
+
+  useEffect(() => {
+    if (!highlightId) return;
+    const selector = highlightId === 'health-score'
+      ? '[data-finding-id="health-score"]'
+      : highlightedAgentId && `[data-finding-agent="${CSS.escape(highlightedAgentId)}"]`;
+    if (!selector) return;
+    const el = document.querySelector(selector);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const t = setTimeout(() => setHighlightActive(false), 4000);
+    return () => clearTimeout(t);
+  }, [highlightId, highlightedAgentId, revealedFindings]);
+  const highlightClass = (active) => (active && highlightActive ? 'ring-2 ring-[#6C63FF] ring-offset-2 rounded-2xl transition-shadow' : '');
 
   // Load findings already persisted from prior runs on mount — without this,
   // the feed only ever shows findings from a run triggered in this exact
@@ -192,6 +298,7 @@ export default function AiGrowth() {
       addLog('Run complete. Fetching latest results…', 'system');
       const fresh = await api.commandCenter.get();
       setCcData(fresh);
+      if (isInternal) api.opsCenter.get().then(setOps).catch(() => {});
       addLog('Done — results updated.', 'system');
     } catch (e) {
       setRefreshError(e.message || 'Run failed');
@@ -288,8 +395,10 @@ export default function AiGrowth() {
         {/* GrowthScores: Overall / SEO / AEO / GEO — same real-score row as
             the Command Center, so the runner console leads with current
             performance before diving into the live agent stream. */}
-        <div className="mb-6">
-          <GrowthScores data={ccData} loading={ccData === null} />
+        <div className="mb-6" data-finding-id="health-score">
+          <div className={highlightClass(highlightId === 'health-score')}>
+            <GrowthScores data={ccData} loading={ccData === null} />
+          </div>
         </div>
 
         {/* Signal Path strip — the fixed pipeline shape, always visible so
@@ -434,7 +543,8 @@ export default function AiGrowth() {
                       return (
                         <div
                           key={f.agentId || i}
-                          className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all duration-300"
+                          data-finding-agent={f.agentId}
+                          className={`bg-white border border-slate-200 rounded-2xl p-4 flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all duration-300 ${highlightClass(Boolean(highlightedAgentId) && f.agentId === highlightedAgentId)}`}
                         >
                           <div>
                             <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
@@ -548,7 +658,233 @@ export default function AiGrowth() {
             )}
           </div>
         )}
+
+        {/* ============= COMPETITOR OVERVIEW + EXECUTIVE SUMMARY ============= */}
+        {/* Migrated from the old Command Center page — real competitor
+            standings and the AI executive-report narrative, both driven by
+            the same ccData already powering the score row above. */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch mt-8">
+          <div className="lg:col-span-6 relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
+            <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
+            <div>
+              <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
+                <span className="w-8 h-8 rounded-xl grid place-items-center bg-orange-50 text-orange-600 shrink-0 border border-orange-100 shadow-sm">
+                  <Globe size={14} />
+                </span>
+                <div className="leading-tight">
+                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Competitor Overview</h3>
+                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">How you compare online</span>
+                </div>
+              </div>
+              {ccData?.competitors && ccData.competitors.length > 0 ? (
+                <CompetitorLeaderboard profiles={ccData.competitors} />
+              ) : (
+                <div className="text-xs text-slate-455 italic p-4 text-center">No competitors logged.</div>
+              )}
+            </div>
+            <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5">
+              Click a competitor to see why.
+            </div>
+          </div>
+
+          <div className="lg:col-span-6">
+            <ExecutiveSummaryPanel
+              text={ccData?.executiveSummary?.narrative}
+              source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
+              generatedAt={ccData?.executiveSummary?.generatedAt}
+            />
+          </div>
+        </div>
+
+        {/* ============= DETAILED AGENT INSIGHTS ============= */}
+        {/* Migrated per-category detail cards from the old Command Center's
+            3-tab agent workspace — shown together here rather than behind
+            tabs, since the tab-switching findings-by-category UI itself
+            duplicated this page's own Live Agent Findings Feed above. */}
+        <div className="mt-8 space-y-6">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-indigo-600" />
+            <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Detailed Agent Insights</h2>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <AuthorityScoreCard authority={ccData?.authority} meta={ccData?.authorityMeta} loading={ccData === null} />
+            <ReferringDomainsCard
+              summary={ccDomainUnresolved ? null : ccBacklinks}
+              loading={!ccDomainUnresolved && ccBacklinks === null}
+            />
+            <CompetitorBacklinkCard
+              backlinkComparison={ccData?.backlinkComparison}
+              meta={ccData?.backlinkComparisonMeta}
+              loading={ccData === null}
+            />
+            <CompetitorRankingCard
+              rankingComparison={ccData?.rankingComparison}
+              meta={ccData?.rankingComparisonMeta}
+              loading={ccData === null}
+            />
+          </div>
+
+          <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
+            <GeoScorecard onOpenReport={setActiveDraft} />
+          </div>
+        </div>
+
+        {/* ============= OPERATIONS HISTORY ============= */}
+        <section className="border-t border-slate-200 pt-5 mt-8">
+          <button
+            onClick={() => setShowOpsHistory(!showOpsHistory)}
+            className="w-full flex items-center justify-between text-xs font-black text-slate-500 uppercase tracking-widest pb-3 cursor-pointer hover:text-slate-800 transition-colors focus:outline-none"
+          >
+            <span className="flex items-center gap-2">
+              <History size={14} className="text-indigo-500" />
+              <span>Operations History Logs</span>
+            </span>
+            {showOpsHistory ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </button>
+
+          {showOpsHistory && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6 items-start animate-slide-down bg-gradient-to-tr from-indigo-50/20 via-transparent to-violet-50/15 border border-indigo-100/50 rounded-[32px] mt-2 shadow-inner">
+              <div className="relative card border border-indigo-100 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
+                <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-indigo-400 pointer-events-none" />
+                <div>
+                  <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
+                    <span className="w-8 h-8 rounded-xl grid place-items-center bg-indigo-50 text-indigo-650 shrink-0 border border-indigo-100/80 shadow-sm">
+                      <Activity size={14} />
+                    </span>
+                    <div className="leading-tight">
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">AI Audit Activity</h3>
+                      <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What our AI checked</span>
+                    </div>
+                  </div>
+                  <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
+                    <ActivityFeed items={ccData?.activity || []} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="relative card border border-slate-200 bg-gradient-to-br from-white/90 via-white/80 to-slate-50/50 backdrop-blur-md p-6 shadow-md rounded-[28px] flex flex-col justify-start overflow-hidden hover:shadow-lg transition-all duration-300">
+                <div className="absolute -right-8 -top-8 w-20 h-20 rounded-full blur-2xl opacity-20 bg-slate-400 pointer-events-none" />
+                <div>
+                  <div className="flex items-center gap-2.5 mb-6 border-b border-slate-100 pb-4">
+                    <span className="w-8 h-8 rounded-xl grid place-items-center bg-slate-55 text-slate-650 shrink-0 border border-slate-200/85 shadow-sm">
+                      <History size={14} />
+                    </span>
+                    <div className="leading-tight">
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Recent Website Changes</h3>
+                      <span className="text-[8px] font-bold text-slate-405 uppercase tracking-widest block mt-0.5">What changed on your site</span>
+                    </div>
+                  </div>
+                  <div className="max-h-[380px] overflow-y-auto pr-1.5 custom-scrollbar">
+                    <ChangesTimeline items={ccData?.recentChanges || []} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* ============= PLATFORM OPERATIONS (admin/internal only) ============= */}
+        {/* Migrated from admin/AiOperationsCenter.jsx — Agent Taskforce,
+            Execution Timeline, Model Status. Everything else on that page
+            (status strip, hero health score, metric cards, executive
+            summary bullets, critical findings, pipeline health, scheduler,
+            audit/system-health links, roadmap list) was either a duplicate
+            of what Orchestration already shows or explicitly dropped. */}
+        {isInternal && ops && (
+          <div className="mt-8 space-y-6">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-fuchsia-600" />
+              <h2 className="text-xs font-black text-slate-900 uppercase tracking-widest">Platform Operations</h2>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Staff only — across every tenant</span>
+            </div>
+
+            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
+                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><Bot size={15} /></span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-800">Agent Taskforce</h3>
+                  <p className="text-[11px] font-semibold text-slate-400 mt-0.5">Every registered agent's most recent run, across all tenants</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {ops.agentTaskforce.map((a) => {
+                  const s = OPS_RUN_STATUS[a.lastRunStatus] || OPS_RUN_STATUS.null;
+                  const Icon = s.icon;
+                  return (
+                    <div key={a.id} className="rounded-2xl border border-slate-150 bg-gradient-to-br from-slate-50/80 to-white p-4 flex flex-col gap-2 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-black text-slate-800 truncate">{a.name}</span>
+                        <span className="text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border shrink-0 flex items-center gap-1" style={{ color: s.color, backgroundColor: s.bg, borderColor: s.border }}>
+                          <Icon size={9} />{s.label}
+                        </span>
+                      </div>
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wide">{a.category}</span>
+                      <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500 mt-1 pt-2 border-t border-slate-100">
+                        <span>{a.lastRunAt ? timeAgo(a.lastRunAt) : 'Never run'}</span>
+                        <span className="font-mono font-black text-slate-600">{a.tookMs != null ? `${a.tookMs}ms` : '—'}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
+                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><ScrollText size={15} /></span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-800">Execution Timeline</h3>
+                  <p className="text-[11px] font-semibold text-slate-400 mt-0.5">Most recent agent runs across every tenant</p>
+                </div>
+              </div>
+              {ops.executionLog.length === 0 ? (
+                <p className="text-xs text-slate-400 italic py-2">No agent runs recorded yet.</p>
+              ) : (
+                <div className="relative max-h-96 overflow-y-auto pl-1">
+                  <div className="absolute left-[7px] top-2 bottom-2 w-px bg-slate-150" />
+                  <div className="space-y-4">
+                    {ops.executionLog.map((r, i) => {
+                      const s = OPS_RUN_STATUS[r.status] || OPS_RUN_STATUS.null;
+                      return (
+                        <div key={i} className="relative pl-6">
+                          <span className="absolute left-0 top-1 w-3.5 h-3.5 rounded-full border-2 border-white shadow" style={{ background: s.color }} />
+                          <div className="flex items-center justify-between gap-3 text-xs">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-[9px] font-mono text-slate-400 shrink-0">{new Date(r.createdAt).toLocaleTimeString()}</span>
+                              <span className="font-black text-slate-800 truncate">{r.agentId}</span>
+                              <span className="text-slate-400 font-medium truncate">· {r.siteName}</span>
+                            </div>
+                            <span className="text-[9px] font-black uppercase tracking-wider" style={{ color: s.color }}>{s.label}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-3xl border border-slate-150 shadow-sm p-6">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-4">
+                <span className="w-9 h-9 rounded-2xl bg-indigo-50 grid place-items-center text-indigo-500 shrink-0"><Cpu size={15} /></span>
+                <h3 className="text-sm font-black text-slate-800">Model Status</h3>
+              </div>
+              <div className="space-y-3 text-[12px] font-semibold text-slate-600">
+                <div className="flex justify-between items-center"><span className="text-slate-400">Active provider</span><span className="font-black text-slate-800 capitalize bg-slate-50 px-2.5 py-1 rounded-lg">{ops.modelStatus.provider}</span></div>
+                <div className="flex justify-between items-center"><span className="text-slate-400">Daily-tier model</span><span className="font-mono text-[11px]">{ops.modelStatus.dailyModel}</span></div>
+                <div className="flex justify-between items-center"><span className="text-slate-400">Monthly-tier model</span><span className="font-mono text-[11px]">{ops.modelStatus.monthlyModel}</span></div>
+                <div className="flex justify-between items-center"><span className="text-slate-400">Forecast engine model</span><span className="font-mono text-[11px]">{ops.modelStatus.forecastModel}</span></div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {activeDraft && <DraftModal draft={activeDraft} onClose={() => setActiveDraft(null)} onSaved={setActiveDraft} onDeleted={() => setActiveDraft(null)} />}
 
       <AgentDetailPanel agent={selected} onClose={() => setSelected(null)} />
     </div>

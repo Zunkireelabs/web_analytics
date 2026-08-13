@@ -57,7 +57,7 @@ export default function Reports({ siteId }) {
     // Monthly quickly could let an earlier tab's slower request resolve
     // LAST and silently win, showing e.g. the Weekly doc/metrics while the
     // Monthly tab is the one actually selected. Same convention already
-    // used by Overview.jsx/Insights.jsx/CommandCenter.jsx.
+    // used by Overview.jsx/Insights.jsx/AiGrowth.jsx.
     let cancelled = false;
     setLoading(true);
     setError(false);

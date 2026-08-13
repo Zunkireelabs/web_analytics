@@ -35,5 +35,20 @@ class Settings(BaseSettings):
     ingest_schedule_enabled: bool = True
     ingest_schedule_hour_utc: int = 3
 
+    # In-process analysis cron (app/ingestion/scheduler.py) — stats, anomalies,
+    # forecasts, insights and recommendations. Previously this ran ONLY via a
+    # host-level crontab line that docker-compose.yml documents in a comment
+    # but nothing in the repo ever installs (no crontab file, no deploy step,
+    # no systemd unit), so on any machine where nobody added that line by hand
+    # no forecast or forecast_risk insight was ever generated and the Analyst
+    # dashboard's early-warning list was empty by construction. Scheduling it
+    # in-process, next to ingestion above, makes it deploy with the container
+    # instead of depending on undocumented host state.
+    #
+    # Runs an hour after ingestion so that day's observations are already
+    # written — the forecast models read what run_nightly() just collected.
+    analysis_schedule_enabled: bool = True
+    analysis_schedule_hour_utc: int = 4
+
 
 settings = Settings()

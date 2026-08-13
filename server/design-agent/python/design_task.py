@@ -188,7 +188,6 @@ def build_component_templates_task(action_types, lessons=None):
     task = "\n".join(lines)
     block = _lessons_block(lessons)
     return task + "\n" + block if block else task
-    return "\n".join(lines)
 
 
 DESIGN_PROFILE_SCHEMA = (

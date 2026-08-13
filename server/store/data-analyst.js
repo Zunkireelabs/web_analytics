@@ -177,6 +177,39 @@ export async function updateKeywordGapStatus(siteId, gapId, status) {
   return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status] };
 }
 
+// A keyword a human typed on the Analyst page as a growth target. Deliberately
+// lands in the same keyword_gaps queue as the machine-generated passes (source
+// 'user_request', see migration 099) so approval routes through the identical
+// createActionCenterRecommendationForGap → generateDraft → Action Center
+// pipeline, rather than a parallel path to the same destination.
+//
+// Returns the existing row instead of inserting when the same topic is already
+// awaiting review for this site: re-typing a keyword you already asked for
+// should surface the request you already made, not stack a second identical
+// row in the review queue. Only pending_review rows are reused — a topic that
+// was previously approved or rejected can legitimately be raised again.
+export async function createUserKeywordGap(siteId, topic, reason) {
+  const { rows: existing } = await query(
+    `SELECT id, topic, reason, priority, status, source, created_at
+       FROM keyword_gaps
+      WHERE site_id = $1 AND lower(topic) = lower($2) AND status = 'pending_review'
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [siteId, topic]
+  );
+  if (existing[0]) {
+    return { ...existing[0], status: GAP_STATUS_FROM_DB[existing[0].status], alreadyQueued: true };
+  }
+
+  const { rows } = await query(
+    `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
+     VALUES ($1, $2, $3, 'medium', 'pending_review', 'user_request')
+     RETURNING id, topic, reason, priority, status, source, created_at`,
+    [siteId, topic, reason || null]
+  );
+  return { ...rows[0], status: GAP_STATUS_FROM_DB[rows[0].status], alreadyQueued: false };
+}
+
 // Real GSC queries that textually match a gap's topic — used as the "did we
 // already partially cover this?" evidence check when a gap is approved (see
 // server/routes/keywords.js). A true zero-coverage gap should turn up little

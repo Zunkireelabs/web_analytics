@@ -54,8 +54,13 @@ function columnY(count, rowH = ROW_H) {
 // both read that shared store directly, and Executive Report Agent reads 7
 // of the 10 (meta.requires) to synthesize one narrative, which itself
 // surfaces back on Command Center (the dashed loop-back edge).
+// 'command-center' node points back at this same Orchestration page — its
+// standalone page (formerly /ai-growth) was retired and its unique content
+// (competitor overview, executive summary, per-category detail cards,
+// operations history) folded directly into AiGrowth.jsx, so the diagram now
+// completes its own loop instead of linking to a dead route.
 const CONSUMERS = [
-  { id: 'command-center', icon: '🧭', label: 'Command Center', to: '/ai-growth', color: CATEGORY.seo.color, sub: 'Discoveries, critical issues, recommended actions — from all 10 agents' },
+  { id: 'command-center', icon: '🧭', label: 'Command Center', to: '/ai-orchestration', color: CATEGORY.seo.color, sub: 'Discoveries, critical issues, recommended actions — from all 10 agents' },
   { id: 'action-center', icon: '⚡', label: 'Action Center', to: '/action-center', color: CATEGORY.content.color, sub: 'Draftable fixes grounded in real findings' },
   { id: 'executive-report', icon: '🧠', label: 'Executive Report', big: true, color: CATEGORY.meta.color, sub: 'Weekly narrative from 7 of 10 agents' },
 ];
