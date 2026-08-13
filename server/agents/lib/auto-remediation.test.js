@@ -324,3 +324,67 @@ describe('principled refusals vs systemic faults', () => {
     assert.equal(result.shipped, 0);
   });
 });
+
+// Publishing cadence for net-new content (sites.blog_min_gap_days, migration
+// 107). The daily budget can't express this on its own: 28 open blog-outline
+// recommendations are 28 legitimate candidates as far as it is concerned.
+describe('autoRemediateSafeRecommendations — blog pacing', () => {
+  beforeEach(reset);
+
+  test('ships at most one blog per run, however many are open', async () => {
+    recommendations = [
+      rec(1, { type: 'blog-outline' }),
+      rec(2, { type: 'blog-outline' }),
+      rec(3, { type: 'blog-outline' }),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f1'], 'takes the highest-priority blog and defers the rest');
+  });
+
+  test('ships no blog at all when one was published inside the gap window', async () => {
+    recentDraftTypes.add('blog-outline');
+    recommendations = [rec(1, { type: 'blog-outline' }), rec(2, { type: 'blog-outline' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 0);
+    assert.deepEqual(calls.generated, []);
+  });
+
+  test('pacing a blog never blocks ordinary fixes in the same run', async () => {
+    recentDraftTypes.add('blog-outline');
+    recommendations = [
+      rec(1, { type: 'blog-outline' }),
+      rec(2, { type: 'meta-title' }),
+      rec(3, { type: 'faq' }),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 2);
+    assert.deepEqual(calls.generated, ['f2', 'f3']);
+  });
+
+  test('the surviving blog competes for the same daily budget, with no separate allowance', async () => {
+    site.auto_remediation_daily_limit = 2;
+    recommendations = [
+      rec(1, { type: 'blog-outline' }),
+      rec(2, { type: 'meta-title' }),
+      rec(3, { type: 'faq' }),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 2, 'the blog occupies one of the 2 slots — it does not get a third');
+    assert.deepEqual(calls.generated, ['f1', 'f2']);
+  });
+
+  test('blog_min_gap_days = 0 disables the gap but still holds the one-per-run cap', async () => {
+    site.blog_min_gap_days = 0;
+    recentDraftTypes.add('blog-outline');
+    recommendations = [rec(1, { type: 'blog-outline' }), rec(2, { type: 'blog-outline' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f1']);
+  });
+});
