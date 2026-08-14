@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -334,6 +334,32 @@ export function startCron() {
       }
     }, { timezone: 'UTC' });
     console.log(`[cron] analyst -> Action Center sync scheduled "${analystSync}" (UTC)`);
+  }
+
+  // Proactive Design Agent trigger — one hour ahead of the 07:00 detect+ship
+  // run, and half an hour after analyst sync above has landed. Before this
+  // existed, a site's whole-site design profile was only ever queued
+  // REACTIVELY, the first time a draft attempt needed it — which for a site
+  // with no profile yet meant the very same 07:00 pass, racing
+  // design-drift.js's bounded wait (DESIGN_AGENT_WAIT_MS) instead of having
+  // real lead time to finish the repo analysis. This gives every site
+  // connected overnight a full hour of head start, so the bounded wait
+  // becomes a safety net for same-morning-connected sites, not the main path.
+  // Override with DESIGN_AGENT_QUEUE_CRON_SCHEDULE if a deployment needs a
+  // different gap ahead of its own CRON_SCHEDULE.
+  const designAgentQueue = process.env.DESIGN_AGENT_QUEUE_CRON_SCHEDULE || '0 6 * * *';
+  if (!cron.validate(designAgentQueue)) {
+    console.error(`[cron] invalid DESIGN_AGENT_QUEUE_CRON_SCHEDULE "${designAgentQueue}" — proactive design-agent queue NOT scheduled.`);
+  } else {
+    cron.schedule(designAgentQueue, async () => {
+      try {
+        const { queued } = await queueDesignAgentDerivationsForAllSites();
+        console.log(`[cron] proactive design-agent queue finished — ${queued} site(s) queued`);
+      } catch (err) {
+        console.error('[cron] proactive design-agent queue error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
   }
 
   // Stale audit-run reaper — independent safety net alongside the same

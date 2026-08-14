@@ -39,6 +39,8 @@ import { getSearchPerformanceRange } from './store/read.js';
 import { knownDomain, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
+import { siteHasUsableDesignProfile, sitePageUrl } from './implementers/lib/design-drift.js';
+import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_JOB_KEY } from './store/execution-jobs.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
 // ai-recommendation are all throttled (see runAgentIfDue below — real
@@ -864,6 +866,38 @@ export async function runFixImpactMeasurementsForAllSites() {
     console.error('[job] fix impact measurement failed:', err.message);
     return [];
   }
+}
+
+// Proactive Design Agent trigger — scheduled at 06:00 local (cron.js), a full
+// hour ahead of the 07:00 detect+ship pass. Before this existed, a site's
+// design profile was only ever queued REACTIVELY, the first time a draft
+// attempt hit resolveOrCreateComponentTemplate — which for a site with no
+// profile yet meant the very same 07:00 pass that needed it, racing
+// design-drift.js's bounded wait (DESIGN_AGENT_WAIT_MS) instead of having any
+// real lead time. This gives every site connected before this run a full
+// hour of head start, so by 07:00 its profile is normally already done and
+// that bounded wait becomes a safety net for genuinely new same-morning
+// sites, not the main path.
+//
+// Fire-and-forget: queues, does not wait — the always-running design-agent
+// worker container drains the queue on its own schedule. One bad site's
+// queue-insert failure must never block another site's.
+export async function queueDesignAgentDerivationsForAllSites() {
+  const sites = (await listSites()).filter((s) => s.design_agent_enabled && s.repo_owner && s.repo_name);
+  let queued = 0;
+  for (const site of sites) {
+    if (siteHasUsableDesignProfile(site)) continue;
+    try {
+      const pending = await getQueuedComponentTemplateJob(site.id, DESIGN_PROFILE_JOB_KEY);
+      if (pending) continue;
+      await createDesignProfileJob(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) });
+      queued++;
+    } catch (err) {
+      console.error(`[job] could not queue design-profile derivation for site ${site.id}:`, err.message);
+    }
+  }
+  if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
+  return { queued };
 }
 
 export async function runFixVerificationsForAllSites() {
