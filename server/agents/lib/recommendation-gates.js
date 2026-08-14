@@ -6,7 +6,7 @@ import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
-import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason } from '../../implementers/lib/pagination-routes.js';
+import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 
 // The gates that decide whether a candidate recommendation is real, and
 // whether it may enter the unattended chain.
@@ -239,6 +239,16 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       // the second line of defense, not a decision this branch second-guesses.
       const generated = await paginationRouteFor(page);
       if (generated) {
+        // canonical/open-graph are the one case where "there is no per-page
+        // file to map" doesn't mean "blocked" — the value is derivable from
+        // the page's own url/title/description, which the layout already
+        // has for every generated page by construction, so real evidence
+        // (not a guess) can prove no fix is even needed. See
+        // paginationHeadTagAutoHandled's own comment for why this is safe
+        // to drop rather than merely reclassify.
+        if (await paginationHeadTagAutoHandled(site, generated, generatorId, { fetchFile: cachedFetchFile, fetchTree: cachedFetchTree })) {
+          return { drop: 'auto-computed-by-layout', blockedReason: null };
+        }
         mappingBlockedReason = paginationBlockedReason(generated, generatorId);
       } else {
         await healUnmappedPage(page, generatorId);

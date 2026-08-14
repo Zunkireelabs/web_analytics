@@ -330,6 +330,26 @@ export function spliceScalarField(content, objRange, fieldName, newValue, format
   return content.slice(0, range.valueStart) + range.quote + escaped + range.quote + content.slice(range.valueEnd);
 }
 
+// Inserts a brand-new `fieldName: "..."` string property as the object's
+// last field — same insertion strategy/comma-safety as insertNewObjectField
+// below, for a scalar string value instead of an object literal. Use only
+// when findScalarFieldRange returned null (the field genuinely doesn't
+// exist yet on this entry, e.g. a page-content field like expandedContent
+// that's never been written before); once created, later drafts go through
+// spliceScalarField instead. Same escaping as spliceScalarField, always
+// double-quoted since the key is brand new (no existing quote style to
+// match).
+export function insertNewScalarField(content, objRange, fieldName, newValue, format = 'js-export-array') {
+  const interior = content.slice(objRange.start + 1, objRange.end);
+  const trimmed = interior.replace(/\s+$/, '');
+  const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
+  const insertPoint = objRange.start + 1 + trimmed.length;
+  const key = format === 'json-array' ? JSON.stringify(fieldName) : fieldName;
+  const escaped = String(newValue).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const insertion = `${needsComma ? ',' : ''}\n    ${key}: "${escaped}"\n  `;
+  return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
+}
+
 // Renders a plain JS value as valid object-literal source — JSON.stringify's
 // quoted-key output is valid syntax in BOTH js-export-array (a real .js
 // file — quoted keys are legal JS) and json-array (real JSON) formats, so

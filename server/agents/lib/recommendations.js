@@ -102,6 +102,7 @@ export async function buildRecommendations(siteId) {
     'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
     'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
+    'auto-computed-by-layout': 'This page\'s canonical/Open Graph tags are already computed automatically by its shared layout template from the page\'s own title, description, and URL — there is no per-page value to write and no fix needed.',
   };
 
   for (const run of runs) {
