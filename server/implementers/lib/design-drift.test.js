@@ -523,7 +523,8 @@ describe('resolveOrCreateComponentTemplate', () => {
     });
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'derivation-queue-failed');
-    assert.match(result.detail, /connection reset/);
+    assert.doesNotMatch(result.detail, /connection reset/);
+    assert.match(result.detail, /queuing the Design Agent to learn it just failed/);
     assert.match(result.detail, /will not resolve on its own/);
   });
 

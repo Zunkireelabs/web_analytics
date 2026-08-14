@@ -10,6 +10,19 @@
 // are both correctly "Yes." for different questions) to be a real signal.
 const MIN_PARAGRAPH_WORDS = 8;
 
+// JSON-LD fields (faq.js's schemaJsonLd, any future generator's equivalent)
+// are a deterministic transform of the generator's own prose fields, never a
+// second LLM authoring — faq.js's mainEntity[].acceptedAnswer.text is built
+// FROM items[].answer, so it will always collide with it here. That's not an
+// LLM repeating itself, it's structured markup mirroring the visible content
+// on purpose (the entire point of FAQPage schema). Skipping these keys keeps
+// this guard checking prose an LLM actually wrote twice, not a generator's
+// own required mirror of what it wrote once (real incident, 2026-08-14: FAQ
+// generation failed the Quality Gate on every attempt, permanently, for any
+// page — 100% of items[].answer collided with schemaJsonLd.mainEntity[].
+// acceptedAnswer.text by construction).
+const NON_PROSE_KEYS = new Set(['schemaJsonLd', 'jsonLd']);
+
 function collectParagraphs(value, path, out) {
   if (typeof value === 'string') {
     const paras = value.split(/\n{2,}|(?<=[.?!])\s{2,}/).map((p) => p.trim()).filter(Boolean);
@@ -24,7 +37,10 @@ function collectParagraphs(value, path, out) {
   }
   if (Array.isArray(value)) { value.forEach((v, i) => collectParagraphs(v, `${path}[${i}]`, out)); return; }
   if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) collectParagraphs(v, path ? `${path}.${k}` : k, out);
+    for (const [k, v] of Object.entries(value)) {
+      if (NON_PROSE_KEYS.has(k)) continue;
+      collectParagraphs(v, path ? `${path}.${k}` : k, out);
+    }
   }
 }
 
