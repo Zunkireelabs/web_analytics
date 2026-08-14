@@ -230,13 +230,17 @@ router.get('/action-center/generators', async (req, res, next) => {
 // draft to whatever this site's own closest match happens to be, and the
 // later verification outcome would then be credited to the wrong memory.
 // Every other caller omits it and gets today's behavior unchanged.
-// waitForDesignAgent: only the cron/auto-remediation path sets this true (see
-// agents/lib/auto-remediation.js's shipDraftForRecommendation) so a site's
-// first-ever draft of a design-sensitive type can ship in the same 07:00 pass
-// that queued the derivation, instead of only unblocking the next day's run.
-// Every interactive caller (this file's own routes, dataAnalyst.js,
-// analyst-seo-mapping.js, MCP) omits it and keeps today's fail-fast behavior —
-// a user's click should never hang for minutes waiting on a repo analysis.
+// waitForDesignAgent: false (default) keeps today's fail-fast behavior — most
+// interactive callers (this file's own routes, analyst-seo-mapping.js, MCP)
+// want that, since a user's click should never hang for minutes waiting on a
+// repo analysis. `true` waits up to design-drift.js's full DESIGN_AGENT_WAIT_MS
+// (5 min) — only the unattended cron paths (auto-remediation.js,
+// learned-repair.js) use that, so a site's first-ever draft of a
+// design-sensitive type can ship in the same 07:00 pass that queued the
+// derivation instead of only unblocking the next day's run. A number is a
+// custom wait budget in ms — dataAnalyst.js's "Generate Content Draft" button
+// uses a short one so a mid-derivation click gets a real result instead of
+// an immediate "come back later", without hanging the request for minutes.
 export async function generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
@@ -294,8 +298,10 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // immediately, even on the very same call that just derived+saved it.
   let effectiveSite = await getSiteById(siteId);
   if (effectiveSite) {
-    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId), { waitForCompletion: waitForDesignAgent })
-      .catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
+    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId), {
+      waitForCompletion: Boolean(waitForDesignAgent),
+      ...(typeof waitForDesignAgent === 'number' ? { waitBudgetMs: waitForDesignAgent } : {}),
+    }).catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
     if (templateResult?.ok && templateResult.template) {
       effectiveSite = {
         ...effectiveSite,

@@ -21,6 +21,10 @@ router.use(requireAuth, requirePlatformRole('platform_admin'));
 
 const PYTHON_BASE_URL = process.env.DATA_ANALYST_AGENT_INTERNAL_URL || 'http://127.0.0.1:8000';
 
+// Well under web/src/api.js's 5-minute REQUEST_TIMEOUT_MS fetch ceiling — see
+// the generate-draft route below for why this waits at all.
+const ANALYST_DRAFT_DESIGN_WAIT_MS = 45_000;
+
 async function callPython(path, { method = 'GET', body, query } = {}) {
   const url = new URL(path, PYTHON_BASE_URL);
   if (query) for (const [k, v] of Object.entries(query)) if (v != null) url.searchParams.set(k, v);
@@ -164,6 +168,12 @@ router.post('/internal/analyst/clients/:clientId/insights/generate-draft', async
     const draft = await generateDraft(site.id, {
       generatorId: action.generatorId, params: action.params,
       source: 'analyst', findingId: action.findingId,
+      // A short bounded wait — long enough to catch a Design Agent
+      // derivation that's already close to done (e.g. queued by an earlier
+      // click, or by this same site's 07:00 cron pass a few minutes ago),
+      // short enough not to hang this request. See action-center.js's
+      // generateDraft doc comment for the full waitForDesignAgent contract.
+      waitForDesignAgent: ANALYST_DRAFT_DESIGN_WAIT_MS,
     });
     res.json(draft);
   } catch (e) { next(e); }
