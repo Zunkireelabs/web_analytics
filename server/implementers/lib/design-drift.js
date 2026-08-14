@@ -4,7 +4,8 @@ import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 import { FRONTEND_ACTION_TYPES } from '../frontend.js';
-import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
+import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, getLatestDesignAgentJob, getDesignAgentJobById, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
+import { getSiteById } from '../../store/read.js';
 import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
   isProfileUsable, isProjectable,
@@ -715,6 +716,19 @@ export async function persistDerivedComponentTemplates(site, componentTemplates,
 // newpage-render.js's plain-markdown output) for exactly this case — a
 // site that hasn't opted into (or can't currently reach) the Design Agent
 // keeps working exactly as it did before this function existed.
+// How long the cron/auto-remediation path (waitForCompletion: true) will sit
+// polling a freshly-queued design-profile derivation before giving up and
+// falling back to the ordinary "queued, unblocks on its own" result. Bounded
+// well under the worker's own bounded-retry budget in worker.js — this is a
+// same-pass convenience (let today's 07:00 run actually ship a PR instead of
+// only unblocking tomorrow's), not a substitute for that retry logic. Never
+// applied to the interactive HTTP path (routes/action-center.js's ordinary
+// generateDraft callers) — a user's own click should fail fast, not hang.
+const DESIGN_AGENT_WAIT_MS = Number(process.env.DESIGN_AGENT_WAIT_MS) || 5 * 60 * 1000;
+const DESIGN_AGENT_POLL_INTERVAL_MS = 5000;
+
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 export async function resolveOrCreateComponentTemplate(site, actionType, {
   saveConfig = updateSiteRepoConfig,
   recordAudit = recordAuditEvent,
@@ -723,6 +737,13 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   findQueuedDerivation = getQueuedComponentTemplateJob,
   enqueueProfileDerivation = createDesignProfileJob,
   latestDesignAgentJob = getLatestDesignAgentJob,
+  // waitForCompletion: only the cron/auto-remediation path sets this true
+  // (via generateDraft's waitForDesignAgent option) — see the constant above.
+  waitForCompletion = false,
+  pollJobStatus = getDesignAgentJobById,
+  refetchSite = getSiteById,
+  sleep = defaultSleep,
+  waitBudgetMs = DESIGN_AGENT_WAIT_MS,
   // Injected only so the self-heal below is testable without a network — the
   // defaults are checkTemplateFreshness's own.
   fetchPage,
@@ -923,11 +944,49 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   if (!isProfileUsable(profile)) {
     const queuedProfile = await findQueuedDerivation(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
     let enqueueError = null;
+    let freshlyQueued = null;
     if (!queuedProfile) {
-      await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
+      freshlyQueued = await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
         enqueueError = err;
         console.error(`[design-drift] could not queue design-profile derivation for site ${site.id}:`, err.message);
+        return null;
       });
+    }
+
+    // Same-pass wait: the cron/auto-remediation path would otherwise queue
+    // this job and then immediately fail the draft anyway, only to retry
+    // (successfully) on tomorrow's run. Poll the job we just found or
+    // created up to waitBudgetMs; if it finishes in time, refetch the site
+    // (the profile lives in url_file_map, saved by the worker via saveConfig
+    // — this in-memory `site` is now stale) and retry ONCE with
+    // waitForCompletion off, so a second derivation can never be queued and
+    // this can never loop.
+    const jobToAwait = queuedProfile || freshlyQueued;
+    if (waitForCompletion && jobToAwait?.id && !enqueueError) {
+      const deadline = Date.now() + waitBudgetMs;
+      let finished = null;
+      while (Date.now() < deadline) {
+        // eslint-disable-next-line no-await-in-loop
+        const job = await pollJobStatus(jobToAwait.id).catch(() => null);
+        if (job && job.status !== 'queued' && job.status !== 'executing') {
+          finished = job;
+          break;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(DESIGN_AGENT_POLL_INTERVAL_MS);
+      }
+      if (finished?.status === 'completed') {
+        const freshSite = await refetchSite(site.id).catch(() => null);
+        if (freshSite) {
+          return resolveOrCreateComponentTemplate(freshSite, actionType, {
+            saveConfig, recordAudit, recordFixOutcomeFn, enqueueDerivation, findQueuedDerivation,
+            enqueueProfileDerivation, latestDesignAgentJob, waitForCompletion: false,
+            pollJobStatus, refetchSite, sleep, waitBudgetMs, fetchPage, fetchStylesheet,
+          });
+        }
+      }
+      // Failed, timed out, or the refetch itself failed — fall through to the
+      // ordinary messaging below exactly as the non-waiting path would.
     }
 
     // The "no action needed, will unblock automatically" claim below used to

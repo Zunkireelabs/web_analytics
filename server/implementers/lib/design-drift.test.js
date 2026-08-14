@@ -516,6 +516,81 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.deepEqual(queued, []);
   });
 
+  describe('waitForCompletion (the cron/auto-remediation same-pass wait)', () => {
+    test('polls the freshly-queued job and retries once it completes, returning a real template', async () => {
+      const polled = [];
+      const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+        ...noopDeps(),
+        enqueueProfileDerivation: async () => ({ id: 42 }),
+        waitForCompletion: true,
+        sleep: async () => {},
+        pollJobStatus: async (jobId) => {
+          polled.push(jobId);
+          return polled.length < 2 ? { id: jobId, status: 'executing' } : { id: jobId, status: 'completed' };
+        },
+        refetchSite: async () => siteWithProfile(),
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.source, 'design-profile', 'the retry against the refetched (now-profiled) site succeeds');
+      assert.equal(polled.length, 2, 'polled until the job left queued/executing');
+    });
+
+    test('waits on an ALREADY-queued job (not just a freshly-created one)', async () => {
+      const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+        ...noopDeps(),
+        findQueuedDerivation: async () => ({ id: 7 }),
+        waitForCompletion: true,
+        sleep: async () => {},
+        pollJobStatus: async (jobId) => ({ id: jobId, status: 'completed' }),
+        refetchSite: async () => siteWithProfile(),
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.source, 'design-profile');
+    });
+
+    test('falls back to the ordinary "queued" result when the job fails within the wait budget', async () => {
+      const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+        ...noopDeps(),
+        enqueueProfileDerivation: async () => ({ id: 42 }),
+        waitForCompletion: true,
+        sleep: async () => {},
+        pollJobStatus: async (jobId) => ({ id: jobId, status: 'failed' }),
+        refetchSite: async () => { throw new Error('should not refetch — the job failed'); },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'derivation-queued');
+    });
+
+    test('falls back to the ordinary "queued" result when the wait budget is exhausted', async () => {
+      let sleeps = 0;
+      const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+        ...noopDeps(),
+        enqueueProfileDerivation: async () => ({ id: 42 }),
+        waitForCompletion: true,
+        waitBudgetMs: 1,
+        sleep: async () => { sleeps++; },
+        pollJobStatus: async (jobId) => ({ id: jobId, status: 'executing' }),
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'derivation-queued');
+      assert.ok(sleeps >= 0, 'never hangs even when the deadline is effectively immediate');
+    });
+
+    test('never queues a second job on the post-completion retry', async () => {
+      let enqueueCalls = 0;
+      const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+        ...noopDeps(),
+        enqueueProfileDerivation: async () => { enqueueCalls++; return { id: 42 }; },
+        waitForCompletion: true,
+        sleep: async () => {},
+        pollJobStatus: async (jobId) => ({ id: jobId, status: 'completed' }),
+        refetchSite: async () => siteWithProfile(),
+      });
+      assert.equal(result.ok, true);
+      assert.equal(enqueueCalls, 1, 'the retry runs with waitForCompletion off, so it can never re-enqueue or loop');
+    });
+  });
+
   test('a failed enqueue is surfaced honestly, not papered over as "queued, no action needed"', async () => {
     const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
       ...noopDeps(),

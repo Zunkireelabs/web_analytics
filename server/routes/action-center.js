@@ -230,7 +230,14 @@ router.get('/action-center/generators', async (req, res, next) => {
 // draft to whatever this site's own closest match happens to be, and the
 // later verification outcome would then be credited to the wrong memory.
 // Every other caller omits it and gets today's behavior unchanged.
-export async function generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId: presetMemoryRefId = null } = {}) {
+// waitForDesignAgent: only the cron/auto-remediation path sets this true (see
+// agents/lib/auto-remediation.js's shipDraftForRecommendation) so a site's
+// first-ever draft of a design-sensitive type can ship in the same 07:00 pass
+// that queued the derivation, instead of only unblocking the next day's run.
+// Every interactive caller (this file's own routes, dataAnalyst.js,
+// analyst-seo-mapping.js, MCP) omits it and keeps today's fail-fast behavior —
+// a user's click should never hang for minutes waiting on a repo analysis.
+export async function generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -287,7 +294,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // immediately, even on the very same call that just derived+saved it.
   let effectiveSite = await getSiteById(siteId);
   if (effectiveSite) {
-    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId))
+    const templateResult = await resolveOrCreateComponentTemplate(effectiveSite, componentTemplateActionTypeFor(generatorId), { waitForCompletion: waitForDesignAgent })
       .catch((err) => { console.error(`[action-center] componentTemplate resolution failed for ${generatorId}:`, err.message); return null; });
     if (templateResult?.ok && templateResult.template) {
       effectiveSite = {

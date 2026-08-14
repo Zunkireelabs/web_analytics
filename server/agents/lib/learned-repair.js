@@ -219,6 +219,8 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
       await shipDraftForRecommendation(siteId, {
         generatorId: item.generatorId, params: item.params,
         findingId: item.id, source: 'learned-repair', memoryRefId: chosen.id,
+        // Unattended cron pass — see auto-remediation.js's identical option.
+        waitForDesignAgent: true,
       });
       repaired.add(item.id);
       console.log(`[learned-repair] site ${siteId} repaired "${item.tag}" (${item.generatorId}) from memory #${chosen.id} — PR opened, awaiting human merge.`);
