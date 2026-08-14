@@ -9,6 +9,7 @@ import { agenticOrchestrationEnabled, runAgenticLoop } from './agentic-orchestra
 import { systemPromptFor, resolveDisplayName } from './copilot-greeting.js';
 import { getUserById } from '../../store/users.js';
 import { getSiteById } from '../../store/read.js';
+import { PLATFORM_GUIDE } from './platform-guide.js';
 
 // Who is being answered, resolved server-side. Never throws — an unresolvable
 // user falls back to the client persona, which is the safe default because it
@@ -57,23 +58,43 @@ async function classifyIntent(message, history) {
     .map((a) => ({ id: a.id, description: a.description, dataSources: a.dataSources || [] }));
   const validIds = new Set(catalog.map((a) => a.id));
 
-  const system = 'You are an intent router for an SEO/analytics AI copilot talking to a non-technical site owner. ' +
-    'Given the user\'s question, recent conversation, and a catalog of specialist agents (id, description, and ' +
-    'which real data sources each one has connected), decide which agent ids are relevant. Never invent an agent ' +
-    'id that is not in the catalog. If the question is a broad, non-specific recap ("summarize today", "what\'s ' +
-    'new", "how are we doing") set mode "summary" with an empty agentIds array instead of picking agents. ' +
-    'Respond with ONLY JSON: {"mode": "route" | "summary", "agentIds": ["..."]}.';
+  const system = 'You are an intent router for an AI copilot embedded in an SEO/analytics dashboard, talking to a ' +
+    'non-technical site owner or staff admin. Given the user\'s question, recent conversation, and a catalog of ' +
+    'specialist agents (id, description, and which real data sources each one has connected), decide how to route ' +
+    'it. Never invent an agent id that is not in the catalog. Three modes:\n' +
+    '- "route": a question about THIS SITE\'s SEO/traffic/data — pick the relevant agent ids.\n' +
+    '- "summary": a broad, non-specific recap of site data ("summarize today", "what\'s new", "how are we doing") ' +
+    '— empty agentIds array.\n' +
+    '- "platform-help": a question about the DASHBOARD/APP ITSELF, not the site\'s data — navigation, "how do I", ' +
+    '"where do I find", what a page/button/feature does, how to approve or ship a fix, etc. — empty agentIds array.\n' +
+    'Respond with ONLY JSON: {"mode": "route" | "summary" | "platform-help", "agentIds": ["..."]}.';
   const user = `Catalog: ${JSON.stringify(catalog)}\nRecent conversation: ${JSON.stringify(history)}\nQuestion: ${message}`;
 
   const raw = await callLLM(system, user, { maxTokens: 200 }).catch(() => null);
   if (!raw) return { mode: 'route', agentIds: RECOMMENDATION_AGENT_IDS }; // safe fallback: ask everyone rather than fail silently
   try {
     const parsed = JSON.parse(stripJsonFences(raw));
+    if (parsed.mode === 'platform-help') return { mode: 'platform-help', agentIds: [] };
     const agentIds = Array.isArray(parsed.agentIds) ? parsed.agentIds.filter((id) => validIds.has(id)) : [];
     return { mode: parsed.mode === 'summary' ? 'summary' : 'route', agentIds: agentIds.length ? agentIds : RECOMMENDATION_AGENT_IDS };
   } catch {
     return { mode: 'route', agentIds: RECOMMENDATION_AGENT_IDS };
   }
+}
+
+// Answers "how do I use this app" questions from the static PLATFORM_GUIDE
+// only — deliberately separate from answerFromCache/runOrchestration, which
+// are grounded in real per-site findings. Mixing the two contexts risks the
+// model blending "what this button does" with invented site data, so this
+// path never sees agent findings at all.
+async function answerPlatformHelp(message, history, personaPrompt) {
+  const system = `${personaPrompt}\n\nYou also act as the built-in guide for how to use this dashboard/platform ` +
+    'itself. Answer ONLY using the reference below — never invent a page, button, or capability that isn\'t listed ' +
+    'in it. If the reference doesn\'t cover what they\'re asking, say so plainly and point them to the closest real ' +
+    `page instead of guessing.\n\n${PLATFORM_GUIDE}`;
+  const user = `Recent conversation: ${JSON.stringify(history)}\nQuestion: ${message}`;
+  const raw = await callLLM(system, user, { maxTokens: 500 }).catch(() => null);
+  return raw ? raw.trim() : null;
 }
 
 async function staleAgentIds(siteId, agentIds) {
@@ -164,7 +185,13 @@ export async function answerQuestion({ siteId, conversationId, message, history,
   const personaPrompt = persona.systemPrompt;
 
   let result;
-  if (routing.mode === 'summary') {
+  if (routing.mode === 'platform-help') {
+    result = {
+      findings: [],
+      narrative: await answerPlatformHelp(message, history, personaPrompt),
+      ranAgentIds: [],
+    };
+  } else if (routing.mode === 'summary') {
     const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
     result = {
       findings: execRun?.facts?.findings || [],

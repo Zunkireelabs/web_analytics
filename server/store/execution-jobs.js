@@ -68,6 +68,24 @@ export async function getQueuedComponentTemplateJob(siteId, actionType) {
   return rows[0] || null;
 }
 
+// Most recent design_generate job for this site + component key, of ANY
+// status — unlike getQueuedComponentTemplateJob above, this also surfaces a
+// FAILED attempt. Lets a caller tell "genuinely just queued, first attempt
+// ever" apart from "every attempt so far has failed and nothing new is
+// pending" — the gate in design-drift.js used to say "queued, no action
+// needed" in both cases, which silently lied once a worker failure left the
+// queue empty with no automatic retry.
+export async function getLatestDesignAgentJob(siteId, actionType) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at, logs FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate'
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT 1`,
+    [siteId, actionType]
+  );
+  return rows[0] || null;
+}
+
 // Sentinel stored in params.componentKeys for a whole-site design-profile
 // job, so getQueuedComponentTemplateJob's existing "is one already pending"
 // check works unchanged for it. Not an action type — deliberately a reserved

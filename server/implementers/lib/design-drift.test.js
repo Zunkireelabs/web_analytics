@@ -344,6 +344,7 @@ describe('resolveOrCreateComponentTemplate', () => {
     enqueueProfileDerivation: async () => { throw new Error('should not queue — the site already has a profile'); },
     enqueueDerivation: async () => { throw new Error('should not queue a per-type derivation'); },
     findQueuedDerivation: async () => null,
+    latestDesignAgentJob: async () => null,
   });
 
   test('returns an existing VERIFIED template immediately', async () => {
@@ -513,6 +514,29 @@ describe('resolveOrCreateComponentTemplate', () => {
     });
     assert.equal(result.reason, 'derivation-queued');
     assert.deepEqual(queued, []);
+  });
+
+  test('a failed enqueue is surfaced honestly, not papered over as "queued, no action needed"', async () => {
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async () => { throw new Error('insert failed: connection reset'); },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'derivation-queue-failed');
+    assert.match(result.detail, /connection reset/);
+    assert.match(result.detail, /will not resolve on its own/);
+  });
+
+  test('a prior FAILED derivation with nothing newly pending says so, instead of repeating a stale "queued" claim', async () => {
+    const result = await resolveOrCreateComponentTemplate(baseSite, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async () => {}, // re-enqueue "succeeds" (a fresh job is queued)...
+      latestDesignAgentJob: async () => ({ id: 3008, status: 'failed', finished_at: '2026-08-12T11:33:03.143Z' }), // ...but the LAST one on record failed
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'derivation-retry-queued');
+    assert.match(result.detail, /job #3008/);
+    assert.match(result.detail, /engineer needs to check the worker logs/);
   });
 
   test('action type with no component-template concept short-circuits', async () => {

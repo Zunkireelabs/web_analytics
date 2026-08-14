@@ -39,9 +39,16 @@ const GSC_PROPERTY_RE = /^(sc-domain:.+|https?:\/\/.+)$/;
 // (`connected`) while its baseline audit never actually completed
 // (`!baselined`, e.g. Google access hadn't propagated yet on first attempt,
 // or the site predates this whole flow) — see POST .../retry-baseline below.
+// Names test suites insert as throwaway `sites` fixtures (see e.g.
+// server/design-agent/worker.test.js). Each of those tests cleans up after
+// itself in an `after()` hook, but a hard-killed run (a dev restart or
+// aborted CI job) skips that hook and leaves the row behind permanently —
+// filtered here so staff-facing client lists don't accumulate that debris.
+const TEST_FIXTURE_SITE_NAMES = new Set(['design-agent-worker.test.js fixture']);
+
 router.get('/internal/clients', async (req, res, next) => {
   try {
-    const sites = await listSites();
+    const sites = (await listSites()).filter((s) => !TEST_FIXTURE_SITE_NAMES.has(s.name));
     res.json(sites.map((s) => ({
       id: s.id, name: s.name, websiteDomain: s.website_domain, timezone: s.timezone,
       connected: !!(s.gsc_property && s.ga4_property_id),

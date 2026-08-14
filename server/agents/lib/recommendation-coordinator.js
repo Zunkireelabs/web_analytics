@@ -86,6 +86,19 @@ export function recommendationPageKey(item) {
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
   if (item.generatorId === 'broken-link-fix') return `${item.params?.page || ''}::${item.params?.href || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
+  // Same failure mode as blog-outline above: landing-page has no `page`
+  // param either (country-intelligence.js calls it with {market}/{city},
+  // analyst-seo-mapping.js's keyword-gap routing calls it with {topic}) — a
+  // second distinct market/topic would otherwise collapse onto the same
+  // page='' key and silently disappear into an unrelated recommendation.
+  if (item.generatorId === 'landing-page') {
+    return `landing::${item.params?.topic || item.params?.city || item.params?.market || ''}`;
+  }
+  // Not a real generator — a pseudo type analyst-seo-mapping.js's
+  // gapDraftEligibility uses to record a comparison-page opportunity that
+  // has no real generator to draft it yet (requiresFutureInfrastructure).
+  // Same failure mode as blog-outline/landing-page above if left uncased.
+  if (item.generatorId === 'comparison-page') return `comparison::${item.params?.topic || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }

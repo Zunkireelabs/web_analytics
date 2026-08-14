@@ -1,0 +1,41 @@
+# Build-context exclusions for every image built from this repo root
+# (Dockerfile, server/design-agent/Dockerfile).
+#
+# The load-bearing entry is `.venv` — server/design-agent/Dockerfile creates
+# the Design Agent's Python venv itself (`python3 -m venv
+# server/design-agent/python/.venv`) and then runs `COPY server ./server`
+# AFTERWARDS. Without this file, a developer's local .venv present in the
+# build context is copied straight over the one the image just built. That
+# venv's `bin/python3` is a macOS binary (and a different Python minor
+# version — 3.14 locally vs the image's 3.12), so the copied interpreter is
+# not executable under Linux: every design_generate job then dies at spawn
+# with ENOENT before Python ever starts. Keep this entry even if the venv is
+# also gitignored — .gitignore governs git, not the Docker build context, so
+# any build run from a working tree that has one (a dev machine, or a CI
+# runner that installed it) would silently ship a broken image.
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Never ship dependency trees or build output — the images install/build
+# their own (`npm ci`, `pip install`, `vite build`). Copying these in is
+# both wrong (host-platform native modules) and enormous.
+node_modules/
+**/node_modules/
+web/dist/
+dist/
+
+# Secrets must never enter an image layer.
+.env
+.env.*
+!.env.example
+
+# Repo/tooling noise with no runtime meaning.
+.git/
+.github/
+.claude/
+*.log
+.DS_Store
+coverage/

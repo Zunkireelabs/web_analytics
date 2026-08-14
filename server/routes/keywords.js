@@ -4,9 +4,10 @@ import { callLLM } from '../llm.js';
 import {
   getKeywordClusters, getKeywordGaps, updateKeywordGapStatus, getSiteProfile,
   getLatestKeywordNarrative, getAnomalyAlerts, getLatestForecastStatuses,
-  getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap, addKeywordGap,
+  getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
+  getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
-import { createActionCenterRecommendationForGap } from '../agents/lib/analyst-seo-mapping.js';
+import { createActionCenterRecommendationForGap, buildProductTopicMap } from '../agents/lib/analyst-seo-mapping.js';
 
 // Keyword Discovery — clusters/gaps/site-profile produced by agents/clustering.py
 // (see server/store/data-analyst.js for the read/write layer). Unlike
@@ -87,32 +88,62 @@ router.put('/internal/keywords/:siteId/gaps/:gapId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Add a keyword to grow on. Seeds a keyword_gaps row (source='manual') that
-// then travels the identical approve -> recommendation -> draft path a
-// clustering-discovered gap does, so this adds an entry point, not a second
-// pipeline. Approving it is still the existing PUT below — adding a keyword
-// is not the same decision as acting on it.
-router.post('/internal/keywords/:siteId/gaps', async (req, res, next) => {
-  try {
-    const { topic, reason, priority } = req.body || {};
-    if (!topic || !String(topic).trim()) {
-      return res.status(400).json({ error: 'topic is required.' });
-    }
-    if (priority && !['high', 'medium', 'low'].includes(priority)) {
-      return res.status(400).json({ error: 'priority must be high, medium or low.' });
-    }
-    const gap = await addKeywordGap(req.params.siteId, {
-      topic,
-      reason: reason || 'Added manually as a keyword to grow on.',
-      priority: priority || 'medium',
-    });
-    res.status(gap.alreadyExisted ? 200 : 201).json(gap);
-  } catch (e) { next(e); }
-});
-
 router.get('/internal/keywords/:siteId/profile', async (req, res, next) => {
   try {
     res.json(await getSiteProfile(req.params.siteId));
+  } catch (e) { next(e); }
+});
+
+// Product Understanding Layer (migration 111) — what this site's OWN
+// product actually does, kept separate from site_profiles above (which
+// profiles topics the site already ranks for, not what it sells). Every
+// write here is human-asserted ('verified'/'human') — there is no writer
+// yet that lets an agent propose one, so nothing here is ever invented.
+router.get('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
+  try {
+    const { status } = req.query;
+    res.json(await getProductCapabilities(req.params.siteId, status));
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/keywords/:siteId/capabilities', async (req, res, next) => {
+  try {
+    const { name, category, description, industries } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: 'name is required.' });
+    }
+    const capability = await createProductCapability(req.params.siteId, {
+      name: String(name).trim(),
+      category: category || null,
+      description: description || null,
+      industries: Array.isArray(industries) ? industries : [],
+    });
+    res.status(201).json(capability);
+  } catch (e) { next(e); }
+});
+
+router.put('/internal/keywords/:siteId/capabilities/:capabilityId', async (req, res, next) => {
+  try {
+    const { status } = req.body || {};
+    if (!['verified', 'proposed', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: "status must be 'verified', 'proposed' or 'rejected'." });
+    }
+    const updated = await updateProductCapabilityStatus(req.params.siteId, req.params.capabilityId, status);
+    if (!updated) {
+      const err = new Error('Product capability not found.');
+      err.status = 404;
+      throw err;
+    }
+    res.json(updated);
+  } catch (e) { next(e); }
+});
+
+// Strategic Product Topic Map (product-visibility growth objective, Phase
+// 3) — read-time aggregation, see buildProductTopicMap's own doc comment
+// for why this isn't a persisted table.
+router.get('/internal/keywords/:siteId/topic-map', async (req, res, next) => {
+  try {
+    res.json(await buildProductTopicMap(req.params.siteId));
   } catch (e) { next(e); }
 });
 

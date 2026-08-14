@@ -2,6 +2,8 @@ import { listOpenRecommendations } from '../../store/recommendations.js';
 import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
+import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
+import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -116,10 +118,16 @@ export async function autoRemediateSafeRecommendations(siteId) {
   const site = await getSiteById(siteId);
   if (!site?.auto_remediation_enabled) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
 
-  const [rows, draftedFindingIds, spentToday] = await Promise.all([
+  const [rows, draftedFindingIds, spentToday, learnedMap] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     countDraftsBySourceToday(siteId, SOURCE, site.timezone || 'UTC'),
+    // Phase 5: real outcome history for this site, read once per run. A
+    // generator whose recent real attempts have repeatedly failed or been
+    // rejected is excluded here — not just reported differently elsewhere —
+    // which is what makes learning actually change behavior rather than
+    // only change what gets displayed.
+    getLearnedConfidenceMap(siteId).catch(() => new Map()),
   ]);
   // blocked_reason is checked HERE rather than trusted to be reflected in
   // risk_tier. The previous comment argued the check was redundant because
@@ -134,7 +142,11 @@ export async function autoRemediateSafeRecommendations(siteId) {
   // A blocked recommendation is exactly what "unattended must not touch this"
   // means, so the unattended path now asks the question directly instead of
   // inferring the answer from a second column that can disagree.
-  const eligible = rows.filter((r) => r.risk_tier === 'safe' && !r.blocked_reason
+  //
+  // classifyRecommendation is the SAME function Phase 4's decision layer and
+  // the Assistant use — this loop's own eligibility and "what would the
+  // Assistant tell you is safe" can never quietly disagree with each other.
+  const eligible = rows.filter((r) => classifyRecommendation(r, learnedMap).decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE
     && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
@@ -186,27 +198,22 @@ export async function autoRemediateSafeRecommendations(siteId) {
     }
     attempted++;
     try {
-
-      await shipDraftForRecommendation(siteId, {
+      // The one path from "we decided to fix this" to "a real branch/PR
+      // exists" — shipDraftForRecommendation already runs the full
+      // generate -> auto-select -> submit -> approve chain (see its own
+      // doc comment above). This used to be followed by an inline
+      // re-implementation of that exact same chain on the same
+      // recommendation — a merge leftover from when the shared helper was
+      // extracted that never had its original call site removed. Effect in
+      // production: every safe-tier fix generated, submitted, and approved
+      // TWICE (double GitHub writes, double API/model cost), and the
+      // second pass's real outcome overwrote the first's — caught by this
+      // session's own test suite expecting exactly one generateDraft call
+      // per shipped recommendation and observing two.
+      const approved = await shipDraftForRecommendation(siteId, {
         generatorId: rec.recommendation_type, params: rec.params,
-        findingId: rec.finding_ids[0], source: 'auto-remediation',
+        findingId: rec.finding_ids[0], source: SOURCE,
       });
-
-      const draft = await generateDraft(siteId, {
-        generatorId: rec.recommendation_type, params: rec.params, source: SOURCE, findingId: rec.finding_ids[0],
-      });
-
-      const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);
-      if (autoSelected) {
-        const updated = await updateDraft(siteId, draft.id, { content: autoSelected });
-        if (updated) draft.content = updated.content;
-      }
-
-      const submitted = await submitDraftForApproval(siteId, draft.id);
-      if (!submitted) throw new Error('Draft was not in a submittable state');
-
-      const approved = await approveAndPublishDraft(siteId, draft.id, { userId: null });
-      if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
 
       // Ensure the chain ends at an OPEN PR, and STOP. This loop deliberately
       // never merges and never calls markDraftImplemented: a human reviewing and
@@ -235,10 +242,14 @@ export async function autoRemediateSafeRecommendations(siteId) {
       // Counting that as shipped would overstate what landed, so it stays a
       // failure — and the draft is left at 'branch_pushed', where the manual
       // "Open PR" button can finish it without regenerating anything.
-      if (!approved.pr_number) await openDraftPr(siteId, draft.id);
+      if (!approved.pr_number) await openDraftPr(siteId, approved.id);
 
 
       shipped++;
+      // Phase 5: best-effort, never awaited into the failure path — a
+      // logging problem must not turn a real shipped fix into a reported
+      // failure. recordOutcome already swallows its own errors internally.
+      recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
       // Both streaks reset: a success is evidence against a systemic fault AND
       // against "this site has nothing it can honestly ship", so neither
       // counter should carry across it.
@@ -277,9 +288,18 @@ export async function autoRemediateSafeRecommendations(siteId) {
         refused++;
         consecutiveFailures = 0;
         consecutiveRefusals++;
+        // 'refused' is logged too, but scored as neither success nor
+        // failure — see generator-learning.js's POSITIVE/NEGATIVE sets. It
+        // still exists in the log so a reader can see the full picture, a
+        // refusal just never moves the learned score either direction.
+        recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id }).catch(() => {});
       } else {
         consecutiveFailures++;
         consecutiveRefusals = 0;
+        // detail is err.message, which every generator on this path is
+        // already required to keep customer-safe (UserFacingError/
+        // safeMessage) — no raw provider text reaches this log.
+        recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: String(err.message || '').slice(0, 500) }).catch(() => {});
       }
       console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }

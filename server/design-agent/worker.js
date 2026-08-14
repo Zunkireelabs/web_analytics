@@ -1,6 +1,7 @@
 import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
 import { createDesignAgentHandler } from './openhands-handler.js';
 import { safeMessage } from '../lib/errors.js';
+import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
 import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
 
@@ -26,19 +27,75 @@ async function notImplementedHandler() {
 // real worker keeps polling globally across every tenant; it exists for
 // callers (worker.test.js's fixtures) that need to claim only their own
 // site's jobs.
+// Backoff before retry N (1-based): 2s, 4s. Deliberately short and finite —
+// this is a bounded recovery from a blip, not a mechanism for waiting out a
+// fault that needs a human. Injectable so tests exercise the real retry
+// control flow without sleeping through it.
+export const RETRY_BACKOFF_MS = [2000, 4000];
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Runs the agent (an external process) with bounded retries for TRANSIENT
+// failures only. The classification decides — never the call site, and never
+// a blanket "retry everything," which would burn model spend re-running work
+// that cannot succeed and hide a broken deployment behind an attempt count.
+//
+// Only the handler call is wrapped. Everything after it (persisting the
+// profile/templates) is deliberately OUTSIDE: a persist failure is an
+// AGENT_LOGIC/validation fault, and re-running a whole repo analysis to
+// retry a database write would be both wasteful and wrong.
+//
+// Every attempt is logged to the job as it happens, and the FIRST failure is
+// preserved alongside the final one — so a job that failed after retries can
+// still show what originally went wrong, not only the last symptom.
+async function runWithRetry(job, handler, { maxAttempts, sleep, log }) {
+  let firstFailure = null;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const outcome = await handler(job);
+      if (attempt > 1) await log(job.id, `Attempt ${attempt} succeeded after ${attempt - 1} retry/retries.`);
+      return { outcome, firstFailure };
+    } catch (err) {
+      const classification = classifyFailure({
+        stage: err?.stage, err, exitCode: err?.exitCode ?? null, timedOut: err?.timedOut ?? false,
+      });
+      if (!firstFailure) firstFailure = classification;
+
+      if (!shouldRetry(classification, attempt, maxAttempts)) {
+        // Either non-retryable by class (deployment/repo/agent-logic/unsafe)
+        // or the bounded attempt cap is reached. Both stop here — the caller
+        // records the terminal failure.
+        if (classification.recoverable) {
+          await log(job.id, `Attempt ${attempt} failed [${classification.errorCode}] — retry limit (${maxAttempts}) reached, giving up.`);
+        } else {
+          await log(job.id, `Attempt ${attempt} failed [${classification.errorCode}] — ${classification.failureClass} is not retryable, not retrying.`);
+        }
+        err.firstFailure = firstFailure;
+        err.attempts = attempt;
+        throw err;
+      }
+
+      const waitMs = RETRY_BACKOFF_MS[attempt - 1] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1];
+      await log(job.id, `Attempt ${attempt} failed [${classification.errorCode}] (transient) — retrying in ${waitMs}ms.`);
+      await sleep(waitMs);
+    }
+  }
+}
+
 export async function processOneJob({
   handler = notImplementedHandler,
   siteId = null,
   getSiteByIdFn = getSiteById,
   persistTemplates = persistDerivedComponentTemplates,
   persistProfile = persistDesignProfile,
+  maxAttempts = 3,
+  sleep = defaultSleep,
 } = {}) {
   const job = await claimNextDesignAgentJob(siteId);
   if (!job) return null;
 
   await appendJobLog(job.id, `Claimed by worker pid ${process.pid}`);
   try {
-    const outcome = await handler(job);
+    const { outcome } = await runWithRetry(job, handler, { maxAttempts, sleep, log: appendJobLog });
 
     // A component-templates job's whole point is to leave a VERIFIED template
     // on the site row. Writing the derived markup only onto execution_jobs.result
@@ -98,9 +155,41 @@ export async function processOneJob({
     // still written either way; this only decides how much the job row itself
     // can honestly say.
     const { message, id } = safeMessage('design-agent.worker.processOneJob', err, 'Design Agent job failed unexpectedly.');
-    await appendJobLog(job.id, `Job failed: ${err?.userFacing ? err.message : message} (ref: ${id})`);
-    await finishExecutionJob(job.id, { status: 'failed' });
-    return { jobId: job.id, status: 'failed', error: err.message };
+
+    // Classify BEFORE writing anything, so the job row records what kind of
+    // failure this was and who can act on it — not just that it failed. The
+    // `stage` an error carries (set by the handler at the boundary that
+    // threw) is authoritative; classifyFailure never guesses one from
+    // message text. See lib/failure-classification.js for why an
+    // unrecognized failure is deliberately classed as ours, not transient.
+    const classification = classifyFailure({
+      stage: err?.stage,
+      err,
+      exitCode: err?.exitCode ?? null,
+      timedOut: err?.timedOut ?? false,
+    });
+
+    const attempts = err?.attempts ?? 1;
+    // The FIRST failure is kept when it differs from the last: a job that
+    // timed out, retried, then failed validation should show both, or the
+    // original trigger is lost behind whatever the final symptom happened to
+    // be. Identical classifications are not duplicated.
+    const firstFailure = err?.firstFailure && err.firstFailure.errorCode !== classification.errorCode
+      ? err.firstFailure
+      : null;
+
+    const detail = err?.userFacing ? err.message : message;
+    await appendJobLog(job.id, `Job failed [${classification.errorCode}] at stage '${classification.stage}': ${detail} `
+      + `(class: ${classification.failureClass}, recoverable: ${classification.recoverable}, attempts: ${attempts}, ref: ${id})`);
+    // Persisted on the job row so a reader who is not this process — the
+    // Action Center, a later HTTP poll — can tell an infrastructure blocker
+    // apart from an agent fault without shelling into this container, which
+    // is exactly what was impossible before.
+    await finishExecutionJob(job.id, {
+      status: 'failed',
+      result: { failure: { ...classification, ref: id, attempts, ...(firstFailure ? { firstFailure } : {}) } },
+    });
+    return { jobId: job.id, status: 'failed', error: err.message, failure: classification, attempts };
   }
 }
 

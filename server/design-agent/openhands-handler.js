@@ -56,6 +56,19 @@ function runDesignTaskProcess({ pythonBin, scriptPath, workspaceDir, extraArgs, 
     let timedOut = false;
     let killTimer = null;
     let graceTimer = null;
+    let spawnError = null;
+
+    // A spawn failure (missing/unexecutable interpreter — ENOENT/EACCES)
+    // emits 'error', NOT a non-zero exit. Without this listener that event is
+    // unhandled, which throws out of band and reaches the job row as the
+    // generic "failed unexpectedly" with the real reason existing nowhere a
+    // reader can reach. Captured here so it travels back through the normal
+    // resolve path and the caller can name the actual stage that broke.
+    child.on('error', (err) => {
+      spawnError = err;
+      clearTimeout(killTimer);
+      clearTimeout(graceTimer);
+    });
 
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (line) => {
@@ -81,11 +94,13 @@ function runDesignTaskProcess({ pythonBin, scriptPath, workspaceDir, extraArgs, 
       }, timeoutMs);
     }
 
+    // 'close' still fires after 'error' in the spawn-failure case, so this
+    // stays the single resolve point for both paths.
     child.on('close', (code) => {
       clearTimeout(killTimer);
       clearTimeout(graceTimer);
       rl.close();
-      resolve({ result, containerId, code, timedOut, stderrTail });
+      resolve({ result, containerId, code, timedOut, stderrTail, spawnError });
     });
   });
 }
@@ -154,7 +169,13 @@ export function createOpenHandsHandler({
       try {
         await workspaceSource(workspaceDir, job);
       } catch (err) {
-        throw new UserFacingError("The Design Agent could not fetch this site's repository. Check that the site's GitHub token is valid and still has access to the configured repo.", { cause: err });
+        // `stage` is what lib/failure-classification.js classifies on — set
+        // at the boundary that actually threw, never inferred later from
+        // message text.
+        const wrapped = new UserFacingError("The Design Agent could not fetch this site's repository. Check that the site's GitHub token is valid and still has access to the configured repo.", { cause: err });
+        wrapped.stage = 'repo_checkout';
+        wrapped.code = err?.code || null;
+        throw wrapped;
       }
 
       const env = {
@@ -165,29 +186,59 @@ export function createOpenHandsHandler({
         OPENHANDS_SUPPRESS_BANNER: '1',
       };
 
-      const { result, code, timedOut, stderrTail } = await runDesignTaskProcess({
+      const { result, code, timedOut, stderrTail, spawnError } = await runDesignTaskProcess({
         pythonBin, scriptPath, workspaceDir, extraArgs: await buildArgs(job), env, timeoutMs, killGraceMs,
         onContainerId: (id) => { containerId = id; },
       });
+
+      // Named before the generic no-result case below: this is an environment
+      // fault (the analysis never started), not an analysis that failed, and
+      // it is the one failure whose fix is purely operational.
+      if (spawnError) {
+        const wrapped = new UserFacingError(`The Design Agent could not start its analysis process (${spawnError.code || 'spawn failed'}). Its Python environment is missing or not executable in this deployment — this needs an engineer, it will not resolve on its own.`, { cause: spawnError });
+        wrapped.stage = 'python_startup';
+        wrapped.code = spawnError.code || null;
+        throw wrapped;
+      }
 
       if (timedOut) {
         // Stage-naming, deliberately free of interpolated exception text so it
         // is safe to persist and show — worker.js surfaces UserFacingError
         // messages onto the job row, which is the only place an operator can
         // read them without shelling into the container.
-        throw new UserFacingError(`The Design Agent ran for ${Math.round(timeoutMs / 1000)}s without finishing and was stopped. The site's repository analysis is taking longer than the configured limit.`);
+        const wrapped = new UserFacingError(`The Design Agent ran for ${Math.round(timeoutMs / 1000)}s without finishing and was stopped. The site's repository analysis is taking longer than the configured limit.`);
+        wrapped.stage = 'agent_run';
+        wrapped.timedOut = true;
+        throw wrapped;
       }
       if (!result) {
         // The exit code is safe to name; stderrTail is NOT — it can carry
         // tokens, hostnames and provider errors — so it stays in the internal
         // log only, reachable via the correlation id worker.js records.
-        throw new UserFacingError(`The Design Agent's analysis process exited (code ${code}) without producing a result. This usually means its container or Python environment could not start — see the worker logs for this job's reference id.`, { cause: new Error(`stderr: ${stderrTail || '(empty)'}`) });
+        const wrapped = new UserFacingError(`The Design Agent's analysis process exited (code ${code}) without producing a result. This usually means its container or Python environment could not start — see the worker logs for this job's reference id.`, { cause: new Error(`stderr: ${stderrTail || '(empty)'}`) });
+        wrapped.stage = 'agent_run';
+        wrapped.exitCode = code;
+        throw wrapped;
       }
       if (result.status !== 'ok') {
         // result.detail is the Python task's own structured message, not a raw
         // exception, so naming the stage is safe; the detail itself still goes
         // to the internal log rather than the job row.
-        throw new UserFacingError("The Design Agent finished but reported that it could not analyse this site's repository.", { cause: new Error(`OpenHands detail: ${result.detail || 'unknown error'}`) });
+        // An ENVIRONMENT_* errorClass means the analysis never actually ran —
+        // the host lacked Docker or model credentials. That is a deployment
+        // fault, not the agent reasoning badly, so it must not be reported as
+        // an agent-logic failure (which is non-recoverable and points the
+        // reader at the wrong fix). design_task.py emits this as a closed
+        // vocabulary; anything unrecognized keeps the old behaviour.
+        const isEnvironment = typeof result.errorClass === 'string' && result.errorClass.startsWith('ENVIRONMENT_');
+        const wrapped = new UserFacingError(
+          isEnvironment
+            ? 'The Design Agent could not run: its analysis sandbox is unavailable in this deployment (Docker or model credentials). This needs an engineer — it will not resolve on its own.'
+            : "The Design Agent finished but reported that it could not analyse this site's repository.",
+          { cause: new Error(`OpenHands detail: ${result.detail || 'unknown error'}`) }
+        );
+        wrapped.stage = isEnvironment ? 'python_environment' : 'result_validation';
+        throw wrapped;
       }
       return { jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates };
     } finally {

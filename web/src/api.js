@@ -223,6 +223,16 @@ export const api = {
     // Supplementary narrative (server/agents/keyword-narrative.js) — separate
     // from api.analyst.executiveSummary's Python pipeline.
     narrative: (siteId) => req(`/internal/keywords/${siteId}/narrative`),
+    // Product Understanding Layer (migration 111) — this site's OWN verified
+    // capabilities, not topics it merely ranks for.
+    capabilities: (siteId, status) =>
+      req(`/internal/keywords/${siteId}/capabilities${status ? `?status=${status}` : ''}`),
+    addCapability: (siteId, capability) =>
+      req(`/internal/keywords/${siteId}/capabilities`, { method: 'POST', body: JSON.stringify(capability) }),
+    updateCapabilityStatus: (siteId, capabilityId, status) =>
+      req(`/internal/keywords/${siteId}/capabilities/${capabilityId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+    // Strategic Product Topic Map — read-time aggregation, not a stored resource.
+    topicMap: (siteId) => req(`/internal/keywords/${siteId}/topic-map`),
     // AI-suggested section order (server/routes/keywords.js's GET .../layout) —
     // consumed by Analyst.jsx's loadAILayout, separate from api.keywords.narrative.
     layout: (siteId) => req(`/internal/keywords/${siteId}/layout`),

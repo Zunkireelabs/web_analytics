@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { formatByUnit, pct, finding, supportingLine } from '../lib/analystFormat.js';
+import { formatByUnit, pct, finding, supportingLine, horizonChange, isDecline } from '../lib/analystFormat.js';
 import {
   LineChart, TrendingUp, TrendingDown, AlertTriangle, Clock, CheckCircle2, Ban, Loader2, Wrench, Send,
 } from 'lucide-react';
+import AnalystTrendCard from './AnalystTrendCard.jsx';
 
 // Everything here comes from the already-fetched dashboard payload — no extra
 // request. Forecasts are produced nightly by the Python service's analysis
@@ -15,38 +16,30 @@ import {
 // claims otherwise.
 const HEADLINE_METRIC_KEYS = ['gsc_impressions', 'gsc_clicks'];
 
-// A metric can have a perfectly good forecast while latest_value is null —
-// latest_value is the most recent observation row, and the collectors write a
-// NULL-valued row for a day the upstream API returned nothing. Confirmed real
-// on this data: gsc_impressions forecasts fine with 14 points yet reports
-// latest_value null. Treating that as "no forecast" would hide a working
-// prediction behind an "insufficient history" message, so the forecast still
-// renders — only the percentage change, which genuinely needs a baseline to
-// compare against, is withheld.
-function horizonChange(metric) {
-  const f = metric?.forecast;
-  const last = f?.status === 'ok' && f.points?.length ? f.points[f.points.length - 1] : null;
-  if (!last) return null;
-  const baseline = metric?.latest_value;
-  const hasBaseline = typeof baseline === 'number' && baseline !== 0;
-  return {
-    endValue: last.point_estimate,
-    baseline: hasBaseline ? baseline : null,
-    deltaPct: hasBaseline ? ((last.point_estimate - baseline) / Math.abs(baseline)) * 100 : null,
-    horizon: f.horizon_periods,
-  };
-}
-
 export default function AnalystImpressionForecast({ clientId, dashboard, onChanged }) {
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState(null);
   // insight.id -> draft id, for findings sent to Action Center this session.
   const [drafted, setDrafted] = useState({});
+  const [selectedMetricKey, setSelectedMetricKey] = useState(null);
 
   const metrics = useMemo(
     () => Object.values(dashboard?.groups || {}).flat(),
     [dashboard]
   );
+
+  // Default to gsc_impressions (matches the headline strip below); falls
+  // back to whatever the first enabled metric is for a client whose keys
+  // differ, and re-picks if the current selection stops existing (client
+  // switch).
+  useEffect(() => {
+    if (!metrics.length) return;
+    setSelectedMetricKey((prev) =>
+      prev && metrics.some((m) => m.metric_key === prev)
+        ? prev
+        : (metrics.find((m) => m.metric_key === 'gsc_impressions') || metrics[0]).metric_key
+    );
+  }, [metrics]);
 
   // Prefer impressions/clicks; fall back to whatever else has a live forecast
   // so a client whose metric keys differ still sees something real.
@@ -59,21 +52,6 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
       : metrics.filter((m) => m.forecast?.status === 'ok').slice(0, 2);
     return chosen.map((m) => ({ metric: m, change: horizonChange(m) }));
   }, [metrics]);
-
-  // Every issue the agent found that represents something going DOWN — not
-  // just forecast risks. Mirrors isDecline() in
-  // server/agents/lib/analyst-seo-mapping.js so what's listed here is the
-  // same set the backend considers actionable.
-  const isDecline = (i) => {
-    const e = i.evidence || {};
-    switch (i.insight_type) {
-      case 'forecast_risk': return true;
-      case 'anomaly': return e.direction === 'low';
-      case 'trend_shift': return typeof e.pct_change === 'number' && e.pct_change < 0;
-      case 'milestone': return e.direction === 'down';
-      default: return false;
-    }
-  };
 
   const warnings = useMemo(() => {
     const order = { high: 0, medium: 1, low: 2 };
@@ -136,6 +114,16 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
           </p>
         </div>
       </div>
+
+      {selectedMetricKey && (
+        <AnalystTrendCard
+          clientId={clientId}
+          metrics={metrics}
+          selectedMetricKey={selectedMetricKey}
+          onSelectMetric={setSelectedMetricKey}
+          insights={dashboard?.insights || []}
+        />
+      )}
 
       {/* ── Forecast strip ───────────────────────────────────────────── */}
       <section className="space-y-2.5">
@@ -207,7 +195,7 @@ export default function AnalystImpressionForecast({ clientId, dashboard, onChang
       </section>
 
       {/* ── Early warnings ───────────────────────────────────────────── */}
-      <section className="space-y-2.5">
+      <section id="an-issues-found" className="space-y-2.5 scroll-mt-6">
         <div className="flex items-center gap-2">
           <Clock size={12} className="text-violet-600 shrink-0" />
           <h3 className="an-label">Issues found</h3>

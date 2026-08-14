@@ -75,29 +75,34 @@ export async function buildGreeting({ siteId, userId }) {
   const siteLabel = site?.website_domain || site?.name || 'your site';
   const stats = summarize(recs.items || []);
 
-  const hello = name ? `Hi ${name}` : 'Hi';
+  // Opens warmly and invites a question, INSTEAD OF leading with a bare
+  // stats dump — but never at the cost of the honest state that follows it.
+  // Dropping that state entirely (an earlier version of this function did)
+  // silently discarded the one thing that made this a greeting from
+  // something that has actually been working: a site whose every finding is
+  // design-blocked, or which is genuinely clear, must still say so rather
+  // than imply there is nothing to discuss.
+  const hello = name ? `Hi ${name} — you're on ${siteLabel}.` : `Hi ${siteLabel} —`;
+  const opener = name ? `${hello} How can I help you today?` : `${hello} how can I help you today?`;
 
-  let message;
+  let state;
   if (isAdmin) {
-    // Operational framing: what needs a human, stated plainly.
     const parts = [];
     if (stats.actionable) parts.push(`${stats.actionable} open recommendation${stats.actionable === 1 ? '' : 's'} ready to action`);
     if (stats.blocked) parts.push(`${stats.blocked} blocked pending design verification`);
-    message = parts.length
-      ? `${hello} — on ${siteLabel}: ${parts.join(', ')}.`
-      : `${hello} — ${siteLabel} is clear right now; nothing is open or blocked.`;
+    state = parts.length ? `Right now: ${parts.join(', ')}.` : `${siteLabel} is clear right now; nothing is open or blocked.`;
+  } else if (!stats.open) {
+    state = `I keep an eye on ${siteLabel} and there's nothing needing your attention right now.`;
+  } else if (stats.actionable) {
+    state = `I've found ${stats.actionable} thing${stats.actionable === 1 ? '' : 's'} worth improving`
+      + `${stats.highPriority ? `, ${stats.highPriority} of them high priority` : ''}.`;
   } else {
-    // Client framing: their site, in their language, with a way in.
-    if (!stats.open) {
-      message = `${hello} — I keep an eye on ${siteLabel} and there's nothing needing your attention right now. Ask me anything about how your search traffic is doing.`;
-    } else if (stats.actionable) {
-      message = `${hello} — I've been looking at ${siteLabel} and found ${stats.actionable} thing${stats.actionable === 1 ? '' : 's'} worth improving${stats.highPriority ? `, ${stats.highPriority} of them high priority` : ''}. Want me to walk you through them?`;
-    } else {
-      // Everything open is blocked — say so honestly rather than implying
-      // there's nothing to do or offering actions that can't be taken.
-      message = `${hello} — I've found some improvements for ${siteLabel}, but they're waiting on a design check before I can prepare them. I'll let you know as soon as they're ready.`;
-    }
+    // Everything open is blocked — say so plainly rather than implying there
+    // is nothing to do, or offering actions that cannot be taken yet.
+    state = "I've found some improvements, but they're waiting on a design check before I can prepare them.";
   }
+
+  const message = `${opener} ${state}`;
 
   return {
     message,

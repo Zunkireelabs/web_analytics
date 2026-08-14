@@ -6,6 +6,7 @@ import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
+import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
@@ -351,7 +352,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   let firstAttemptIssues = null;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = runQualityGate(content, generatorId);
+    gateResult = await runQualityGate(content, generatorId, siteId);
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
     if (attempt < MAX_GENERATION_ATTEMPTS) {
@@ -574,6 +575,12 @@ router.post('/action-center/drafts/:id/reject', async (req, res, next) => {
     const { reason } = req.body || {};
     const draft = await markDraftAbandoned(req.siteId, req.params.id, reason || 'rejected_by_reviewer', req.userId);
     if (!draft) return res.status(404).json({ error: 'Draft not found, or already in a terminal state' });
+    // Phase 5: a genuine HUMAN rejection, distinct from the automatic
+    // supersede/dedup calls to markDraftAbandoned elsewhere in this file
+    // (those pass no abandonedBy, since no reviewer made a judgment) — only
+    // this route, the Phase 3 Reject action, represents real evidence that a
+    // human looked at the generator's output and declined it.
+    recordOutcome(req.siteId, draft.action_type, 'rejected', { draftId: draft.id, detail: (reason || '').slice(0, 500) }).catch(() => {});
     res.json(draft);
   } catch (e) { next(e); }
 });
@@ -632,7 +639,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = runQualityGate(draft.content, draft.action_type);
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId);
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the
@@ -1036,6 +1043,12 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 async function finalizeImplemented(siteId, draftId, site) {
   const draft = await markDraftImplemented(siteId, draftId);
   if (draft) {
+    // Phase 5: a real merge is the strongest positive signal a generator can
+    // earn — a human actually shipped this to production. Recorded
+    // regardless of how the draft originated (auto-remediation or a human
+    // manually generating and approving it), since either way it is real
+    // evidence the generator's output was trustworthy.
+    recordOutcome(siteId, draft.action_type, 'merged', { draftId: draft.id }).catch(() => {});
     try {
       await runSiteDiscoveryIfDue(site);
     } catch (err) {

@@ -14,6 +14,7 @@ import actionCenterRouter from './routes/action-center.js';
 import reportsRouter from './routes/reports.js';
 import commandCenterRouter from './routes/command-center.js';
 import copilotRouter from './routes/copilot.js';
+import assistantRouter from './routes/assistant.js';
 import integrationsRouter from './routes/integrations.js';
 import notificationsRouter from './routes/notifications.js';
 import watchlistRouter from './routes/watchlist.js';
@@ -139,6 +140,7 @@ app.use('/api', usersRouter);
 app.use('/api', oauthConsentRouter);
 // Internal-only (requirePlatformRole-gated) — must stay last, see above.
 app.use('/api', copilotRouter);
+app.use('/api', assistantRouter);
 app.use('/api', integrationsRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', watchlistRouter);

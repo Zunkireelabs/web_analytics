@@ -4,7 +4,7 @@ import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 import { FRONTEND_ACTION_TYPES } from '../frontend.js';
-import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
+import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
 import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
   isProfileUsable, isProjectable,
@@ -722,6 +722,7 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   enqueueDerivation = createComponentTemplateJob,
   findQueuedDerivation = getQueuedComponentTemplateJob,
   enqueueProfileDerivation = createDesignProfileJob,
+  latestDesignAgentJob = getLatestDesignAgentJob,
   // Injected only so the self-heal below is testable without a network — the
   // defaults are checkTemplateFreshness's own.
   fetchPage,
@@ -921,10 +922,45 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   // instead of one queued job per content type each re-reading the same repo.
   if (!isProfileUsable(profile)) {
     const queuedProfile = await findQueuedDerivation(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
+    let enqueueError = null;
     if (!queuedProfile) {
       await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) }).catch((err) => {
+        enqueueError = err;
         console.error(`[design-drift] could not queue design-profile derivation for site ${site.id}:`, err.message);
       });
+    }
+
+    // The "no action needed, will unblock automatically" claim below used to
+    // fire unconditionally — including when the queue insert above just
+    // failed, or when nothing has actually been re-queued since a PRIOR
+    // attempt failed (no queued/executing row exists, so this same branch
+    // re-runs on every check, but a transient failure between here and the
+    // worker claiming the job could still leave nothing pending). Surface
+    // that honestly instead of repeating a claim that's stopped being true.
+    if (enqueueError) {
+      const { message, id } = safeMessage('design-drift.projectComponentTemplate', enqueueError, 'queuing the Design Agent to learn it just failed');
+      return {
+        ok: false,
+        reason: 'derivation-queue-failed',
+        detail: `This site's design language has not been derived yet, and ${message} (ref ${id}). This needs an `
+          + 'engineer to check the system logs — it will not resolve on its own.',
+        template: null,
+        componentKey,
+      };
+    }
+    if (!queuedProfile) {
+      const latest = await latestDesignAgentJob(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
+      if (latest?.status === 'failed') {
+        return {
+          ok: false,
+          reason: 'derivation-retry-queued',
+          detail: `The Design Agent's last attempt to learn this site's design failed (job #${latest.id}, `
+            + `${latest.finished_at}). A fresh attempt has just been queued — if this keeps failing, an engineer `
+            + 'needs to check the worker logs rather than waiting on it again.',
+          template: null,
+          componentKey,
+        };
+      }
     }
     return {
       ok: false,

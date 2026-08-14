@@ -41,7 +41,21 @@ export default function GrowthReport({ isInternal = false }) {
 
   useEffect(() => {
     if (!isInternal) return;
-    api.clients.list().then(setClients).catch(() => {});
+    api.clients.list()
+      // Milestones is a real-progress-since-onboarding view — only clients
+      // with an actual onboarding baseline belong here. This also happens to
+      // filter out soft-deleted sites, never-onboarded test sites, and
+      // leftover design-agent-worker.test.js fixture rows without needing a
+      // name-based blocklist.
+      .then((all) => {
+        const real = all.filter((c) => c.status === 'active' && c.baselined);
+        setClients(real);
+        // No "My site" option here (this is staff viewing clients, not a
+        // client viewing their own site) — land on the first real client
+        // instead of an unselected/blank picker.
+        setSelectedSiteId((prev) => prev ?? real[0]?.id ?? null);
+      })
+      .catch(() => {});
   }, [isInternal]);
 
   // A Full Site Audit can take from seconds to well over an hour — poll
@@ -68,7 +82,6 @@ export default function GrowthReport({ isInternal = false }) {
           <select id="milestones-client-picker" value={selectedSiteId ?? ''}
             onChange={(e) => setSelectedSiteId(e.target.value ? Number(e.target.value) : null)}
             className="text-xs font-bold bg-white border border-slate-200/80 rounded-xl px-2.5 py-2 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 shadow-sm transition">
-            <option value="">My site</option>
             {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </div>

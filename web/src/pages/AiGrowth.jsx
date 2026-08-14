@@ -13,10 +13,8 @@ import CompetitorBacklinkCard from '../components/CompetitorBacklinkCard.jsx';
 import CompetitorRankingCard from '../components/CompetitorRankingCard.jsx';
 import AiRecommendationCard from '../components/AiRecommendationCard.jsx';
 import GeoIntelligenceCard from '../components/GeoIntelligenceCard.jsx';
-import GeoScorecard from '../components/GeoScorecard.jsx';
 import ActivityFeed from '../components/ActivityFeed.jsx';
 import ChangesTimeline from '../components/ChangesTimeline.jsx';
-import DraftModal from '../components/DraftModal.jsx';
 import { ORCH_CATEGORY as CATEGORY } from '../components/orchestration/palette.js';
 import {
   Play,
@@ -79,11 +77,6 @@ export default function AiGrowth({ isInternal }) {
   const [runningAgents, setRunningAgents] = useState(new Map());
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
-
-  // Draft/fix modal — same pattern Command Center / Action Center use:
-  // a generator draft opened from a card (GeoScorecard's "view report" here)
-  // renders in this shared modal.
-  const [activeDraft, setActiveDraft] = useState(null);
 
   // Operations History collapsible (migrated from the old Command Center).
   const [showOpsHistory, setShowOpsHistory] = useState(false);
@@ -392,6 +385,16 @@ export default function AiGrowth({ isInternal }) {
           </div>
         </div>
 
+        {/* Executive summary — leads the page, same pattern as Reports.jsx
+            (mounted directly under the page header, first content block). */}
+        <div className="mb-6">
+          <ExecutiveSummaryPanel
+            text={ccData?.executiveSummary?.narrative}
+            source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
+            generatedAt={ccData?.executiveSummary?.generatedAt}
+          />
+        </div>
+
         {/* GrowthScores: Overall / SEO / AEO / GEO — same real-score row as
             the Command Center, so the runner console leads with current
             performance before diving into the live agent stream. */}
@@ -659,40 +662,30 @@ export default function AiGrowth({ isInternal }) {
           </div>
         )}
 
-        {/* ============= COMPETITOR OVERVIEW + EXECUTIVE SUMMARY ============= */}
+        {/* ============= COMPETITOR OVERVIEW ============= */}
         {/* Migrated from the old Command Center page — real competitor
-            standings and the AI executive-report narrative, both driven by
-            the same ccData already powering the score row above. */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch mt-8">
-          <div className="lg:col-span-6 relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden">
-            <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
-            <div>
-              <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
-                <span className="w-8 h-8 rounded-xl grid place-items-center bg-orange-50 text-orange-600 shrink-0 border border-orange-100 shadow-sm">
-                  <Globe size={14} />
-                </span>
-                <div className="leading-tight">
-                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Competitor Overview</h3>
-                  <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">How you compare online</span>
-                </div>
+            standings, driven by the same ccData already powering the score
+            row above. (Executive summary now leads the page, above.) */}
+        <div className="relative card border border-slate-200 bg-gradient-to-br from-white to-orange-50/10 p-5 shadow-sm rounded-3xl flex flex-col justify-between overflow-hidden mt-8">
+          <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-orange-400 to-rose-400" />
+          <div>
+            <div className="flex items-center gap-2.5 mb-4 border-b border-slate-100 pb-3">
+              <span className="w-8 h-8 rounded-xl grid place-items-center bg-orange-50 text-orange-600 shrink-0 border border-orange-100 shadow-sm">
+                <Globe size={14} />
+              </span>
+              <div className="leading-tight">
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-800">Competitor Overview</h3>
+                <span className="text-[8px] font-bold text-slate-400 uppercase tracking-widest block mt-0.5">How you compare online</span>
               </div>
-              {ccData?.competitors && ccData.competitors.length > 0 ? (
-                <CompetitorLeaderboard profiles={ccData.competitors} />
-              ) : (
-                <div className="text-xs text-slate-455 italic p-4 text-center">No competitors logged.</div>
-              )}
             </div>
-            <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5">
-              Click a competitor to see why.
-            </div>
+            {ccData?.competitors && ccData.competitors.length > 0 ? (
+              <CompetitorLeaderboard profiles={ccData.competitors} />
+            ) : (
+              <div className="text-xs text-slate-455 italic p-4 text-center">No competitors logged.</div>
+            )}
           </div>
-
-          <div className="lg:col-span-6">
-            <ExecutiveSummaryPanel
-              text={ccData?.executiveSummary?.narrative}
-              source={ccData?.executiveSummary?.narrative ? 'executive-report' : null}
-              generatedAt={ccData?.executiveSummary?.generatedAt}
-            />
+          <div className="text-[9px] font-bold text-slate-400 border-t border-slate-100 pt-2.5">
+            Click a competitor to see why.
           </div>
         </div>
 
@@ -727,10 +720,7 @@ export default function AiGrowth({ isInternal }) {
 
           <AiRecommendationCard aiRecommendation={ccData?.aiRecommendation} meta={ccData?.aiRecommendationMeta} loading={ccData === null} />
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
-            <GeoScorecard onOpenReport={setActiveDraft} />
-          </div>
+          <GeoIntelligenceCard geoIntelligence={ccData?.geoIntelligence} meta={ccData?.geoIntelligenceMeta} loading={ccData === null} />
         </div>
 
         {/* ============= OPERATIONS HISTORY ============= */}
@@ -883,8 +873,6 @@ export default function AiGrowth({ isInternal }) {
           </div>
         )}
       </div>
-
-      {activeDraft && <DraftModal draft={activeDraft} onClose={() => setActiveDraft(null)} onSaved={setActiveDraft} onDeleted={() => setActiveDraft(null)} />}
 
       <AgentDetailPanel agent={selected} onClose={() => setSelected(null)} />
     </div>
