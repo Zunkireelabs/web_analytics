@@ -109,6 +109,80 @@ export function matchPaginationRoute(pageUrl, routes) {
   return routes.find((r) => r.routePrefix !== '/' && normalized.startsWith(`${r.routePrefix}/`)) || null;
 }
 
+// Real head-tag evidence for the two field types whose value is always
+// derivable from the generated page's own url/title/description, never
+// stored per-item data: `canonical`/`open-graph`. Matched on the tag
+// existing at all AND its value being template-interpolated (contains
+// `{{`) rather than a literal string — a hardcoded `<link rel="canonical"
+// href="https://example.com">` would "match" on presence alone while still
+// being wrong on every page, and that's a real, separate site bug this
+// generator can't fix through a data-array adapter regardless (there's no
+// per-page value to plug in); only interpolated evidence proves the layout
+// already produces a genuinely per-page-correct value.
+const HEAD_TAG_EVIDENCE = { canonical: /rel=["']canonical["'][^>]*>/i, 'open-graph': /property=["']og:title["'][^>]*>/i };
+
+function tagIsPerPageInterpolated(match) {
+  return !!match && /\{\{/.test(match[0]);
+}
+
+// Bare `layout:` front-matter reader — deliberately separate from
+// parsePaginationFrontMatter above, which only returns non-null for a
+// PAGINATING template (`pagination: data: ...` present); a plain layout
+// file (base.njk, comparison.njk) has no pagination block of its own but
+// still needs its own `layout:` chain followed.
+function extractLayoutField(source) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(source || '');
+  if (!match) return null;
+  return /^\s*layout:\s*["']?([\w./-]+)["']?\s*$/m.exec(match[1])?.[1] || null;
+}
+
+// Locates a layout-file by its bare name (as it appears in front matter —
+// `layout: base.njk`, never a full path) against the real repo tree.
+// Refuses (returns null) on zero or more-than-one match rather than
+// guessing which one a bare name meant — same evidence bar as
+// discoverPaginationRoutes' own dataFileCandidates.
+async function findLayoutFile(name, tree, fetchFile, site, branch) {
+  const matches = tree.files.filter((f) => f === name || f.endsWith(`/${name}`));
+  if (matches.length !== 1) return null;
+  try {
+    const file = await fetchFile(site, matches[0], branch);
+    return file ? { path: matches[0], content: file.content } : null;
+  } catch { return null; }
+}
+
+// Whether a pagination-generated route's OWN shared layout chain (its
+// `layout:` front matter, followed up to a bounded number of hops the same
+// way Eleventy itself resolves `layout: x` -> x's own `layout: y` -> ...)
+// already renders this head tag with a real per-page value — in which case
+// a canonical/open-graph recommendation for one of this route's pages can
+// never be satisfied by any per-item data write (there's nothing to write;
+// the layout already computes it) and should be dropped, not left blocked
+// forever asking someone to "configure a data-array-content adapter" for a
+// field with no per-item concept. Only checked for canonical/open-graph —
+// see HEAD_TAG_EVIDENCE; every other action type keeps going through
+// paginationBlockedReason as before. Direct file evidence only, same
+// "checked, not guessed" discipline as the rest of this module: a repo read
+// failure or an ambiguous/missing layout file honestly returns false
+// (stays blocked) rather than assuming either way.
+export async function paginationHeadTagAutoHandled(site, route, actionType, { fetchFile = getFileContent, fetchTree = getRepoTree, branch } = {}) {
+  const pattern = HEAD_TAG_EVIDENCE[actionType];
+  if (!pattern || !route.layout || !site?.repo_owner || !site?.repo_name) return false;
+  const resolvedBranch = branch || baseBranch(site);
+  let tree;
+  try { tree = await fetchTree(site, resolvedBranch); } catch { return false; }
+
+  let layoutName = route.layout;
+  const seen = new Set();
+  for (let hop = 0; hop < 4 && layoutName && !seen.has(layoutName); hop++) {
+    seen.add(layoutName);
+    const found = await findLayoutFile(layoutName, tree, fetchFile, site, resolvedBranch);
+    if (!found) return false;
+    if (tagIsPerPageInterpolated(pattern.exec(found.content))) return true;
+    layoutName = extractLayoutField(found.content);
+  }
+  return false;
+}
+
 // What a human actually needs to know when a generated page cannot be fixed
 // yet. Names the real mechanism — which template, which data file — instead of
 // asking for a file mapping that would be wrong even if someone added it.

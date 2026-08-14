@@ -1,10 +1,11 @@
 import { getFileContent } from '../../github/client.js';
 import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter } from '../lib/url-file-map.js';
+import { buildMergeValues } from '../lib/marker-merge.js';
 import {
   findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray, insertNewArrayField,
   assertValidContent, dedupeAndValidateFaqItems, diffFaqItems, parseManagedFaqItems,
-  findScalarFieldRange, spliceScalarField, findObjectFieldRange, spliceObjectField, insertNewObjectField,
+  findScalarFieldRange, spliceScalarField, insertNewScalarField, findObjectFieldRange, spliceObjectField, insertNewObjectField,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
 
@@ -137,32 +138,46 @@ export async function isDataReady(site, page, config, fetchFile = getFileContent
   return true;
 }
 
-// The meta-title draft value keys this adapter knows how to write, and
-// where each one comes from on the draft — kept in exact sync with
-// marker-merge.js's buildMergeValues (the equivalent mapping for the
-// template-file path) so a page behaves identically regardless of which
-// implementer/adapter actually ends up writing it.
-function scalarValuesFromDraft(content) {
-  const values = {};
-  if (content?.selectedTitle) values.title = content.selectedTitle;
-  if (content?.metaDescription) values.metaDescription = content.metaDescription;
-  return values;
+// The draft value keys this adapter knows how to write into a plain string
+// field (config.fields), and where each one comes from. meta-title is kept
+// as its own literal extraction (exact original behavior/error text,
+// unchanged) since it's the long-established, already-live path. Every
+// other type (internal-links, expand-content, qa-content, and any future
+// one buildMergeValues grows) is delegated straight to marker-merge.js's
+// buildMergeValues — the SAME rendering used for a per-file template's
+// marker splice — so a pagination-generated page (no per-file template to
+// marker-splice into) gets byte-identical rendered HTML written into its
+// own data-array entry instead, using the site's own captured
+// componentTemplates for visual parity, not a second, divergent renderer.
+function scalarValuesFromDraft(actionType, content, componentTemplates) {
+  if (actionType === 'meta-title') {
+    if (!content?.selectedTitle) {
+      return { ok: false, error: 'No title has been selected for this draft yet — pick one of the title proposals first.' };
+    }
+    const values = { title: content.selectedTitle };
+    if (content.metaDescription) values.metaDescription = content.metaDescription;
+    return { ok: true, values };
+  }
+  return buildMergeValues(actionType, content || {}, 'visible', componentTemplates);
 }
 
-// Writes a meta-title draft's selected title/description into an existing
-// object's own plain string fields (config.fields) — see this file's
-// module comment above for the config shape and the "existing field only,
-// never guessed" safety posture. A separate function from computeChange's
-// FAQ/items path below: different input validation (a selected title, not
-// an items array), different edit primitive (scalar splice, not array
-// splice), and a plain changedRegions diff with no FAQ-specific renderMode/
-// faqDiff fields that would be meaningless here.
+// Writes a draft's rendered value(s) into an existing object's own plain
+// string field(s) (config.fields) — inserting the field if it doesn't exist
+// yet on this entry (same "insert if missing, once; splice thereafter"
+// posture computeSchemaFieldChange already uses for schemaField), never
+// guessing WHICH field to use, only whether it already exists. A separate
+// function from computeChange's FAQ/items array path below: different edit
+// primitive (scalar splice/insert, not array splice), and a plain
+// changedRegions diff with no FAQ-specific renderMode/faqDiff fields that
+// would be meaningless here.
 async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, config) {
   const page = draft.content?.page || draft.input?.page;
-  const values = scalarValuesFromDraft(draft.content);
-  if (!values.title) {
-    return { ok: false, reason: 'draft-not-ready', error: 'No title has been selected for this draft yet — pick one of the title proposals first.' };
+  const componentTemplates = site?.url_file_map?.siteRoot?.componentTemplates || {};
+  const valuesResult = scalarValuesFromDraft(draft.action_type, draft.content, componentTemplates);
+  if (!valuesResult.ok) {
+    return { ok: false, reason: 'draft-not-ready', error: valuesResult.error };
   }
+  const values = valuesResult.values;
 
   const idField = config.idField || 'id';
   const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
@@ -189,11 +204,10 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
     const newValue = values[valueKey];
     if (newValue == null) continue;
     const before = findScalarFieldRange(content, objRange, fieldName, format);
-    if (!before) {
-      return { ok: false, reason: 'no-insertion-marker', error: `Could not find a plain string "${fieldName}" field on the ${idField} "${id}" entry in ${config.dataFile} to update.` };
-    }
-    const beforeValue = content.slice(before.valueStart, before.valueEnd);
-    const spliced = spliceScalarField(content, objRange, fieldName, newValue, format);
+    const beforeValue = before ? content.slice(before.valueStart, before.valueEnd) : '(none)';
+    const spliced = before
+      ? spliceScalarField(content, objRange, fieldName, newValue, format)
+      : insertNewScalarField(content, objRange, fieldName, newValue, format);
     // objRange's end shifts as the object's own content grows/shrinks with
     // each field written — start never moves (the object's own opening
     // brace, always before any field inside it).
