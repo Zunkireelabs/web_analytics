@@ -938,12 +938,12 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // worker claiming the job could still leave nothing pending). Surface
     // that honestly instead of repeating a claim that's stopped being true.
     if (enqueueError) {
+      const { message, id } = safeMessage('design-drift.projectComponentTemplate', enqueueError, 'queuing the Design Agent to learn it just failed');
       return {
         ok: false,
         reason: 'derivation-queue-failed',
-        detail: `This site's design language has not been derived yet, and queuing the Design Agent to learn it just `
-          + `failed (${enqueueError.message}). This needs an engineer to check the system logs — it will not resolve `
-          + 'on its own.',
+        detail: `This site's design language has not been derived yet, and ${message} (ref ${id}). This needs an `
+          + 'engineer to check the system logs — it will not resolve on its own.',
         template: null,
         componentKey,
       };
