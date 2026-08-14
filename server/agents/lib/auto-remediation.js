@@ -213,6 +213,11 @@ export async function autoRemediateSafeRecommendations(siteId) {
       const approved = await shipDraftForRecommendation(siteId, {
         generatorId: rec.recommendation_type, params: rec.params,
         findingId: rec.finding_ids[0], source: SOURCE,
+        // Unattended cron pass, not a user's click — worth waiting out a
+        // same-site design-profile derivation so today's run can ship a real
+        // PR instead of only unblocking tomorrow's. See design-drift.js's
+        // DESIGN_AGENT_WAIT_MS.
+        waitForDesignAgent: true,
       });
 
       // Ensure the chain ends at an OPEN PR, and STOP. This loop deliberately
@@ -332,8 +337,8 @@ export async function autoRemediateSafeRecommendations(siteId) {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, memoryRefId = null }) {
-  const draft = await generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId });
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, memoryRefId = null, waitForDesignAgent = false }) {
+  const draft = await generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
   if (autoSelected) {

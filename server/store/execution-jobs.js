@@ -75,6 +75,20 @@ export async function getQueuedComponentTemplateJob(siteId, actionType) {
 // pending" — the gate in design-drift.js used to say "queued, no action
 // needed" in both cases, which silently lied once a worker failure left the
 // queue empty with no automatic retry.
+// Lightweight status poll for a single known job id — used by the
+// waitForCompletion path in design-drift.js's resolveOrCreateComponentTemplate,
+// which already knows the id (either just-inserted or found via
+// getQueuedComponentTemplateJob) and only needs to know when it leaves
+// 'queued'/'executing'. Deliberately narrower than getExecutionJob (no
+// items join) since this gets polled repeatedly.
+export async function getDesignAgentJobById(jobId) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at FROM execution_jobs WHERE id = $1 AND kind = 'design_generate'`,
+    [jobId]
+  );
+  return rows[0] || null;
+}
+
 export async function getLatestDesignAgentJob(siteId, actionType) {
   const { rows } = await query(
     `SELECT id, status, finished_at, logs FROM execution_jobs
