@@ -82,9 +82,9 @@ describe('evidence tiers', () => {
     // Defence in depth: risk-tiers.js stays the source of truth for "may this
     // ever run unattended", so a generator demoted there is refused here
     // without anyone having to remember to edit two lists.
-    assert.equal(riskTierForGenerator('broken-link-fix'), 'manual');
-    assert.equal(requiredEvidenceFor('broken-link-fix'), null);
-    assert.equal(isRepairEligible('broken-link-fix'), false);
+    assert.equal(riskTierForGenerator('landing-page'), 'manual');
+    assert.equal(requiredEvidenceFor('landing-page'), null);
+    assert.equal(isRepairEligible('landing-page'), false);
   });
 
   test('an unknown generator is refused, not defaulted', () => {

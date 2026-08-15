@@ -237,11 +237,23 @@ describe('concurrency — two workers racing the same queue', () => {
       assert.equal(count, 1, `job ${jobId} was claimed more than once by this test's own workers`);
     }
 
-    const { rows } = await query(
-      'SELECT id, status FROM execution_jobs WHERE id = ANY($1::int[])',
-      [jobs.map((j) => j.id)]
-    );
-    const stuck = rows.filter((r) => r.status !== 'completed' && r.status !== 'failed');
+    // A job an external process claimed (see the comment above) may still be
+    // mid-flight the instant this test's own two drains go empty — that
+    // process is running the REAL handler (createDesignAgentHandler(), a
+    // repo checkout + model call), not this test's instant mock, so it can
+    // still be legitimately 'executing' for a while yet. Poll instead of a
+    // single instant read, so only a job that never reaches a terminal state
+    // at all counts as stuck.
+    let stuck = [];
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const { rows } = await query(
+        'SELECT id, status FROM execution_jobs WHERE id = ANY($1::int[])',
+        [jobs.map((j) => j.id)]
+      );
+      stuck = rows.filter((r) => r.status !== 'completed' && r.status !== 'failed');
+      if (!stuck.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
     assert.deepEqual(stuck, [], 'no job should be left in queued/executing — every job must reach a terminal state, however it was claimed');
   });
 });
