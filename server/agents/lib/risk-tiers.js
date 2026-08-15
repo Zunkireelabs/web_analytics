@@ -4,16 +4,19 @@
 // everything else always goes through the existing stepped
 // Generate -> Submit -> Approve flow with a human decision at each step.
 //
-// Confirmed with the user 2026-08-04: broken-link-fix and blog-outline
-// swapped from their first-draft classification (broken-link-fix moved to
-// manual — a wrong redirect/link fix breaks live navigation; blog-outline
-// moved to safe — it drafts an outline for review, doesn't publish net-new
-// pages on its own). cookie-policy/privacy-policy/terms-of-service default
-// to manual (not in the spec's explicit safe list, legal-content risk).
-// analytics-install deliberately stays out of the safe set: its draft is
-// blocked on a real tracking ID a human has to supply (see
-// generators/analytics-install.js), so it can never be a genuine zero-review
-// auto-publish candidate the way the rest of this list is.
+// Re-confirmed with the user 2026-08-15: only two generators are still
+// deliberately kept manual — landing-page and translation (see the bottom
+// of this file for why). Every other generator either already refuses
+// cleanly instead of guessing (broken-link-fix, duplicate-id-fix,
+// analytics-install), is structurally inert until a site configures a
+// target for it (geo-audit, direct-answer), or now has a real programmatic
+// safety check backing it (cookie-policy/privacy-policy/terms-of-service —
+// see legal-fact-guard.js/quality-gate.js) instead of only a disclaimer.
+//
+// Confirmed with the user 2026-08-04: blog-outline swapped from its
+// first-draft classification — moved to safe because it drafted an outline
+// for review, not a net-new page on its own. (blog-outline itself moved to
+// manual and back again below; see that entry's own history.)
 //
 // Re-confirmed with the user 2026-08-07: blog-outline moved back to manual.
 // It no longer drafts an outline — generators/blog-outline.js now produces a
@@ -49,18 +52,64 @@ const SAFE_GENERATOR_IDS = new Set([
   // href-rewrite-inject.js rewrites one specific <a href> and returns
   // 'no-match' (or 'nested-anchor') rather than touching a file it isn't sure
   // about, so a draft it can't apply cleanly is refused whole and the
-  // recommendation stays open for a human.
-  //
-  // The obvious objection is that broken-link-fix is manual precisely because
-  // "a wrong redirect/link fix breaks live navigation", and this also rewrites
-  // a link. The difference is where the replacement URL comes from, and it is
-  // a real one: broken-link-fix has to FIND a plausible replacement for a dead
-  // link (its params.page is only the first page the href was crawled from,
-  // and it falls back to GitHub code search), whereas redirect-fix's
-  // destination was already observed — technical-seo.js followed the actual
-  // redirect chain to its real endpoint. There is no guess to get wrong. The
-  // generator is pure and deterministic with no LLM call at all.
+  // recommendation stays open for a human. redirect-fix's destination was
+  // already observed — technical-seo.js followed the actual redirect chain
+  // to its real endpoint. There is no guess to get wrong. The generator is
+  // pure and deterministic with no LLM call at all.
   'redirect-fix',
+  // Promoted 2026-08-15: the "must guess a replacement for a dead link"
+  // reasoning that used to keep this manual describes a generator behavior
+  // that no longer exists. generators/broken-link-fix.js never proposes a
+  // replacement URL — it only ever drafts the REMOVAL of a confirmed-dead
+  // link (keeping its real visible text as plain content), and
+  // implementers/lib/href-rewrite-inject.js's stripLink() only applies when
+  // the exact dead href is still found byte-for-byte in the live file,
+  // refusing otherwise. Same exact-match-or-refuse shape as redirect-fix
+  // above, just one step more conservative (deletes rather than rewrites).
+  'broken-link-fix',
+  // Promoted 2026-08-15. The one non-provably-safe shape (anything other
+  // than an SVG gradient/clipPath/mask referenced only by url(#id)) already
+  // produces an advisory draft with no file diff, which the apply-time
+  // implementer refuses with a clean 422 rather than a false "failure" —
+  // confirmed to route through the same refusal path (not the circuit
+  // breaker) as every other exact-match-or-refuse generator above.
+  'duplicate-id-fix',
+  // Promoted 2026-08-15. Self-gating: generators/analytics-install.js only
+  // ever produces a complete, apply-ready draft when a real tracking ID was
+  // already known; otherwise it ships with placeholderFields and
+  // implementers/lib/marker-merge.js refuses apply with a clear "fill this
+  // in manually" error — the same refusal path as duplicate-id-fix, so this
+  // can never silently auto-publish a placeholder.
+  'analytics-install',
+  // Promoted 2026-08-15. Moot in practice: geo-audit has no registered
+  // implementer at all (nothing in implementers/backend.js's `handles`
+  // list) — it produces a report/score, never a file diff, so there is
+  // nothing for the auto-chain to ever apply. Membership here changes
+  // nothing; recorded for consistency with the rest of this file's stated-
+  // reason convention.
+  'geo-audit',
+  // Promoted 2026-08-15. Same net-new content gate as blog-outline above:
+  // buildRecommendations demotes a direct-answer recommendation to 'manual'
+  // whenever url_file_map.newContentTargets has no entry for it — true for
+  // every site today — so this is inert until a site configures a real
+  // target dir, at which point it unblocks itself with no further change
+  // here, same as blog-outline already relies on.
+  'direct-answer',
+  // Promoted 2026-08-15, together as a set: cookie-policy, privacy-policy,
+  // and terms-of-service all share compliance-draft.js's
+  // generateCompliancePage(), which now has a real programmatic safety net
+  // instead of only a "have a lawyer review this" disclaimer —
+  // quality-gate.js runs legal-fact-guard.js's findUnverifiedLegalClaims()
+  // against these three, flagging any third-party service or contact detail
+  // the draft mentions that isn't backed by its own real detected facts
+  // (content.factsUsed). A draft that invents a fact fails the gate (refused,
+  // stays open for a human — the same generate-time-retry-then-refuse,
+  // approve-time-recheck flow every other generator already goes through);
+  // one that sticks to real facts + generic policy language ships
+  // unattended. Also still gated by the same net-new url_file_map.
+  // newContentTargets requirement as blog-outline/direct-answer, so this is
+  // inert on any site that hasn't configured a target for it.
+  'cookie-policy', 'privacy-policy', 'terms-of-service',
   // Promoted 2026-08-12 on an explicit product decision: growing impressions
   // depends on new content, not only on fixing existing pages, so the agent must
   // be able to draft an article and open a PR without a human first clicking
@@ -99,35 +148,14 @@ const SAFE_GENERATOR_IDS = new Set([
 // Everything NOT in the set above is manual, and stays that way for a stated
 // reason rather than by omission. Recorded here so a future audit re-litigates
 // evidence instead of guessing at intent (all 29 generator ids reviewed
-// 2026-08-12):
+// 2026-08-12, re-reviewed 2026-08-15 — only these two remain):
 //
-//   analytics-install  — its draft is blocked on a real tracking ID a human has
-//                        to supply, so it can never be a zero-review auto-apply.
-//   broken-link-fix    — must infer a replacement for a dead link; see above.
-//   duplicate-id-fix   — renaming an id safely needs every CSS/JS/anchor
-//                        reference to it, which a static fetch cannot see. Its
-//                        one provably-safe shape (an SVG gradient referenced
-//                        only by url(#id) within its own <svg>) auto-applies,
-//                        and every other occurrence falls back to an advisory
-//                        draft with no file diff — which would fail at apply if
-//                        it reached an unattended chain.
-//   geo-audit          — report/score only, deliberately never actionable
-//                        (confirmed 2026-08-10).
-//   cookie-policy,     — legal content. Publishing unreviewed legal text is a
-//   privacy-policy,      different category of risk from a meta tag, regardless
-//   terms-of-service     of how good the draft is.
-//   translation        — publishes a whole machine-translated, indexable page.
-//                        Quality and brand risk, unreviewed.
-//   landing-page       — net-new page, and unlike blog-outline it has no
-//                        word-count floor or expansion retry of its own.
-//   direct-answer      — the one net-new type still manual, and only because no
-//                        site has a url_file_map.newContentTargets entry for it
-//                        (site 1 has one for blog-outline, landing-page and the
-//                        three legal types, but not this). Its content shape is
-//                        bounded and grounded like blog-outline's, so it is a
-//                        straightforward promotion the moment a real target dir
-//                        is configured — at which point the net-new gate in
-//                        buildRecommendations stops blocking it anyway.
+//   translation  — publishes a whole machine-translated, indexable page.
+//                 Quality and brand risk, unreviewed — no programmatic check
+//                 here plays the same role legal-fact-guard.js plays for
+//                 the legal generators above, so this stays manual.
+//   landing-page — net-new page, and unlike blog-outline it has no
+//                 word-count floor or expansion retry of its own.
 
 export function riskTierForGenerator(generatorId) {
   return SAFE_GENERATOR_IDS.has(generatorId) ? 'safe' : 'manual';

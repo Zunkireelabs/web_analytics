@@ -201,6 +201,12 @@ function DraftStepper({ status }) {
 
 export default function ActionCenter() {
   const [searchParams, setSearchParams] = useSearchParams();
+  // Set only when a platform_admin arrived here via a cross-client deep link
+  // (e.g. the Analyst's "Send to Action Center" — see AnalystGrowthOpportunities.jsx
+  // / AnalystMetricIntelligence.jsx). Undefined for every normal session, in
+  // which case every api.actionCenter.* call below falls back to the
+  // session's own site, same as before this existed.
+  const siteId = searchParams.get('siteId') || undefined;
   const [tab, setTab] = useState('recommendations'); // 'recommendations' | 'drafts' | 'implemented'
   const [recs, setRecs] = useState(null); // null = loading
   const [drafts, setDrafts] = useState(null);
@@ -236,13 +242,13 @@ export default function ActionCenter() {
     setSelectedRecommendation(null);
   }, [activeCategory, tab]);
 
-  const loadRecs = () => api.actionCenter.recommendations().then((data) => {
+  const loadRecs = () => api.actionCenter.recommendations(siteId).then((data) => {
     setRecs(data);
     const categories = [...new Set((data?.items || []).map((item) => item.category || 'Technical Fixes'))];
     if (categories.length > 0) setActiveCategory(categories[0]);
   }).catch(() => setRecs({ items: [], lastAnalyzedAt: {} }));
 
-  const loadDrafts = () => api.actionCenter.drafts().then((data) => {
+  const loadDrafts = () => api.actionCenter.drafts({}, siteId).then((data) => {
     setDrafts(data);
     if (data && data.length > 0) setSelectedDraftItem(data[0]);
   }).catch(() => setDrafts([]));
@@ -253,9 +259,9 @@ export default function ActionCenter() {
   // button below falls back to the plain eligible count rather than a
   // hardcoded guess for that first moment.
   const safeFixBatchLimit = todayStats?.batchLimit ?? null;
-  const loadTodayStats = () => api.actionCenter.todayExecutionStats().then(setTodayStats).catch(() => {});
+  const loadTodayStats = () => api.actionCenter.todayExecutionStats(siteId).then(setTodayStats).catch(() => {});
 
-  useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, []);
+  useEffect(() => { loadRecs(); loadDrafts(); loadTodayStats(); }, [siteId]);
   useEffect(() => { if (tab === 'drafts' || tab === 'implemented') loadDrafts(); }, [tab]);
 
   // Deep link from a notification's "where the agent decided how to fix
@@ -289,7 +295,7 @@ export default function ActionCenter() {
     setRefreshing(true);
     setError(null);
     try {
-      const fresh = await api.actionCenter.refresh(range.start, range.end);
+      const fresh = await api.actionCenter.refresh(range.start, range.end, siteId);
       setRecs(fresh);
       const categories = [...new Set((fresh?.items || []).map((item) => item.category || 'Technical Fixes'))];
       if (categories.length > 0) setActiveCategory(categories[0]);
@@ -304,7 +310,7 @@ export default function ActionCenter() {
     setGeneratingId(item.id);
     setError(null);
     try {
-      const draft = await api.actionCenter.generate(item.generatorId, item.params, item.source, item.id);
+      const draft = await api.actionCenter.generate(item.generatorId, item.params, item.source, item.id, siteId);
       setActiveDraft(draft);
       // The backend now excludes any already-drafted finding from
       // recommendations — refresh recs too so this item disappears from the
@@ -335,7 +341,7 @@ export default function ActionCenter() {
     setExecutionResult(null);
     setExecutionJobDetail(null);
     try {
-      const result = await api.actionCenter.executeSafeFixes();
+      const result = await api.actionCenter.executeSafeFixes(undefined, siteId);
       setExecutionResult(result);
       loadRecs();
       loadDrafts();
@@ -351,7 +357,7 @@ export default function ActionCenter() {
       if (timedOut) {
         setRecoveringExecution(true);
         try {
-          const recovered = await api.actionCenter.latestExecutionJob();
+          const recovered = await api.actionCenter.latestExecutionJob(siteId);
           if (recovered.job) {
             setExecutionResult(recovered);
             loadRecs();
@@ -381,7 +387,7 @@ export default function ActionCenter() {
     if (!jobId) return;
     setLoadingExecutionJobDetail(true);
     try {
-      setExecutionJobDetail(await api.actionCenter.getExecutionJob(jobId));
+      setExecutionJobDetail(await api.actionCenter.getExecutionJob(jobId, siteId));
     } catch (e) {
       setError(e.message || 'Failed to load execution job detail');
     } finally {
@@ -396,7 +402,7 @@ export default function ActionCenter() {
   // and there's nothing to open; that finding is already back in Recs untouched.
   const openFailedDraft = async (draftId) => {
     try {
-      setActiveDraft(await api.actionCenter.draft(draftId));
+      setActiveDraft(await api.actionCenter.draft(draftId, siteId));
     } catch (e) {
       setError(e.message || 'Could not load draft');
     }
@@ -410,7 +416,7 @@ export default function ActionCenter() {
     setError(null);
     setExecutionResult(null);
     try {
-      const draft = await api.actionCenter.approveAndShip(item.id);
+      const draft = await api.actionCenter.approveAndShip(item.id, siteId);
       setExecutionResult({ shipped: 1, failed: 0, job: { pr_url: draft.pr_url, pr_number: draft.pr_number } });
       setSelectedRecommendation(null);
       loadRecs();
@@ -431,7 +437,7 @@ export default function ActionCenter() {
     setRecheckingId(item.id);
     setRecheckResult(null);
     try {
-      const result = await api.actionCenter.recheckRecommendation(item.id);
+      const result = await api.actionCenter.recheckRecommendation(item.id, siteId);
       setRecheckResult({ id: item.id, ...result });
       if (result.changed) {
         setSelectedRecommendation(null);
@@ -1180,6 +1186,7 @@ export default function ActionCenter() {
         <DraftModal
           key={activeDraft.id}
           draft={activeDraft}
+          siteId={siteId}
           onClose={() => setActiveDraft(null)}
           onSaved={(updated) => { setActiveDraft(updated); loadDrafts(); if (updated.rolled_back_at) loadRecs(); }}
           onDeleted={() => { setActiveDraft(null); loadDrafts(); loadRecs(); }}

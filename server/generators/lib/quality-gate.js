@@ -3,6 +3,7 @@ import { findDuplicateParagraphs } from './duplicate-content-guard.js';
 import { findSchemaIssues } from './schema-structure-guard.js';
 import { findEmptySections } from './empty-section-guard.js';
 import { checkPositioning } from './positioning-guard.js';
+import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
 // evaluate at all — every other generator (meta-title, schema, faq's Q&A
@@ -50,6 +51,17 @@ const POSITIONING_CHECKED_GENERATOR_IDS = new Set(['landing-page']);
 // would just be redundant, not additionally safe.
 const NON_LLM_GENERATOR_IDS = new Set(['duplicate-id-fix', 'geo-audit']);
 
+// Legal-content generators (cookie-policy/privacy-policy/terms-of-service)
+// share compliance-draft.js's generateCompliancePage(), which already
+// stores the real facts it gave the model on every draft as
+// `content.factsUsed` (siteName, domain, cookiesObserved, trackersDetected)
+// — see legal-fact-guard.js. This is what makes it safe to add these three
+// to the auto-ship tier (agents/lib/risk-tiers.js): a draft that only uses
+// real detected facts ships unattended; one that invents a service/contact
+// detail fails this gate and stays open for a human, same as any other
+// Quality Gate failure.
+const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
+
 // siteId is optional and only used by the positioning check — every
 // existing caller that doesn't pass one (there are none left after this
 // change, but a future one could be) simply skips it, same as a site with
@@ -57,12 +69,14 @@ const NON_LLM_GENERATOR_IDS = new Set(['duplicate-id-fix', 'geo-audit']);
 export async function runQualityGate(content, generatorId, siteId) {
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
+  const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
   const issues = [
     ...(isNonLlmContent ? [] : findScaffoldingIssues(content, generatorId)),
     ...(isNonLlmContent ? [] : findDuplicateParagraphs(content)),
     ...findSchemaIssues(content),
     ...findEmptySections(content),
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
+    ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),
   ];
   return { clean: issues.length === 0, issues };
 }

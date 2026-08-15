@@ -2,6 +2,10 @@ import { getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js'
 import { analyzePageUrl, recommendationsFor, TAG_TO_GENERATOR, inferSchemaType } from './lib/page-content.js';
 import { priorityByRank, impactFromValue, effortFromDifficulty, makeFinding } from './lib/findings.js';
 import { callLLM } from '../llm.js';
+import {
+  ctrAtPosition, TARGET_POSITION, TRAFFIC_GAIN_NOTE, DIFFICULTY_NOTE,
+  opportunityScore as scoreOpportunity, estimatedTrafficGain as scoreTrafficGain, estimatedDifficulty as scoreDifficulty,
+} from './lib/opportunity-scoring.js';
 
 export const meta = {
   id: 'opportunity',
@@ -17,19 +21,6 @@ const STRIKING_MIN_POSITION = 5;
 const STRIKING_MAX_POSITION = 15;
 const MIN_IMPRESSIONS = 10;
 const MAX_OPPORTUNITIES = 20;
-
-// Realistic improvement target used to project traffic gain (page-1-top,
-// not an unrealistic #1).
-const TARGET_POSITION = 3;
-
-// Approximate industry-aggregate organic CTR by position (blended desktop/
-// mobile, order-of-magnitude only). This is NOT measured for this site and
-// is never presented as one — it's solely the baseline used to project
-// estimatedTrafficGain, and is always accompanied by `assumptions` in the
-// output so it can't be mistaken for an observed fact.
-const CTR_BY_POSITION = { 1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07, 6: 0.05, 7: 0.04, 8: 0.03, 9: 0.025, 10: 0.02 };
-const CTR_TAIL = 0.015; // positions 11+
-const ctrAtPosition = (p) => CTR_BY_POSITION[Math.round(p)] ?? CTR_TAIL;
 
 export async function run({ siteId, start, end, pageCache }) {
   // Falls back to a direct (uncached) fetch when run standalone, outside an
@@ -58,21 +49,12 @@ export async function run({ siteId, start, end, pageCache }) {
   const maxImpressions = candidates.reduce((m, c) => Math.max(m, c.impressions), 1);
   const targetCtr = ctrAtPosition(TARGET_POSITION);
 
-  const scored = candidates.map((c) => {
-    const positionFactor = Math.min(1, Math.max(0,
-      (STRIKING_MAX_POSITION - c.avgPosition) / (STRIKING_MAX_POSITION - STRIKING_MIN_POSITION)));
-    const opportunityScore = Math.round(c.impressions * positionFactor);
-    const estimatedTrafficGain = Math.max(0, Math.round(c.impressions * (targetCtr - c.ctr)));
-
-    // Difficulty proxy: harder = further from page 1 + more impression volume
-    // relative to this batch. Internal signals only — no backlink/competitor
-    // data exists, so this is explicitly a proxy, not true keyword difficulty.
-    const positionComponent = (c.avgPosition - STRIKING_MIN_POSITION) / (STRIKING_MAX_POSITION - STRIKING_MIN_POSITION);
-    const volumeComponent = c.impressions / maxImpressions;
-    const estimatedDifficulty = Math.min(5, Math.max(1, Math.round((0.5 * positionComponent + 0.5 * volumeComponent) * 4) + 1));
-
-    return { ...c, opportunityScore, estimatedTrafficGain, estimatedDifficulty };
-  });
+  const scored = candidates.map((c) => ({
+    ...c,
+    opportunityScore: scoreOpportunity(c.impressions, c.avgPosition, STRIKING_MIN_POSITION, STRIKING_MAX_POSITION),
+    estimatedTrafficGain: scoreTrafficGain(c.impressions, c.ctr, targetCtr),
+    estimatedDifficulty: scoreDifficulty(c.avgPosition, c.impressions, maxImpressions, STRIKING_MIN_POSITION, STRIKING_MAX_POSITION),
+  }));
 
   const top = scored.sort((a, b) => b.opportunityScore - a.opportunityScore).slice(0, MAX_OPPORTUNITIES);
 
@@ -122,10 +104,8 @@ export async function run({ siteId, start, end, pageCache }) {
     findings,
     assumptions: {
       targetPosition: TARGET_POSITION,
-      trafficGainNote: `estimatedTrafficGain assumes the query reaches position ${TARGET_POSITION} and applies an ` +
-        'approximate industry-average CTR-by-position curve — an estimate, not a guarantee, not measured for this site.',
-      difficultyNote: 'estimatedDifficulty (1-5) is an internal proxy from current position + relative impression ' +
-        'volume only — not true keyword difficulty, since no backlink/competitor data source exists.',
+      trafficGainNote: TRAFFIC_GAIN_NOTE,
+      difficultyNote: DIFFICULTY_NOTE,
     },
   };
 

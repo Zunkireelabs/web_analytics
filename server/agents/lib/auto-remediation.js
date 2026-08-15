@@ -114,7 +114,14 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
 //
 // It ends at an OPEN PULL REQUEST and never merges — see the openDraftPr call
 // below for why that boundary is deliberate rather than incidental.
-export async function autoRemediateSafeRecommendations(siteId) {
+// globalRemaining: an optional platform-wide ceiling on top of this site's
+// own budget (server/job.js's AUTO_REMEDIATION_GLOBAL_DAILY_CEILING) — see
+// that file for how it's tracked across sequential per-site calls in one
+// cron pass. Defaults to Infinity (no change in behavior) for every other
+// caller (routes/action-center.js's executeSafeFixes, a human-triggered
+// batch, is never subject to it — same reasoning as pacing above, a human
+// asking for a batch isn't the runaway this ceiling exists to catch).
+export async function autoRemediateSafeRecommendations(siteId, { globalRemaining = Infinity } = {}) {
   const site = await getSiteById(siteId);
   if (!site?.auto_remediation_enabled) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
 
@@ -160,15 +167,38 @@ export async function autoRemediateSafeRecommendations(siteId) {
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
   // budget left" rather than a negative slice that would silently take
-  // everything.
+  // everything. Also capped by the platform-wide ceiling (globalRemaining),
+  // when the caller supplied one — whichever is tighter wins.
   const dailyLimit = site.auto_remediation_daily_limit ?? 60;
-  const remaining = Math.max(0, dailyLimit - spentToday);
+  const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
-    console.log(`[auto-remediation] site ${siteId} has already used its full daily budget (${spentToday}/${dailyLimit}) — nothing attempted this run.`);
-    return { attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: 'budget-exhausted' };
+    const reason = spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached';
+    console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
+    return { attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason };
   }
 
-  const budgeted = candidates.slice(0, remaining);
+  // Priority-aware selection (item 7b): listOpenRecommendations already
+  // orders by priority tier (high/medium/low) then recency — real, but
+  // coarse. Within the SAME tier, prefer higher real expected impact
+  // (recommendations.expected_impact.value, the same field health-score.js
+  // already reads) weighted by this generator's own learned success
+  // confidence (learnedMap, already fetched above) — both real,
+  // already-computed numbers, nothing new invented. A generator with no
+  // confidence history yet (no learnedMap entry) is treated as neutral
+  // (0.5), not penalized relative to a proven-bad one — only a MEASURED low
+  // confidence should demote within a tier.
+  const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+  const rankScore = (rec) => {
+    const impact = typeof rec.expected_impact?.value === 'number' ? rec.expected_impact.value : 0;
+    const confidence = learnedMap.get(rec.recommendation_type)?.confidence;
+    return impact * (typeof confidence === 'number' ? confidence : 0.5);
+  };
+  const ranked = [...candidates].sort((a, b) => {
+    const tierDiff = (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3);
+    return tierDiff !== 0 ? tierDiff : rankScore(b) - rankScore(a);
+  });
+
+  const budgeted = ranked.slice(0, remaining);
   // Never silently truncate: a run that ships 30 of 41 open issues must say
   // so, or the Action Center looks like it simply found fewer problems.
   if (budgeted.length < candidates.length) {

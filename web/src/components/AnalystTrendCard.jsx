@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ComposedChart, Area, Line, ReferenceLine, ReferenceDot, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { api } from '../api.js';
+import { horizonUnit } from '../lib/analystFormat.js';
 
 const GRANULARITIES = ['Day', 'Week', 'Month'];
 
@@ -233,7 +234,7 @@ export default function AnalystTrendCard({ clientId, metrics, selectedMetricKey,
         {data?.forecast?.status === 'ok' && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[9px] font-bold text-slate-500">
             <span>Model: <span className="text-slate-700">{data.forecast.model}</span></span>
-            {data.forecast.horizon_periods && <span>Horizon: <span className="text-slate-700">{data.forecast.horizon_periods}d</span></span>}
+            {data.forecast.horizon_periods && <span>Horizon: <span className="text-slate-700">{data.forecast.horizon_periods}{horizonUnit(metric)}</span></span>}
             {data.forecast.confidence != null && <span>Confidence: <span className="text-slate-700">{Math.round(data.forecast.confidence * 100)}%</span></span>}
             <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" /> High anomaly</span>
             <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-sky-400" /> Low anomaly</span>

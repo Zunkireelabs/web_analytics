@@ -5,7 +5,7 @@ import { getSiteById } from '../store/read.js';
 import { createInsightReportDoc } from '../report/insight-doc.js';
 import { generateDraft } from './action-center.js';
 import { seoDraftEligibility } from '../agents/lib/analyst-seo-mapping.js';
-import { safeMessage, describeHttpFailure } from '../lib/errors.js';
+import { callDataAnalystAgent as callPython } from '../lib/data-analyst-client.js';
 
 // Narrow, JSON-shaped proxy to the standalone data-analyst-agent/ Python
 // service, for the in-app /analyst page (web/src/pages/Analyst.jsx) — a
@@ -19,41 +19,9 @@ import { safeMessage, describeHttpFailure } from '../lib/errors.js';
 const router = Router();
 router.use(requireAuth, requirePlatformRole('platform_admin'));
 
-const PYTHON_BASE_URL = process.env.DATA_ANALYST_AGENT_INTERNAL_URL || 'http://127.0.0.1:8000';
-
 // Well under web/src/api.js's 5-minute REQUEST_TIMEOUT_MS fetch ceiling — see
 // the generate-draft route below for why this waits at all.
 const ANALYST_DRAFT_DESIGN_WAIT_MS = 45_000;
-
-async function callPython(path, { method = 'GET', body, query } = {}) {
-  const url = new URL(path, PYTHON_BASE_URL);
-  if (query) for (const [k, v] of Object.entries(query)) if (v != null) url.searchParams.set(k, v);
-
-  let res;
-  try {
-    res = await fetch(url, {
-      method,
-      headers: {
-        'X-Admin-Key': process.env.DATA_ANALYST_AGENT_ADMIN_KEY || '',
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch (e) {
-    const { message } = safeMessage('dataAnalyst.callPython', e, 'Data Analyst Agent is unreachable right now');
-    const err = new Error(message);
-    err.status = 502;
-    throw err;
-  }
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.detail || `Data Analyst Agent request ${describeHttpFailure(res.status)}`);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
-}
 
 // Each handler just forwards client_id (already an integer path param —
 // Client.id is deliberately the same id as this app's sites.id, see

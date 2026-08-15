@@ -6,6 +6,15 @@ import { safeErrorMessage } from './lib/errors.js';
 // way for the user to tell a hang from real, still-in-progress work.
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
+// Appends `?siteId=`/`&siteId=` when siteId is set — used by actionCenter's
+// methods to carry a platform_admin's cross-client site override through to
+// the server (see server/routes/action-center.js's siteId-override
+// middleware). A no-op for every normal tenant call, where siteId is undefined.
+function withSite(path, siteId) {
+  if (!siteId) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}siteId=${encodeURIComponent(siteId)}`;
+}
+
 // Thin fetch wrapper. Sends cookies (session) and throws on non-2xx.
 //
 // Every thrown Error's `.message` here is passed through safeErrorMessage
@@ -96,11 +105,14 @@ export const api = {
   movers: (site, start, end) => req(`/movers?site=${site}${start && end ? `&start=${start}&end=${end}` : ''}`),
   translate: (q) => req(`/translate?query=${encodeURIComponent(q)}`),
 
-  copilot: {
-    ask: (conversationId, message) => req('/copilot/ask', { method: 'POST', body: JSON.stringify({ conversationId, message }) }),
-    greeting: () => req('/copilot/greeting'),
-    conversations: () => req('/copilot/conversations'),
-    messages: (conversationId) => req(`/copilot/conversations/${conversationId}/messages`),
+  // server/routes/assistant.js — replaces the old Growth Copilot / Analyst
+  // Chat pair. `siteId` is only honored server-side for a platform_admin
+  // caller (resolveContext), so a tenant session passing it would be a
+  // silent no-op, not a real override.
+  assistant: {
+    message: (message, conversationId, siteId) => req(`/assistant/message${siteId ? `?siteId=${siteId}` : ''}`, { method: 'POST', body: JSON.stringify({ message, conversationId }) }),
+    invoke: (capability, args, siteId) => req(`/assistant/invoke/${capability}${siteId ? `?siteId=${siteId}` : ''}`, { method: 'POST', body: JSON.stringify(args || {}) }),
+    capabilities: (siteId) => req(`/assistant/capabilities${siteId ? `?siteId=${siteId}` : ''}`),
   },
 
   watchlist: {
@@ -125,7 +137,7 @@ export const api = {
   },
 
   integrations: {
-    health: () => req('/integrations/health'),
+    health: (siteId) => req(`/integrations/health${siteId ? `?siteId=${siteId}` : ''}`),
     check: (id) => req(`/integrations/${id}/check`, { method: 'POST' }),
   },
 
@@ -219,6 +231,10 @@ export const api = {
       req(`/internal/keywords/${siteId}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
     updateGapStatus: (siteId, gapId, status) =>
       req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+    // Website-wide Growth Opportunities (Analyst page) — computed read-time
+    // from real GSC query/page data + the keyword_gaps review queue, no
+    // separate persistence. See server/agents/lib/growth-opportunities.js.
+    growthOpportunities: (siteId) => req(`/internal/keywords/${siteId}/growth-opportunities`),
     profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),
     // Supplementary narrative (server/agents/keyword-narrative.js) — separate
     // from api.analyst.executiveSummary's Python pipeline.
@@ -277,30 +293,37 @@ export const api = {
   },
 
   actionCenter: {
-    recommendations: () => req('/action-center/recommendations'),
-    refresh: (start, end) => req('/action-center/recommendations/refresh', { method: 'POST', body: JSON.stringify({ start, end }) }),
-    generators: () => req('/action-center/generators'),
-    generate: (generatorId, params, source, findingId) => req('/action-center/generate', { method: 'POST', body: JSON.stringify({ generatorId, params, source, findingId }) }),
-    drafts: (filters = {}) => req(`/action-center/drafts?${new URLSearchParams(filters)}`),
-    draft: (id) => req(`/action-center/drafts/${id}`),
-    saveDraft: (id, content) => req(`/action-center/drafts/${id}`, { method: 'PUT', body: JSON.stringify({ content }) }),
-    deleteDraft: (id) => req(`/action-center/drafts/${id}`, { method: 'DELETE' }),
-    submitDraft: (id) => req(`/action-center/drafts/${id}/submit`, { method: 'POST' }),
-    reject: (id, reason) => req(`/action-center/drafts/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
-    approveDraft: (id, renderMode) => req(`/action-center/drafts/${id}/approve`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
-    implementDraft: (id) => req(`/action-center/drafts/${id}/implemented`, { method: 'POST' }),
-    pushBranch: (id, renderMode) => req(`/action-center/drafts/${id}/push-branch`, { method: 'POST', body: JSON.stringify({ renderMode }) }),
-    openPr: (id) => req(`/action-center/drafts/${id}/open-pr`, { method: 'POST' }),
-    checkPrStatus: (id) => req(`/action-center/drafts/${id}/check-pr-status`, { method: 'POST' }),
-    previewDraft: (id) => req(`/action-center/drafts/${id}/preview`),
-    rollback: (id) => req(`/action-center/drafts/${id}/rollback`, { method: 'POST' }),
-    executeSafeFixes: (limit) => req('/action-center/execute-safe-fixes', { method: 'POST', body: JSON.stringify({ limit }) }),
-    latestExecutionJob: () => req('/action-center/execution-jobs/latest'),
-    approveAndShip: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/approve-and-ship`, { method: 'POST' }),
-    recheckRecommendation: (recommendationId) => req(`/action-center/recommendations/${recommendationId}/recheck`, { method: 'POST' }),
-    getExecutionJob: (id) => req(`/action-center/execution-jobs/${id}`),
+    // Every method here takes a trailing optional `siteId` — populated only
+    // when this page was reached via a platform_admin cross-client deep link
+    // (e.g. the Analyst's "Send to Action Center"/"In Action Center" links,
+    // which carry `?siteId=` — see ActionCenter.jsx). Omitted, the server
+    // scopes to the session's own site as always (server/routes/
+    // action-center.js's siteId-override middleware ignores the query param
+    // for any non-platform_admin session).
+    recommendations: (siteId) => req(withSite('/action-center/recommendations', siteId)),
+    refresh: (start, end, siteId) => req(withSite('/action-center/recommendations/refresh', siteId), { method: 'POST', body: JSON.stringify({ start, end }) }),
+    generators: (siteId) => req(withSite('/action-center/generators', siteId)),
+    generate: (generatorId, params, source, findingId, siteId) => req(withSite('/action-center/generate', siteId), { method: 'POST', body: JSON.stringify({ generatorId, params, source, findingId }) }),
+    drafts: (filters = {}, siteId) => req(withSite(`/action-center/drafts?${new URLSearchParams(filters)}`, siteId)),
+    draft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId)),
+    saveDraft: (id, content, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'PUT', body: JSON.stringify({ content }) }),
+    deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),
+    submitDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/submit`, siteId), { method: 'POST' }),
+    reject: (id, reason, siteId) => req(withSite(`/action-center/drafts/${id}/reject`, siteId), { method: 'POST', body: JSON.stringify({ reason }) }),
+    approveDraft: (id, renderMode, siteId) => req(withSite(`/action-center/drafts/${id}/approve`, siteId), { method: 'POST', body: JSON.stringify({ renderMode }) }),
+    implementDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/implemented`, siteId), { method: 'POST' }),
+    pushBranch: (id, renderMode, siteId) => req(withSite(`/action-center/drafts/${id}/push-branch`, siteId), { method: 'POST', body: JSON.stringify({ renderMode }) }),
+    openPr: (id, siteId) => req(withSite(`/action-center/drafts/${id}/open-pr`, siteId), { method: 'POST' }),
+    checkPrStatus: (id, siteId) => req(withSite(`/action-center/drafts/${id}/check-pr-status`, siteId), { method: 'POST' }),
+    previewDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/preview`, siteId)),
+    rollback: (id, siteId) => req(withSite(`/action-center/drafts/${id}/rollback`, siteId), { method: 'POST' }),
+    executeSafeFixes: (limit, siteId) => req(withSite('/action-center/execute-safe-fixes', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
+    latestExecutionJob: (siteId) => req(withSite('/action-center/execution-jobs/latest', siteId)),
+    approveAndShip: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/approve-and-ship`, siteId), { method: 'POST' }),
+    recheckRecommendation: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/recheck`, siteId), { method: 'POST' }),
+    getExecutionJob: (id, siteId) => req(withSite(`/action-center/execution-jobs/${id}`, siteId)),
 
-    todayExecutionStats: () => req('/action-center/execution-stats/today'),
+    todayExecutionStats: (siteId) => req(withSite('/action-center/execution-stats/today', siteId)),
 
   },
 

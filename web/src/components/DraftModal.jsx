@@ -317,7 +317,7 @@ function FileDiffPreview({ result }) {
   return <FileDiffBlock {...result} />;
 }
 
-export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
+export default function DraftModal({ draft, siteId, onClose, onSaved, onDeleted }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(() => JSON.stringify(draft.content, null, 2));
   const [saving, setSaving] = useState(false);
@@ -336,7 +336,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
 
   const selectTitle = async (title) => {
     try {
-      const updated = await api.actionCenter.saveDraft(draft.id, { ...draft.content, selectedTitle: title });
+      const updated = await api.actionCenter.saveDraft(draft.id, { ...draft.content, selectedTitle: title }, siteId);
       onSaved(updated);
     } catch (e) {
       setError(e.message || 'Could not select title');
@@ -346,7 +346,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
   const loadFilePreview = async () => {
     setFilePreview('loading');
     try {
-      const result = await api.actionCenter.previewDraft(draft.id);
+      const result = await api.actionCenter.previewDraft(draft.id, siteId);
       setFilePreview(result);
     } catch (e) {
       if (e.status === 404) setDraftGone(true);
@@ -394,7 +394,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     setError(null);
     try {
       const apiFn = call === 'approve' ? api.actionCenter.approveDraft : api.actionCenter.pushBranch;
-      const updated = await apiFn(draft.id, renderMode);
+      const updated = await apiFn(draft.id, renderMode, siteId);
       setRenderModeConfirm(null);
       onSaved(updated);
     } catch (e) {
@@ -406,7 +406,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
           // server instead of showing a stale "Use Visible"/"Use
           // Schema-only" prompt for a state that's no longer true.
           setRenderModeConfirm(null);
-          api.actionCenter.draft(draft.id).then(onSaved).catch(() => setError(e.message || 'Action failed'));
+          api.actionCenter.draft(draft.id, siteId).then(onSaved).catch(() => setError(e.message || 'Action failed'));
         } else {
           setRenderModeConfirm({ call, reason: e.message, confidence: e.confidence, suggestedMode: e.suggestedMode });
         }
@@ -428,12 +428,12 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     setTransitioning(true);
     setError(null);
     try {
-      const result = await api.actionCenter.rollback(draft.id);
+      const result = await api.actionCenter.rollback(draft.id, siteId);
       setRollbackPr({ prNumber: result.prNumber, prUrl: result.prUrl });
       // The backend just marked this draft rolled_back_at, which reopens its
       // finding in Recommendations (getDraftedFindingIds) — refetch so the
       // caller's onSaved reloads Recs, not just Drafts.
-      api.actionCenter.draft(draft.id).then(onSaved).catch(() => {});
+      api.actionCenter.draft(draft.id, siteId).then(onSaved).catch(() => {});
     } catch (e) {
       setError(e.message || 'Rollback failed');
     } finally {
@@ -465,7 +465,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     setSaving(true);
     setError(null);
     try {
-      const updated = await api.actionCenter.saveDraft(draft.id, parsed);
+      const updated = await api.actionCenter.saveDraft(draft.id, parsed, siteId);
       setEditing(false);
       onSaved(updated);
     } catch (e) {
@@ -478,7 +478,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
   const remove = async () => {
     if (!confirm('Discard this draft? This cannot be undone.')) return;
     try {
-      await api.actionCenter.deleteDraft(draft.id);
+      await api.actionCenter.deleteDraft(draft.id, siteId);
       onDeleted(draft.id);
     } catch (e) {
       if (e.status === 404) { setDraftGone(true); return; }
@@ -495,7 +495,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
     setTransitioning(true);
     setError(null);
     try {
-      await api.actionCenter.reject(draft.id, 'sent_back_to_recommendations');
+      await api.actionCenter.reject(draft.id, 'sent_back_to_recommendations', siteId);
       onDeleted(draft.id);
     } catch (e) {
       if (e.status === 404) { setDraftGone(true); return; }
@@ -861,7 +861,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       <Edit3 size={12} /> Edit
                     </button>
                     <button
-                      onClick={() => transition(() => api.actionCenter.submitDraft(draft.id))}
+                      onClick={() => transition(() => api.actionCenter.submitDraft(draft.id, siteId))}
                       disabled={transitioning}
                       className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md shadow-indigo-100 hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
@@ -886,7 +886,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                   <>
                     {!MERGE_MANDATORY_TYPES.includes(draft.action_type) && (
                       <button
-                        onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
+                        onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))}
                         disabled={transitioning}
                         className="text-[11px] font-black uppercase tracking-wider px-3.5 py-2.5 rounded-xl text-slate-500 hover:bg-slate-100 border border-slate-200 disabled:opacity-60 transition"
                       >
@@ -923,7 +923,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       </span>
                     )}
                     <button
-                      onClick={() => transition(() => api.actionCenter.openPr(draft.id))}
+                      onClick={() => transition(() => api.actionCenter.openPr(draft.id, siteId))}
                       disabled={transitioning}
                       className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
@@ -939,7 +939,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       Waiting on a human to review and merge the PR on GitHub. This also refreshes the client build (CI) check above.
                     </span>
                     <button
-                      onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id))}
+                      onClick={() => transition(() => api.actionCenter.checkPrStatus(draft.id, siteId))}
                       disabled={transitioning}
                       className="text-[11px] font-black uppercase tracking-wider px-4.5 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-indigo-500/15 disabled:opacity-60 flex items-center gap-1"
                       style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}
@@ -973,7 +973,7 @@ export default function DraftModal({ draft, onClose, onSaved, onDeleted }) {
                       </span>
                     )}
                     <button
-                      onClick={() => transition(() => api.actionCenter.implementDraft(draft.id))}
+                      onClick={() => transition(() => api.actionCenter.implementDraft(draft.id, siteId))}
                       disabled={transitioning}
                       className="text-[11px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] shadow-md hover:shadow-emerald-500/15 disabled:opacity-60 shrink-0"
                       style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}

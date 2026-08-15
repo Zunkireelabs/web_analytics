@@ -8,6 +8,7 @@ import {
   getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
 import { createActionCenterRecommendationForGap, buildProductTopicMap } from '../agents/lib/analyst-seo-mapping.js';
+import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
 
 // Keyword Discovery — clusters/gaps/site-profile produced by agents/clustering.py
 // (see server/store/data-analyst.js for the read/write layer). Unlike
@@ -23,6 +24,17 @@ router.get('/internal/keywords/:siteId/clusters', async (req, res, next) => {
   try {
     const { cluster_type: clusterType } = req.query;
     res.json(await getKeywordClusters(req.params.siteId, clusterType));
+  } catch (e) { next(e); }
+});
+
+// Website-wide Growth Opportunities (Analyst page) — built read-time
+// directly from gsc_query_page + keyword_gaps, no persistence, so it's never
+// stale the way the 14-day keyword_clusters snapshot is. See
+// agents/lib/growth-opportunities.js for the full model and why each
+// opportunity type is or isn't produced.
+router.get('/internal/keywords/:siteId/growth-opportunities', async (req, res, next) => {
+  try {
+    res.json(await buildGrowthOpportunities(req.params.siteId));
   } catch (e) { next(e); }
 });
 

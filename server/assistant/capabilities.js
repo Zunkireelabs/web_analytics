@@ -6,6 +6,9 @@ import { runDiscovery } from '../discovery/run-discovery.js';
 import { listOpenRecommendations } from '../store/recommendations.js';
 import { summarizeAutonomy } from '../agents/lib/autonomy-decision.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
+import { callDataAnalystAgent } from '../lib/data-analyst-client.js';
+import { answerQuestion } from '../agents/lib/copilot.js';
+import { createConversation, getConversation, getRecentMessages, saveMessage } from '../store/copilot.js';
 import { query } from '../db.js';
 
 // The Assistant's entire surface for touching the system (Phase 3, §9/§21).
@@ -176,6 +179,54 @@ export const CAPABILITIES = {
         // second place to work through recommendations (§26).
         sample: items.slice(0, 5).map((i) => ({ id: i.id, tag: i.tag, page: i.params?.page ?? null, blocked: !!i.blockedReason })),
       };
+    },
+  },
+
+  // Every role. The Assistant's deterministic intents above only cover
+  // onboarding/decisions/agent-activity — a real question about the site's
+  // data itself ("why did traffic drop", "which pages have wins") needs the
+  // findings-routing engine this app already had (server/agents/lib/
+  // copilot.js's answerQuestion, formerly the standalone "Growth Copilot"
+  // widget). Reused here rather than reimplemented: same LLM intent
+  // classification across the real agent catalog, same cached-vs-fresh
+  // orchestration, same cited-evidence + Generate Draft output.
+  //
+  // Unlike every other capability, this one manages its own conversation
+  // (server/store/copilot.js) because answerQuestion's synthesis quality
+  // depends on real turn history, not a single message in isolation — the
+  // Assistant's other capabilities are stateless by design because they
+  // re-read live system state instead.
+  ask_growth_copilot: {
+    description: "Ask a free-form question about this site's own data — traffic, findings, wins, why something changed — answered with cited evidence from the real agent findings.",
+    requiredRole: 'tenant_member',
+    run: async (ctx, { message, conversationId } = {}) => {
+      if (!message) return { ok: false, reason: 'message is required' };
+      let convo = conversationId ? await getConversation(ctx.siteId, conversationId) : null;
+      if (!convo) convo = await createConversation(ctx.siteId, message.slice(0, 80));
+
+      const history = await getRecentMessages(convo.id, 8);
+      await saveMessage(convo.id, 'user', message);
+
+      const result = await answerQuestion({ siteId: ctx.siteId, conversationId: convo.id, message, history, userId: ctx.userId });
+      return { conversationId: convo.id, answer: result.answer, citedFindings: result.citedFindings, followUps: result.followUps };
+    },
+  },
+
+  // Admin-only. Proxies to the standalone data-analyst-agent service for
+  // statistical/forecasting questions (traffic trends, anomalies, keyword
+  // opportunities) — everything the operational capabilities above cannot
+  // answer, since they only read this app's own onboarding/recommendation
+  // state. requiredRole platform_admin (not tenant_admin) because this is
+  // the same staff-only surface the old /analyst page's chat used
+  // (server/routes/dataAnalyst.js), just reached through the Assistant now
+  // instead of a second chat widget.
+  ask_analyst_data: {
+    description: "Ask the statistical/forecasting analyst agent a free-form question about this site's performance data (traffic, keywords, anomalies).",
+    requiredRole: 'platform_admin',
+    run: async (ctx, { question } = {}) => {
+      if (!question) return { ok: false, reason: 'question is required' };
+      const result = await callDataAnalystAgent(`/ask/${ctx.siteId}`, { method: 'POST', body: { question } });
+      return { answer: result.answer, toolCalls: result.tool_calls || [] };
     },
   },
 };

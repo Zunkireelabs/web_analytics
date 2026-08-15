@@ -30,6 +30,15 @@ async def get_ai_recommendation_visibility_series(mcp: McpClient, start: str, en
     return await mcp.call_tool("get_ai_recommendation_visibility_series", {"start": start, "end": end})
 
 
+async def get_ai_recommendation_visibility_weekly_series(mcp: McpClient, start: str, end: str) -> list[dict]:
+    """[{week, mentioned_count, total_count, visibility_pct}] — real AI-engine
+    mention rate rolled up to calendar week (Monday-start). Empty if not enabled
+    for this site. The underlying ai_prompt_runs data was never actually
+    monthly-only — this is the same real per-run data as
+    get_ai_recommendation_visibility_series above, bucketed finer."""
+    return await mcp.call_tool("get_ai_recommendation_visibility_weekly_series", {"start": start, "end": end})
+
+
 async def get_competitor_structural_score_series(mcp: McpClient, start: str, end: str) -> list[dict]:
     """[{snapshot_date, own_score}] — this site's own structural-readiness score,
     one value per real run, deduped across the competitor rows written in that run."""

@@ -12,8 +12,30 @@ const VERIFIABLE_SOURCES = new Set(['opportunity', 'content-gap']);
 // Exported so routes/action-center.js's checkDraftPrStatus knows which
 // generator ids already get a real fix-verification recheck (and therefore
 // already write to agent_fix_memory via fix-verification.js) — everything
-// else falls back to PR-merge/abandon as its only available outcome signal.
-export const VERIFIABLE_GENERATOR_IDS = new Set(['meta-title', 'faq', 'schema', 'internal-links']);
+// else falls back to PR-merge/abandon as its only available outcome signal,
+// which means the health/AI-visibility scores trust a merge forever with no
+// live re-check for anything not in this set.
+//
+// canonical/open-graph/breadcrumbs/qa-content added 2026-08-15: each has a
+// real, deterministic, tag-mapped detection check already reachable through
+// contentGapsFor (agents/lib/page-content.js's contentGapChecks — 'Missing
+// canonical tag'/'Canonical points to a different domain'/'Missing Open
+// Graph tags'/'Missing breadcrumbs'/'Missing question-style headings', all
+// wired via GAP_TYPE_TO_GENERATOR), the same mechanism already proven for
+// faq/schema above — no new per-type verification code needed, this is a
+// Set-membership change only.
+//
+// Deliberately NOT added: expand-content, translation, landing-page,
+// blog-outline, and the legal pages — all LLM-authored prose. "Does this
+// page still say the right thing" is a different, harder problem than "is
+// this tag present", and there is no real check here that would verify
+// content correctness rather than just re-running a presence check against
+// prose — adding them would be exactly the kind of fabricated verification
+// this mechanism exists to avoid.
+export const VERIFIABLE_GENERATOR_IDS = new Set([
+  'meta-title', 'faq', 'schema', 'internal-links',
+  'canonical', 'open-graph', 'breadcrumbs', 'qa-content',
+]);
 
 export function isVerifiableDraft(draft) {
   return VERIFIABLE_SOURCES.has(draft.source)

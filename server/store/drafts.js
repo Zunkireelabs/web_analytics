@@ -545,6 +545,22 @@ export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC')
   return rows[0]?.n ?? 0;
 }
 
+// Same shape as countDraftsBySourceToday, summed across every site — backs
+// job.js's optional AUTO_REMEDIATION_GLOBAL_DAILY_CEILING. Per-site budgets
+// each use their own timezone (a site's "today" is meaningful to that
+// site's own publishing rhythm); a cross-site total has no single site's
+// timezone to prefer, so this uses UTC as a fixed, if slightly coarse,
+// "today" for the platform-wide ceiling — a blunt additional safety net on
+// top of the precise per-site budgets, not a replacement for them.
+export async function countDraftsBySourceTodayAllSites(source) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE source = $1 AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
+    [source]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 // Whether a draft of `actionType` was created for this site within the last
 // `days` days — the evidence behind auto-remediation.js's publishing-cadence
 // gap (sites.blog_min_gap_days, migration 107).

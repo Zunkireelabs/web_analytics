@@ -2,44 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { Search, TrendingUp, Send, AlertTriangle, CheckCircle2, ExternalLink, Loader2, Ban } from 'lucide-react';
 
-// Keywords already earning impressions but sitting past page 1. This is the
-// honest version of "how much impression will this keyword bring": every
-// number here is the site's OWN observed GSC data (keyword_clusters.
-// keywords_json, written by the 14-day clustering collector), never an
-// estimated or LLM-guessed search volume — no column in this schema stores
-// one. A keyword at position 11-30 is already being served to real searchers
-// and just isn't being clicked, which makes it the highest-leverage thing to
-// improve; ranking below ~30 means the impressions are too thin to act on.
-const NEAR_PAGE_ONE_MIN_POSITION = 10;
-const NEAR_PAGE_ONE_MAX_POSITION = 30;
 const MAX_KEYWORD_ROWS = 15;
-
-// keyword_clusters is append-only — every clustering run writes its own
-// snapshot (see migration 079), so one site accumulates the same keyword once
-// per run. getKeywordClusters returns newest-first, so keeping the FIRST
-// occurrence of each keyword keeps the most recent numbers and drops the
-// stale repeats. Without this the list burns its rows on the same handful of
-// keywords repeated back to back.
-function dedupeByKeyword(rows) {
-  const seen = new Set();
-  return rows.filter((k) => {
-    const key = (k.keyword || '').trim().toLowerCase();
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function nearPageOne(clusters) {
-  const flat = clusters
-    .flatMap((c) => (Array.isArray(c.keywords_json) ? c.keywords_json : []).map((k) => ({ ...k, cluster: c.cluster_name })))
-    .filter((k) => k.avg_position > NEAR_PAGE_ONE_MIN_POSITION
-      && k.avg_position <= NEAR_PAGE_ONE_MAX_POSITION
-      && (k.impressions ?? 0) > 0);
-  return dedupeByKeyword(flat)
-    .sort((a, b) => (b.impressions ?? 0) - (a.impressions ?? 0))
-    .slice(0, MAX_KEYWORD_ROWS);
-}
 
 const PRIORITY_CHIP = { high: 'an-chip-rose', medium: 'an-chip-amber', low: 'an-chip-slate' };
 const SOURCE_LABEL = {
@@ -55,7 +18,7 @@ const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber',
 const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
 
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
-  const [clusters, setClusters] = useState(null);
+  const [opportunities, setOpportunities] = useState(null);
   const [gaps, setGaps] = useState(null);
   const [error, setError] = useState(null);
   // Per-gap action state, keyed by gap id: 'sending' | { draftId, draftError }.
@@ -67,15 +30,23 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
 
   useEffect(() => {
     const requestId = ++requestRef.current;
-    setClusters(null);
+    setOpportunities(null);
     setGaps(null);
     setError(null);
     setGapAction({});
 
-    Promise.all([api.keywords.clusters(clientId), api.keywords.gaps(clientId)])
-      .then(([clusterRows, gapRows]) => {
+    // Close to Page 1 used to read keyword_clusters.keywords_json — a
+    // 14-day-cadence, append-only snapshot with no clicks/CTR/page column at
+    // all, and a SEPARATE position window (10-30) from the Growth
+    // Opportunities section above (10-20), so the two sections could — and
+    // for Zunkiree Labs, did — disagree about what counted as "close to page
+    // 1." Both now read the exact same growth-opportunities endpoint
+    // (server/agents/lib/growth-opportunities.js), filtered to
+    // page1-opportunity, so there is exactly one definition on this page.
+    Promise.all([api.keywords.growthOpportunities(clientId), api.keywords.gaps(clientId)])
+      .then(([oppRows, gapRows]) => {
         if (requestRef.current !== requestId) return;
-        setClusters(clusterRows || []);
+        setOpportunities(oppRows?.opportunities || []);
         setGaps(gapRows || []);
       })
       .catch((e) => {
@@ -84,7 +55,13 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
       });
   }, [clientId, refreshToken]);
 
-  const keywords = useMemo(() => (clusters ? nearPageOne(clusters) : []), [clusters]);
+  const keywords = useMemo(
+    () => (opportunities || [])
+      .filter((o) => o.type === 'page1-opportunity')
+      .sort((a, b) => (b.opportunityScore ?? 0) - (a.opportunityScore ?? 0))
+      .slice(0, MAX_KEYWORD_ROWS),
+    [opportunities]
+  );
 
   // Acting on a gap moves it out of pending_review, which would drop it from
   // this list instantly — taking the "Draft ready in Action Center" confirmation
@@ -162,7 +139,7 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
 
   // Loading and genuinely-empty are separate states — showing "no keywords
   // found" while the request is still in flight reads as a real answer.
-  const loading = clusters === null || gaps === null;
+  const loading = opportunities === null || gaps === null;
 
   if (loading) {
     return (
@@ -193,35 +170,55 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
         <div className="pt-1">
             {keywords.length === 0 ? (
               <p className="text-xs font-medium text-slate-500 bg-slate-100/60 border border-slate-200 rounded-xl px-4 py-3">
-                No keywords ranking between positions {NEAR_PAGE_ONE_MIN_POSITION + 1} and{' '}
-                {NEAR_PAGE_ONE_MAX_POSITION} yet. The keyword collector runs every 14 days — this
-                fills in once it has clustered enough Search Console data for this client.
+                No keywords just outside page 1 right now. This fills in once real Search Console
+                traffic lands a query at position 10-20 for this client.
               </p>
             ) : (
               <>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[440px]">
+                  <table className="w-full text-left border-collapse min-w-[560px]">
                     <thead>
                       <tr className="border-b border-slate-200">
                         <th className="an-label py-2 pr-3 font-black">Keyword</th>
+                        <th className="an-label py-2 px-3 font-black whitespace-nowrap">Opportunity</th>
                         <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">Impressions</th>
-                        <th className="an-label py-2 pl-3 font-black text-right whitespace-nowrap">Position</th>
+                        <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">CTR</th>
+                        <th className="an-label py-2 px-3 font-black text-right whitespace-nowrap">Position</th>
+                        <th className="an-label py-2 px-3 font-black">Target</th>
+                        <th className="an-label py-2 pl-3 font-black">Recommended</th>
                       </tr>
                     </thead>
                     <tbody>
                       {keywords.map((k, i) => (
-                        <tr key={`${k.keyword}-${i}`} className="border-b border-slate-100 last:border-0">
+                        <tr key={`${k.query}-${i}`} className="border-b border-slate-100 last:border-0">
                           <td className="py-2.5 pr-3">
-                            <div className="text-xs font-bold text-slate-800">{k.keyword}</div>
-                            {k.cluster && (
-                              <div className="text-[10px] font-medium text-slate-400 mt-0.5">{k.cluster}</div>
-                            )}
+                            <div className="text-xs font-bold text-slate-800">{k.query}</div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className={`an-chip ${PRIORITY_CHIP[k.severity] || 'an-chip-slate'}`}>
+                              {k.severity || 'low'}
+                            </span>
                           </td>
                           <td className="py-2.5 px-3 text-right text-xs font-black text-slate-800 tabular-nums">
                             {Math.round(k.impressions ?? 0).toLocaleString()}
                           </td>
-                          <td className="py-2.5 pl-3 text-right text-xs font-bold text-amber-600 tabular-nums">
-                            {(Math.round((k.avg_position ?? 0) * 10) / 10).toFixed(1)}
+                          <td className="py-2.5 px-3 text-right text-xs font-bold text-slate-600 tabular-nums">
+                            {k.ctr != null ? `${(k.ctr * 100).toFixed(1)}%` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-xs font-bold text-amber-600 tabular-nums">
+                            {k.avgPosition != null ? k.avgPosition.toFixed(1) : '—'}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {k.page ? (
+                              <a href={k.page} target="_blank" rel="noreferrer" className="text-[11px] font-bold text-indigo-600 hover:underline inline-flex items-center gap-1">
+                                Existing page <ExternalLink size={10} />
+                              </a>
+                            ) : (
+                              <span className="text-[11px] font-semibold text-slate-400">No strong existing page</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 pl-3 text-[11px] font-medium text-slate-500 max-w-[16rem]">
+                            {k.recommendedAction}
                           </td>
                         </tr>
                       ))}
@@ -230,7 +227,8 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                 </div>
                 <p className="text-[10px] font-medium text-slate-400">
                   Not an estimated search volume — these are searches you're already being shown
-                  for but not clicked on yet.
+                  for but not clicked on yet. Same source as Growth Opportunities above, filtered
+                  to page-1-adjacent queries.
                 </p>
               </>
             )}

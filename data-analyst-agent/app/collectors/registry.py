@@ -16,6 +16,7 @@ from app.collectors.health_score import HealthScoreCollector
 from app.collectors.keyword_clustering import KeywordClusteringCollector
 from app.collectors.monthly_metrics import MonthlyMetricsCollector
 from app.collectors.page_query import PageQueryCollector
+from app.collectors.weekly_metrics import WeeklyMetricsCollector
 from app.db.models import MetricCatalog, MetricDimensionSupport
 
 # Ordered — derived_ratios must run after gsc_daily/ga4_daily each night,
@@ -33,6 +34,7 @@ COLLECTORS: list[Collector] = [
     HealthScoreCollector(),
     DerivedRatiosCollector(),
     MonthlyMetricsCollector(),
+    WeeklyMetricsCollector(),
     Ga4ChannelsCollector(),
     GscBreakdownCollector(),
     Ga4BreakdownCollector(),

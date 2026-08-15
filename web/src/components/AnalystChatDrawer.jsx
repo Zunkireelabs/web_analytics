@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
-import AnalystChatPanel from './AnalystChatPanel.jsx';
+import AdminAssistantPanel from './AdminAssistantPanel.jsx';
 
 // "Ask the analyst" used to be a permanent sticky column, always taking a
 // third of the page's width whether or not anyone was using it. Collapsed
 // here into a floating trigger + slide-up drawer instead, so the content
 // column (Growth Outlook, Keyword Opportunities, Impression Forecast) gets
-// the full page width by default. The global Copilot bubble
-// (App.jsx's hideCopilot) is hidden on this route specifically so this is
-// the only floating assistant trigger on the Analyst page.
+// the full page width by default. The global client Assistant bubble
+// (App.jsx's hideAssistant) is hidden on this route specifically so this is
+// the only floating assistant trigger on the Analyst page — the staff-only
+// AdminAssistantPanel, not the client-facing one.
 export default function AnalystChatDrawer({ clientId, dashboard }) {
   const [open, setOpen] = useState(false);
 
@@ -43,7 +44,7 @@ export default function AnalystChatDrawer({ clientId, dashboard }) {
         }`}
         style={{ height: 'min(34rem, calc(100vh - 6rem))' }}
       >
-        {open && <AnalystChatPanel clientId={clientId} dashboard={dashboard} onClose={() => setOpen(false)} />}
+        {open && <AdminAssistantPanel clientId={clientId} onClose={() => setOpen(false)} />}
       </div>
 
       {!open && (

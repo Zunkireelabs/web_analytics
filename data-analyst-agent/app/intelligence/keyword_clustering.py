@@ -299,6 +299,25 @@ async def research_topic_keywords(site_type: str | None, industry: str, topic: s
     return results
 
 
+def _research_gap_reason(keyword: str, parent_topic: str, position: float | None, intent: str) -> str:
+    """Every field used here is real evidence already on hand at the point
+    this gap is written — the parent topic it was researched under, this
+    site's OWN observed position for the keyword (gsc_breakdown, via
+    observed_positions below) if any, and the search intent the research step
+    itself classified. Replaces a single hardcoded sentence that was
+    identical for all 88 claude_research-sourced gaps on Zunkiree Labs alone,
+    which told the reader nothing about why THIS keyword was picked."""
+    if position is None:
+        return (
+            f'A real {intent} search related to your "{parent_topic}" topic — no existing page currently '
+            f'ranks for it at all.'
+        )
+    return (
+        f'A real {intent} search related to your "{parent_topic}" topic — you already rank #{position:.0f}, '
+        f'well outside striking distance, so this needs a stronger page rather than a first one.'
+    )
+
+
 def gaps_from_research(
     topic: str, researched: list[dict], observed_positions: dict[str, float], existing_topics: set[str],
 ) -> list[dict]:
@@ -318,7 +337,7 @@ def gaps_from_research(
             continue  # already flagged (Step 3 or an earlier topic this run) — never duplicate
         new_gaps.append({
             "topic": r["keyword"],
-            "reason": "People search this but you rank poorly/not at all",
+            "reason": _research_gap_reason(r["keyword"], topic, position, r["search_intent"]),
             "priority": DIFFICULTY_TO_PRIORITY[r["estimated_difficulty"]],
         })
         existing_topics.add(keyword_lower)

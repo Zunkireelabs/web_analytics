@@ -4,7 +4,7 @@ import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
 import Sidebar from './components/Sidebar.jsx';
-import CopilotPanel from './components/CopilotPanel.jsx';
+import ClientAssistantPanel from './components/ClientAssistantPanel.jsx';
 
 // Lazy-loaded: none of these are needed for first paint. The internal-only
 // ones (AiGrowth/ActionCenter/ClientOnboarding) also pull in heavy libraries
@@ -32,7 +32,7 @@ export default function App() {
   const [sites, setSites] = useState([]);
   const [siteId, setSiteId] = useState(null);
   const [sitesLoaded, setSitesLoaded] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const checkSession = () => api.me()
@@ -97,11 +97,13 @@ export default function App() {
   // guards every route these pages call.
   const isPlatformAdmin = role === 'platform_admin';
 
-  // The Analyst page (/analyst) has its own inline "Ask the analyst" chat
-  // scoped to whichever client is selected there — a second floating
-  // assistant on top of that would just be two chat entry points fighting
-  // for the same corner of the screen.
-  const hideCopilot = location.pathname === '/analyst';
+  // The Analyst page (/analyst) has its own staff-only Admin Assistant
+  // (AnalystChatDrawer -> AdminAssistantPanel) scoped to whichever client is
+  // selected there — a second floating assistant on top of that would just
+  // be two chat entry points fighting for the same corner of the screen, and
+  // the client-facing Assistant deliberately does not carry the admin
+  // Assistant's cross-client analyst capability anyway.
+  const hideAssistant = location.pathname === '/analyst';
 
   return (
     <div className="min-h-screen relative flex">
@@ -153,9 +155,22 @@ export default function App() {
               <Route path="/action-center" element={<ActionCenter />} />
               {/* Every account, not internal-only — same session's own password either way. */}
               <Route path="/settings" element={<Settings />} />
-              {/* Staff-only — operates across every client's site, not just this session's own. */}
-              {isInternal && <Route path="/clients" element={<ClientOnboarding />} />}
-              {isInternal && <Route path="/analyst" element={<Analyst />} />}
+              {/* Staff-only — operates across every client's site, not just this
+                  session's own. Gated on isPlatformAdmin, NOT isInternal:
+                  both routes' entire API surface is requirePlatformRole
+                  ('platform_admin')-gated server-side (server/routes/
+                  clients.js, dataAnalyst.js, keywords.js all 404 anyone
+                  below that role), so an isInternal session that is only
+                  tenant_admin/tenant_member on the internal site could reach
+                  a page whose every real request 404s — reachable, but
+                  useless, and visible in the sidebar for a role that can't
+                  use it. Today isInternal and isPlatformAdmin coincide for
+                  every account on the internal site (both existing accounts
+                  are platform_admin), which is exactly why this went
+                  unnoticed; it stops coinciding the moment a non-admin
+                  teammate is added. */}
+              {isPlatformAdmin && <Route path="/clients" element={<ClientOnboarding />} />}
+              {isPlatformAdmin && <Route path="/analyst" element={<Analyst />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
                   mcp-server/oauth-provider.js's authorize(), scoped to this
                   session's own siteId server-side, same as every route above. */}
@@ -185,25 +200,24 @@ export default function App() {
         )}
       </main>
 
-      {/* The AI Copilot is the primary way to interact with the platform —
-          reachable from anywhere via this floating trigger, not tucked into
-          one page. Available to EVERY authenticated session, staff and client
-          alike (the server route dropped its platform_admin-only gate to
-          match). It is not the same experience for both: the greeting and the
-          answering prompt adapt to who is asking (server/agents/lib/
-          copilot-greeting.js), while the data stays scoped to the session's
-          own site either way. */}
-      {!copilotOpen && !hideCopilot && (
-        <button type="button" onClick={() => setCopilotOpen(true)}
+      {/* The Growth Assistant is the primary way to interact with the
+          platform — reachable from anywhere via this floating trigger, not
+          tucked into one page. Client-facing only: it talks to
+          server/assistant/'s tenant-isolated capability registry (onboarding
+          status, pending decisions, agent activity, safe fixes), not the
+          cross-client analyst capability the staff-only Admin Assistant on
+          /analyst has. */}
+      {!assistantOpen && !hideAssistant && (
+        <button type="button" onClick={() => setAssistantOpen(true)}
           className="fixed bottom-6 right-6 z-20 w-14 h-14 rounded-full text-white text-xl shadow-lg
                      hover:scale-105 transition-transform focus-visible:outline focus-visible:outline-2
                      focus-visible:outline-offset-2 focus-visible:outline-[#6C63FF]"
           style={{ background: '#6C63FF', boxShadow: '0 8px 24px -4px rgba(108,99,255,0.5)' }}
-          aria-label="Open AI Copilot">
+          aria-label="Open Growth Assistant">
           ✦
         </button>
       )}
-      <CopilotPanel open={copilotOpen && !hideCopilot} onClose={() => setCopilotOpen(false)} />
+      <ClientAssistantPanel open={assistantOpen && !hideAssistant} onClose={() => setAssistantOpen(false)} />
     </div>
   );
 }

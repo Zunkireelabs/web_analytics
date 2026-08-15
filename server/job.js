@@ -29,7 +29,7 @@ import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
 import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
-import { getImplementedFindingIds, countDraftsBySourceToday } from './store/drafts.js';
+import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -809,12 +809,34 @@ async function fetchAnalystInsights(siteId) {
 // A site with analytics but no repo has nothing to push to, and
 // autoRemediateSafeRecommendations' own auto_remediation_enabled gate stays
 // the real opt-in on top of that.
+// Optional platform-wide safety ceiling on top of every site's own
+// auto_remediation_daily_limit (item 7a) — unset by default, in which case
+// globalRemainingSeed() returns Infinity and behavior is byte-for-byte
+// unchanged from before this existed. Each site's per-site budget is still
+// the precise control; this is a blunt additional backstop for "the total
+// across every onboarded site got too large," not a replacement for it.
+// Seeded from a real count of today's already-shipped drafts (not reset to
+// 0) so the hourly catch-up loop below correctly resumes the same day's
+// running total rather than re-granting a fresh ceiling every time it fires.
+async function globalRemainingSeed() {
+  const ceiling = Number(process.env.AUTO_REMEDIATION_GLOBAL_DAILY_CEILING);
+  if (!Number.isFinite(ceiling) || ceiling < 0) return Infinity;
+  const alreadyShipped = await countDraftsBySourceTodayAllSites('auto-remediation');
+  return Math.max(0, ceiling - alreadyShipped);
+}
+
 export async function runAutoRemediationForAllSites() {
   const sites = (await listSites()).filter(isShippable);
   const results = [];
+  let globalRemaining = await globalRemainingSeed();
   for (const site of sites) {
+    if (globalRemaining <= 0) {
+      console.log(`[job] auto-remediation: platform-wide daily ceiling reached — skipping remaining ${sites.length - results.length} site(s) this run.`);
+      break;
+    }
     try {
-      const result = await autoRemediateSafeRecommendations(site.id);
+      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      globalRemaining -= result.shipped || 0;
       if (result.attempted || result.shipped) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
       }
@@ -842,12 +864,18 @@ export async function runAutoRemediationForAllSites() {
 // still ships the same day, onto the same batch branch/PR.
 export async function runAutoRemediationCatchupForAllSites(tz) {
   const sites = (await listSites()).filter(isShippable);
+  let globalRemaining = await globalRemainingSeed();
   for (const site of sites) {
+    if (globalRemaining <= 0) {
+      console.log('[job] auto-remediation catch-up: platform-wide daily ceiling already reached — skipping this pass.');
+      break;
+    }
     try {
       const alreadyShippedToday = await countDraftsBySourceToday(site.id, 'auto-remediation', site.timezone || tz);
       if (!isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone: tz })) continue;
 
-      const result = await autoRemediateSafeRecommendations(site.id);
+      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      globalRemaining -= result.shipped || 0;
       if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
     } catch (err) {
       console.error(`[job] auto-remediation catch-up failed for site ${site.id} "${site.name}":`, err.message);

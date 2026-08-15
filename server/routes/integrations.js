@@ -13,11 +13,18 @@ router.use(requireAuth, requirePlatformRole('platform_admin'));
 // Joins registry meta with the latest persisted status for this site —
 // an integration never checked yet defaults to status: 'unknown', not an
 // error, since no row exists for it in integration_health.
+// ?siteId= lets a platform_admin check another site's integration health
+// (e.g. the Analyst page's client picker) — safe because this whole router
+// is already platform_admin-gated above, unlike server/routes/assistant.js's
+// equivalent override, which additionally re-validates the requester's role
+// per-request since that router is open to every authenticated tenant.
 router.get('/integrations/health', async (req, res, next) => {
   try {
+    const requestedSiteId = Number(req.query.siteId);
+    const siteId = Number.isInteger(requestedSiteId) ? requestedSiteId : req.siteId;
     const [meta, rows] = await Promise.all([
       listIntegrationMeta(),
-      getIntegrationHealth(req.siteId),
+      getIntegrationHealth(siteId),
     ]);
     const byId = new Map(rows.map((r) => [r.integration_id, r]));
     res.json(meta.map((m) => {
