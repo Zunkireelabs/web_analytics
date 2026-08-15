@@ -579,9 +579,34 @@ export async function hasRecentDraftOfType(siteId, actionType, days, timezone = 
 // Used by buildRecommendations (agents/lib/recommendations.js) to stop
 // resurfacing a finding in the Findings List once its fix is actually live,
 // instead of waiting on the next agent run to naturally stop re-detecting it.
+// Also feeds Website Health's implementedFindingIds (job.js -> health-score.js)
+// and the Growth report/summary — so a finding excluded here is treated
+// everywhere as genuinely resolved, not merely "PR merged".
+//
+// "implemented" itself is real evidence (a merged PR, see markDraftImplemented
+// above) that the fix shipped — but shipping isn't the same as the fix
+// actually working (wrong file patched, a silently failed deploy, an edge
+// case the generator missed). For the subset of drafts fix-verification.js
+// can re-check (isVerifiableDraft), a LATERAL join pulls each finding's most
+// recent non-pending verification outcome; a finding whose latest real
+// re-check still found the issue live is excluded here even though its
+// draft says 'implemented', so it re-surfaces in Recommendations and the
+// next scheduled health-score run correctly re-penalizes it instead of
+// silently staying "fixed" forever. Findings with no verification history
+// (unverifiable draft types) are unaffected — COALESCE lets them pass
+// through exactly as before.
 export async function getImplementedFindingIds(siteId) {
   const { rows } = await query(
-    "SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND status = 'implemented' AND finding_id IS NOT NULL",
+    `SELECT DISTINCT d.finding_id
+     FROM drafts d
+     LEFT JOIN LATERAL (
+       SELECT fv.outcome FROM fix_verifications fv
+       WHERE fv.site_id = d.site_id AND fv.finding_id = d.finding_id AND fv.outcome != 'pending'
+       ORDER BY fv.checked_at DESC NULLS LAST
+       LIMIT 1
+     ) latest_verification ON true
+     WHERE d.site_id = $1 AND d.status = 'implemented' AND d.finding_id IS NOT NULL
+       AND COALESCE(latest_verification.outcome, 'verified-fixed') != 'still-present'`,
     [siteId]
   );
   return new Set(rows.map((r) => r.finding_id));
