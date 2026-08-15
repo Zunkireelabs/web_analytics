@@ -161,7 +161,7 @@ export async function autoRemediateSafeRecommendations(siteId) {
   // mid-day after work was already done — Math.max keeps that a clean "no
   // budget left" rather than a negative slice that would silently take
   // everything.
-  const dailyLimit = site.auto_remediation_daily_limit ?? 30;
+  const dailyLimit = site.auto_remediation_daily_limit ?? 60;
   const remaining = Math.max(0, dailyLimit - spentToday);
   if (remaining === 0) {
     console.log(`[auto-remediation] site ${siteId} has already used its full daily budget (${spentToday}/${dailyLimit}) — nothing attempted this run.`);
