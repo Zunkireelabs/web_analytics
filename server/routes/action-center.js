@@ -38,6 +38,7 @@ import { getFileContent, getPullRequest } from '../github/client.js';
 import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
+import { getUserById } from '../store/users.js';
 import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
 import { markQueryDrafted } from '../store/growth-queries.js';
@@ -142,6 +143,27 @@ async function buildRenderModeHint(siteId, actionType, page) {
 
 const router = Router();
 router.use(requireAuth);
+
+// Overrides req.siteId to a `?siteId=` query param, but only for a
+// platform_admin session (same pattern as assistant.js's resolveContext) —
+// a platform_admin genuinely manages many client sites (e.g. arriving here
+// via the Analyst's "Send to Action Center" link for whichever client is
+// selected there), while a tenant user's req.siteId always stays exactly
+// their own session's site, with no code path to change it. Invalid/missing
+// ids, and any non-platform-admin session, fall through to the session's own
+// site untouched.
+router.use(async (req, res, next) => {
+  if (!req.query.siteId) return next();
+  try {
+    const user = await getUserById(req.userId);
+    if (user?.role !== 'platform_admin') return next();
+    const requested = Number(req.query.siteId);
+    if (!Number.isInteger(requested)) return next();
+    const site = await getSiteById(requested);
+    if (site) req.siteId = requested;
+    next();
+  } catch (e) { next(e); }
+});
 
 // Most recent persisted recommendations — instant, may be stale. `Refresh`
 // below re-runs the agents fresh.

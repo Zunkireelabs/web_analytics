@@ -361,6 +361,36 @@ export async function getCannibalizedQueries(siteId, start, end, { minImpression
   return conflicts.slice(0, limit);
 }
 
+// One row per (query, page) actually seen in gsc_query_page over the range,
+// with clicks/impressions/CTR/position all together — the join
+// getTopPagePerQuery deliberately drops (it keeps page only, no metrics) and
+// keyword_clusters never had (append-only 14-day snapshots with no page
+// column at all, see agents/lib/growth-opportunities.js for why this
+// replaces that as the Analyst page's opportunity source). Real numbers
+// only: no estimated search volume exists anywhere in this schema.
+export async function getQueryPageMetrics(siteId, start, end, { minImpressions = 5 } = {}) {
+  const { rows } = await query(
+    `SELECT query, page,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            ROUND(SUM(position * impressions) / NULLIF(SUM(impressions), 0), 2) AS avg_position,
+            ROUND((SUM(clicks)::numeric / NULLIF(SUM(impressions), 0)), 4) AS ctr
+       FROM gsc_query_page
+      WHERE site_id = $1 AND date BETWEEN $2 AND $3
+      GROUP BY query, page
+     HAVING SUM(impressions) >= $4`,
+    [siteId, start, end, minImpressions]
+  );
+  return rows.map((r) => ({
+    query: r.query,
+    page: r.page,
+    clicks: Number(r.clicks),
+    impressions: Number(r.impressions),
+    avgPosition: r.avg_position != null ? Number(r.avg_position) : null,
+    ctr: r.ctr != null ? Number(r.ctr) : 0,
+  }));
+}
+
 // Top queries driving traffic to a single landing page over a date range —
 // the reverse of getTopPagePerQuery, used by the Content Gap Agent to know
 // which real query to check a page's content against (e.g. does it signal

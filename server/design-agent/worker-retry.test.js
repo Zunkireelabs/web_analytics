@@ -68,14 +68,36 @@ async function jobRow(id) {
   return rows[0];
 }
 
+// See worker.test.js's "concurrency — two workers racing the same queue"
+// describe block: a real worker.js instance may be polling this same shared
+// database, and its own default claim (no siteId — real deployments poll
+// globally, across every tenant, by design) can claim ANY site's queued
+// design_generate job — including one of this suite's single-job fixtures,
+// in the window between this test creating it and its own scoped
+// processOneJob call. When that happens processOneJob finds nothing left to
+// claim for this (otherwise idle, throwaway) site: a false failure, not a
+// retry-policy regression. Retrying with a freshly created job recovers the
+// real signal; two independent external steals inside one test run would be
+// extraordinary, so exhausting `attempts` here is a genuine failure.
+async function withOwnJob(siteId, { makeHandler, options = {} }, attempts = 3) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
+    const slept = [];
+    const handler = makeHandler();
+    const result = await processOneJob({ handler, siteId, sleep: fakeSleep(slept), ...options });
+    if (result) return { job, handler, slept, result };
+    if (attempt === attempts) {
+      throw new Error(`Job ${job.id} (site ${siteId}) was claimed by another process on all ${attempts} attempt(s) — an external worker is stealing this fixture before this test's own scoped claim runs.`);
+    }
+  }
+}
+
 describe('processOneJob — retry policy', () => {
   test('a transient EXTERNAL_SERVICE failure is retried and can succeed', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const slept = [];
-    const handler = flakyHandler({ stage: 'repo_checkout', code: 'ETIMEDOUT', succeedOnAttempt: 2 });
-
-    const result = await processOneJob({ handler, siteId, sleep: fakeSleep(slept) });
+    const { job, handler, slept, result } = await withOwnJob(siteId, {
+      makeHandler: () => flakyHandler({ stage: 'repo_checkout', code: 'ETIMEDOUT', succeedOnAttempt: 2 }),
+    });
 
     assert.equal(result.status, 'completed', 'a recovered job completes normally');
     assert.equal(handler.attemptCount(), 2, 'exactly one retry was needed');
@@ -86,11 +108,10 @@ describe('processOneJob — retry policy', () => {
 
   test('a transient failure that never recovers stops at the bounded limit', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const slept = [];
-    const handler = flakyHandler({ stage: 'repo_checkout', code: 'ETIMEDOUT' }); // never succeeds
-
-    const result = await processOneJob({ handler, siteId, maxAttempts: 3, sleep: fakeSleep(slept) });
+    const { job, handler, slept, result } = await withOwnJob(siteId, {
+      makeHandler: () => flakyHandler({ stage: 'repo_checkout', code: 'ETIMEDOUT' }), // never succeeds
+      options: { maxAttempts: 3 },
+    });
 
     assert.equal(result.status, 'failed');
     assert.equal(handler.attemptCount(), 3, 'bounded — never an infinite loop');
@@ -103,11 +124,9 @@ describe('processOneJob — retry policy', () => {
 
   test('a DEPLOYMENT failure is never retried', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const slept = [];
-    const handler = flakyHandler({ stage: 'python_startup', code: 'ENOENT' });
-
-    const result = await processOneJob({ handler, siteId, sleep: fakeSleep(slept) });
+    const { job, handler, slept, result } = await withOwnJob(siteId, {
+      makeHandler: () => flakyHandler({ stage: 'python_startup', code: 'ENOENT' }),
+    });
 
     assert.equal(result.status, 'failed');
     assert.equal(handler.attemptCount(), 1, 'retrying cannot install a missing interpreter');
@@ -119,51 +138,48 @@ describe('processOneJob — retry policy', () => {
 
   test('a CLIENT_REPO failure is never retried automatically', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const slept = [];
     // Same stage as the transient case above — only the errno differs. This
     // is the distinction the whole policy rests on.
-    const handler = flakyHandler({ stage: 'repo_checkout', code: null });
-
-    const result = await processOneJob({ handler, siteId, sleep: fakeSleep(slept) });
+    const { handler, slept, result } = await withOwnJob(siteId, {
+      makeHandler: () => flakyHandler({ stage: 'repo_checkout', code: null }),
+    });
 
     assert.equal(result.status, 'failed');
     assert.equal(handler.attemptCount(), 1);
     assert.deepEqual(slept, []);
-    const row = await jobRow(job.id);
+    const row = await jobRow(result.jobId);
     assert.equal(row.result.failure.failureClass, 'FAILED_BECAUSE_CLIENT_REPOSITORY_IS_BROKEN');
   });
 
   test('an AGENT_LOGIC failure is never retried', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const slept = [];
-    const handler = flakyHandler({ stage: 'result_validation' });
-
-    const result = await processOneJob({ handler, siteId, sleep: fakeSleep(slept) });
+    const { handler, result } = await withOwnJob(siteId, {
+      makeHandler: () => flakyHandler({ stage: 'result_validation' }),
+    });
 
     assert.equal(result.status, 'failed');
     assert.equal(handler.attemptCount(), 1, 'the same input would produce the same bad output');
-    const row = await jobRow(job.id);
+    const row = await jobRow(result.jobId);
     assert.equal(row.result.failure.failureClass, 'FAILED_BECAUSE_AGENT_LOGIC_IS_WRONG');
   });
 
   test('the ORIGINAL failure is preserved when a retry later fails differently', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    let attempts = 0;
-    const handler = async () => {
-      attempts += 1;
-      const err = new UserFacingError('induced');
-      // Transient first (so it retries), then a different, terminal fault.
-      if (attempts === 1) { err.stage = 'agent_run'; err.timedOut = true; }
-      else { err.stage = 'result_validation'; }
-      throw err;
-    };
+    const { result } = await withOwnJob(siteId, {
+      makeHandler: () => {
+        let attempts = 0;
+        return async () => {
+          attempts += 1;
+          const err = new UserFacingError('induced');
+          // Transient first (so it retries), then a different, terminal fault.
+          if (attempts === 1) { err.stage = 'agent_run'; err.timedOut = true; }
+          else { err.stage = 'result_validation'; }
+          throw err;
+        };
+      },
+    });
 
-    await processOneJob({ handler, siteId, sleep: fakeSleep([]) });
-
-    const row = await jobRow(job.id);
+    const row = await jobRow(result.jobId);
     assert.equal(row.result.failure.errorCode, 'AGENT_RESULT_UNUSABLE', 'final failure is recorded');
     assert.equal(row.result.failure.firstFailure.errorCode, 'AGENT_RUN_TIMEOUT',
       'the original trigger is not lost behind the last symptom');
@@ -171,17 +187,16 @@ describe('processOneJob — retry policy', () => {
 
   test('secrets never enter the persisted failure information', async () => {
     const siteId = await makeSite();
-    const job = await createDesignAgentJob(siteId, null, { params: { mode: 'fixture-demo' } });
-    const handler = async () => {
-      // A realistic provider error: carries a token and a hostname.
-      const err = new Error('remote: Invalid credentials ghp_LIVESECRET123 for https://api.github.com/repos/x/y');
-      err.stage = 'repo_checkout';
-      throw err;
-    };
+    const { result } = await withOwnJob(siteId, {
+      makeHandler: () => async () => {
+        // A realistic provider error: carries a token and a hostname.
+        const err = new Error('remote: Invalid credentials ghp_LIVESECRET123 for https://api.github.com/repos/x/y');
+        err.stage = 'repo_checkout';
+        throw err;
+      },
+    });
 
-    await processOneJob({ handler, siteId, sleep: fakeSleep([]) });
-
-    const row = await jobRow(job.id);
+    const row = await jobRow(result.jobId);
     const persisted = JSON.stringify(row.result) + JSON.stringify(row.logs);
     assert.equal(persisted.includes('ghp_LIVESECRET123'), false, 'the token must never reach a readable row');
     assert.equal(persisted.includes('api.github.com'), false, 'nor the provider hostname');

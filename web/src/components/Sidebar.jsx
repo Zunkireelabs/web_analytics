@@ -38,7 +38,11 @@ const GROWTH_TOOLS_NAV = [
 ];
 
 // Staff-only pages — operate across every client's site, not just the
-// session's own, so they stay behind isInternal.
+// session's own. Both routes' entire API surface is requirePlatformRole
+// ('platform_admin')-gated server-side (server/routes/clients.js,
+// dataAnalyst.js, keywords.js), so this section is shown on isPlatformAdmin,
+// not isInternal — an internal-site session that's only tenant_admin/
+// tenant_member has no use for a nav entry whose every real request 404s.
 const INTERNAL_NAV = [
   { to: '/clients', label: 'Clients', icon: Building2 },
   { to: '/analyst', label: 'Analyst', icon: LineChart },
@@ -175,7 +179,7 @@ export default function Sidebar({ sites, siteId, isInternal, isPlatformAdmin, on
             <SidebarSection id="growth" label="Growth Tools" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
               links={GROWTH_TOOLS_NAV} isActive={isActive} open={!collapsed.growth} onToggle={toggleSection} />
 
-            {isInternal && (
+            {isPlatformAdmin && (
               <SidebarSection id="internal" label="Internal Console" tint="text-[#6C63FF] hover:text-[#6C63FF]/80"
                 links={INTERNAL_NAV} isActive={isActive} open={!collapsed.internal} onToggle={toggleSection} />
             )}

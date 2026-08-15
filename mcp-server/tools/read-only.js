@@ -15,7 +15,7 @@ import { listGeneratorMeta } from '../../server/generators/registry.js';
 import { listDrafts, getDraft } from '../../server/store/drafts.js';
 import { buildRecommendations } from '../../server/agents/lib/recommendations.js';
 import { getAuthorityScoreSeries } from '../../server/store/authority.js';
-import { getMonthlyMentionRate } from '../../server/store/ai-recommendation.js';
+import { getMonthlyMentionRate, getWeeklyMentionRate } from '../../server/store/ai-recommendation.js';
 import { getOwnStructuralScoreSeries } from '../../server/store/competitor-profiles.js';
 import { getForecasts, getAnomalyAlerts, getSiteProfile, getKeywordClusters, getKeywordGaps } from '../../server/store/data-analyst.js';
 import { dateStr, jsonResult, withErrorHandling } from './shared.js';
@@ -197,6 +197,11 @@ export function registerReadOnlyTools(server, siteId) {
     description: 'Real AI-engine recommendation mention rate (%), rolled up to calendar month, between two dates, oldest first. Empty if AI recommendation tracking is not enabled for this site.',
     inputSchema: { start: dateStr, end: dateStr },
   }, withErrorHandling('get_ai_recommendation_visibility_series', async ({ start, end }) => jsonResult(await getMonthlyMentionRate(siteId, start, end))));
+
+  server.registerTool('get_ai_recommendation_visibility_weekly_series', {
+    description: 'Real AI-engine recommendation mention rate (%), rolled up to calendar week (Monday-start), between two dates, oldest first. Empty if AI recommendation tracking is not enabled for this site.',
+    inputSchema: { start: dateStr, end: dateStr },
+  }, withErrorHandling('get_ai_recommendation_visibility_weekly_series', async ({ start, end }) => jsonResult(await getWeeklyMentionRate(siteId, start, end))));
 
   server.registerTool('get_competitor_structural_score_series', {
     description: "Real snapshots of this site's own competitor-structural-readiness score between two dates, oldest first, one value per real run (deduped across the competitor rows written in that run).",

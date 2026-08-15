@@ -13,6 +13,10 @@ from app.db.session import get_session
 
 router = APIRouter()
 
+# How many of the newest insights the dashboard read returns. See the comment
+# at the query itself for why this is not tighter.
+INSIGHT_LIMIT = 200
+
 
 @router.get("/dashboard/{client_id}")
 async def get_dashboard(client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session)) -> dict:
@@ -31,12 +35,32 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
         select(func.max(IngestionRun.created_at)).where(IngestionRun.client_id == client.id, IngestionRun.status == "ok")
     )
 
+    # The dashboard groups these by metric_key client-side, so a cap that is
+    # too tight silently drops signal rather than merely shortening a list: a
+    # single noisy metric can occupy every slot and hide every other metric's
+    # findings entirely. Still bounded — this is a cache-only read that must
+    # stay fast — just bounded well above the number of metrics in the catalog.
     insights_rows = (
-        await session.execute(select(Insight).where(Insight.client_id == client.id).order_by(Insight.generated_at.desc()).limit(20))
+        await session.execute(select(Insight).where(Insight.client_id == client.id).order_by(Insight.generated_at.desc()).limit(INSIGHT_LIMIT))
     ).scalars().all()
+
+    # One query for every recommendation instead of one per insight. At the
+    # old limit of 20 the N+1 was tolerable; at this limit it would be the
+    # slowest part of the endpoint.
+    recs_by_insight = {}
+    if insights_rows:
+        rec_rows = (
+            await session.execute(
+                select(AnalystRecommendations).where(
+                    AnalystRecommendations.insight_id.in_([i.id for i in insights_rows])
+                )
+            )
+        ).scalars().all()
+        recs_by_insight = {r.insight_id: r for r in rec_rows}
+
     insights = []
     for i in insights_rows:
-        rec = (await session.execute(select(AnalystRecommendations).where(AnalystRecommendations.insight_id == i.id))).scalar_one_or_none()
+        rec = recs_by_insight.get(i.id)
         if rec is not None and rec.status in ("resolved", "dismissed"):
             continue  # staff already marked this occurrence solved or not worth acting on
         insights.append({
@@ -86,6 +110,7 @@ async def get_metric_series(
     return {
         "client": {"id": client.id, "name": client.name},
         "metric_key": metric.metric_key, "display_name": metric.display_name, "unit": metric.unit,
+        "cadence": metric.cadence,
         "series": [
             {"date": period_start.isoformat(), "value": float(value) if value is not None else None}
             for period_start, value in rows
@@ -131,6 +156,7 @@ async def _metric_card(session: AsyncSession, client_id: int, metric: MetricCata
 
     return {
         "metric_key": metric.metric_key, "display_name": metric.display_name, "unit": metric.unit,
+        "cadence": metric.cadence,
         "visualization_type": metric.visualization_type, "icon": metric.icon,
         "latest_value": float(latest.value) if latest and latest.value is not None else None,
         "latest_date": latest.period_start.isoformat() if latest else None,

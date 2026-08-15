@@ -37,6 +37,48 @@ export function classifyIntent(message) {
   return 'unknown';
 }
 
+// Every role's fallback for a question the deterministic intents above don't
+// cover — "why did traffic drop", "which pages have wins", anything about
+// the site's real data rather than its onboarding state. Tries the
+// findings-routing engine (ask_growth_copilot, the former standalone
+// "Growth Copilot") FIRST for everyone: it already covers the full agent
+// catalog (SEO, GEO, AEO, security, content...), not just statistics, and
+// carries real cited evidence + a Generate Draft affordance the plainer
+// Python stats path below cannot produce.
+//
+// A platform_admin gets a SECOND attempt at the standalone data-analyst-agent
+// (deeper forecasting/keyword-distance tools the findings engine doesn't
+// have) only if the first call outright failed — not merely answered
+// honestly that it had nothing, which is a real answer, not a failure.
+// ask_analyst_data's own requiredRole enforces platform_admin too — belt and
+// suspenders, since this is what lets an ambiguous question reach it at all.
+//
+// Failures (either service unreachable) are swallowed, never surfaced as a
+// raw error, because the caller always has the deterministic capability-list
+// reply to fall back to.
+async function tryDataFallback(ctx, message, conversationId, deps) {
+  try {
+    const result = await invokeCapability('ask_growth_copilot', ctx, { message, conversationId }, deps);
+    if (result.ok) {
+      return {
+        state: ASSISTANT_STATE.READY,
+        message: result.data.answer,
+        data: { conversationId: result.data.conversationId, citedFindings: result.data.citedFindings, followUps: result.data.followUps },
+        actions: (result.data.followUps || []).map((q) => ({ id: 'follow_up', label: q })),
+      };
+    }
+  } catch { /* fall through to the admin-only stats path below */ }
+
+  if (ctx.role !== 'platform_admin') return null;
+  try {
+    const result = await invokeCapability('ask_analyst_data', ctx, { question: message }, deps);
+    if (!result.ok) return null;
+    return { state: ASSISTANT_STATE.READY, message: result.data.answer, data: { toolCalls: result.data.toolCalls }, actions: [] };
+  } catch {
+    return null;
+  }
+}
+
 // Which unresolved item a message refers to.
 //
 // Named reference is tried FIRST and is the important case: "why are you
@@ -81,7 +123,7 @@ function resolveReference(message, unresolved) {
 // Every reply is { state, message, data, actions } — `data` is the structured
 // result the message was composed from, so a UI can render richly and a
 // reviewer can check that the words match the system's actual state.
-export async function handleMessage({ ctx, message, deps = {} } = {}) {
+export async function handleMessage({ ctx, message, deps = {}, conversationId = null } = {}) {
   const intent = classifyIntent(message);
 
   const status = await invokeCapability('get_onboarding_status', ctx, {}, deps);
@@ -121,7 +163,14 @@ export async function handleMessage({ ctx, message, deps = {} } = {}) {
 
     case 'explain': {
       const target = resolveReference(message, unresolved);
-      if (!target) return { state: onboarding.state, message: 'There is no pending decision to explain right now.', data: {}, actions: [] };
+      if (!target) {
+        // No pending decision matches "why" — this is usually a real
+        // question about the site's data ("why did clicks drop"), not an
+        // onboarding one.
+        const fallback = await tryDataFallback(ctx, message, conversationId, deps);
+        if (fallback) return fallback;
+        return { state: onboarding.state, message: 'There is no pending decision to explain right now.', data: {}, actions: [] };
+      }
       const rec = recommendForFinding(target);
       return { state: onboarding.state, message: composeExplanation(rec), data: { recommendation: rec }, actions: [] };
     }
@@ -196,13 +245,18 @@ export async function handleMessage({ ctx, message, deps = {} } = {}) {
       };
     }
 
-    default:
+    default: {
+      const fallback = await tryDataFallback(ctx, message, conversationId, deps);
+      if (fallback) return fallback;
       return {
         state: onboarding.state,
-        message: `I can tell you how onboarding is going, what needs your decision, what the agents have been doing, or why something failed — and I can run discovery and configure what I can prove.`,
+        message: ctx.role === 'platform_admin'
+          ? `I can tell you how onboarding is going, what needs your decision, what the agents have been doing, or why something failed; run discovery and configure what I can prove; or ask about this site's traffic, findings, and forecasts.`
+          : `I can tell you how onboarding is going, what needs your decision, what the agents have been doing, why something failed, or anything about this site's traffic and findings — and I can run discovery and configure what I can prove.`,
         data: { available: capabilitiesFor(ctx.role) },
         actions: [],
       };
+    }
   }
 }
 

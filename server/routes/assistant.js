@@ -34,10 +34,10 @@ async function resolveContext(req) {
 
 router.post('/assistant/message', async (req, res, next) => {
   try {
-    const { message } = req.body || {};
+    const { message, conversationId } = req.body || {};
     if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
     const ctx = await resolveContext(req);
-    const result = await handleMessage({ ctx, message });
+    const result = await handleMessage({ ctx, message, conversationId: conversationId || null });
     res.json(result);
   } catch (e) { next(e); }
 });

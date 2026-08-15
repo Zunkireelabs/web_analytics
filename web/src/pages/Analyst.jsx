@@ -1,30 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
-import AnalystGrowthPulse from '../components/AnalystGrowthPulse.jsx';
+import AnalystBriefing from '../components/AnalystBriefing.jsx';
+import AnalystGrowthOutlook from '../components/AnalystGrowthOutlook.jsx';
+import AnalystMetricIntelligence from '../components/AnalystMetricIntelligence.jsx';
+import AnalystGrowthOpportunities from '../components/AnalystGrowthOpportunities.jsx';
 import AnalystProductCapabilities from '../components/AnalystProductCapabilities.jsx';
 import AnalystTopicMap from '../components/AnalystTopicMap.jsx';
 import AnalystKeywordOpportunities from '../components/AnalystKeywordOpportunities.jsx';
 import AnalystGrowKeyword from '../components/AnalystGrowKeyword.jsx';
-import AnalystImpressionForecast from '../components/AnalystImpressionForecast.jsx';
 import AnalystChatDrawer from '../components/AnalystChatDrawer.jsx';
 import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
 import { Activity, AlertTriangle } from 'lucide-react';
 
-// The Analyst agent does three jobs, so this page shows three things,
-// full-width and stacked (not squeezed into a two-column layout anymore —
-// "Ask the analyst" moved to a floating drawer, see AnalystChatDrawer):
+// The page reads top-to-bottom as one argument, future first:
 //
-//   1. Growth Outlook — the proactive read: where the two headline metrics
-//      are forecast to land, and the single most urgent thing to fix before
-//      it drops, promoted out of Impression Forecast's own list.
-//   2. Keyword Opportunities — what people search for that we could rank for
-//      (already-ranking near-page-1 terms), plus Keyword Discovery — net-new
-//      topics queued for Action Center, and Grow for a keyword to seed one
-//      by hand regardless of what the site profiler has picked up yet.
-//   3. Impression Forecast — the full trend chart plus every decline insight
-//      found, each with its own real Fix/Dismiss/Send-to-Action-Center
-//      controls (Growth Outlook's CTA jumps straight here).
+//   1. Growth Outlook — the hero. Every forecastable headline metric (not
+//      just impressions and clicks) with its projected direction, plus the
+//      Past → Today → Forecast chart, promoted here from the bottom of the
+//      page where it used to be buried inside Impression Forecast.
+//   2. What needs attention — one card per METRIC, merging the observed
+//      decline, the projected one, the root cause and the fix into a single
+//      story, with the low-volume noise demoted below a fold.
+//   3. Growth Opportunities — website-wide, ranked, built from real GSC
+//      query+page data + the keyword_gaps queue (not the stale 14-day
+//      keyword_clusters snapshot). Answers "where can this site grow next?"
+//      without requiring a keyword to already be picked.
+//   4. Product Capabilities / Topic Map — context for what the site sells.
+//   5. Keyword Opportunities (Close to Page 1 + Discovery) + Grow a keyword.
+//
+// Growth Outlook and What-needs-attention together replace the old
+// AnalystGrowthPulse + AnalystImpressionForecast pair, which split the same
+// intelligence across two sections at opposite ends of the page: a metric's
+// past decline appeared in one and its forecast decline in the other, with no
+// indication they were the same story.
+//
+// Growth Opportunities (agents/lib/growth-opportunities.js) and the older
+// Keyword Opportunities section below it currently have two SEPARATE
+// "close to page 1" views — the older one still reads the stale
+// keyword_clusters snapshot. Rewiring it onto the same canonical model is
+// the next phase, not done here.
 //
 // This page previously rendered nine sections wrapped in a personalization
 // layer (drag-to-reorder, show/hide toggles, four layout presets, theme and
@@ -39,6 +54,13 @@ function AnalystBody({ clientId }) {
   // Bumped when the chat queues a new keyword, so the keyword section reloads
   // its gap list without either component knowing about the other.
   const [keywordRefreshToken, setKeywordRefreshToken] = useState(0);
+  // Which real integrations THIS client has connected — Growth Opportunities,
+  // Topic Map, and Keyword Opportunities below are all functionally built
+  // from GSC data (see their own empty-state copy), so a client with no
+  // Search Console connected should be told THAT specifically instead of
+  // just showing the same generic "nothing here yet" every under-provisioned
+  // client sees, indistinguishable from "connected but genuinely quiet."
+  const [gscConnected, setGscConnected] = useState(null);
 
   // Only the newest request may commit its result — switching clients quickly
   // otherwise lets a slower earlier response overwrite the current one.
@@ -58,6 +80,16 @@ function AnalystBody({ clientId }) {
   };
 
   useEffect(() => { load(); }, [clientId]);
+
+  useEffect(() => {
+    setGscConnected(null);
+    api.integrations.health(clientId)
+      .then((rows) => {
+        const gsc = rows.find((r) => r.id === 'google-oauth');
+        setGscConnected(gsc ? gsc.status === 'ok' : null);
+      })
+      .catch(() => setGscConnected(null));
+  }, [clientId]);
 
   if (error) {
     return (
@@ -79,11 +111,28 @@ function AnalystBody({ clientId }) {
 
   return (
     <div className="space-y-5">
+      <AnalystBriefing clientId={clientId} />
+
+      {gscConnected === false && (
+        <div className="an-panel p-4 border-amber-300/50 bg-amber-50/60 text-amber-800 text-xs font-semibold flex items-center gap-2">
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>Search Console isn't connected for this client — Growth Opportunities, Topic Map, and Keyword Opportunities below will stay empty until it is.</span>
+        </div>
+      )}
+
       {dashboard === null ? (
         <AnalystSkeletonLoader variant="card" />
       ) : (
-        <AnalystGrowthPulse dashboard={dashboard} />
+        <AnalystGrowthOutlook clientId={clientId} dashboard={dashboard} />
       )}
+
+      {dashboard === null ? (
+        <AnalystSkeletonLoader variant="card" />
+      ) : (
+        <AnalystMetricIntelligence clientId={clientId} dashboard={dashboard} onChanged={load} />
+      )}
+
+      <AnalystGrowthOpportunities clientId={clientId} />
 
       <AnalystProductCapabilities clientId={clientId} />
 
@@ -95,12 +144,6 @@ function AnalystBody({ clientId }) {
         clientId={clientId}
         onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
       />
-
-      {dashboard === null ? (
-        <AnalystSkeletonLoader variant="card" />
-      ) : (
-        <AnalystImpressionForecast clientId={clientId} dashboard={dashboard} onChanged={load} />
-      )}
 
       <AnalystChatDrawer clientId={clientId} dashboard={dashboard} />
     </div>
@@ -138,7 +181,7 @@ export default function Analyst() {
           <div>
             <h1 className="text-lg font-black text-slate-900 tracking-tight">Analyst</h1>
             <p className="text-xs font-medium text-slate-500 mt-0.5">
-              Keywords worth growing, and what's about to drop
+              What's growing, what's about to change, and where this site can grow next
             </p>
           </div>
 
