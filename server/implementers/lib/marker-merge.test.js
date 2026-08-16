@@ -253,6 +253,21 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<strong>important<\/strong>/);
   });
 
+  test('expand-content renders a "- " bullet list (external-citations\' natural multi-source shape) as a real <ul><li>, never leaking literal "- " as visible text', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'References',
+        body: '- [Source One](https://example.com/one)\n- [Source Two](https://example.com/two)',
+      }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.expandedContent, />-\s/);
+    assert.match(
+      result.values.expandedContent,
+      /<ul><li><a href="https:\/\/example\.com\/one">Source One<\/a><\/li><li><a href="https:\/\/example\.com\/two">Source Two<\/a><\/li><\/ul>/,
+    );
+  });
+
 
   test('qa-content falls back to a native <details>/<summary> with a real <h3> question — no site-specific CSS required to look correct', () => {
     const result = buildMergeValues('qa-content', {
