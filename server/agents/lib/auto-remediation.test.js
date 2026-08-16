@@ -16,9 +16,10 @@ let draftedFindingIds;
 let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
-const calls = { generated: [], approved: [], prsOpened: [] };
+const calls = { generated: [], approved: [], prsOpened: [], closed: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
+let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
 // (attemptNumber) => Error | null — full control over what generateDraft
 // throws, for the cases where the shape of the error is what's under test
 // (an explicit `refusal` flag on a 5xx, an unflagged 5xx) rather than merely
@@ -37,8 +38,10 @@ function reset() {
   calls.generated = [];
   calls.approved = [];
   calls.prsOpened = [];
+  calls.closed = [];
   failOn = () => false;
   refuseOn = () => false;
+  staleOn = () => false;
   generateError = () => null;
   generateAttempts = 0;
   approveOpensPr = false;
@@ -53,7 +56,10 @@ function rec(id, { riskTier = 'safe', type = 'meta-title' } = {}) {
 }
 
 mock.module(resolve('../../store/recommendations.js'), {
-  namedExports: { listOpenRecommendations: async () => recommendations },
+  namedExports: {
+    listOpenRecommendations: async () => recommendations,
+    closeRecommendation: async (id) => { calls.closed.push(id); },
+  },
 });
 mock.module(resolve('../../store/drafts.js'), {
   namedExports: {
@@ -86,6 +92,9 @@ mock.module(resolve('../../routes/action-center.js'), {
       // The shape real generators use to decline an item honestly — e.g. schema.js's
       // "had no real data on the page" and expand-content.js's ungrounded-citations
       // refusal, both { status: 400, userFacing: true }.
+      if (staleOn(generatorId)) {
+        throw Object.assign(new Error(`${generatorId} already has real data — nothing left to fix`), { status: 400, userFacing: true, refusal: true, stale: true });
+      }
       if (refuseOn(generatorId)) {
         throw Object.assign(new Error(`refusing to draft ${generatorId} — no real data`), { status: 400, userFacing: true });
       }
@@ -347,6 +356,25 @@ describe('principled refusals vs systemic faults', () => {
     assert.equal(result.failed, 2);
     assert.equal(result.refused, 2);
     assert.equal(result.shipped, 0);
+  });
+
+  test('a stale refusal (generator proves the premise is already gone) closes the recommendation', async () => {
+    staleOn = (type) => type === 'schema';
+    recommendations = [rec(1, { type: 'schema' }), rec(2)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.refused, 1);
+    assert.deepEqual(calls.closed, [1], 'the stale recommendation is closed so tomorrow\'s run does not re-refuse it');
+  });
+
+  test('an ordinary refusal (not stale) never closes the recommendation', async () => {
+    refuseOn = (type) => type === 'schema';
+    recommendations = [rec(1, { type: 'schema' })];
+
+    await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.closed, [], 'a refusal that says nothing about the recommendation being resolved must leave it open');
   });
 });
 

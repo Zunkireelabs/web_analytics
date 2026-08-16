@@ -113,9 +113,14 @@ export async function generate({ siteId, params }) {
   // trusting the caller). Fail outright — regenerating the LLM call can't
   // change the fact the type is already there.
   if (existingSchemaTypes.includes(schemaType)) {
+    // stale: true — this isn't a case the generator can't handle, it's proof
+    // the recommendation's own premise (no schema of this type) is no longer
+    // true. Left as an ordinary refusal, this recommendation stays 'open' and
+    // gets re-attempted (and re-refused) by every future run forever — see
+    // auto-remediation.js's stale-refusal handling, which closes it instead.
     throw Object.assign(
       new Error(`This page already has real "${schemaType}" schema — drafting another would duplicate it, not fix a gap.`),
-      { status: 400, userFacing: true },
+      { status: 400, userFacing: true, refusal: true, stale: true },
     );
   }
 

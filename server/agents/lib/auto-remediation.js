@@ -1,4 +1,4 @@
-import { listOpenRecommendations } from '../../store/recommendations.js';
+import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
@@ -328,6 +328,21 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
         // still exists in the log so a reader can see the full picture, a
         // refusal just never moves the learned score either direction.
         recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id }).catch(() => {});
+        // err.stale === true means the generator itself found live evidence
+        // the recommendation's premise is no longer true (e.g. schema.js
+        // discovering the page already has real schema of the recommended
+        // type) — not "can't fix this", but "there's nothing left to fix".
+        // Left merely 'refused', the row stays open and gets re-attempted
+        // (and re-refused) by every future run forever — confirmed live on
+        // site 1, where the same handful of schema recommendations have
+        // refused on repeat since Aug 14, eating into the refusal-streak
+        // breaker every day without ever converging. Close it the same way
+        // closeStaleRecommendations does (status='superseded'), since this is
+        // exactly what that sweep would eventually conclude too, just
+        // discovered here first and directly instead of on its next pass.
+        if (err?.stale === true) {
+          closeRecommendation(rec.id).catch(() => {});
+        }
       } else {
         consecutiveFailures++;
         consecutiveRefusals = 0;
