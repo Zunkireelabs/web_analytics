@@ -157,6 +157,14 @@ export function createOpenHandsHandler({
   dockerBin = process.env.DESIGN_AGENT_DOCKER_BIN || 'docker',
   timeoutMs = Number(process.env.DESIGN_AGENT_TASK_TIMEOUT_MS || 10 * 60 * 1000),
   killGraceMs = Number(process.env.DESIGN_AGENT_KILL_GRACE_MS || 5000),
+  // Shapes the final { status:'ok', ... } result into whatever this call
+  // site's caller actually wants back — defaults to the original
+  // component-templates/design-profile shape so those two callers (and
+  // every existing test) are byte-identical to before this was added.
+  // createCodeSelfRepairHandler below is the other concrete use: same
+  // spawn/timeout/cleanup machinery, a result shape carrying a patch/
+  // filesChanged/testsPassed instead.
+  mapResult = (result, job) => ({ jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates }),
 } = {}) {
   return async function openHandsHandler(job) {
     const workspaceDir = await mkdtemp(join(tmpdir(), 'design-agent-'));
@@ -240,7 +248,7 @@ export function createOpenHandsHandler({
         wrapped.stage = isEnvironment ? 'python_environment' : 'result_validation';
         throw wrapped;
       }
-      return { jobId: job.id, detail: result.detail, componentTemplates: result.componentTemplates };
+      return mapResult(result, job);
     } finally {
       await backstopDockerCleanup(dockerBin, containerId);
       await rm(workspaceDir, { recursive: true, force: true });
@@ -348,4 +356,56 @@ export function createDesignAgentHandler(options = {}) {
     if (job.params?.mode === 'component-templates') return componentTemplateHandler(job);
     return fixtureDemoHandler(job);
   };
+}
+
+// Platform code self-repair (server/agents/lib/code-self-repair.js): the
+// SAME spawn/stdout-parsing/timeout/SIGKILL-escalation/backstop-cleanup
+// machinery as every handler above, pointed at a checkout of THIS
+// platform's own repository instead of a client site's, running
+// design_task.py's "code-self-repair" mode (an EDITING task, unlike the
+// read-only component-templates/design-profile modes — the whole point is
+// for OpenHands to fix real generator/implementer code and validate it with
+// TerminalTool). checkoutRepoTarballFn is reused unmodified: it only ever
+// required a { repo_owner, repo_name, repo_default_branch? } shape, which a
+// plain platform-repo descriptor object satisfies exactly as a real `site`
+// row would — no new checkout code needed.
+//
+// job shape: { id, generatorId, reason, errorMessage, occurrenceDays,
+// testFileHint, repo: { repo_owner, repo_name, repo_default_branch } }.
+// `repo` is required explicitly (not defaulted here) so this module stays
+// free of any platform-identity constant — code-self-repair.js owns that.
+export function createCodeSelfRepairHandler({ checkoutRepoTarballFn = checkoutRepoTarball, ...options } = {}) {
+  return createOpenHandsHandler({
+    ...options,
+    workspaceSource: (destDir, job) => checkoutRepoTarballFn(job.repo, destDir, { ref: job.repo?.repo_default_branch }),
+    buildArgs: (job) => ['code-self-repair', JSON.stringify({
+      generatorId: job.generatorId,
+      reason: job.reason,
+      errorMessage: job.errorMessage,
+      occurrenceDays: job.occurrenceDays,
+      testFileHint: job.testFileHint || null,
+    })],
+    // Independent of componentTemplates/designProfile's shape entirely —
+    // carries what code-self-repair.js needs to validate again itself
+    // (never trusting the sandbox's own self-report, see design_task.py)
+    // and to open a real PR: the full new content of every file the agent
+    // touched (the workspace is deleted right after this resolves, so the
+    // result line is the only surviving copy) plus a unified diff purely
+    // for human-readable PR body text and for-storage as a future known-fix
+    // patch. Only ever built from a `status: 'ok'` result — a failed/
+    // timed-out/errored run throws instead (createOpenHandsHandler above,
+    // unchanged), which is what already makes "tests failed" or "sandbox
+    // crashed" indistinguishable from a bug in this file's own logic: both
+    // are real failures the caller must catch, not a value to branch on.
+    mapResult: (result, job) => ({
+      jobId: job.id,
+      detail: result.detail,
+      rootCause: result.rootCause || null,
+      summary: result.summary || null,
+      testsPassed: result.testsPassed === true,
+      testOutput: result.testOutput || null,
+      patch: result.patch || null,
+      filesChanged: Array.isArray(result.filesChanged) ? result.filesChanged : [],
+    }),
+  });
 }

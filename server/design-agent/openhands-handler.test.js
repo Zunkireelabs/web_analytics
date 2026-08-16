@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createOpenHandsHandler } from './openhands-handler.js';
+import { createOpenHandsHandler, createCodeSelfRepairHandler } from './openhands-handler.js';
 
 // Stubs the entire Python+Docker boundary (see test-support/
 // fake-design-task-*.js and fake-docker.js) — pythonBin/scriptPath/dockerBin
@@ -221,5 +221,45 @@ describe('createOpenHandsHandler — timeout / forced termination', () => {
         assert.match(readIfExists(dockerLog), new RegExp(`rm -f.*${containerId}`), 'Node-side backstop must clean up a container whose own process never got to (SIGKILLed before its cleanup could run)');
       }
     );
+  });
+});
+
+describe('createCodeSelfRepairHandler — platform-repo checkout, payload, and result shape', () => {
+  test('checks out the PLATFORM repo (not a client site), passes the code-self-repair payload, and maps a distinct result shape', async () => {
+    const payloadLog = tempLogPath('payload');
+    const checkoutCalls = [];
+    const platformRepo = { repo_owner: 'Zunkireelabs', repo_name: 'web_analytics', repo_default_branch: 'stage' };
+    await withTestLogs({ DESIGN_AGENT_TEST_PAYLOAD_LOG: payloadLog }, async () => {
+      const handler = createCodeSelfRepairHandler({
+        pythonBin: process.execPath,
+        scriptPath: path.join(testSupportDir, 'fake-design-task-code-self-repair.js'),
+        dockerBin: fakeDockerBin,
+        killGraceMs: 300,
+        checkoutRepoTarballFn: async (repo, destDir) => { checkoutCalls.push(repo); fs.mkdirSync(destDir, { recursive: true }); },
+      });
+      const result = await handler({
+        id: 'expand-content:invalid-edit',
+        repo: platformRepo,
+        generatorId: 'expand-content',
+        reason: 'invalid-edit',
+        errorMessage: 'Auto-generated edit would break syntax',
+        occurrenceDays: 2,
+        testFileHint: 'server/implementers/adapters/lib/js-data-splice.test.js',
+      });
+
+      assert.equal(checkoutCalls.length, 1);
+      assert.deepEqual(checkoutCalls[0], platformRepo, 'must check out the platform repo descriptor, not any client site');
+
+      const payload = JSON.parse(readIfExists(payloadLog));
+      assert.equal(payload.generatorId, 'expand-content');
+      assert.equal(payload.reason, 'invalid-edit');
+      assert.equal(payload.testFileHint, 'server/implementers/adapters/lib/js-data-splice.test.js');
+
+      assert.equal(result.testsPassed, true);
+      assert.equal(result.rootCause, 'stub root cause');
+      assert.equal(result.filesChanged.length, 1);
+      assert.equal(result.filesChanged[0].path, 'server/stub.js');
+      assert.match(result.patch, /diff --git/);
+    });
   });
 });

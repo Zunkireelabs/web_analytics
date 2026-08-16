@@ -318,6 +318,28 @@ export function findScalarFieldRange(content, objRange, fieldName, format = 'js-
   return found.length === 1 ? found[0] : null;
 }
 
+// Escapes a value for embedding in a single-line, single/double-quoted JS
+// string literal: backslashes and the delimiting quote (as spliceScalarField
+// always did), PLUS raw newlines/carriage returns -- an unescaped line
+// terminator inside "..."/'...' is a syntax error (unterminated string), not
+// just cosmetic. This is the exact shape expand-content's rendered
+// multi-line HTML (marker-merge.js's renderExpandedHtml, `\n` between the
+// heading and body of every section) was hitting: assertValidContent
+// correctly refused to apply rather than write broken JS, but every
+// expand-content draft on a data-array-content page failed for it, forever,
+// since nothing upstream produces single-line values. U+2028/U+2029 (line/
+// paragraph separator) are also illegal unescaped in a JS string literal per
+// spec, unlike in a template literal -- escaped here too for the same reason.
+function escapeJsStringLiteral(value, quote) {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+    .replace(new RegExp(escapeRegExp(quote), 'g'), `\\${quote}`);
+}
+
 // Replaces an existing scalar field's string value in place, re-escaping
 // backslashes and the field's own quote character the same minimal way
 // lib/marker-merge.js's applyMarker does for a LINE marker's quoted value —
@@ -326,7 +348,7 @@ export function findScalarFieldRange(content, objRange, fieldName, format = 'js-
 export function spliceScalarField(content, objRange, fieldName, newValue, format = 'js-export-array') {
   const range = findScalarFieldRange(content, objRange, fieldName, format);
   if (!range) return null;
-  const escaped = String(newValue).replace(/\\/g, '\\\\').replace(new RegExp(escapeRegExp(range.quote), 'g'), `\\${range.quote}`);
+  const escaped = escapeJsStringLiteral(String(newValue), range.quote);
   return content.slice(0, range.valueStart) + range.quote + escaped + range.quote + content.slice(range.valueEnd);
 }
 
@@ -345,7 +367,7 @@ export function insertNewScalarField(content, objRange, fieldName, newValue, for
   const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
   const insertPoint = objRange.start + 1 + trimmed.length;
   const key = format === 'json-array' ? JSON.stringify(fieldName) : fieldName;
-  const escaped = String(newValue).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escaped = escapeJsStringLiteral(String(newValue), '"');
   const insertion = `${needsComma ? ',' : ''}\n    ${key}: "${escaped}"\n  `;
   return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
 }

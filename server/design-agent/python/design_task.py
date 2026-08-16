@@ -48,6 +48,27 @@ existing call site/test that only ever passes argv[1]):
   replaces the need to re-analyse the repo once per content type, and is what
   stops each design-sensitive generator inventing its own presentation.
 
+- "code-self-repair" (server/agents/lib/code-self-repair.js): runs against
+  argv[1], a real checkout of THIS platform's OWN repository (not a client
+  site — server/design-agent/openhands-handler.js's
+  createCodeSelfRepairHandler, checked out the same way a tenant repo is,
+  via repo-checkout.js against a platform-repo descriptor instead of a
+  `site` row), on `stage`. Unlike the two modes above, this one EDITS real
+  files: argv[3] is a JSON object {generatorId, reason, errorMessage,
+  occurrenceDays, testFileHint} describing a generator/implementer bug that
+  has now failed identically on at least two separate calendar days across
+  real sites (server/agents/lib/auto-remediation.js's escalation sweep) —
+  investigate the real root cause, make the smallest safe fix, and validate
+  it. The agent's own TerminalTool test run is advisory only; this script
+  independently re-validates every changed file after the agent's turn ends
+  (node --check for syntax, node --test for the given/inferred test file) —
+  see _validate_code_self_repair below — and only reports status:"ok" when
+  that independent check actually passes. `patch` (a unified diff) and
+  `filesChanged` (each file's real new content, since the workspace is
+  deleted right after this process exits) are what the Node side turns into
+  a real branch + PR; nothing here ever commits, pushes, or opens a PR
+  itself — this process only edits files on disk and validates.
+
 Prints two kinds of sentinel lines the Node handler looks for:
 - CONTAINER_PREFIX, as soon as the container exists — captured eagerly (the
   handler reads stdout line-by-line, not just at the end) so it still knows
@@ -69,10 +90,12 @@ __exit__ (-> cleanup() -> `docker stop`, which also removes it since `--rm`
 was used at `docker run` time) still runs before the process actually exits.
 """
 
+import difflib
 import json
 import os
 import re
 import signal
+import subprocess
 import sys
 
 RESULT_PREFIX = "DESIGN_AGENT_RESULT: "
@@ -259,6 +282,181 @@ def build_design_profile_task(lessons=None):
     return task + "\n" + block if block else task
 
 
+# Bounds the before/after snapshot (and therefore what the agent is even
+# told it may touch) to real application code — never migrations (a code fix
+# should not also silently alter the database schema), never
+# package.json/package-lock.json (a dependency change is a decision for a
+# human, not an autonomous repair), never node_modules or .git.
+CODE_SELF_REPAIR_ROOT = "server"
+CODE_SELF_REPAIR_EXCLUDED_DIRS = {"node_modules", ".git", "migrations"}
+
+
+def build_code_self_repair_task(payload):
+    """The investigate-and-fix task for a repeated generator/implementer
+    failure — server/agents/lib/code-self-repair.js only calls this mode
+    once auto-remediation.js's sweep has already confirmed the SAME
+    (generatorId, reason) pair failed on 2+ distinct calendar days, so the
+    prompt states that evidence as a given, not something to re-derive."""
+    generator_id = payload.get("generatorId") or "(unknown generator)"
+    reason = payload.get("reason") or "(unknown reason)"
+    error_message = payload.get("errorMessage") or "(no error message captured)"
+    occurrence_days = payload.get("occurrenceDays")
+    test_file_hint = payload.get("testFileHint")
+
+    lines = [
+        "This directory is a real, complete checkout of this platform's own "
+        f"application repository, on its integration branch ({CODE_SELF_REPAIR_ROOT}/ "
+        "is where all server-side code lives). This is a real code-editing task: "
+        "you may read and edit files, and run commands with the terminal tool.\n",
+        f"A generator/implementer with id \"{generator_id}\" has been failing or "
+        f"refusing with the same reason (\"{reason}\") on at least "
+        f"{occurrence_days or 2} separate calendar days, across real client sites. "
+        "This is not a one-off — it is evidence of a real bug in the shared "
+        "platform code itself, not in any one site's content.\n",
+        f"The error/detail captured from a real failed attempt: {error_message}\n",
+        "Do NOT simply retry the original recommendation or generate new "
+        "content — that is not your job here. Investigate the ACTUAL PLATFORM "
+        "IMPLEMENTATION: find the generator in server/generators/, the "
+        "implementer/adapter in server/implementers/ (and any shared helper it "
+        "calls, e.g. server/implementers/adapters/lib/, server/implementers/lib/) "
+        "that this generator id and failure reason point to. Read the relevant "
+        "code and its existing test file before changing anything.\n",
+        "Identify the real root cause. Implement the SMALLEST safe fix — do not "
+        "refactor, rename, or restructure anything beyond what the bug requires. "
+        "Do not add speculative error handling, comments, or abstractions.\n",
+    ]
+    if test_file_hint:
+        lines.append(
+            f"Run the existing test file at {test_file_hint} with the terminal "
+            f"tool (`node --test {test_file_hint}`) and confirm it passes after "
+            "your fix. If you can write a small additional test case that "
+            "reproduces the original bug, add it to that same file.\n"
+        )
+    else:
+        lines.append(
+            "Find and run this code's existing test file(s) with the terminal "
+            "tool (`node --test <path>`) and confirm they pass after your fix. "
+            "If no test file exists yet for the exact function you changed, add "
+            "a small one next to the code, matching this repo's existing test "
+            "style (node:test + node:assert/strict).\n"
+        )
+    lines.append(
+        f"Only touch files under {CODE_SELF_REPAIR_ROOT}/. Never touch "
+        f"{CODE_SELF_REPAIR_ROOT}/migrations/, package.json, or "
+        "package-lock.json. Do not run any git commands — do not commit, do "
+        "not push; another process handles that after you finish.\n"
+    )
+    lines.append(
+        "When you are done, respond with ONLY a JSON object (no prose, no code "
+        "fence) shaped exactly like:\n"
+        '{"summary": "<one sentence, what was wrong>", '
+        '"rootCause": "<one or two sentences, the real cause>", '
+        '"testCommand": "<the exact command you ran to validate>", '
+        '"testsPassed": true or false}\n'
+        "Report testsPassed truthfully — it will be checked independently "
+        "either way, but a false claim here is worse than an honest failure."
+    )
+    return "\n".join(lines)
+
+
+def _iter_code_files(root_dir):
+    """Every real .js/.mjs source or test file under CODE_SELF_REPAIR_ROOT,
+    skipping the excluded dirs — the bounded set this snapshots before/after
+    the agent's turn to discover exactly what it touched, independent of
+    (and not trusting) its own filesChanged self-report."""
+    base = os.path.join(root_dir, CODE_SELF_REPAIR_ROOT)
+    if not os.path.isdir(base):
+        return
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in CODE_SELF_REPAIR_EXCLUDED_DIRS]
+        for name in filenames:
+            if name.endswith((".js", ".mjs")):
+                yield os.path.relpath(os.path.join(dirpath, name), root_dir)
+
+
+def _snapshot_code_files(root_dir):
+    snapshot = {}
+    for relpath in _iter_code_files(root_dir):
+        try:
+            with open(os.path.join(root_dir, relpath), "r", encoding="utf-8") as f:
+                snapshot[relpath] = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return snapshot
+
+
+def _diff_snapshots(before, after):
+    """Real changed/added files only (never a deleted-file entry — deleting
+    platform code is never the smallest safe fix for a splice/escaping bug,
+    and a legitimate delete needs a human PR description explaining why, not
+    an autonomous one). Returns [{path, newContent, patch}]."""
+    changed = []
+    for relpath, new_content in after.items():
+        old_content = before.get(relpath)
+        if old_content == new_content:
+            continue
+        patch_lines = difflib.unified_diff(
+            (old_content or "").splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{relpath}",
+            tofile=f"b/{relpath}",
+        )
+        changed.append({
+            "path": relpath,
+            "newContent": new_content,
+            "patch": "".join(patch_lines),
+        })
+    return changed
+
+
+def _run_subprocess(cmd, cwd, timeout=120):
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        output = proc.stdout.decode("utf-8", errors="replace")[-4000:]
+        return {"ok": proc.returncode == 0, "output": output}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": f"timed out after {timeout}s"}
+    except OSError as err:
+        return {"ok": False, "output": str(err)}
+
+
+def _validate_code_self_repair(workspace_dir, changed_files, test_file_hint):
+    """The independent validation gate — never trusts the agent's own
+    TerminalTool run or its self-reported testsPassed. A syntactically
+    invalid file, or a failing/missing test run, means this is NOT a
+    successful repair, no matter what the agent's final message claims."""
+    if not changed_files:
+        return {"ok": False, "output": "Agent made no file changes."}
+
+    for entry in changed_files:
+        check = _run_subprocess(["node", "--check", entry["path"]], cwd=workspace_dir, timeout=30)
+        if not check["ok"]:
+            return {"ok": False, "output": f"node --check failed for {entry['path']}:\n{check['output']}"}
+
+    test_targets = [test_file_hint] if test_file_hint else [
+        e["path"] for e in changed_files if e["path"].endswith(".test.js")
+    ]
+    if not test_targets:
+        # A fix with no test file at all to run is not validated, by this
+        # module's own contract — see build_code_self_repair_task's
+        # instruction to add one when none exists.
+        return {"ok": False, "output": "No test file available to validate against (no testFileHint, and the agent added no *.test.js file)."}
+
+    combined_output = []
+    for test_path in test_targets:
+        full_path = os.path.join(workspace_dir, test_path)
+        if not os.path.isfile(full_path):
+            return {"ok": False, "output": f"Expected test file not found after the agent's changes: {test_path}"}
+        result = _run_subprocess(["node", "--test", test_path], cwd=workspace_dir, timeout=120)
+        combined_output.append(f"$ node --test {test_path}\n{result['output']}")
+        if not result["ok"]:
+            return {"ok": False, "output": "\n\n".join(combined_output)}
+    return {"ok": True, "output": "\n\n".join(combined_output)}
+
+
 def _extract_json_object(text):
     """Lenient JSON extraction from an LLM's final message — same tolerance
     server/llm.js's extractJson gives JS callers (strip a code fence, or pull
@@ -338,6 +536,10 @@ def main() -> int:
             # so the argument positions match component-templates mode exactly.
             lessons = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else []
             task = build_design_profile_task(lessons)
+        elif mode == "code-self-repair":
+            payload = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}
+            task = build_code_self_repair_task(payload)
+            code_repair_before = _snapshot_code_files(workspace_dir)
         else:
             task = FIXTURE_DEMO_TASK
 
@@ -380,6 +582,35 @@ def main() -> int:
                     result = {"status": "error", "detail": "Agent did not report a parseable design profile with typography."}
                 else:
                     result["designProfile"] = profile
+            elif mode == "code-self-repair":
+                message_text = _last_agent_message_text(conversation)
+                parsed = _extract_json_object(message_text) or {}
+                code_repair_after = _snapshot_code_files(workspace_dir)
+                changed_files = _diff_snapshots(code_repair_before, code_repair_after)
+                test_file_hint = None
+                try:
+                    test_file_hint = json.loads(sys.argv[3]).get("testFileHint") if len(sys.argv) > 3 and sys.argv[3] else None
+                except (json.JSONDecodeError, AttributeError):
+                    test_file_hint = None
+                validation = _validate_code_self_repair(workspace_dir, changed_files, test_file_hint)
+                if not validation["ok"]:
+                    result = {
+                        "status": "error",
+                        "detail": f"Repair could not be validated: {validation['output']}",
+                        "rootCause": parsed.get("rootCause"),
+                        "summary": parsed.get("summary"),
+                        "testsPassed": False,
+                        "testOutput": validation["output"],
+                    }
+                else:
+                    result.update({
+                        "rootCause": parsed.get("rootCause"),
+                        "summary": parsed.get("summary"),
+                        "testsPassed": True,
+                        "testOutput": validation["output"],
+                        "patch": "\n".join(f["patch"] for f in changed_files),
+                        "filesChanged": [{"path": f["path"], "newContent": f["newContent"]} for f in changed_files],
+                    })
 
         print(RESULT_PREFIX + json.dumps(result))
         return 0 if result["status"] == "ok" else 1

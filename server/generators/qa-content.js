@@ -39,6 +39,22 @@ export async function generate({ siteId, params }) {
     .filter((i) => i && typeof i.question === 'string' && typeof i.answer === 'string' && /\?\s*$/.test(i.question.trim()))
     .slice(0, 5);
 
-  const content = { page, query: query || null, items };
+  // Same deterministic transform faq.js's own schemaJsonLd is, and for the
+  // same reason: marker-merge.js's schema-only mode (render-inspector.js's
+  // visible-FAQ cap/dedup now applies to this generator too — a page that
+  // already has a visible FAQ gets THIS content as structured data only,
+  // never a second visible accordion) needs real JSON-LD to publish, not
+  // just the visible items.
+  const schemaJsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: items.map((i) => ({
+      '@type': 'Question',
+      name: i.question,
+      acceptedAnswer: { '@type': 'Answer', text: i.answer },
+    })),
+  };
+
+  const content = { page, query: query || null, items, schemaJsonLd };
   return { content, summary: `${items.length} Q&A item(s) for ${page}` };
 }

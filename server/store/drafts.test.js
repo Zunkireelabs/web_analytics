@@ -14,6 +14,15 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT DISTINCT d.finding_id')) {
     return { rows: implementedFindingIdsRows };
   }
+  if (sql.startsWith('SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = ANY')) {
+    return { rows: [{ n: 0 }] };
+  }
+  if (sql.startsWith('SELECT DISTINCT COALESCE(content')) {
+    return { rows: [] };
+  }
+  if (sql.startsWith('SELECT 1 FROM drafts')) {
+    return { rows: [] };
+  }
   throw new Error(`drafts.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -21,7 +30,10 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 mock.module(resolve('../db.js'), {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
-const { markDraftBranchPushed, getImplementedFindingIds } = await import('./drafts.js');
+const {
+  markDraftBranchPushed, getImplementedFindingIds,
+  countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
+} = await import('./drafts.js');
 
 beforeEach(() => { issued = []; implementedFindingIdsRows = []; });
 
@@ -79,5 +91,36 @@ describe('markDraftBranchPushed — target_provenance', () => {
     const update = issued.find((q) => q.sql.includes("status = 'branch_pushed'"));
     assert.equal(update.params[5], JSON.stringify(['src/a.njk']));
     assert.equal(update.params[6], null);
+  });
+});
+
+// qa-content.js renders the same kind of visible accordion block 'faq' does
+// (render-inspector.js's INSPECTABLE_ACTION_TYPES), so it shares the same
+// sitewide visible-FAQ cap/dedup — a page that already has a visible FAQ
+// from EITHER mechanism must not get a second one from the other. Regression
+// coverage for the bug this closes: qa-content added a duplicate visible FAQ
+// to a page that already had one, because these three queries only ever
+// looked for action_type = 'faq', never noticing qa-content's own visible
+// blocks (or vice versa).
+describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
+  test('countVisibleFaqDrafts filters on both action types, not just faq', async () => {
+    await countVisibleFaqDrafts(1);
+    const q = issued.find((q) => q.sql.includes('COUNT(*)::int AS n FROM drafts'));
+    assert.ok(q, 'expected the count query to run');
+    assert.deepEqual(q.params[1], ['faq', 'qa-content']);
+  });
+
+  test('distinctVisibleFaqDraftPages filters on both action types', async () => {
+    await distinctVisibleFaqDraftPages(1);
+    const q = issued.find((q) => q.sql.startsWith('SELECT DISTINCT COALESCE(content'));
+    assert.ok(q);
+    assert.deepEqual(q.params[1], ['faq', 'qa-content']);
+  });
+
+  test('hasImplementedVisibleFaqForPage filters on both action types', async () => {
+    await hasImplementedVisibleFaqForPage(1, 'https://example.com/x');
+    const q = issued.find((q) => q.sql.startsWith('SELECT 1 FROM drafts'));
+    assert.ok(q);
+    assert.deepEqual(q.params[2], ['faq', 'qa-content']);
   });
 });

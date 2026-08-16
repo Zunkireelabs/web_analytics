@@ -310,7 +310,13 @@ export default function ActionCenter() {
     setGeneratingId(item.id);
     setError(null);
     try {
-      const draft = await api.actionCenter.generate(item.generatorId, item.params, item.source, item.id, siteId);
+      // findingId must be the recommendation's real finding key (item.findingIds[0]),
+      // NOT item.id (the recommendation's own row id) — getRecommendations only
+      // hides a recommendation once one of its real finding_ids has a draft, so a
+      // draft stamped with the row id instead can never match and the
+      // recommendation stays "open" forever even after its PR ships. Confirmed
+      // live: two shipped drafts (PR #53) whose recommendations never closed.
+      const draft = await api.actionCenter.generate(item.generatorId, item.params, item.source, item.findingIds?.[0], siteId);
       setActiveDraft(draft);
       // The backend now excludes any already-drafted finding from
       // recommendations — refresh recs too so this item disappears from the

@@ -291,11 +291,34 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, false);
   });
 
-  test('qa-content has no schema-only representation', () => {
+  // Regression: a page that already has a visible FAQ must be able to get
+  // qa-content as structured data only, the same way 'faq' can — otherwise
+  // render-inspector.js's cap/dedup deciding 'schema-only' for this
+  // generator would have nothing it could actually publish, since the mode
+  // decision and the content-building capability have to agree.
+  test('qa-content schema-only mode publishes real JSON-LD, mirroring faq', () => {
+    const schemaJsonLd = { '@type': 'FAQPage', mainEntity: [{ '@type': 'Question', name: 'What is this?' }] };
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }], schemaJsonLd,
+    }, 'schema-only');
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<script type="application\/ld\+json">.*"@type":"FAQPage"/);
+    assert.doesNotMatch(result.values.qaContent, /<details>/, 'schema-only must not also publish the visible accordion');
+  });
+
+  test('qa-content schema-only mode fails honestly with no schemaJsonLd to publish', () => {
     const result = buildMergeValues('qa-content', {
       items: [{ question: 'What is this?', answer: 'A real answer.' }],
     }, 'schema-only');
     assert.equal(result.ok, false);
+  });
+
+  test('qa-content still appends the JSON-LD schema after the visible block, mirroring faq', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }], schemaJsonLd,
+    });
+    assert.match(result.values.qaContent, /<script type="application\/ld\+json">.*"@type":"FAQPage"/);
   });
 
   test('internal-links falls back to a bare, unstyled <ul> when the site has no configured template', () => {

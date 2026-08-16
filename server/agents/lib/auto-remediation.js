@@ -4,6 +4,7 @@ import { getSiteById } from '../../store/read.js';
 import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
+import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -327,7 +328,18 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
         // failure — see generator-learning.js's POSITIVE/NEGATIVE sets. It
         // still exists in the log so a reader can see the full picture, a
         // refusal just never moves the learned score either direction.
-        recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id }).catch(() => {});
+        //
+        // detail carries err.reason (a short, stable code like
+        // 'invalid-edit' — see implementers' {ok:false, reason, error}
+        // contract) rather than the full message: this is what lets
+        // code-self-repair.js's escalation sweep group repeats of the SAME
+        // underlying problem across days/sites, the same way the 'failed'
+        // branch below already does with err.message. Previously this was
+        // the one gap — a refusal's reason was never persisted at all.
+        recordOutcome(siteId, rec.recommendation_type, 'refused', { recommendationId: rec.id, detail: err?.reason || null }).catch(() => {});
+        maybeEscalateToCodeRepair({ generatorId: rec.recommendation_type, reason: err?.reason || null, errorMessage: err.message, siteId }).catch((escErr) => {
+          console.error(`[auto-remediation] code self-repair escalation check failed for ${rec.recommendation_type}:`, escErr.message);
+        });
         // err.stale === true means the generator itself found live evidence
         // the recommendation's premise is no longer true (e.g. schema.js
         // discovering the page already has real schema of the recommended
@@ -350,6 +362,9 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
         // already required to keep customer-safe (UserFacingError/
         // safeMessage) — no raw provider text reaches this log.
         recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: String(err.message || '').slice(0, 500) }).catch(() => {});
+        maybeEscalateToCodeRepair({ generatorId: rec.recommendation_type, reason: String(err.message || '').slice(0, 500), errorMessage: err.message, siteId }).catch((escErr) => {
+          console.error(`[auto-remediation] code self-repair escalation check failed for ${rec.recommendation_type}:`, escErr.message);
+        });
       }
       console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }

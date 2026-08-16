@@ -768,14 +768,17 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   if (renderModeOverride) {
     mode = renderModeOverride;
   } else {
-    // 'faq' additionally checks whether the OTHER FAQ writer mechanism
-    // (the data-array-content adapter) already published a visible FAQ for
-    // this exact page — see lib/faq-render-mode.js. Every other
-    // marker-merge type keeps calling inspectRenderMode directly, which
-    // short-circuits to 'visible'/100/deterministic for anything outside
+    // 'faq' and 'qa-content' additionally check whether the OTHER FAQ
+    // writer mechanism (the data-array-content adapter, or each other —
+    // both render the same kind of visible accordion block and share one
+    // sitewide cap/dedup, see render-inspector.js's INSPECTABLE_ACTION_TYPES)
+    // already published a visible FAQ for this exact page — see
+    // lib/faq-render-mode.js. Every other marker-merge type keeps calling
+    // inspectRenderMode directly, which short-circuits to
+    // 'visible'/100/deterministic for anything outside
     // INSPECTABLE_ACTION_TYPES anyway.
     inspection = INSPECTABLE_ACTION_TYPES.includes(draft.action_type)
-      ? await decideFaqRenderMode(site, page, file.content)
+      ? await decideFaqRenderMode(site, page, file.content, draft.action_type)
       : await inspectRenderMode(file.content, draft.action_type, {});
     if (!inspection.mode || inspection.confidence < CONFIDENCE_THRESHOLD) {
       return {

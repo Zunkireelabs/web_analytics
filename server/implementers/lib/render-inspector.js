@@ -20,7 +20,18 @@ import { safeMessage } from '../../lib/errors.js';
 // schema is inherently schema-only always, meta-title/internal-links have no
 // schema fragment. Adding a future dual-representation type is a one-line
 // addition here.
-export const INSPECTABLE_ACTION_TYPES = ['faq'];
+//
+// 'qa-content' belongs here for the same reason 'faq' does: it renders its
+// own visible accordion block (qa-content.js's own doc comment: "rendered
+// with the site's own real FAQ accordion styling"), and ACCORDION_KEYWORD_PATTERN
+// below (expandAll/activeIndex/accordion) matches its markup just as
+// readily as a dedicated FAQ block's — this module's evidence-scanning was
+// always type-agnostic, only the INSPECTABLE gate wasn't. Confirmed live:
+// a page with an existing visible FAQ got a SECOND visible accordion from
+// qa-content, because qa-content skipped this whole cap/dedup system
+// entirely and always rendered visible (see the `!INSPECTABLE_ACTION_TYPES
+// .includes(actionType)` short-circuit below).
+export const INSPECTABLE_ACTION_TYPES = ['faq', 'qa-content'];
 
 export const CONFIDENCE_THRESHOLD = 70;
 

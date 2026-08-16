@@ -292,6 +292,13 @@ export async function recordApplyFailure(siteId, id, errorMessage, renderModeInf
   return rows[0] || null;
 }
 
+// Both action types render their own visible accordion-style Q&A block
+// (see render-inspector.js's INSPECTABLE_ACTION_TYPES comment) and so both
+// count against the same sitewide visible-FAQ cap/dedup — a page that
+// already has one from either mechanism must not get a second one from the
+// other. Shared by every query below that used to check 'faq' alone.
+const VISIBLE_FAQ_ACTION_TYPES = ['faq', 'qa-content'];
+
 // Every page on this site with a live, actually-applied visible FAQ block —
 // render_mode is only ever set from markDraftBranchPushed onward, so this
 // naturally only counts drafts with a real GitHub branch already pushed.
@@ -299,8 +306,8 @@ export async function recordApplyFailure(siteId, id, errorMessage, renderModeInf
 // inspectRenderMode, so visible FAQ blocks stay selective across a site.
 export async function countVisibleFaqDrafts(siteId) {
   const { rows } = await query(
-    `SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible'`,
-    [siteId]
+    `SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = ANY($2::text[]) AND render_mode = 'visible'`,
+    [siteId, VISIBLE_FAQ_ACTION_TYPES]
   );
   return rows[0].n;
 }
@@ -334,9 +341,9 @@ export async function distinctVisibleFaqDraftPages(siteId) {
   const { rows } = await query(
     `SELECT DISTINCT COALESCE(content->>'page', input->>'page') AS page
      FROM drafts
-     WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible'
+     WHERE site_id = $1 AND action_type = ANY($2::text[]) AND render_mode = 'visible'
        AND COALESCE(content->>'page', input->>'page') IS NOT NULL`,
-    [siteId]
+    [siteId, VISIBLE_FAQ_ACTION_TYPES]
   );
   return rows.map((r) => r.page);
 }
@@ -355,10 +362,10 @@ export async function hasImplementedVisibleFaqForPage(siteId, page) {
   if (!page) return false;
   const { rows } = await query(
     `SELECT 1 FROM drafts
-     WHERE site_id = $1 AND action_type = 'faq' AND render_mode = 'visible' AND status = 'implemented'
+     WHERE site_id = $1 AND action_type = ANY($3::text[]) AND render_mode = 'visible' AND status = 'implemented'
        AND (content->>'page' = $2 OR input->>'page' = $2)
      LIMIT 1`,
-    [siteId, page]
+    [siteId, page, VISIBLE_FAQ_ACTION_TYPES]
   );
   return rows.length > 0;
 }
