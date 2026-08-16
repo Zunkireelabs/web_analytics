@@ -7,7 +7,7 @@ import {
   scanBalanced, findObjectRange, findArrayFieldRange, findRootArrayBounds, spliceMarkedArray,
   insertNewArrayField, assertValidContent, dedupeAndValidateFaqItems,
   parseExistingFaqItems, parseManagedFaqItems, diffFaqItems,
-  findScalarFieldRange, spliceScalarField,
+  findScalarFieldRange, spliceScalarField, insertNewScalarField,
   findRootObjectBounds, findObjectFieldRange, removeArrayItemByField,
 } from './js-data-splice.js';
 
@@ -156,6 +156,29 @@ describe('findScalarFieldRange / spliceScalarField', () => {
     const objRange = findObjectRange(content, 'id', 'x', 'json-array');
     const updated = spliceScalarField(content, objRange, 'title', 'new & "quoted"', 'json-array');
     assert.equal(JSON.parse(updated)[0].title, 'new & "quoted"');
+  });
+
+  // Real incident: expand-content's rendered value (marker-merge.js's
+  // renderExpandedHtml) is multi-line HTML with literal newlines between a
+  // section's heading and body. A raw, unescaped newline inside a "..." JS
+  // string literal is a syntax error, so every expand-content draft on a
+  // data-array-content page (locations.js, comparisons.js) was refused by
+  // assertValidContent at apply time — "Invalid or unexpected token" —
+  // forever, since nothing upstream ever produced a single-line value.
+  test('splices a multi-line value into a scalar field and stays valid JS (real expand-content shape)', () => {
+    const objRange = findObjectRange(locations, 'id', 'kathmandu', 'js-export-array');
+    const multiLine = '<div>\n  <h2>Last Updated</h2>\n  <p>This page was last updated on 2026-08-14.</p>\n</div>';
+    const updated = spliceScalarField(locations, objRange, 'title', multiLine, 'js-export-array');
+    assert.equal(assertValidContent(updated, 'js-export-array').ok, true);
+    assert.match(updated, /title: "<div>\\n  <h2>Last Updated<\/h2>/);
+  });
+
+  test('inserts a brand-new multi-line scalar field and stays valid JS', () => {
+    const objRange = findObjectRange(glossary, 'id', 'agentic-commerce', 'js-export-array');
+    const multiLine = '<div>\n  <h2>Heading</h2>\n  <p>Body text.</p>\n</div>';
+    const updated = insertNewScalarField(glossary, objRange, 'expandedContent', multiLine, 'js-export-array');
+    assert.equal(assertValidContent(updated, 'js-export-array').ok, true);
+    assert.match(updated, /expandedContent: "<div>\\n  <h2>Heading<\/h2>/);
   });
 });
 

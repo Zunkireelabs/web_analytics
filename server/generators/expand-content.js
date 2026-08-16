@@ -108,14 +108,18 @@ export async function generate({ siteId, params }) {
   }
 
   if (focus === 'freshness-date') {
+    // The section body IS the published page copy (see renderExpandedHtml
+    // in marker-merge.js) — it must read as a real sentence a visitor would
+    // see, not implementer instructions to whoever applies this draft. This
+    // used to append "Add a visible <time> element... set datePublished/
+    // dateModified..." as if that were prose; it shipped verbatim to a live
+    // page (careers.njk, PR #50) instead of being read as a to-do.
     const today = new Date().toISOString().slice(0, 10);
     const content = {
       page,
       sections: [{
         heading: 'Last Updated',
-        body: `This page was last updated on ${today}. Add a visible <time datetime="${today}">${today}</time> element ` +
-          `near the top of the page, and set datePublished/dateModified to "${today}" in this page's JSON-LD (or an ` +
-          '"article:modified_time" meta tag) so AI engines and search crawlers can see the freshness signal.',
+        body: `This page was last updated on ${today}.`,
       }],
       focus,
     };
