@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { scanVisibleFaqSignals, hasExistingFaqSchema, hasVisibleFaqSignal, hasSafeInsertionPoint, inspectRenderMode } from './render-inspector.js';
+import { scanVisibleFaqSignals, hasExistingFaqSchema, hasVisibleFaqSignal, hasSafeInsertionPoint, inspectRenderMode, INSPECTABLE_ACTION_TYPES } from './render-inspector.js';
 
 // Only exercises the deterministic paths (regex/structural evidence, the
 // sitewide cap short-circuit) — llmAssistedInspection needs a real LLM call
@@ -120,6 +120,37 @@ describe('inspectRenderMode — deterministic short-circuits', () => {
 
   test('no existing FAQ and cap not reached gets visible with no LLM call needed', async () => {
     const result = await inspectRenderMode('<p>Welcome to our homepage.</p>', 'faq', {
+      visibleFaqCount: 0, visibleFaqCap: 5,
+    });
+    assert.equal(result.mode, 'visible');
+    assert.equal(result.source, 'deterministic');
+  });
+
+  // Regression: qa-content renders its own visible accordion (same
+  // ACCORDION_KEYWORD_PATTERN markup as a dedicated FAQ block) but used to
+  // skip this whole cap/dedup system entirely, always rendering visible —
+  // confirmed live as a real duplicate-FAQ bug. It must now behave exactly
+  // like 'faq' at every one of these decision points.
+  test('qa-content is inspectable, same as faq', () => {
+    assert.ok(INSPECTABLE_ACTION_TYPES.includes('qa-content'));
+  });
+
+  test('qa-content gets schema-only on strong existing-FAQ evidence, same as faq', async () => {
+    const result = await inspectRenderMode('{% for item in faq %}{{ item.question }}{% endfor %}', 'qa-content', {
+      visibleFaqCount: 0, visibleFaqCap: 5,
+    });
+    assert.equal(result.mode, 'schema-only');
+    assert.equal(result.source, 'deterministic');
+  });
+
+  test('qa-content is subject to the sitewide visible-FAQ cap, same as faq', async () => {
+    const result = await inspectRenderMode('<p>plain page</p>', 'qa-content', { visibleFaqCount: 5, visibleFaqCap: 5 });
+    assert.equal(result.mode, 'schema-only');
+    assert.equal(result.source, 'cap');
+  });
+
+  test('qa-content gets visible when no existing FAQ and cap not reached', async () => {
+    const result = await inspectRenderMode('<p>Welcome to our homepage.</p>', 'qa-content', {
       visibleFaqCount: 0, visibleFaqCap: 5,
     });
     assert.equal(result.mode, 'visible');

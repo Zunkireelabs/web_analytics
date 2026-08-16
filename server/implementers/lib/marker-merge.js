@@ -638,9 +638,14 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   }
 
   if (actionType === 'qa-content') {
-    if (mode === 'schema-only') return { ok: false, error: '"qa-content" has no schema-only representation.' };
     if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
-    return { ok: true, values: { qaContent: renderQaHtml(content.items, templateFor('qa-content', componentTemplates.qaContent, DEFAULT_QA_TEMPLATE)) } };
+    const visible = renderQaHtml(content.items, templateFor('qa-content', componentTemplates.qaContent, DEFAULT_QA_TEMPLATE));
+    const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
+    if (mode === 'schema-only') {
+      if (!schema) return { ok: false, error: 'This Q&A draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      return { ok: true, values: { qaContent: schema } };
+    }
+    return { ok: true, values: { qaContent: schema ? `${visible}\n${schema}` : visible } };
   }
 
   if (actionType === 'analytics-install') {

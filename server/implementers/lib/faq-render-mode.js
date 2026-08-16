@@ -43,7 +43,7 @@ export async function countCurrentlyVisibleFaqPages(site, { fetchFile = getFileC
 // ahead of any file inspection, since it's stronger evidence than a content
 // scan and the two mechanisms' output isn't visible to each other any other
 // way (see that function's own comment).
-export async function decideFaqRenderMode(site, page, fileContent) {
+export async function decideFaqRenderMode(site, page, fileContent, actionType = 'faq') {
   if (await hasImplementedVisibleFaqForPage(site.id, page)) {
     return {
       mode: 'schema-only', confidence: 95,
@@ -52,7 +52,7 @@ export async function decideFaqRenderMode(site, page, fileContent) {
     };
   }
   const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
-  return inspectRenderMode(fileContent, 'faq', { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
+  return inspectRenderMode(fileContent, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
 }
 
 // Full version for a caller that doesn't have the page's template file
