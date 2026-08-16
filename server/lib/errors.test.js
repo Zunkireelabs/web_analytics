@@ -94,6 +94,36 @@ describe('safeMessage / logInternal', () => {
       console.error = original;
     }
   });
+
+  test('logInternal also prints err.cause — the real detail behind a wrapped UserFacingError', () => {
+    const original = console.error;
+    const logged = [];
+    console.error = (...args) => { logged.push(args.join(' ')); };
+    try {
+      const wrapped = new UserFacingError('Generic customer-safe message.', {
+        cause: new Error('OpenHands detail: Docker daemon unreachable at /var/run/docker.sock'),
+      });
+      logInternal('design-agent.worker.processOneJob', wrapped);
+      assert.ok(
+        logged.some((line) => line.includes('Docker daemon unreachable')),
+        'the cause must reach the developer-facing log, not just the generic wrapper message'
+      );
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test('logInternal does not throw or print an extra line when there is no cause', () => {
+    const original = console.error;
+    const logged = [];
+    console.error = (...args) => { logged.push(args.join(' ')); };
+    try {
+      logInternal('ctx', new Error('plain error, no cause'));
+      assert.equal(logged.length, 1);
+    } finally {
+      console.error = original;
+    }
+  });
 });
 
 describe('describeFetchFailure', () => {

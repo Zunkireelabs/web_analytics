@@ -42,6 +42,20 @@ export class UserFacingError extends Error {
 export function logInternal(context, err) {
   const id = randomUUID().slice(0, 8);
   console.error(`[internal-error:${id}] ${context}:`, err?.stack || err?.message || err);
+  // err.cause is where the ACTUAL diagnostic detail often lives — e.g.
+  // openhands-handler.js wraps every Design Agent failure in a
+  // UserFacingError with a safe, generic customer message, and attaches the
+  // real Python/Docker exception as `cause` specifically so a developer could
+  // recover it here. Error#stack never includes `cause` on Node 20 (no
+  // "Caused by:" appended the way newer runtimes/browsers do it), so without
+  // this the cause was captured correctly and then silently dropped at the
+  // one place this module's own doc comment promises "the full detail is
+  // allowed to be written down" — confirmed live: `docker logs
+  // design-agent-worker-stage` showed nothing but the generic wrapper
+  // message on every failed run, even with direct server access, because
+  // this line never printed the one thing (Docker daemon vs LLM auth) that
+  // would have told an engineer what to actually fix.
+  if (err?.cause) console.error(`[internal-error:${id}] caused by:`, err.cause?.stack || err.cause?.message || err.cause);
   return id;
 }
 
