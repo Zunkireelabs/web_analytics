@@ -1,4 +1,4 @@
-import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase } from '../../github/client.js';
+import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
 import { validateRenderingBatch } from './rendering-gate.js';
 
@@ -93,6 +93,46 @@ export function batchBranchConflictError(site, batchInfo) {
   };
 }
 
+// Must match FAMILY_WRITE_MARKER in the site repo's own
+// check-family-siblings.mjs (installed verbatim by install-rendering-
+// workflow.js) exactly. That gate greps `git log` on the PR's commit range
+// for this literal string; it has no way to ask this app *why* a commit
+// touched a shared `_data/*` file, only whether the marker is present
+// somewhere in the range.
+const FAMILY_WRITE_MARKER = '[family-write]';
+
+// True when this draft's commit would be the SECOND (or later) write today
+// to a `_data/*` array file already changed earlier on today's batch branch.
+// Each Action Center draft splices exactly one record into its data file
+// (see adapters/lib/js-data-splice.js), so a single draft's own files never
+// trip the site's per-family "1 changed sibling" cap by themselves — the
+// leak only happens when several same-day drafts against DIFFERENT records
+// of the SAME shared data file get batched onto one branch/PR (see
+// getOrInitBatchBranch's "additional drafts... added as new commits to this
+// same branch" comment). That's a legitimate, human-reviewable outcome, not
+// a bug — so it's declared via FAMILY_WRITE_MARKER rather than blocked.
+//
+// Detected generically, with no hardcoded family/route knowledge (this app
+// doesn't parse the site's Eleventy front matter): a `_data/*` file this
+// draft is about to write already differing between today's batch branch's
+// current tip and the site's base branch means an earlier commit THIS PR
+// already touched it — the exact case the sibling-leakage gate flags.
+async function needsFamilyWriteMarker(site, files, target) {
+  if (!target.exists) return false; // first commit on today's branch — nothing prior to collide with
+  const dataFiles = files.filter((f) => /(^|\/)_data\//.test(f.path));
+  if (!dataFiles.length) return false;
+
+  const base = baseBranch(site);
+  for (const f of dataFiles) {
+    const [baseFile, headFile] = await Promise.all([
+      getFileContent(site, f.path, base),
+      getFileContent(site, f.path, target.branchName),
+    ]);
+    if ((baseFile?.content ?? null) !== (headFile?.content ?? null)) return true;
+  }
+  return false;
+}
+
 // Two real, independently-triggered steps — deliberately NOT bundled. Staff
 // needs a real manual checkpoint between "a branch with the real change
 // exists" and "a PR is open for someone to review and merge," so they
@@ -128,9 +168,10 @@ export async function pushDraftBranch(site, draft, files, target) {
     // draft (see commitFilesAtomic's comment). Replaces a previous
     // sequential getFileSha+putFile-per-file loop, which had exactly that
     // gap for multi-file draft types (llms-txt+robots.txt, broken-link-fix).
+    const marker = (await needsFamilyWriteMarker(site, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
     await commitFilesAtomic(
       site, branchName, files,
-      `Action Center: apply ${draft.action_type} draft #${draft.id}`
+      `Action Center: apply ${draft.action_type} draft #${draft.id}${marker}`
     );
 
     return { ok: true, branchName };
