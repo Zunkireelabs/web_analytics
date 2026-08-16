@@ -489,21 +489,45 @@ const DEFAULT_EXPAND_TEMPLATE = {
 };
 
 // Converts the light markdown expand-content's prompts sometimes produce
-// (bold/italic emphasis, and — pre-generator-fix — inline links) into real
-// HTML instead of leaking literal `**`/`[text](url)` syntax as visible text
-// (escapeHtml alone just escapes <>&", it never parses markdown). A link is
-// only ever rendered as a real <a> when its href is an actual http(s) URL;
-// anything else (a bare "#", empty, or missing href) is deliberately
-// downgraded to its plain text — expand-content.js's own prompt no longer
-// asks for placeholder citation links, but this is the last line of defense
-// against ever publishing a dead anchor to a live site.
-function markdownToHtml(text) {
-  const escaped = escapeHtml(text);
-  return escaped
+// (bold/italic emphasis, inline links, and — the external-citations focus's
+// natural way of listing several sources — a "- item" bullet list) into real
+// HTML instead of leaking literal `**`/`[text](url)`/`- ` syntax as visible
+// text (escapeHtml alone just escapes <>&", it never parses markdown). A
+// link is only ever rendered as a real <a> when its href is an actual
+// http(s) URL; anything else (a bare "#", empty, or missing href) is
+// deliberately downgraded to its plain text — expand-content.js's own
+// prompt no longer asks for placeholder citation links, but this is the
+// last line of defense against ever publishing a dead anchor to a live
+// site.
+function markdownInline(text) {
+  return text
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+}
+
+function markdownToHtml(text) {
+  const escaped = escapeHtml(text);
+  const parts = [];
+  let listItems = [];
+  const flushList = () => {
+    if (listItems.length) {
+      parts.push(`<ul>${listItems.map((item) => `<li>${markdownInline(item)}</li>`).join('')}</ul>`);
+      listItems = [];
+    }
+  };
+  for (const line of escaped.split('\n')) {
+    const bullet = /^-\s+(.*)$/.exec(line);
+    if (bullet) {
+      listItems.push(bullet[1]);
+    } else {
+      flushList();
+      parts.push(markdownInline(line));
+    }
+  }
+  flushList();
+  return parts.join('\n');
 }
 
 // Each section is a real, LLM-grounded heading+body pair (generators/
