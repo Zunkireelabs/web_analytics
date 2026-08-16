@@ -3,19 +3,32 @@ import assert from 'node:assert/strict';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
-// Every GitHub call fails, so each entry point below takes its catch branch.
+// Every GitHub call fails by default, so each entry point below takes its
+// catch branch. Individual tests that need a happy path (e.g. the
+// family-write marker tests) swap the relevant `defaults` entry for the
+// duration of the test and restore it afterwards — node:test's mock.module
+// can only mock a given specifier once per file, so per-test variation has
+// to happen through this indirection rather than a second mock.module call.
+const defaults = {
+  getBranchSha: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
+  createBranch: async () => { throw new Error('Bad credentials (401)'); },
+  commitFilesAtomic: async () => { throw new Error('Bad credentials (401)'); },
+  openPullRequest: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
+  getFileContent: async () => null,
+};
+
 mock.module(resolve('../../github/client.js'), {
   namedExports: {
-    getBranchSha: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
-    createBranch: async () => { throw new Error('Bad credentials (401)'); },
-    commitFilesAtomic: async () => { throw new Error('Bad credentials (401)'); },
+    getBranchSha: (...a) => defaults.getBranchSha(...a),
+    createBranch: (...a) => defaults.createBranch(...a),
+    commitFilesAtomic: (...a) => defaults.commitFilesAtomic(...a),
     mergeBranchFromBase: async () => ({ ok: true }),
-    openPullRequest: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
+    openPullRequest: (...a) => defaults.openPullRequest(...a),
     listOpenPullRequestsForBranch: async () => [],
     getPullRequest: async () => ({}),
     getCheckRunsForRef: async () => [],
     defaultBranchName: (site) => site.repo_default_branch || 'main',
-    getFileContent: async () => null,
+    getFileContent: (...a) => defaults.getFileContent(...a),
     getRepoTree: async () => ({ files: [], truncated: false }),
     putFile: async () => ({}),
   },
@@ -63,6 +76,60 @@ describe('persisted GitHub failures carry a correlation ref', () => {
     const refOf = (s) => s.error.match(/\(ref: ([0-9a-f]+)\)/)[1];
 
     assert.notEqual(refOf(a), refOf(b));
+  });
+});
+
+describe('family-write marker on same-day _data batches', () => {
+  test('a second draft touching an already-changed _data file gets the marker', async () => {
+    let captured;
+    defaults.getBranchSha = async () => 'sha123';
+    defaults.createBranch = async () => ({});
+    defaults.commitFilesAtomic = async (site, branch, files, message) => { captured = message; return { sha: 'new' }; };
+    // base branch still has the old record; today's batch branch already
+    // carries an earlier draft's edit to the same shared _data file.
+    defaults.getFileContent = async (site, path, ref) => (
+      ref === 'main' ? { content: 'old', sha: 'a' } : { content: 'new', sha: 'b' }
+    );
+
+    try {
+      const result = await pushDraftBranch(
+        site, draft,
+        [{ path: 'src/_data/comparisons.js', content: 'x' }],
+        { branchName: 'action-center/batch-1-2026-08-16', exists: true },
+      );
+
+      assert.equal(result.ok, true);
+      assert.match(captured, /\[family-write\]$/);
+    } finally {
+      defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+      defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.getFileContent = async () => null;
+    }
+  });
+
+  test('the first draft of the day on a fresh branch gets no marker', async () => {
+    let captured;
+    defaults.getBranchSha = async () => 'sha123';
+    defaults.createBranch = async () => ({});
+    defaults.commitFilesAtomic = async (site, branch, files, message) => { captured = message; return { sha: 'new' }; };
+    defaults.getFileContent = async () => { throw new Error('should not be called when target.exists is false'); };
+
+    try {
+      const result = await pushDraftBranch(
+        site, draft,
+        [{ path: 'src/_data/comparisons.js', content: 'x' }],
+        { branchName: 'action-center/batch-1-2026-08-16', exists: false },
+      );
+
+      assert.equal(result.ok, true);
+      assert.doesNotMatch(captured, /\[family-write\]/);
+    } finally {
+      defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+      defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.getFileContent = async () => null;
+    }
   });
 });
 
