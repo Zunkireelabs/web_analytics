@@ -15,6 +15,22 @@ const MAX_REDIRECT_HOPS = 8;
 const REDIRECT_HOP_TIMEOUT_MS = 5000;
 const LONG_CHAIN_HOP_THRESHOLD = 3;
 const UA_HEADER = { 'User-Agent': 'Mozilla/5.0 (compatible; ZunkireeAnalyticsBot/1.0; +technical-seo-agent)' };
+// Retry identity for a link that failed under UA_HEADER's self-identifying
+// bot UA — a real browser UA and a longer timeout, tried once before a link
+// is actually reported broken. Confirmed live: linkedin.com/company/zunkiree
+// and a Couchbase blog post both 403'd under the bot UA while returning a
+// real 200 under this one — sites with bot-protection routinely block an
+// unfamiliar UA string even though the page is genuinely live to visitors.
+// braindigit.com/truemark.dev/upaya.org all 200'd on retry too, after the
+// bot UA's 5s REDIRECT_HOP_TIMEOUT_MS timed out on them — not dead, just
+// slower to respond than this codebase's own crawler budget assumes. Two of
+// these false positives had already shipped as real PRs deleting live
+// citations (drafts 766/767, zunkireelabs-web PR #53) before this was
+// caught, which is why this is a retry-before-reporting-broken, not merely
+// a longer default timeout: a citation getting DELETED from real content on
+// a false positive is a correctness bug, not just noisy reporting.
+const BROWSER_RETRY_UA_HEADER = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' };
+const RETRY_TIMEOUT_MS = 12000;
 // Soft-404 detection guardrail: a fully client-side-rendered site can serve
 // the identical shell for every route, real or not — in that world this
 // heuristic would flag everything, so a suspiciously high match rate across
@@ -89,7 +105,7 @@ export async function detectDuplicateTitles(siteId, batchResults) {
 // (not just the first request) is checked against isPrivateOrLocalHost —
 // a same-host redirect could in principle point at a private/internal
 // address even when the original href looked like a normal same-site link.
-async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS) {
+async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS, headers = UA_HEADER, timeoutMs = REDIRECT_HOP_TIMEOUT_MS) {
   const chain = [];
   let current = startUrl;
 
@@ -99,12 +115,12 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS) {
     if (isPrivateOrLocalHost(hostname)) return { chain, finalStatus: null, hops: chain.length, error: 'blocked: private/local address' };
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REDIRECT_HOP_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      res = await fetch(current, { method: 'HEAD', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
+      res = await fetch(current, { method: 'HEAD', redirect: 'manual', signal: controller.signal, headers });
       if (res.status === 405) { // some servers reject HEAD outright
-        res = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers: UA_HEADER });
+        res = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal, headers });
       }
     } catch (err) {
       return { chain, finalStatus: null, hops: chain.length, error: describeFetchFailure('technical-seo-analysis.followRedirects', err) };
@@ -122,6 +138,23 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS) {
     return { chain, finalStatus: res.status, hops: chain.length - 1, error: null };
   }
   return { chain, finalStatus: null, hops: maxHops, error: 'exceeded max redirect hops' };
+}
+
+// A link only gets reported broken after failing TWICE: once under
+// UA_HEADER's self-identifying bot UA at the normal timeout (the fast path
+// that resolves the overwhelming majority of real links), and — only if
+// that failed outright or came back 403 — once more under a real browser UA
+// and a longer timeout. A 403 is deliberately included alongside outright
+// failures: bot-protected sites (LinkedIn, Cloudflare-fronted blogs) return
+// 403 specifically FOR an unfamiliar bot UA while serving a real 200 to an
+// ordinary browser, so a lone 403 under UA_HEADER is not trustworthy
+// evidence a page is actually gone. Any other status (200, 404, 410, …) is
+// trusted on the first attempt — retrying those would waste every check's
+// budget doubling requests to sites that are answering honestly.
+async function followRedirectsWithRetry(startUrl, maxHops = MAX_REDIRECT_HOPS) {
+  const first = await followRedirects(startUrl, maxHops);
+  if (!first.error && first.finalStatus !== 403) return first;
+  return followRedirects(startUrl, maxHops, BROWSER_RETRY_UA_HEADER, RETRY_TIMEOUT_MS);
 }
 
 function normalizeBody(text) {
@@ -197,7 +230,7 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   const fingerprint = origin ? await fetchSoftNotFoundFingerprint(origin) : null;
 
   const results = await Promise.all(hrefs.map(async (href) => {
-    const r = await followRedirects(href);
+    const r = await followRedirectsWithRetry(href);
     const eligible = !r.error && r.finalStatus != null && r.finalStatus >= 200 && r.finalStatus < 300;
     const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
     return { href, sourcePages: [...sourcesByHref.get(href)], ...r, softNotFound };
@@ -250,7 +283,7 @@ export async function crawlExternalCitations(pageResults, maxChecks = MAX_LINK_C
   const hrefs = [...sourcesByHref.keys()].slice(0, maxChecks);
 
   const results = await Promise.all(hrefs.map(async (href) => {
-    const r = await followRedirects(href);
+    const r = await followRedirectsWithRetry(href);
     return { href, sourcePages: [...sourcesByHref.get(href)], ...r };
   }));
 
@@ -270,7 +303,7 @@ export async function recheckLink(href) {
   let origin;
   try { origin = new URL(href).origin; } catch { return { broken: true, error: 'invalid URL', finalStatus: null, softNotFound: false }; }
   const [redirectResult, fingerprint] = await Promise.all([
-    followRedirects(href),
+    followRedirectsWithRetry(href),
     fetchSoftNotFoundFingerprint(origin),
   ]);
   const eligible = !redirectResult.error && redirectResult.finalStatus != null && redirectResult.finalStatus >= 200 && redirectResult.finalStatus < 300;
