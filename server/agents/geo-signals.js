@@ -47,10 +47,30 @@ const GEO_SIGNAL_RULES = [
     effort: 'Low',
   },
   {
+    // Deliberately informational (generatorId: null), unlike the other four
+    // rules above — those route to expand-content with a `focus` schema.js
+    // can always honestly satisfy (a real date, the site's own configured
+    // author, a grounded external source). Review schema has no equivalent
+    // safe default: schema.js's Review type needs real ratingValue/
+    // reviewCount data that most pages simply never have (a blog post, a
+    // careers page), so it can't fill this gap without fabricating and
+    // (correctly) refuses instead — via the Article-fallback-blocked path
+    // once the page already has real Article schema, which is true for
+    // nearly every content page. routed here as 'schema'/'Review', that
+    // refusal is not a one-off: hasReviewSchema can never become true
+    // without real review data appearing on the page, so the SAME
+    // recommendation refused on repeat, day after day (confirmed live on
+    // site 1 — the same handful of Review-schema recommendations refusing
+    // since Aug 14), burning attempts and contributing to
+    // auto-remediation.js's consecutive-refusal breaker before it reached
+    // genuinely shippable work. content-gap.js's GAP_TYPE_TO_GENERATOR
+    // (page-content.js) already reached this same conclusion for the
+    // identical gap ('Missing review/rating schema': null) — this just
+    // brings this file's own copy of the same signal in line with it.
     test: (analysis) => !analysis.hasReviewSchema,
-    label: 'Add Review or AggregateRating JSON-LD schema so AI assistants can surface social proof.',
-    generatorId: 'schema',
-    params: (page, query, schemaTypes) => ({ page, schemaType: 'Review' }),
+    label: 'Add Review or AggregateRating JSON-LD schema so AI assistants can surface social proof — only once this page has real reviews/ratings to mark up.',
+    generatorId: null,
+    params: () => ({}),
     effort: 'Low',
   },
   {
@@ -62,7 +82,7 @@ const GEO_SIGNAL_RULES = [
   },
 ];
 
-function recommendationsFor(analysis, page, query, schemaTypes) {
+export function recommendationsFor(analysis, page, query, schemaTypes) {
   return GEO_SIGNAL_RULES.filter((r) => r.test(analysis)).map((r) => ({
     label: r.label,
     generatorId: r.generatorId,
