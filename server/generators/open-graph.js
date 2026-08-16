@@ -30,6 +30,24 @@ export async function generate({ params }) {
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
 
+  // The recommendation that led here is only ever generated from a PAST
+  // audit fetch — this page's live state can have changed since (a
+  // shared-layout fix that started emitting og:title/og:description for
+  // every page from title/description front matter, a manual template fix,
+  // ...). Re-checking live rather than trusting the finding avoids drafting
+  // (and getting permanently stuck on, if no per-page marker was ever
+  // configured for tags the page never actually needed) a fix for a gap
+  // that's already closed. Same "stale: true" pattern as schema.js's/
+  // canonical.js's own already-fixed refusal — auto-remediation.js closes
+  // the recommendation on sight instead of leaving it open to be
+  // re-attempted and re-refused forever.
+  if (fetched.analysis.hasOpenGraph) {
+    throw Object.assign(
+      new Error(`"${page}" already has Open Graph tags — drafting another would duplicate them, not fix a gap.`),
+      { status: 400, userFacing: true, refusal: true, stale: true },
+    );
+  }
+
   const { title, metaDescription, bodyText } = fetched.analysis;
   const ogTitle = title || PLACEHOLDER_NOTE;
   // A thin/boilerplate-only extraction must fall through to the placeholder,
