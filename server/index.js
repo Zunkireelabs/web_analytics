@@ -153,6 +153,13 @@ app.use('/api', systemHealthRouter);
 app.use('/api', auditLogRouter);
 app.use('/api', opsCenterRouter);
 
+// Safety net: a request under /api that no router above matched should
+// 404 immediately, not fall through into the SPA catch-all (which would
+// serve index.html for an API path) or, worse, into Vite's dev middleware
+// below — see vite.config.js's VITE_EMBEDDED note for the self-proxy hang
+// that fell through to previously with no /api-scoped catch-all here.
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
+
 const port = Number(process.env.API_PORT || 3002);
 const httpServer = createHttpServer(app);
 
@@ -169,6 +176,11 @@ if (process.env.NODE_ENV === 'production') {
     app.get('*', (req, res) => res.sendFile(join(dist, 'index.html')));
   }
 } else {
+  // See vite.config.js: this marks the embedded (middleware-mode) case so
+  // that config skips its "/api" proxy rule, which only makes sense for the
+  // standalone `vite` dev server on :5173 — this process already IS the
+  // Express server /api requests need to reach.
+  process.env.VITE_EMBEDDED = 'true';
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({
     server: { middlewareMode: true, hmr: { server: httpServer } },
