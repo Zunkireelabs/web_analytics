@@ -1,5 +1,5 @@
 import { getSiteById } from '../store/read.js';
-import { knownDomain, hostnameOf } from '../agents/lib/site-domain.js';
+import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 
 // Pure, deterministic generator — no LLM call, same shape as canonical.js.
@@ -37,9 +37,9 @@ export async function generate({ siteId, params }) {
   }
 
   const site = await getSiteById(siteId);
-  const domain = knownDomain(site);
-  if (domain && hostnameOf(page) !== domain) {
-    throw Object.assign(new Error(`"${page}" is not on this site's own domain (${domain}) — refusing to draft breadcrumbs for a page we can't confirm is real.`), { status: 400 });
+  const domains = ownDomains(site);
+  if (domains && !domains.includes(hostnameOf(page))) {
+    throw Object.assign(new Error(`"${page}" is not on this site's own domain (${domains.join(', ')}) — refusing to draft breadcrumbs for a page we can't confirm is real.`), { status: 400 });
   }
 
   // The page already carries a real BreadcrumbList — drafting another would

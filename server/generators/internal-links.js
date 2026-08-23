@@ -1,6 +1,6 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-content.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 
 export const meta = {
@@ -33,7 +33,7 @@ export async function generate({ siteId, params }) {
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
   requireGroundedContent(fetched.analysis, { generatorId: meta.id });
 
-  const domain = knownDomain(site);
+  const domain = ownDomains(site);
   // Real candidate targets only — excludes the source page itself.
   const candidates = filterOwnDomainPages(otherPagesRaw, domain)
     .map((p) => p.dim_value)

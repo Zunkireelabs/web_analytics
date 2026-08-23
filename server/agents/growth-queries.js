@@ -1,7 +1,7 @@
 import { getSiteById, getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { analyzePageUrl } from './lib/page-content.js';
-import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
+import { knownDomain, ownDomains, filterOwnDomainPages } from './lib/site-domain.js';
 import { sortByRotation } from './lib/rotation.js';
 import {
   upsertTrackedQuery, listActiveQueries, upsertQueryStatus,
@@ -166,7 +166,7 @@ export async function run({ siteId, start, end }) {
     getSearchPerformanceRange(siteId, start, end, 'page', 8),
     getTopPagePerQuery(siteId, start, end),
   ]);
-  const topPages = filterOwnDomainPages(topPagesRaw, domain).map((p) => p.dim_value);
+  const topPages = filterOwnDomainPages(topPagesRaw, ownDomains(site)).map((p) => p.dim_value);
   const pageByQuery = new Map(topPageByQueryRows.map((p) => [p.query, p.page]));
   const top20ByImpressions = new Set(
     [...gscQueriesRaw].sort((a, b) => Number(b.impressions) - Number(a.impressions)).slice(0, TOP_N_FOR_TRACTION).map((q) => q.dim_value)
@@ -214,7 +214,7 @@ export async function run({ siteId, start, end }) {
   const byId = new Map(active.map((q) => [q.id, q]));
   const batch = rotatedIds.slice(0, COVERAGE_BATCH_SIZE).map((id) => byId.get(id));
 
-  const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), domain, (r) => r.page);
+  const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), ownDomains(site), (r) => r.page);
   const inventoryUrls = inventory.map((r) => r.page);
   const pageAnalysisCache = new Map();
   async function analysisFor(url) {

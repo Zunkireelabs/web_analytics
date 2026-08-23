@@ -39,4 +39,27 @@ describe('pageFilterGroups', () => {
     const [group] = pageFilterGroups('my-site.example.com');
     assert.doesNotThrow(() => new RegExp(group.filters[0].expression));
   });
+
+  // A site can have more than one real hostname of its own — e.g. Zunkiree
+  // Labs' own booking-engine product on zenly.zunkireelabs.com and its CRM
+  // product on edgex.zunkireelabs.com — passed as the array ownDomains(site)
+  // returns, alongside the primary domain.
+  test('accepts an array of own domains and matches any of them', () => {
+    const [group] = pageFilterGroups(['zunkireelabs.com', 'zenly.zunkireelabs.com', 'edgex.zunkireelabs.com']);
+    const re = new RegExp(group.filters[0].expression);
+    assert.match('https://zunkireelabs.com/pricing/', re);
+    assert.match('https://zenly.zunkireelabs.com/features/', re);
+    assert.match('https://edgex.zunkireelabs.com/crm/', re);
+  });
+
+  test('still excludes an unrelated subdomain not in the array', () => {
+    const [group] = pageFilterGroups(['zunkireelabs.com', 'zenly.zunkireelabs.com', 'edgex.zunkireelabs.com']);
+    const re = new RegExp(group.filters[0].expression);
+    assert.doesNotMatch('https://supreme-court.zunkireelabs.com/court/surkhetdc/legalmaterials', re);
+    assert.doesNotMatch('https://dev-web.zunkireelabs.com/', re);
+  });
+
+  test('undefined when the array is empty', () => {
+    assert.equal(pageFilterGroups([]), undefined);
+  });
 });

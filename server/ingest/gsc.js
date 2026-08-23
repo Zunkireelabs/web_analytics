@@ -1,5 +1,5 @@
 import { getSearchConsole } from '../auth/google.js';
-import { knownDomain } from '../agents/lib/site-domain.js';
+import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 
 // A `sc-domain:` GSC property is domain-level — it returns EVERY subdomain
 // Search Console has verified data for, which can include an entirely
@@ -14,10 +14,18 @@ import { knownDomain } from '../agents/lib/site-domain.js';
 // consumer — this ingestion, any current agent, or any future one — can
 // ever see a foreign subdomain's data, without each one having to
 // remember to filter it out individually.
-export function pageFilterGroups(domain) {
-  if (!domain) return undefined; // no website_domain configured yet — same "pass through unfiltered" convention as filterOwnDomainPages
-  const escaped = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(www\\.)?${escaped}([/?]|$)` }] }];
+//
+// `domains` is either a single hostname or the fuller ownDomains(site) set
+// (e.g. a hero product legitimately hosted on its own subdomain, alongside
+// the main site) — every entry gets its own alternation branch, so a page
+// on ANY of them passes, while an unlisted subdomain still doesn't.
+export function pageFilterGroups(domains) {
+  const list = (Array.isArray(domains) ? domains : [domains]).filter(Boolean);
+  if (!list.length) return undefined; // no website_domain configured yet — same "pass through unfiltered" convention as filterOwnDomainPages
+  const alternation = list
+    .map((d) => `(www\\.)?${d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+    .join('|');
+  return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(${alternation})([/?]|$)` }] }];
 }
 
 // Fetch GSC Search Analytics for a single date, using `site`'s own Google
@@ -28,7 +36,7 @@ export function pageFilterGroups(domain) {
 export async function fetchGscForDate(site, date) {
   const gscProperty = site.gsc_property;
   const sc = await getSearchConsole(site);
-  const dimensionFilterGroups = pageFilterGroups(knownDomain(site));
+  const dimensionFilterGroups = pageFilterGroups(ownDomains(site));
 
   const queryApi = async (dimensions, rowLimit) => {
     const res = await sc.searchanalytics.query({
@@ -70,7 +78,20 @@ export async function fetchGscForDate(site, date) {
   // landing page (the single-dimension 'queries'/'pages' rows above share no key).
   // Also includes device + country for circumstantial context on that click.
   const queryPageRows = await queryApi(['query', 'page', 'device', 'country'], 250);
-  const queryPages = queryPageRows.map((r) => ({
+  const domains = ownDomains(site);
+  // Real, observed gap: the API's own page-dimension regex filter above
+  // (dimensionFilterGroups) does not reliably exclude a foreign subdomain
+  // on THIS particular 4-dimension combined request, even though the
+  // identical filter correctly excludes it on the single-dimension 'page'
+  // query just above — confirmed live (supreme-court.<domain> rows still
+  // came back here after the exact same filter). Never trust the upstream
+  // API's filter alone for this one call: re-assert it in code so a
+  // foreign subdomain's clicks can never reach gsc_query_page regardless
+  // of whatever caused the API to not honor its own filter here.
+  const queryPageRowsOwn = domains
+    ? queryPageRows.filter((r) => domains.includes(hostnameOf(r.keys?.[1])))
+    : queryPageRows;
+  const queryPages = queryPageRowsOwn.map((r) => ({
     query: r.keys?.[0] ?? '',
     page: r.keys?.[1] ?? '',
     device: r.keys?.[2] ?? '',

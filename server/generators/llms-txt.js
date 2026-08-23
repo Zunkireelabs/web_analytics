@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 
 export const meta = {
   id: 'llms-txt',
@@ -104,7 +104,7 @@ export async function generate({ siteId, params }) {
     getSearchPerformanceRange(siteId, start, end, 'page', 100),
   ]);
   const siteName = site?.name || 'This site';
-  const domain = knownDomain(site);
+  const domain = ownDomains(site);
   const pagePerf = filterOwnDomainPages(pagePerfRaw, domain);
 
   // Real site origin, derived from an actual ranking page URL — same
