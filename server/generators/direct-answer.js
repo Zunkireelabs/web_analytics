@@ -1,5 +1,5 @@
 import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 
@@ -59,7 +59,7 @@ export async function generate({ siteId, params }) {
     getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
   ]);
   const domain = knownDomain(site);
-  const otherPages = filterOwnDomainPages(otherPagesRaw, domain);
+  const otherPages = filterOwnDomainPages(otherPagesRaw, ownDomains(site));
   const candidates = otherPages.map((p) => p.dim_value);
   const candidateSet = new Set(candidates);
 

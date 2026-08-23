@@ -7,7 +7,7 @@ import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.j
 import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
@@ -120,10 +120,10 @@ export async function auditSite(siteId) {
   // selectCandidatePages/ai-recommendation.js already do, so this audit's
   // "real candidate pages" pool matches what the actual recommendation
   // agents use, not raw unfiltered GSC data.
-  const pages = filterOwnDomainPages(rawPages, knownDomain(site));
+  const pages = filterOwnDomainPages(rawPages, ownDomains(site));
   const pageUrls = pages.map((p) => p.dim_value);
   if (rawPages.length !== pages.length) {
-    console.log(`(filtered ${rawPages.length - pages.length} page(s) from other subdomains — knownDomain: ${knownDomain(site) || '(none configured)'})`);
+    console.log(`(filtered ${rawPages.length - pages.length} page(s) from other subdomains — own domains: ${(ownDomains(site) || []).join(', ') || '(none configured)'})`);
   }
 
   console.log(`\n=== Site #${siteId} "${site.name}" (${site.repo_owner}/${site.repo_name}) — ${pageUrls.length} real candidate pages, ${ACTION_TYPES.length} action types ===`);

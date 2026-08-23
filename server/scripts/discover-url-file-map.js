@@ -4,7 +4,7 @@ import { pool } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { resolveFile, resolveMarkers, resolveAdapter } from '../implementers/lib/url-file-map.js';
 import { hasMarker } from '../implementers/lib/marker-merge.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { safeEvalJsDataFile } from './lib/safe-js-data-eval.js';
@@ -131,7 +131,7 @@ export async function discoverSite(siteId) {
   const branch = baseBranch(site);
   const { start, end } = defaultRange();
   const rawPages = await getSearchPerformanceRange(siteId, start, end, 'page', PAGE_LIMIT);
-  const pages = filterOwnDomainPages(rawPages, knownDomain(site));
+  const pages = filterOwnDomainPages(rawPages, ownDomains(site));
   const pageUrls = [...new Set(pages.map((p) => p.dim_value))];
 
   console.log(`\n=== Discovering faq config gaps for site #${siteId} "${site.name}" (${site.repo_owner}/${site.repo_name}), ${pageUrls.length} candidate pages ===`);

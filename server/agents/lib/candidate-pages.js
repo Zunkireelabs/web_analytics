@@ -2,7 +2,7 @@ import { getSearchPerformanceRange, getSearchPerformanceForPages, getSiteById } 
 import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
 import { sortByRotation } from './rotation.js';
-import { knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { ownDomains, filterOwnDomainPages } from './site-domain.js';
 
 const DEFAULT_GSC_LIMIT = 100;
 const DEFAULT_ZERO_TRAFFIC_LIMIT = 200;
@@ -38,7 +38,7 @@ export async function selectCandidatePages(siteId, agentId, {
     getSearchPerformanceRange(siteId, start, end, 'page', gscLimit),
     listPageInventory(siteId, { limit: zeroTrafficLimit + gscLimit }),
   ]);
-  const domain = knownDomain(site);
+  const domain = ownDomains(site);
   const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
   const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
 

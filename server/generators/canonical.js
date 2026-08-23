@@ -1,5 +1,5 @@
 import { getSiteById } from '../store/read.js';
-import { knownDomain, hostnameOf } from '../agents/lib/site-domain.js';
+import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 
 // Pure, deterministic generator — no LLM call. A canonical tag's correct
@@ -30,9 +30,9 @@ export async function generate({ siteId, params }) {
   // against — an unset website_domain passes through unfiltered rather than
   // blocking on an unresolved guess, same convention as filterOwnDomainPages.
   const site = await getSiteById(siteId);
-  const domain = knownDomain(site);
-  if (domain && hostnameOf(page) !== domain) {
-    throw Object.assign(new Error(`"${page}" is not on this site's own domain (${domain}) — refusing to draft a canonical tag for a page we can't confirm is real.`), { status: 400 });
+  const domains = ownDomains(site);
+  if (domains && !domains.includes(hostnameOf(page))) {
+    throw Object.assign(new Error(`"${page}" is not on this site's own domain (${domains.join(', ')}) — refusing to draft a canonical tag for a page we can't confirm is real.`), { status: 400 });
   }
 
   // The recommendation that led here (technical-seo.js's "no canonical tag"

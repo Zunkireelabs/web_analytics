@@ -27,6 +27,17 @@ from app.agent.narrator import call_llm
 from app.db.models import Client, Investigation, MetricCatalog, Opportunity
 from app.db.session import SessionLocal
 
+
+def _strip_nul(text):
+    """Postgres's UTF8 text columns reject a literal NUL byte outright
+    (asyncpg.exceptions.CharacterNotInRepertoireError), which an LLM can
+    emit verbatim when its input evidence contains raw scraped page text
+    with embedded control characters — a real, observed crash on this
+    write, not hypothetical. Strips only the one byte Postgres can never
+    store; every other character (including other control chars) passes
+    through untouched."""
+    return text.replace("\x00", "") if isinstance(text, str) else text
+
 REASONING_SYSTEM_PROMPT = (
     "You are generating persisted analyst reasoning for one Investigation in an AI growth intelligence "
     "platform. You are given the investigation's metric, dimension, severity, status, evidence, forecast "
@@ -138,9 +149,9 @@ async def _generate(session: AsyncSession, investigation: Investigation, metric:
     for block in response.content:
         if block.type == "tool_use" and block.name == "submit_reasoning":
             fields = block.input
-            investigation.executive_summary = fields.get("executive_summary")
-            investigation.technical_summary = fields.get("technical_summary")
-            investigation.business_summary = fields.get("business_summary")
-            investigation.risk_assessment = fields.get("risk_assessment")
+            investigation.executive_summary = _strip_nul(fields.get("executive_summary"))
+            investigation.technical_summary = _strip_nul(fields.get("technical_summary"))
+            investigation.business_summary = _strip_nul(fields.get("business_summary"))
+            investigation.risk_assessment = _strip_nul(fields.get("risk_assessment"))
             investigation.missing_evidence = fields.get("missing_evidence") or []
             return

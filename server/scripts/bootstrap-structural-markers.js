@@ -5,7 +5,7 @@ import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.j
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { getOrDetectStrategy } from '../implementers/lib/strategy-registry.js';
 import { MARKER_MERGE_TYPES } from '../implementers/backend.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 
@@ -75,7 +75,7 @@ export async function bootstrapSite(siteId) {
 
   const { start, end } = defaultRange();
   const rawPages = await getSearchPerformanceRange(siteId, start, end, 'page', PAGE_LIMIT);
-  const pages = filterOwnDomainPages(rawPages, knownDomain(site));
+  const pages = filterOwnDomainPages(rawPages, ownDomains(site));
   console.log(`\n=== Site #${siteId} "${site.name}" (${site.repo_owner}/${site.repo_name}) — ${pages.length} real candidate pages ===`);
 
   // Unique (filePath, markerName) pairs only — several pages can share one

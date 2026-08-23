@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceRange, getQueriesForPage } from '../store/read.js';
 import { analyzePageUrl, checkLlmsReadiness } from '../agents/lib/page-content.js';
-import { knownDomain, filterOwnDomainPages } from '../agents/lib/site-domain.js';
+import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { buildGeoAuditReport } from '../agents/lib/geo-audit-report.js';
 
 export const meta = {
@@ -37,7 +37,7 @@ export async function generate({ siteId, params }) {
   const domain = knownDomain(site);
 
   const pagePerfRaw = await getSearchPerformanceRange(siteId, start, end, 'page', PAGE_POOL_SIZE);
-  const pagePerf = filterOwnDomainPages(pagePerfRaw, domain)
+  const pagePerf = filterOwnDomainPages(pagePerfRaw, ownDomains(site))
     .filter((p) => Number(p.impressions) >= 5)
     .filter((p) => !EXCLUDED_TERMS.some((t) => p.dim_value.toLowerCase().includes(t)))
     .sort((a, b) => Number(b.impressions) - Number(a.impressions))

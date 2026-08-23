@@ -1,5 +1,5 @@
 import { getSearchConsole } from '../auth/google.js';
-import { knownDomain } from '../agents/lib/site-domain.js';
+import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 
 // A `sc-domain:` GSC property is domain-level — it returns EVERY subdomain
 // Search Console has verified data for, which can include an entirely
@@ -14,10 +14,53 @@ import { knownDomain } from '../agents/lib/site-domain.js';
 // consumer — this ingestion, any current agent, or any future one — can
 // ever see a foreign subdomain's data, without each one having to
 // remember to filter it out individually.
-export function pageFilterGroups(domain) {
-  if (!domain) return undefined; // no website_domain configured yet — same "pass through unfiltered" convention as filterOwnDomainPages
-  const escaped = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(www\\.)?${escaped}([/?]|$)` }] }];
+//
+// `domains` is either a single hostname or the fuller ownDomains(site) set
+// (e.g. a hero product legitimately hosted on its own subdomain, alongside
+// the main site) — every entry gets its own alternation branch, so a page
+// on ANY of them passes, while an unlisted subdomain still doesn't.
+export function pageFilterGroups(domains) {
+  const list = (Array.isArray(domains) ? domains : [domains]).filter(Boolean);
+  if (!list.length) return undefined; // no website_domain configured yet — same "pass through unfiltered" convention as filterOwnDomainPages
+  const alternation = list
+    .map((d) => `(www\\.)?${d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+    .join('|');
+  return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(${alternation})([/?]|$)` }] }];
+}
+
+// Tripwire for the query-only dimension specifically — unlike page/
+// queryPage rows, a query-only row has no page/URL on it at all, so it
+// can never be hostname-checked the way queryPageRowsOwn above is. The
+// dimensionFilterGroups page-filter already confirmed unreliable on one
+// combined request (see fetchGscForDate) — there is no proof it is
+// reliable here either, just no independent way to re-check it directly.
+// The closest indirect check: a query's OWN total impressions (this
+// unfiltered per-query request) should already be fully accounted for by
+// that same query's impressions in queryPages (which IS hard-filtered to
+// ownDomains). A query with meaningfully MORE unfiltered impressions than
+// its filtered total suggests some of that volume came from a page
+// outside ownDomains that this call's filter let through anyway — the
+// same class of leak already found once. Tolerant of a real, benign gap:
+// queryPages caps at 250 rows, so a long-tail query spread across many
+// low-volume pages can legitimately be undercounted there without any
+// leak — hence a ratio threshold, not exact equality, and a minimum
+// impression floor so single-digit noise never fires this.
+export function detectQueryDimensionLeakage(queries, queryPages, { minImpressions = 20, toleranceRatio = 1.5 } = {}) {
+  const filteredImpressionsByQuery = new Map();
+  for (const r of queryPages) {
+    const key = r.query;
+    filteredImpressionsByQuery.set(key, (filteredImpressionsByQuery.get(key) || 0) + Number(r.impressions || 0));
+  }
+  const suspicious = [];
+  for (const q of queries) {
+    const unfilteredImpressions = Number(q.impressions || 0);
+    if (unfilteredImpressions < minImpressions) continue;
+    const filteredImpressions = filteredImpressionsByQuery.get(q.dim_value) || 0;
+    if (unfilteredImpressions > filteredImpressions * toleranceRatio) {
+      suspicious.push({ query: q.dim_value, unfilteredImpressions, filteredImpressions });
+    }
+  }
+  return suspicious;
 }
 
 // Fetch GSC Search Analytics for a single date, using `site`'s own Google
@@ -28,7 +71,7 @@ export function pageFilterGroups(domain) {
 export async function fetchGscForDate(site, date) {
   const gscProperty = site.gsc_property;
   const sc = await getSearchConsole(site);
-  const dimensionFilterGroups = pageFilterGroups(knownDomain(site));
+  const dimensionFilterGroups = pageFilterGroups(ownDomains(site));
 
   const queryApi = async (dimensions, rowLimit) => {
     const res = await sc.searchanalytics.query({
@@ -70,7 +113,20 @@ export async function fetchGscForDate(site, date) {
   // landing page (the single-dimension 'queries'/'pages' rows above share no key).
   // Also includes device + country for circumstantial context on that click.
   const queryPageRows = await queryApi(['query', 'page', 'device', 'country'], 250);
-  const queryPages = queryPageRows.map((r) => ({
+  const domains = ownDomains(site);
+  // Real, observed gap: the API's own page-dimension regex filter above
+  // (dimensionFilterGroups) does not reliably exclude a foreign subdomain
+  // on THIS particular 4-dimension combined request, even though the
+  // identical filter correctly excludes it on the single-dimension 'page'
+  // query just above — confirmed live (supreme-court.<domain> rows still
+  // came back here after the exact same filter). Never trust the upstream
+  // API's filter alone for this one call: re-assert it in code so a
+  // foreign subdomain's clicks can never reach gsc_query_page regardless
+  // of whatever caused the API to not honor its own filter here.
+  const queryPageRowsOwn = domains
+    ? queryPageRows.filter((r) => domains.includes(hostnameOf(r.keys?.[1])))
+    : queryPageRows;
+  const queryPages = queryPageRowsOwn.map((r) => ({
     query: r.keys?.[0] ?? '',
     page: r.keys?.[1] ?? '',
     device: r.keys?.[2] ?? '',
@@ -80,6 +136,17 @@ export async function fetchGscForDate(site, date) {
     ctr: r.ctr ?? 0,
     position: r.position ?? 0,
   }));
+
+  if (domains) {
+    const suspicious = detectQueryDimensionLeakage(queries, queryPages);
+    if (suspicious.length) {
+      console.warn(
+        `[gsc] site ${site.id} ${date}: ${suspicious.length} quer${suspicious.length === 1 ? 'y' : 'ies'} may include impressions from outside ${domains.join(', ')} ` +
+        `(query-only totals can't be hostname-checked directly — see detectQueryDimensionLeakage):`,
+        suspicious.map((s) => `"${s.query}" (${s.unfilteredImpressions} unfiltered vs ${s.filteredImpressions} filtered)`).join('; ')
+      );
+    }
+  }
 
   return { date, totals, queries, pages, devices, countries, queryPages };
 }

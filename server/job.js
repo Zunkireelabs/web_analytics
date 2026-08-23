@@ -37,7 +37,7 @@ import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
-import { knownDomain, filterOwnDomainPages } from './agents/lib/site-domain.js';
+import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl } from './implementers/lib/design-drift.js';
@@ -598,7 +598,7 @@ export async function runSiteDiscoveryIfDue(site) {
     crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
     getSearchPerformanceRange(site.id, start, end, 'page', 200),
   ]);
-  const domain = knownDomain(site);
+  const domain = ownDomains(site);
   const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
 
   await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
