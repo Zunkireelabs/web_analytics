@@ -137,7 +137,7 @@ function fakeQuery(text, params = []) {
 mock.module('/Users/yukta/Travel/analytics/server/db.js', {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
-const { findRelevantMemory, recordFixOutcome, findPortableRepairs, deprecateMemory, deprecateObsoleteMemories } = await import('./agent-memory.js');
+const { findRelevantMemory, recordFixOutcome, findPortableRepairs, deprecateMemory, deprecateObsoleteMemories, sanitizeLessonText } = await import('./agent-memory.js');
 
 // Promotes a freshly-recorded row to the exact state findPortableRepairs
 // requires, without hand-writing a store row — so these tests exercise the
@@ -327,16 +327,41 @@ describe('findPortableRepairs — cross-client retrieval', () => {
     assert.deepEqual(found[0].repairRecipe, RECIPE);
   });
 
-  test('refuses a row proven on only ONE site — correct is not the same as portable', async () => {
+  test('the default floor (minDistinctSites=1) still returns a row proven on exactly one OTHER site', async () => {
+    // 1 is the absolute floor: zero cross-site evidence is never portable,
+    // but the module itself does not know any generator's real evidence
+    // bar — that is applied by the caller (agents/lib/learned-repair.js),
+    // strictly after its own technical/structural/content-context
+    // compatibility check. See that module's decision-chain comment.
+    const id = await seed({ siteId: 7 }); // learned on the target site itself, so it contributes no evidence
+    makePortable(id, { successSites: [2] }); // reused successfully on exactly one OTHER site
+    const found = await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 });
+    assert.equal(found.length, 1);
+    assert.equal(found[0].provenSiteCount, 1);
+  });
+
+  test('an explicit higher minDistinctSites still refuses a row proven on only ONE other site — correct is not the same as portable', async () => {
     const id = await seed();
     makePortable(id, { successSites: [1] }); // same site as it was learned on
+    assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7, minDistinctSites: 2 }), []);
+  });
+
+  test('refuses a row with NO cross-site evidence at all, even against the default floor', async () => {
+    // Learned directly ON the target site, with no other site's success —
+    // distinctSuccessSites excludes the target site itself, so this is
+    // genuinely zero cross-site evidence, not just "below some tier".
+    const id = await seed({ siteId: 7 });
+    makePortable(id, { successSites: [] });
     assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
   });
 
   test('does not count the target site as its own evidence', async () => {
-    const id = await seed();
+    // Learned ON the target site (7) and "reused" there too — if the target
+    // site were ever wrongly counted as its own evidence this would show one
+    // distinct site and pass even the default floor; correctly excluded, it
+    // is zero and must refuse.
+    const id = await seed({ siteId: 7 });
     makePortable(id, { successSites: [7] });
-    // Only site 1 (where it was learned) remains once site 7 is excluded.
     assert.deepEqual(await findPortableRepairs({ problemSignature: base.problemSignature, targetSiteId: 7 }), []);
   });
 
@@ -390,6 +415,76 @@ describe('findPortableRepairs — cross-client retrieval', () => {
 
   test('returns nothing when given no signature at all', async () => {
     assert.deepEqual(await findPortableRepairs({ targetSiteId: 7 }), []);
+  });
+});
+
+// Cross-site reuse is intentional (findPortableRepairs above deliberately
+// does NOT filter by site_id — see learned-repair.js's "CROSS-SITE SAFETY
+// BOUNDARY" comment). What must never happen is a client-specific detail —
+// a URL, a client name, reproduced draft copy — riding along inside a row
+// that another client's repair-reuse can read. Two independent nets: (1)
+// sanitizeLessonText redacts every free-text field on the INSERT path, and
+// (2) findPortableRepairs' own returned shape never exposes those free-text
+// fields at all, so even an unsanitized value couldn't reach the reuse path.
+describe('cross-site content safety — a shared lesson can never carry client-specific content', () => {
+  beforeEach(() => resetStore());
+
+  test('sanitizeLessonText redacts URLs, emails and long quoted spans', () => {
+    assert.equal(sanitizeLessonText('See https://client-a.example/products/widget for the broken page.'), 'See <url> for the broken page.');
+    assert.equal(sanitizeLessonText('Contact ops@client-a.example about this.'), 'Contact <email> about this.');
+    const longQuote = 'x'.repeat(90);
+    assert.equal(sanitizeLessonText(`The draft said "${longQuote}" verbatim.`), 'The draft said "<quoted-content>" verbatim.');
+  });
+
+  test('a URL/email/long-quote written through recordFixOutcome is redacted before it ever reaches the row', async () => {
+    const id = await recordFixOutcome({
+      category: 'content', scope: 'client', siteId: 1, generatorId: 'faq',
+      problemSignature: 'faq:leaky-symptom',
+      symptoms: `Reproduced from https://client-a.example/pricing — contact billing@client-a.example. Quote: "${'y'.repeat(90)}"`,
+      affectedPattern: 'faq generation output',
+      fixStrategy: 'Rewrite the section',
+      outcome: 'success',
+    });
+    const row = store.find((r) => r.id === id);
+    assert.doesNotMatch(row.symptoms, /https?:\/\//);
+    assert.doesNotMatch(row.symptoms, /client-a\.example/);
+    assert.doesNotMatch(row.symptoms, /y{80,}/);
+  });
+
+  test('findPortableRepairs never returns symptoms/root_cause/affected_pattern/fix_strategy/fix_pattern — a cross-site reader has no way to read free text even if it were unsanitized', async () => {
+    const id = await recordFixOutcome({
+      category: 'content', scope: 'client', siteId: 1, generatorId: 'alt-text',
+      problemSignature: 'alt-text:leak-shape-check',
+      symptoms: 'Images were missing alt text.',
+      affectedPattern: 'Pages with img tags lacking an alt attribute.',
+      fixStrategy: 'Add a grounded alt attribute.',
+      outcome: 'success',
+      siteFingerprint: ['render:eleventy'], repairRecipe: { kind: 'generator-chain', generatorId: 'alt-text' },
+    });
+    makePortable(id, { successSites: [2] });
+    const [found] = await findPortableRepairs({ problemSignature: 'alt-text:leak-shape-check', targetSiteId: 7 });
+    assert.ok(found);
+    for (const field of ['symptoms', 'rootCause', 'affectedPattern', 'fixStrategy', 'fixPattern', 'notes']) {
+      assert.ok(!(field in found), `findPortableRepairs leaked a free-text field: ${field}`);
+    }
+    assert.deepEqual(Object.keys(found).sort(), [
+      'confidence', 'generatorId', 'id', 'problemSignature', 'provenSiteCount', 'repairRecipe', 'siteFingerprint', 'successfulReuseCount',
+    ]);
+  });
+
+  test('repair_recipe carries only a generator routing decision, never client content', async () => {
+    // buildRepairRecipe (learned-repair.js) only ever produces
+    // {kind, generatorId, version} — asserted here at the storage boundary,
+    // since this is the one thing that DOES travel from site A to site B.
+    const id = await recordFixOutcome({
+      category: 'content', scope: 'client', siteId: 1, generatorId: 'faq',
+      problemSignature: 'faq:recipe-shape-check',
+      symptoms: 'x', affectedPattern: 'y', fixStrategy: 'z', outcome: 'success',
+      siteFingerprint: ['render:eleventy'],
+      repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+    });
+    const row = store.find((r) => r.id === id);
+    assert.deepEqual(Object.keys(row.repair_recipe).sort(), ['generatorId', 'kind', 'version']);
   });
 });
 

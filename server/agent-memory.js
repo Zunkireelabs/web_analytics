@@ -217,11 +217,24 @@ export async function deprecateObsoleteMemories(knownGeneratorIds = []) {
 // query shape. It is the single most important guard here: "worked twice on
 // one site" is evidence the fix is right, not evidence it is PORTABLE.
 //
+// `minDistinctSites` defaults to 1, not to any generator's real tier
+// threshold — 1 is the absolute floor below which a row is not evidence of
+// portability at all (zero cross-site successes), and it is the loosest
+// value any REPAIR_EVIDENCE_TIERS entry could ever require, so this default
+// never hides a row a caller might legitimately want to see. The REAL,
+// per-generator evidence bar (requiredEvidenceFor in agents/lib/
+// learned-repair.js) is applied by that caller AFTER its own technical/
+// structural/content-context compatibility loop, not here — see that
+// module's decision-chain comment. Deliberately not this module's job: this
+// is the RETRIEVE step, and folding the generator-specific evidence bar into
+// the query would let "how much proof is enough" run before "is this even
+// applicable", which is the ordering this default is designed to avoid.
+//
 // Returns raw-ish candidates including site_fingerprint; applicability
 // matching itself lives in agents/lib/learned-repair.js so this module keeps
 // its documented no-heavy-imports property.
 export async function findPortableRepairs({
-  problemSignature, category = null, targetSiteId = null, minDistinctSites = 2, limit = 5,
+  problemSignature, category = null, targetSiteId = null, minDistinctSites = 1, limit = 20,
 } = {}) {
   if (!problemSignature) return [];
 

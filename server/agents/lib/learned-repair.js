@@ -4,6 +4,7 @@ import { sanitizeForCustomer } from '../../lib/errors.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint, fingerprintCompatible } from './site-fingerprint.js';
+import { getOrClassifyPageContentType } from './page-content-classifier.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 import { TAG_TO_GENERATOR, GAP_TYPE_TO_GENERATOR } from './page-content.js';
 
@@ -12,6 +13,42 @@ import { TAG_TO_GENERATOR, GAP_TYPE_TO_GENERATOR } from './page-content.js';
 // each needs first. Deliberately separate from agent-memory.js (which stores
 // and retrieves) and from auto-remediation.js (which executes) — this module
 // only decides.
+//
+// CROSS-SITE SAFETY BOUNDARY — read this before touching either side of it.
+// This feature is INTENTIONALLY not site-isolated: the entire point is that
+// a repair proven on client A's site can act on client B's repository
+// (findPortableRepairs in agent-memory.js does not filter by site_id). That
+// is a deliberate product decision, not an oversight, and it must stay that
+// way — do not "fix" it into per-site isolation.
+//
+// What makes that safe is NOT tenant isolation, it's that only a GENERIC
+// repair lesson is eligible to cross that boundary, enforced by construction
+// rather than by review:
+//   - the only thing that actually moves from site A to site B is
+//     `repair_recipe` (buildRepairRecipe above) — `{kind, generatorId,
+//     version}`. It names WHICH generator chain to re-run, never the bytes
+//     it produced. The implementer re-derives every anchor/edit from B's own
+//     real source and refuses if it doesn't match (see buildRepairRecipe's
+//     comment) — so even a malformed recipe cannot inject A's content into B.
+//   - `site_fingerprint` (site-fingerprint.js) is technology-only tokens
+//     (render engine, file extension, adapter id, content-type LABEL) — no
+//     client name, domain, URL or path; enforced by
+//     site-fingerprint.test.js's PRIVACY assertions.
+//   - the free-text fields that DO travel with a memory row (symptoms,
+//     affected_pattern, fix_strategy, fix_pattern) are all generalized
+//     descriptions the writer composes from generatorId/tags/source, never
+//     from page content or a customer's draft copy (see
+//     fix-verification.js's learnFromOutcome), and are additionally passed
+//     through agent-memory.js's sanitizeLessonText before every insert as a
+//     second, independent net.
+//   - findPortableRepairs' returned shape (agent-memory.js) exposes only
+//     id/generatorId/problemSignature/siteFingerprint/repairRecipe/
+//     confidence/counts — symptoms/notes/affected_pattern/fix_strategy are
+//     never part of it, so even if one of those fields somehow carried
+//     something client-specific, this reuse path has no way to read it.
+// The actual isolation for THIS feature is the technical/structural/
+// content-context/evidence gate below, not `site_id` — see
+// interceptWithLearnedRepairs.
 
 // THE retrieval key, used by BOTH the writer (fix-verification.js, when a
 // live re-check confirms a fix worked) and the reader (the interception path).
@@ -79,36 +116,44 @@ export function buildRepairRecipe(generatorId) {
 // on the strength of someone else's outcome' are different bars, and these
 // generators do not share a failure mode — so the EVIDENCE required scales
 // with how a bad match would actually fail. Every tier is reachable; the
-// riskier ones just need proof from more independent sites first.
+// riskier ones just need proof from more independent sites first. Values are
+// the number of distinct other sites required, not a tier label — kept
+// deliberately unequal across tiers (1 / 2 / 4, not a fixed step) so a
+// tightened or loosened bar for one class never has to touch another's.
 //
-//   2 — exact-match-or-refuse. The implementer re-derives its anchor from the
-//       target repo and refuses the whole draft if it is missing or ambiguous
-//       (alt-text-inject.js, schema-repair-inject.js). A wrong match cannot
-//       half-write a file; it declines and the issue flows to the Action
-//       Center exactly as it does today.
+//   exact-match-or-refuse (1 site required) — alt-text, schema-repair. The
+//       implementer re-derives its anchor from the target repo and refuses
+//       the whole draft if it is missing or ambiguous (alt-text-inject.js,
+//       schema-repair-inject.js). A wrong match cannot half-write a file; it
+//       declines and the issue flows to the Action Center exactly as it does
+//       today — so a single prior success is enough proof.
 //
-//   3 — deterministic, no LLM. Output is reproducible from the same inputs,
-//       so a bad match produces a predictable wrong value rather than
-//       invented prose. But these write whole files or config (nginx, robots,
-//       sitemap) with no anchor refusal to catch it.
+//   deterministic, no LLM (2 sites required) — canonical, viewport,
+//       html-lang, breadcrumbs, robots-fix, security-headers, sitemap,
+//       llms-txt. Output is reproducible from the same inputs, so a bad
+//       match produces a predictable wrong value rather than invented prose,
+//       but these write whole files or config with no anchor refusal to
+//       catch it — hence more than 1, but still far below the LLM tier.
 //
-//   4 — LLM prose through marker merge. No anchor refusal, and the content is
-//       real customer-facing copy. A lesson learned on client A shaping
-//       client B's visible text is the highest-consequence case here, so it
-//       needs the most independent corroboration. The Quality Gate, approval
-//       re-validation and the human PR review all still apply underneath.
+//   LLM prose through marker merge (4 sites required) — meta-title, faq,
+//       expand-content, qa-content, internal-links, open-graph, schema. No
+//       anchor refusal, and the content is real customer-facing copy. A
+//       lesson learned on client A shaping client B's visible text is the
+//       highest-consequence case here, so it keeps the most independent
+//       corroboration. The Quality Gate, approval re-validation and the
+//       human PR review all still apply underneath.
 const REPAIR_EVIDENCE_TIERS = {
-  'alt-text': 2,
-  'schema-repair': 2,
+  'alt-text': 1,
+  'schema-repair': 1,
 
-  canonical: 3,
-  viewport: 3,
-  'html-lang': 3,
-  breadcrumbs: 3,
-  'robots-fix': 3,
-  'security-headers': 3,
-  sitemap: 3,
-  'llms-txt': 3,
+  canonical: 2,
+  viewport: 2,
+  'html-lang': 2,
+  breadcrumbs: 2,
+  'robots-fix': 2,
+  'security-headers': 2,
+  sitemap: 2,
+  'llms-txt': 2,
 
   'meta-title': 4,
   faq: 4,
@@ -174,17 +219,18 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
     // Derived from generatorId + source, NOT from item.tag — that field is a
     // human display label and would never match what the writer stored.
     const signature = problemSignatureFor(item.generatorId, tagsForGenerator(item.generatorId, item.source), item.source);
-    const targetFingerprint = computeSiteFingerprint(site, {
-      targetFilePath: item.params?.page ? resolveFile(site, item.params.page) : null,
-    });
 
     let candidates = [];
     try {
+      // No minDistinctSites here on purpose — that would apply the EVIDENCE
+      // gate before the TECHNICAL/STRUCTURAL/CONTENT-CONTEXT gate below has
+      // even run (see agent-memory.js's default). The generator-specific
+      // evidence bar (`required`, resolved above from REPAIR_EVIDENCE_TIERS)
+      // is applied by this module, after compatibility, in the loop below.
       candidates = await findPortableRepairs({
         problemSignature: signature,
         category: topLevelCategoryForGenerator(item.generatorId),
         targetSiteId: siteId,
-        minDistinctSites: required,
       });
     } catch (err) {
       console.error(`[learned-repair] site ${siteId} lookup failed for ${signature}:`, err.message);
@@ -192,20 +238,68 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
     }
     if (!candidates.length) continue;
 
-    // Applicability is decided here, not in the SQL — the fingerprint compare
-    // needs both sides in memory. First compatible candidate wins; they are
-    // already ordered by confidence.
+    // Content-type classification (page-content-classifier.js) is the one
+    // fingerprint input that costs real money (a DB read, occasionally an
+    // LLM call), so it only runs here — for a page that already has a real
+    // evidence-backed candidate — never for the common case of a page with
+    // no learned repair at all. A cache hit on a page already classified for
+    // an earlier candidate/run costs nothing further.
+    //
+    // This IS the "investigate" step of the technical -> structural ->
+    // content-context -> evidence decision chain: an uncached page gets
+    // classified right here, live, before the applicability verdict is made
+    // — not a separate persisted state, just a lazily-resolved fact.
+    const targetContentType = item.params?.page
+      ? await getOrClassifyPageContentType(siteId, item.params.page).catch(() => null)
+      : null;
+    const targetFingerprint = computeSiteFingerprint(site, {
+      targetFilePath: item.params?.page ? resolveFile(site, item.params.page) : null,
+      pageUrl: item.params?.page || null,
+      actionType: item.generatorId,
+      contentType: targetContentType?.contentType || null,
+    });
+
+    // The decision chain, explicit and in order — each candidate must clear
+    // every earlier gate before a later one is even consulted:
+    //
+    //   1-3. TECHNICAL -> STRUCTURAL -> CONTENT CONTEXT, all three folded
+    //        into one fingerprintCompatible() call (site-fingerprint.js):
+    //        render:/target-ext: (technical), page-adapter: (structural),
+    //        content-type: (content context). Any one of them failing is a
+    //        flat refusal regardless of how much reuse evidence exists.
+    //   4.   EVIDENCE — `c.provenSiteCount >= required` — is checked ONLY
+    //        after a candidate has already passed step 1-3. A candidate with
+    //        abundant cross-site evidence but an incompatible fingerprint is
+    //        never chosen; a compatible candidate with too little evidence
+    //        is skipped in favor of a later, sufficiently-proven one. Nothing
+    //        in this loop can let evidence alone stand in for compatibility.
+    //
+    // Applicability is decided here, not in the SQL — the fingerprint
+    // compare needs both sides in memory. First candidate to clear ALL FOUR
+    // gates wins; candidates arrive ordered by confidence.
     let chosen = null;
     let lastRefusal = null;
     for (const c of candidates) {
       const compat = fingerprintCompatible(c.siteFingerprint, targetFingerprint);
-      if (compat.ok) { chosen = c; break; }
-      lastRefusal = compat.missing;
+      if (!compat.ok) { lastRefusal = compat.missing; continue; }
+      if (c.provenSiteCount < required) {
+        lastRefusal = [`evidence:${c.provenSiteCount}<${required}`];
+        continue;
+      }
+      chosen = c;
+      break;
     }
     if (!chosen) {
       // Logged rather than silent: "no repair applied" and "no repair applied
       // because this site has no renderCapabilities.generator recorded" are
       // very different operational answers, and only one of them is a bug.
+      // A refusal whose `missing` names content-type: specifically is a
+      // content-context mismatch/uncertainty rather than a technical/
+      // structural one, and one naming `evidence:` is neither — both still
+      // fall through to the same Action Center path, but the self-describing
+      // token names in the log line below (e.g. "content-type:blog!=
+      // content-type:product" vs "render:eleventy!=render:nextjs" vs
+      // "evidence:1<4") already keep the distinction inspectable.
       console.log(`[learned-repair] site ${siteId} has ${candidates.length} proven repair(s) for ${signature} but none applicable here — blocked by: ${(lastRefusal || []).join(', ')}`);
       continue;
     }
@@ -218,7 +312,7 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
     try {
       await shipDraftForRecommendation(siteId, {
         generatorId: item.generatorId, params: item.params,
-        findingId: item.id, source: 'learned-repair', memoryRefId: chosen.id,
+        findingId: item.id, source: 'learned-repair', findingOrigin: item.source || null, memoryRefId: chosen.id,
         // Unattended cron pass — see auto-remediation.js's identical option.
         waitForDesignAgent: true,
       });
