@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isShippable, hourInTimezone, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './ship-window.js';
+import { isShippable, hourInTimezone, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL } from './ship-window.js';
 
 const withRepo = { id: 1, repo_owner: 'acme', repo_name: 'site-a', timezone: 'Asia/Kolkata' };
 const noRepo = { id: 2, repo_owner: null, repo_name: null, timezone: 'Asia/Kolkata' };
@@ -10,7 +10,8 @@ const noRepo = { id: 2, repo_owner: null, repo_name: null, timezone: 'Asia/Kolka
 // ship hour — and 14:00 in Pacific/Kiritimati (UTC+14) — after it. One instant,
 // two opposite answers, which is the whole point of doing this per site.
 const MORNING_IST = new Date('2026-08-12T00:00:00Z');
-const AFTERNOON_IST = new Date('2026-08-12T09:00:00Z'); // 14:30 IST
+const WITHIN_CATCHUP_WINDOW_IST = new Date('2026-08-12T03:30:00Z'); // 09:00 IST — inside [7, 11)
+const AFTERNOON_IST = new Date('2026-08-12T09:00:00Z'); // 14:30 IST — window long closed
 
 describe('isShippable', () => {
   test('requires a repository, not analytics — there is nowhere to push otherwise', () => {
@@ -35,29 +36,43 @@ describe('isShipCatchupOwed', () => {
   });
 
   test('owes a run once the ship hour has passed and nothing shipped', () => {
-    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: AFTERNOON_IST }), true);
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: WITHIN_CATCHUP_WINDOW_IST }), true);
   });
 
   test('owes nothing when the scheduled run already produced work today', () => {
-    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 4, now: AFTERNOON_IST }), false);
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 4, now: WITHIN_CATCHUP_WINDOW_IST }), false);
   });
 
   test('never owes a run to a site with no repository', () => {
-    assert.equal(isShipCatchupOwed({ site: noRepo, alreadyShippedToday: 0, now: AFTERNOON_IST }), false);
+    assert.equal(isShipCatchupOwed({ site: noRepo, alreadyShippedToday: 0, now: WITHIN_CATCHUP_WINDOW_IST }), false);
+  });
+
+  // The whole reason this bound exists: a stray process started well past the
+  // morning window (e.g. a local dev server run at 7 PM with real prod creds)
+  // must not still find shipping "owed" — see PR #55 on zunkireelabs-web.
+  test('owes nothing once the catch-up window has closed, even with nothing shipped', () => {
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: AFTERNOON_IST }), false);
+  });
+
+  test('defaults the catch-up window to closing at 11:00, four hours after the ship hour', () => {
+    assert.equal(SHIP_CATCHUP_END_HOUR_LOCAL, 11);
   });
 
   // The per-site timezone is load-bearing, not decoration: at one instant a
-  // Kiritimati tenant is owed a catch-up while an Indian tenant is not.
+  // Kiritimati tenant is owed a catch-up (09:00 local, inside its window)
+  // while an Indian tenant is not (00:30 local, before its ship hour).
   test('decides per tenant timezone at a single instant', () => {
     const kiritimati = { ...withRepo, timezone: 'Pacific/Kiritimati' };
-    assert.equal(isShipCatchupOwed({ site: kiritimati, alreadyShippedToday: 0, now: MORNING_IST }), true);
-    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: MORNING_IST }), false);
+    const instant = new Date('2026-08-11T19:00:00Z');
+    assert.equal(isShipCatchupOwed({ site: kiritimati, alreadyShippedToday: 0, now: instant }), true);
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: instant }), false);
   });
 
   test('falls back to the supplied timezone when a site has none', () => {
     const noTz = { ...withRepo, timezone: null };
-    assert.equal(isShipCatchupOwed({ site: noTz, alreadyShippedToday: 0, fallbackTimezone: 'UTC', now: MORNING_IST }), false);
-    assert.equal(isShipCatchupOwed({ site: noTz, alreadyShippedToday: 0, fallbackTimezone: 'Pacific/Kiritimati', now: MORNING_IST }), true);
+    const instant = new Date('2026-08-11T19:00:00Z'); // 09:00 in Pacific/Kiritimati, inside its window
+    assert.equal(isShipCatchupOwed({ site: noTz, alreadyShippedToday: 0, fallbackTimezone: 'UTC', now: instant }), false);
+    assert.equal(isShipCatchupOwed({ site: noTz, alreadyShippedToday: 0, fallbackTimezone: 'Pacific/Kiritimati', now: instant }), true);
   });
 
   // Shipping is chained onto the 07:00 detection run (cron.js), so the guard's

@@ -21,6 +21,15 @@
 // autonomy has always ended.
 export const SHIP_HOUR_LOCAL = Number(process.env.SHIP_HOUR_LOCAL || 7);
 
+// How late a missed 07:00 run can still be recovered. Without an upper bound
+// the hourly catch-up guard below owes shipping at literally any hour past
+// SHIP_HOUR_LOCAL — including a stray local dev process started at 7 PM with
+// production credentials, which is exactly how PR #55 on zunkireelabs-web got
+// opened outside the intended morning window. Four hours gives the daily job
+// and its own hourly guard (job.js) room to recover from a normal missed
+// wake-up without leaving the window open all day.
+export const SHIP_CATCHUP_END_HOUR_LOCAL = Number(process.env.SHIP_CATCHUP_END_HOUR_LOCAL || 11);
+
 // Whether a site is eligible to have work SHIPPED at all. Deliberately keyed
 // on the repo, not on GSC/GA4 (listConnectedSites' filter): a site with
 // analytics but no repository has nowhere to push a branch. The
@@ -48,5 +57,6 @@ export function hourInTimezone(timezone, now = new Date()) {
 export function isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone = 'UTC', now = new Date() }) {
   if (!isShippable(site)) return false;
   if (alreadyShippedToday > 0) return false;
-  return hourInTimezone(site.timezone || fallbackTimezone, now) >= SHIP_HOUR_LOCAL;
+  const hour = hourInTimezone(site.timezone || fallbackTimezone, now);
+  return hour >= SHIP_HOUR_LOCAL && hour < SHIP_CATCHUP_END_HOUR_LOCAL;
 }
