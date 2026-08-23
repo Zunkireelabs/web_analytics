@@ -43,6 +43,15 @@ from app.db.session import SessionLocal
 from app.scoring.confidence import compute_confidence
 
 
+def compute_priority_score(opportunity_score: float, confidence: float, effort_level: int) -> float:
+    """The formula documented in this module's own docstring, extracted to
+    one place so callers that need a priority_score for a single
+    recommendation on-demand (see app/investigations/drafts.py's priority
+    gate) can reuse it verbatim instead of duplicating the arithmetic.
+    effort_level is never 0 — DB constraint restricts it to 1-5."""
+    return (opportunity_score / 100) * confidence / effort_level
+
+
 async def run_recommendation_prioritizer() -> None:
     async with SessionLocal() as session:
         clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
@@ -82,7 +91,7 @@ async def run_recommendation_prioritizer() -> None:
                     ))
                     continue
                 opportunity_score, confidence, effort_level = result
-                priority_score = (opportunity_score / 100) * confidence / effort_level
+                priority_score = compute_priority_score(opportunity_score, confidence, effort_level)
                 scored.append((rec, priority_score, confidence, effort_level))
 
             # Rank only THIS batch's newly-scored rows among themselves —

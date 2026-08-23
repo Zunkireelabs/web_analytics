@@ -266,6 +266,26 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
       result.values.expandedContent,
       /<ul><li><a href="https:\/\/example\.com\/one">Source One<\/a><\/li><li><a href="https:\/\/example\.com\/two">Source Two<\/a><\/li><\/ul>/,
     );
+    // Regression: the row template used to wrap the whole body in a fixed
+    // <p>...</p>, so a bullet-list-only body rendered as <p><ul>...</ul></p>
+    // — block content nested inside a <p>, which is invalid HTML that
+    // browsers recover from by force-closing the <p> early.
+    assert.doesNotMatch(result.values.expandedContent, /<p>\s*<ul>/);
+  });
+
+  test('expand-content keeps prose and a bullet list as siblings, never a <ul> nested inside a <p>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'References',
+        body: 'See the sources below.\n- [Source One](https://example.com/one)\n- [Source Two](https://example.com/two)\nMore context after the list.',
+      }],
+    });
+    assert.equal(result.ok, true);
+    const html = result.values.expandedContent;
+    assert.doesNotMatch(html, /<p>[^<]*<ul>/, 'a <ul> must never be nested inside a <p> — invalid HTML that browsers force-close');
+    assert.match(html, /<p>See the sources below\.<\/p>/);
+    assert.match(html, /<ul><li>.*<\/li><\/ul>/s);
+    assert.match(html, /<p>More context after the list\.<\/p>/, 'text after the list must survive as its own paragraph, not get silently dropped');
   });
 
 

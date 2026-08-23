@@ -79,10 +79,14 @@ async def _forecast_one(session: AsyncSession, client_id: int, metric: MetricCat
                 point_estimate=p.point_estimate, lower_bound=p.lower_bound, upper_bound=p.upper_bound,
             ))
 
-    # Site-level only — see app/forecast/confidence.py's docstring for why a
-    # non-site dimension_value's forecast_runs.confidence is deliberately
-    # left null rather than borrowing the site series' backtest error.
-    if result.status == "ok" and dimension_type == "site":
+    # Dimension-aware (Prompt 8 Option A): compute_forecast_confidence now
+    # backtests against this SAME (dimension_type, dimension_value)'s own
+    # forecast history (see app/stats/diagnostics.py's dimension-scoped
+    # _forecast_backtest_pairs) — no longer a site-only computation, so
+    # every enabled dimension (site/channel/device/page) gets a real
+    # confidence score instead of a null placeholder once it has enough
+    # backtest history of its own.
+    if result.status == "ok":
         confidence_id, confidence = await compute_forecast_confidence(
             session, client_id=client_id, forecast_run=run, series=series,
         )

@@ -3,6 +3,7 @@ import {
   getSiteById, getDataRange, getDailySeries, getRangeTotals, getMonthlyTotals,
   getChannelsRange, getChannelsDailySeries, getGscBreakdownRange, getGa4BreakdownRange, getTopMovers,
   getHealthScoreSeries, getGscBreakdownDailySeries, getGa4BreakdownDailySeries, getGscBreakdownDailyTopN,
+  getQueryPageMetrics, getCannibalizedQueries,
 } from '../../server/store/read.js';
 import { translateQuery } from '../../server/report/translate.js';
 import { buildReportSummary, buildCountryBreakdown } from '../../server/report/summary.js';
@@ -18,6 +19,8 @@ import { getAuthorityScoreSeries } from '../../server/store/authority.js';
 import { getMonthlyMentionRate, getWeeklyMentionRate } from '../../server/store/ai-recommendation.js';
 import { getOwnStructuralScoreSeries } from '../../server/store/competitor-profiles.js';
 import { getForecasts, getAnomalyAlerts, getSiteProfile, getKeywordClusters, getKeywordGaps } from '../../server/store/data-analyst.js';
+import { listPageInventory } from '../../server/store/page-inventory.js';
+import { getTechnicalSeoSignalsForPages } from '../../server/store/technical-seo-checks.js';
 import { dateStr, jsonResult, withErrorHandling } from './shared.js';
 
 // Read-only analytics/reporting/agent-status/Action-Center-read MCP tools.
@@ -232,4 +235,57 @@ export function registerReadOnlyTools(server, siteId) {
     description: 'Real keyword topics with zero current coverage, identified from this site\'s own profile and existing clusters — a human-review queue, never auto-applied. Optionally filtered by review status.',
     inputSchema: { status: z.enum(['pending_review', 'approved', 'rejected']).optional() },
   }, withErrorHandling('get_keyword_gaps', async ({ status }) => jsonResult(await getKeywordGaps(siteId, status))));
+
+  // The canonical "every real page we know about" for this site (see
+  // page_inventory's own migration comment) — sitemap + a real
+  // homepage-outward crawl + GSC's own performance data, merged. This is
+  // website STRUCTURE (which URLs exist, how they were discovered, whether
+  // a page is orphaned — reachable from nothing else on the site via a real
+  // internal link), not page CONTENT: titles/headings/body/schema are
+  // computed fresh per-request by Node's own page-content analysis and
+  // never persisted anywhere, so there is no existing stored dataset to
+  // wrap into a tool here without Node first changing what it persists.
+  server.registerTool('get_page_inventory', {
+    description: "Every real URL known for this site (from sitemap, a real crawl, and/or GSC), how it was first discovered, and whether it's orphaned (in the sitemap but unreachable via any real internal link found during the last crawl). Newest-seen first.",
+    inputSchema: { limit: z.number().int().positive().max(2000).optional() },
+  }, withErrorHandling('get_page_inventory', async ({ limit }) => jsonResult(await listPageInventory(siteId, { limit }))));
+
+  // Persisted content/technical signals (migration 120) — title, canonical,
+  // schema, index status, broken links, word count, meta description, and
+  // internal-link count, all computed by Node's existing page-content/
+  // technical-seo pipeline and never re-derived here. Only covers pages this
+  // site's technical-seo rotation has already checked (see technical_seo_
+  // checks' own migration comment on the bounded-rotation rationale) —
+  // absent pages simply aren't in the result, not a false "no issues".
+  server.registerTool('get_technical_seo_signals', {
+    description: 'Real, already-persisted per-page technical SEO + content signals: title, canonical/schema presence, index status, broken links, word count, meta description, internal link count. Only covers pages already checked by this site\'s technical-seo rotation — a page never checked is simply absent, not "clean". Optionally filtered to specific pages.',
+    inputSchema: { pages: z.array(z.string()).max(200).optional(), limit: z.number().int().positive().max(2000).optional() },
+  }, withErrorHandling('get_technical_seo_signals', async ({ pages, limit }) => jsonResult(await getTechnicalSeoSignalsForPages(siteId, { pages, limit }))));
+
+  // Real per-(query,page) Search Console evidence (gsc_query_page) — the
+  // join get_gsc_breakdown deliberately doesn't have (it aggregates query
+  // and page as independent single-dimension rows). This is the same store
+  // function server/agents/lib/growth-opportunities.js already uses for the
+  // Analyst page's own opportunity surfacing.
+  server.registerTool('get_query_page_metrics', {
+    description: 'Real Search Console clicks/impressions/CTR/avg-position for every (query, page) pair actually observed together over a date range — the evidence needed to grade a target keyword or judge whether an existing page already covers it. No estimated search volume anywhere in this data.',
+    inputSchema: { start: dateStr, end: dateStr, minImpressions: z.number().int().min(0).default(5) },
+  }, withErrorHandling('get_query_page_metrics', async ({ start, end, minImpressions }) => jsonResult(await getQueryPageMetrics(siteId, start, end, { minImpressions }))));
+
+  // Real query cannibalization candidates — 2+ of the site's OWN pages both
+  // genuinely ranking (real position, real impressions) for the same real
+  // query. Same store function server/routes already expose for staff
+  // review; here it's read-only evidence for the Analyst to grade further
+  // (demand threshold, ownership instability) before treating it as a
+  // finding, per this task's evidence-requirement.
+  server.registerTool('get_cannibalized_queries', {
+    description: 'Real queries where 2+ of this site\'s own pages both rank within a position ceiling over a date range, sorted by combined clicks. Raw candidate evidence only — not itself a finding; requires further grading (demand, ranking stability) before use.',
+    inputSchema: {
+      start: dateStr, end: dateStr,
+      minImpressions: z.number().int().min(0).default(5),
+      maxPosition: z.number().int().min(1).max(100).default(20),
+      limit: z.number().int().min(1).max(100).default(20),
+    },
+  }, withErrorHandling('get_cannibalized_queries', async ({ start, end, minImpressions, maxPosition, limit }) =>
+    jsonResult(await getCannibalizedQueries(siteId, start, end, { minImpressions, maxPosition, limit }))));
 }

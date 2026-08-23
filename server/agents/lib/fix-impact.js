@@ -1,6 +1,7 @@
 import {
   getDueImpactMeasurements, recordImpactOutcome, getPageSearchTotals, IMPACT_WINDOW_DAYS,
 } from '../../store/fix-impact.js';
+import { recordOutcome } from './generator-learning.js';
 
 // Measures what a merged fix actually did to real Search Console numbers, which
 // is the one thing this system has never checked about its own work. Every
@@ -77,6 +78,23 @@ export function computeDelta(before, after) {
   };
 }
 
+// The one already-computed, already-signed number this module uses to
+// classify a measured outcome for the learning loop (see
+// generator-learning.js's impactConfidence bucket): clicks is the most
+// directly interpretable "did this help traffic" figure of the four in
+// delta, it is never null when status is 'measured' (both windows have
+// real impressions by construction), and computeDelta already documents
+// its sign convention (positive = improved) — reused as-is, not a new
+// formula. Deliberately NOT a weighted blend of clicks/impressions/
+// position/ctr — that would be exactly the kind of invented business rule
+// this system avoids; impressions/position/ctr remain visible in the
+// stored delta for human review, just not used to derive this label.
+export function classifyImpact(delta) {
+  if (delta.clicks > 0) return 'impact-positive';
+  if (delta.clicks < 0) return 'impact-negative';
+  return 'impact-neutral';
+}
+
 export async function measureOne(row) {
   const windows = measurementWindows(row.merged_at);
   const [before, after] = await Promise.all([
@@ -88,7 +106,8 @@ export async function measureOne(row) {
   // against, and one with none after may simply not have been re-crawled yet.
   // Either way there is no honest comparison to report — and reporting "+0%"
   // would read as "the fix did nothing", which is a different and unearned
-  // claim.
+  // claim. No outcome is logged for the learning loop either — "we don't
+  // know" must never be recorded as a neutral/negative signal.
   if (!before || !after) {
     return recordImpactOutcome(row.id, {
       status: 'insufficient-data',
@@ -96,10 +115,18 @@ export async function measureOne(row) {
     });
   }
 
-  return recordImpactOutcome(row.id, {
-    status: 'measured',
-    beforeWindow: before, afterWindow: after, delta: computeDelta(before, after),
+  const delta = computeDelta(before, after);
+  const updated = await recordImpactOutcome(row.id, { status: 'measured', beforeWindow: before, afterWindow: after, delta });
+
+  // Distinct from the technical shipped/failed/merged/rejected signal
+  // (generator-learning.js keeps them in separate buckets) — this is
+  // "did the fix move the metric", logged into the same existing
+  // outcome/confidence mechanism rather than a new one.
+  await recordOutcome(row.site_id, row.generator_id, classifyImpact(delta), {
+    draftId: row.draft_id, detail: `clicks ${delta.clicks >= 0 ? '+' : ''}${delta.clicks} over ${IMPACT_WINDOW_DAYS}d post-merge`,
   });
+
+  return updated;
 }
 
 // Due-driven sweep, mirroring fix-verification.js's runDueVerifications. One

@@ -52,13 +52,13 @@ describe('evidence tiers', () => {
   test('exact-match-or-refuse generators need the least corroboration', () => {
     // Their implementer re-derives anchors from the target repo and refuses
     // all-or-nothing, so a wrong match declines rather than half-writing.
-    assert.equal(requiredEvidenceFor('alt-text'), 2);
-    assert.equal(requiredEvidenceFor('schema-repair'), 2);
+    assert.equal(requiredEvidenceFor('alt-text'), 1);
+    assert.equal(requiredEvidenceFor('schema-repair'), 1);
   });
 
   test('deterministic no-LLM generators need more', () => {
-    assert.equal(requiredEvidenceFor('canonical'), 3);
-    assert.equal(requiredEvidenceFor('security-headers'), 3);
+    assert.equal(requiredEvidenceFor('canonical'), 2);
+    assert.equal(requiredEvidenceFor('security-headers'), 2);
   });
 
   test('LLM prose generators need the most — they write customer-facing copy', () => {

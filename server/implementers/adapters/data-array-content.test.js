@@ -488,3 +488,57 @@ describe('data-array-content computeChange — schemaField (JSON-LD object write
     assert.equal(reparsed.ok, true);
   });
 });
+
+// Regression coverage for the file-scope-safety investigation: meta-title
+// and faq/qa-content routinely share one dataFile (see tenantAWithMetaTitle
+// above — both point at src/_data/locations.js), and github-ops.js's
+// needsFamilyWriteMarker only flags that a batch's later commits touch an
+// already-touched _data file — it relies on each draft's own computeChange
+// being applied against the batch branch's CURRENT tip (not stale base
+// content) to actually avoid clobbering an earlier draft's write. This was
+// previously true only by inspection of the caller wiring (auto-remediation
+// applies serially, preview/apply re-fetch off the batch branch); nothing
+// exercised the actual two-draft splice sequence end-to-end.
+describe('data-array-content computeChange — cross-generator batch sequencing (shared _data file safety)', () => {
+  test('a meta-title draft applied after a faq draft on the same entry preserves both writes', async () => {
+    const first = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', items: [{ question: 'New Q?', answer: 'New A' }] },
+    }, fetchLocations);
+    assert.equal(first.ok, true);
+
+    const second = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'meta-title',
+      content: {
+        page: 'https://zunkireelabs.com/locations/kathmandu/',
+        selectedTitle: 'AI Development in Kathmandu — Zunkiree Labs',
+        metaDescription: 'A tightened, on-length meta description for the Kathmandu location page.',
+      },
+    }, async () => ({ content: first.newContent }));
+
+    assert.equal(second.ok, true);
+    // the faq draft's earlier write survives the meta-title draft's splice
+    assert.match(second.newContent, /New Q\?/);
+    // and the meta-title draft's own write is present
+    assert.match(second.newContent, /title: "AI Development in Kathmandu — Zunkiree Labs"/);
+    // an unrelated sibling entry is untouched by either draft
+    assert.match(second.newContent, /id: "pokhara"/);
+  });
+
+  test('two faq drafts for different pages in the same dataFile both land, applied in sequence', async () => {
+    const first = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', items: [{ question: 'Kathmandu Q?', answer: 'Kathmandu A' }] },
+    }, fetchLocations);
+    assert.equal(first.ok, true);
+
+    const second = await computeChange(tenantAWithMetaTitle, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/', items: [{ question: 'Pokhara Q?', answer: 'Pokhara A' }] },
+    }, async () => ({ content: first.newContent }));
+
+    assert.equal(second.ok, true);
+    assert.match(second.newContent, /Kathmandu Q\?/);
+    assert.match(second.newContent, /Pokhara Q\?/);
+  });
+});

@@ -370,7 +370,16 @@ async function main() {
   await pool.end();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+// Guarded like discover-url-file-map.js/bootstrap-structural-markers.js's
+// own CLI entrypoints — connect-repo.js imports auditSite() as a library
+// call, and without this guard that import alone re-ran this file's own
+// CLI main() (parsing connect-repo's argv, auditing, and calling
+// pool.end()) as a side effect, before connect-repo's own explicit
+// auditSite() call and pool.end() ran — hence "Called end on pool more
+// than once".
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

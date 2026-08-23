@@ -12,6 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Anomaly, Client, Insight, MetricCatalog, MetricObservation, MetricPeriodStats, AnalystRecommendations
+
+# Prompt 8 (content decay): metrics where a decline actually represents lost
+# organic value, as opposed to gsc_ctr/gsc_position which can move for
+# reasons unrelated to content quality (e.g. a SERP feature grabbing the
+# click). Page-dimension only — content decay is a per-page concept.
+CONTENT_DECAY_METRICS = ("gsc_clicks", "gsc_impressions")
 from app.db.session import SessionLocal
 
 TREND_SHIFT_THRESHOLD_PCT = {"wow": 15.0, "mom": 20.0}
@@ -29,6 +35,7 @@ async def run_insight_engine() -> None:
             await _anomaly_insights(session, client.id)
             await _trend_shift_insights(session, client.id)
             await _forecast_risk_insights(session, client.id)
+            await _content_decay_insights(session, client.id)
             await _milestone_insights(session, client.id)
             await session.commit()
 
@@ -156,6 +163,88 @@ async def _trend_shift_insights(session: AsyncSession, client_id: int) -> None:
                       "pct_change": float(r.pct_change),
                       "correlated_anomalies": correlated},
         )
+
+
+async def _content_decay_insights(session: AsyncSession, client_id: int) -> None:
+    """Classifies an existing page-dimension decline as `content_decay` when
+    it meets a stricter, SUSTAINED bar than a single trend_shift — reuses the
+    exact same MetricPeriodStats rows _trend_shift_insights already computed
+    (deltas.py's nightly WoW/MoM stats engine), never a new statistical
+    method. Does not replace or remove the trend_shift/forecast_risk insights
+    for the same page — this is an additional classification alongside them.
+
+    Qualifies only if:
+    - The 3 most recent WoW snapshots for (metric, page) are real,
+      consecutive calendar weeks (exactly 7 days apart, no gap — a gap would
+      mean the page dropped out of gsc_page_dimension's top-50 admission
+      streak, i.e. missing data, not confirmed decline).
+    - EVERY one of those 3 weeks independently clears TREND_SHIFT_THRESHOLD_
+      PCT['wow'] on its own (the same bar a single trend_shift already uses)
+      — "sustained" means 3-in-a-row, not a new arbitrary number.
+    - The latest MoM snapshot for the same (metric, page) ALSO clears
+      TREND_SHIFT_THRESHOLD_PCT['mom'] — corroboration that this is a real
+      multi-week decline, not 3 volatile weeks that net out flat by month.
+      Missing/non-qualifying MoM data means insufficient history/
+      corroboration, and this deliberately does NOT fire."""
+    for metric_key in CONTENT_DECAY_METRICS:
+        rows = (
+            await session.execute(
+                select(MetricPeriodStats).where(
+                    MetricPeriodStats.client_id == client_id, MetricPeriodStats.metric_key == metric_key,
+                    MetricPeriodStats.dimension_type == "page", MetricPeriodStats.period_type == "wow",
+                )
+            )
+        ).scalars().all()
+
+        by_page: dict[str, list[MetricPeriodStats]] = {}
+        for r in rows:
+            by_page.setdefault(r.dimension_value, []).append(r)
+
+        # Batch-fetch every page's MoM rows for this metric once, same as the
+        # WoW query above, instead of a per-page round-trip inside the loop
+        # below — keeps this an O(1)-query pass regardless of page count.
+        mom_rows = (
+            await session.execute(
+                select(MetricPeriodStats).where(
+                    MetricPeriodStats.client_id == client_id, MetricPeriodStats.metric_key == metric_key,
+                    MetricPeriodStats.dimension_type == "page", MetricPeriodStats.period_type == "mom",
+                )
+            )
+        ).scalars().all()
+        latest_mom_by_page: dict[str, MetricPeriodStats] = {}
+        for r in mom_rows:
+            existing = latest_mom_by_page.get(r.dimension_value)
+            if existing is None or r.period_end > existing.period_end:
+                latest_mom_by_page[r.dimension_value] = r
+
+        threshold_wow = TREND_SHIFT_THRESHOLD_PCT["wow"]
+        threshold_mom = TREND_SHIFT_THRESHOLD_PCT["mom"]
+
+        for page, page_rows in by_page.items():
+            page_rows.sort(key=lambda r: r.period_end, reverse=True)
+            if len(page_rows) < 3:
+                continue
+            recent3 = page_rows[:3]
+            if any((recent3[i].period_end - recent3[i + 1].period_end).days != 7 for i in range(2)):
+                continue  # a gap means missing weeks, not a confirmed 3-week decline
+            wow_pct_changes = [float(r.pct_change) for r in recent3 if r.pct_change is not None]
+            if len(wow_pct_changes) < 3 or any(pc > -threshold_wow for pc in wow_pct_changes):
+                continue
+
+            mom_row = latest_mom_by_page.get(page)
+            if mom_row is None or mom_row.pct_change is None or float(mom_row.pct_change) > -threshold_mom:
+                continue  # no MoM corroboration yet — insufficient history, not a false negative
+
+            await _replace_insight(
+                session, client_id=client_id, metric_key=metric_key, dimension_type="page",
+                dimension_value=page, period_start=recent3[0].period_end, insight_type="content_decay",
+                severity="high",
+                evidence={
+                    "consecutive_weeks": 3, "wow_pct_changes": wow_pct_changes,
+                    "mom_pct_change": float(mom_row.pct_change),
+                    "wow_threshold_pct": threshold_wow, "mom_threshold_pct": threshold_mom,
+                },
+            )
 
 
 async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None:

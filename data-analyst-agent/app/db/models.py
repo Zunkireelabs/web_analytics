@@ -236,7 +236,7 @@ class Insight(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "insight_type IN ('anomaly','trend_shift','forecast_risk','milestone')",
+            "insight_type IN ('anomaly','trend_shift','forecast_risk','milestone','content_decay','target_keyword_evidence','cannibalization')",
             name="insights_type_check",
         ),
         CheckConstraint("severity IN ('high','medium','low')", name="insights_severity_check"),
@@ -843,6 +843,8 @@ class ForecastAccuracy(Base):
     forecast_point_id: Mapped[int] = mapped_column(
         ForeignKey("forecast_points.id", ondelete="CASCADE"), nullable=False, unique=True,
     )
+    dimension_type: Mapped[str] = mapped_column(Text, nullable=False, default="site")
+    dimension_value: Mapped[str] = mapped_column(Text, nullable=False, default="__site__")
     predicted_value: Mapped[float] = mapped_column(Numeric, nullable=False)
     actual_value: Mapped[float] = mapped_column(Numeric, nullable=False)
     abs_pct_error: Mapped[float | None] = mapped_column(Numeric)

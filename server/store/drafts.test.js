@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 let issued;
 
 let implementedFindingIdsRows = [];
+let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
+let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
 
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
@@ -23,6 +25,18 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT 1 FROM drafts')) {
     return { rows: [] };
   }
+  if (sql.startsWith('INSERT INTO drafts')) {
+    if (insertDraftConflict) {
+      const err = new Error('duplicate key value violates unique constraint "drafts_site_finding_id_unique"');
+      err.code = '23505';
+      err.constraint = insertDraftErrorConstraint;
+      throw err;
+    }
+    return { rows: [{ id: 1, site_id: params[0], action_type: params[1], finding_id: params[6] }] };
+  }
+  if (sql.startsWith('SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2')) {
+    return { rows: insertDraftConflict ? [insertDraftConflict] : [] };
+  }
   throw new Error(`drafts.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -33,9 +47,40 @@ mock.module(resolve('../db.js'), {
 const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
+  createDraft,
 } = await import('./drafts.js');
 
-beforeEach(() => { issued = []; implementedFindingIdsRows = []; });
+beforeEach(() => { issued = []; implementedFindingIdsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
+
+// Prompt 7 audit / migration 118: the app-level getDraftByFindingId-then-
+// insert check in generateDraft() has a real concurrent window (LLM
+// generation + Quality Gate + Design Agent resolution all run between the
+// read and this insert) — the DB-level unique index is the actual
+// backstop. This proves createDraft() treats a losing insert as "someone
+// else already created this finding's draft," returning that row, rather
+// than surfacing a raw duplicate-key error to the caller.
+describe('createDraft — finding_id race backstop (migration 118)', () => {
+  test('a normal insert with no conflict just returns the new row', async () => {
+    const draft = await createDraft(7, { actionType: 'meta-title', findingId: 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p', content: {} });
+    assert.equal(draft.id, 1);
+    assert.equal(draft.finding_id, 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p');
+  });
+
+  test('a 23505 on drafts_site_finding_id_unique returns the winning concurrent draft instead of throwing', async () => {
+    insertDraftConflict = { id: 42, site_id: 7, action_type: 'meta-title', finding_id: 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p', status: 'draft' };
+    const draft = await createDraft(7, { actionType: 'meta-title', findingId: 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p', content: {} });
+    assert.equal(draft.id, 42, 'returns the row the winning concurrent insert already created');
+  });
+
+  test('a 23505 on an UNRELATED constraint still throws — this backstop only swallows its own race', async () => {
+    insertDraftConflict = { id: 99, site_id: 7, finding_id: 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p' };
+    insertDraftErrorConstraint = 'drafts_pkey';
+    await assert.rejects(
+      () => createDraft(7, { actionType: 'meta-title', findingId: 'analyst:gsc_ctr:trend_shift:2026-08-18:https://x.com/p', content: {} }),
+      /duplicate key/,
+    );
+  });
+});
 
 // getImplementedFindingIds feeds Website Health's implementedFindingIds
 // (job.js -> health-score.js) as well as Growth report/summary — a finding

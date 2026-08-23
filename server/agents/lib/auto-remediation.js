@@ -188,11 +188,26 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
   // confidence history yet (no learnedMap entry) is treated as neutral
   // (0.5), not penalized relative to a proven-bad one — only a MEASURED low
   // confidence should demote within a tier.
+  //
+  // Also tempered by learnedMap's SEPARATE impactConfidence (fix-impact.js's
+  // measured real-world GSC outcome, see generator-learning.js) — same
+  // neutral-0.5 default when there's no history yet, same multiplicative,
+  // non-blocking role as `confidence` above. This is the one place measured
+  // business impact is allowed to influence action selection: it can only
+  // ever scale this generator's rank UP or DOWN within its priority tier,
+  // never remove its eligibility or block it outright (a generator with
+  // weak measured impact still ships, just later within the same tier) —
+  // deliberately not a hard "no impact -> never again" rule (SEO effects
+  // are delayed and noisy; see fix-impact.js's own caveat on its delta).
   const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
   const rankScore = (rec) => {
     const impact = typeof rec.expected_impact?.value === 'number' ? rec.expected_impact.value : 0;
-    const confidence = learnedMap.get(rec.recommendation_type)?.confidence;
-    return impact * (typeof confidence === 'number' ? confidence : 0.5);
+    const learned = learnedMap.get(rec.recommendation_type);
+    const confidence = learned?.confidence;
+    const impactConfidence = learned?.impactConfidence;
+    return impact
+      * (typeof confidence === 'number' ? confidence : 0.5)
+      * (typeof impactConfidence === 'number' ? impactConfidence : 0.5);
   };
   const ranked = [...candidates].sort((a, b) => {
     const tierDiff = (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3);
@@ -243,7 +258,7 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
       // per shipped recommendation and observing two.
       const approved = await shipDraftForRecommendation(siteId, {
         generatorId: rec.recommendation_type, params: rec.params,
-        findingId: rec.finding_ids[0], source: SOURCE,
+        findingId: rec.finding_ids[0], source: SOURCE, findingOrigin: rec.detecting_agents?.[0] || null,
         // Unattended cron pass, not a user's click — worth waiting out a
         // same-site design-profile derivation so today's run can ship a real
         // PR instead of only unblocking tomorrow's. See design-drift.js's
@@ -397,8 +412,8 @@ export async function autoRemediateSafeRecommendations(siteId, { globalRemaining
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, memoryRefId = null, waitForDesignAgent = false }) {
-  const draft = await generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId, waitForDesignAgent });
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false }) {
+  const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
   if (autoSelected) {

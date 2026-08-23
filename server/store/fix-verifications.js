@@ -38,7 +38,13 @@ export const VERIFIABLE_GENERATOR_IDS = new Set([
 ]);
 
 export function isVerifiableDraft(draft) {
-  return VERIFIABLE_SOURCES.has(draft.source)
+  // finding_origin (migration 119) is the real detecting agent, preserved
+  // separately from `source` (which auto-remediation.js/execution-engine
+  // overwrite with their own shipping-mechanism label) — fall back to
+  // `source` for rows with no recorded origin (pre-migration rows, or a
+  // caller with no separate origin to give, e.g. a manual click where
+  // `source` already IS the real detecting agent).
+  return VERIFIABLE_SOURCES.has(draft.finding_origin || draft.source)
     && !!draft.finding_id
     && VERIFIABLE_GENERATOR_IDS.has(draft.action_type)
     && !!draft.input?.page;

@@ -68,11 +68,13 @@ from app.forecast.run import run_forecasts
 from app.ingestion.run_nightly import run_nightly
 from app.insights.engine import run_insight_engine
 from app.insights.recommendations import run_recommendation_engine
+from app.intelligence.cannibalization import run_cannibalization_detection
 from app.intelligence.effort_estimation import run_effort_estimation
 from app.intelligence.impact_prediction import run_impact_prediction
 from app.intelligence.opportunity_scoring import run_opportunity_scoring
 from app.intelligence.prioritizer import run_recommendation_prioritizer
 from app.intelligence.root_cause import run_root_cause_analysis
+from app.intelligence.target_keyword_evidence import run_target_keyword_evidence
 from app.investigations.drafts import run_draft_trigger
 from app.investigations.engine import run_investigation_engine
 from app.investigations.outcome import run_investigation_outcome_evaluation
@@ -95,6 +97,11 @@ async def main() -> None:
     async with track("investigating"):
         await run_feature_importance()
         await run_insight_engine()
+        # Must mirror app/analysis/run_pass.py::run_analysis_pass exactly —
+        # that module's own docstring claims stage-for-stage parity with
+        # this script, which these two calls were originally missing from.
+        await run_target_keyword_evidence()
+        await run_cannibalization_detection()
         await run_root_cause_analysis()
     async with track("generating_recommendations"):
         await run_recommendation_engine()

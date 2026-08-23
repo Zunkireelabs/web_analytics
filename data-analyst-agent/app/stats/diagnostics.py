@@ -120,7 +120,10 @@ async def compute_seasonality_strength(session: AsyncSession, *, client_id: int,
     return _stl_strength(series, "seasonal")
 
 
-async def _forecast_backtest_pairs(session: AsyncSession, *, client_id: int, metric_key: str) -> tuple[list[float], list[float], str | None]:
+async def _forecast_backtest_pairs(
+    session: AsyncSession, *, client_id: int, metric_key: str,
+    dimension_type: str = "site", dimension_value: str = "__site__",
+) -> tuple[list[float], list[float], str | None]:
     """Shared backtest population for compute_prediction_error (MAPE/RMSE)
     and compute_r_squared: every past forecast_points row (across every
     historical forecast_run — forecast_runs is INSERT-only, so this
@@ -130,13 +133,22 @@ async def _forecast_backtest_pairs(session: AsyncSession, *, client_id: int, met
     just with different statistics — never two different samples silently
     disagreeing about what was backtested. Returns (actuals, predicted,
     reason) — reason is set only when the pair lists come back short/empty,
-    so callers can report an honest insufficient-data detail."""
+    so callers can report an honest insufficient-data detail.
+
+    dimension_type/dimension_value default to site/'__site__' — every
+    existing caller (compute_all_diagnostics' dashboard panel) is
+    unaffected. app/forecast/confidence.py passes a forecast_run's own
+    dimension so a page/channel/device forecast is backtested against ITS
+    OWN realized series, never borrowed from the site-level one (see that
+    module's docstring — this used to be a hard site-only restriction for
+    exactly that reason; now it's correct for any dimension because the
+    filter is real, not removed)."""
     today = date.today()
     run_rows = (
         await session.execute(
             select(ForecastRun.id).where(
                 ForecastRun.client_id == client_id, ForecastRun.metric_key == metric_key,
-                ForecastRun.dimension_type == "site", ForecastRun.dimension_value == "__site__",
+                ForecastRun.dimension_type == dimension_type, ForecastRun.dimension_value == dimension_value,
                 ForecastRun.status == "ok",
             )
         )
@@ -159,7 +171,7 @@ async def _forecast_backtest_pairs(session: AsyncSession, *, client_id: int, met
         await session.execute(
             select(MetricObservation.period_start, MetricObservation.value).where(
                 MetricObservation.client_id == client_id, MetricObservation.metric_key == metric_key,
-                MetricObservation.dimension_type == "site", MetricObservation.dimension_value == "__site__",
+                MetricObservation.dimension_type == dimension_type, MetricObservation.dimension_value == dimension_value,
                 MetricObservation.period_start.in_(target_dates),
             )
         )
@@ -178,10 +190,17 @@ async def _forecast_backtest_pairs(session: AsyncSession, *, client_id: int, met
     return actuals, predicted, None
 
 
-async def compute_prediction_error(session: AsyncSession, *, client_id: int, metric_key: str) -> DiagnosticResult:
+async def compute_prediction_error(
+    session: AsyncSession, *, client_id: int, metric_key: str,
+    dimension_type: str = "site", dimension_value: str = "__site__",
+) -> DiagnosticResult:
     """MAPE/RMSE over the shared forecast backtest population — see
-    _forecast_backtest_pairs."""
-    actuals, predicted, reason = await _forecast_backtest_pairs(session, client_id=client_id, metric_key=metric_key)
+    _forecast_backtest_pairs. dimension_type/dimension_value default to
+    site/'__site__', unchanged for compute_all_diagnostics' dashboard panel."""
+    actuals, predicted, reason = await _forecast_backtest_pairs(
+        session, client_id=client_id, metric_key=metric_key,
+        dimension_type=dimension_type, dimension_value=dimension_value,
+    )
     if reason is not None:
         return DiagnosticResult(status="insufficient-data", value=None, detail={"n_backtestable_points": len(actuals), "reason": reason})
 
@@ -196,7 +215,10 @@ async def compute_prediction_error(session: AsyncSession, *, client_id: int, met
     )
 
 
-async def compute_r_squared(session: AsyncSession, *, client_id: int, metric_key: str) -> DiagnosticResult:
+async def compute_r_squared(
+    session: AsyncSession, *, client_id: int, metric_key: str,
+    dimension_type: str = "site", dimension_value: str = "__site__",
+) -> DiagnosticResult:
     """Forecast backtest R² (coefficient of determination): 1 - SS_res/SS_tot
     over the same realized actual-vs-predicted pairs compute_prediction_error
     backtests — a real out-of-sample fit-quality measure, deliberately the
@@ -205,8 +227,12 @@ async def compute_r_squared(session: AsyncSession, *, client_id: int, metric_key
     when the realized values have zero variance (SS_tot == 0) rather than
     dividing by zero, and is never clamped to [0, 1] — a forecast worse than
     predicting the mean legitimately scores negative, and clamping it would
-    hide that from the reader."""
-    actuals, predicted, reason = await _forecast_backtest_pairs(session, client_id=client_id, metric_key=metric_key)
+    hide that from the reader. dimension_type/dimension_value default to
+    site/'__site__', unchanged for compute_all_diagnostics' dashboard panel."""
+    actuals, predicted, reason = await _forecast_backtest_pairs(
+        session, client_id=client_id, metric_key=metric_key,
+        dimension_type=dimension_type, dimension_value=dimension_value,
+    )
     if reason is not None:
         return DiagnosticResult(status="insufficient-data", value=None, detail={"n_backtestable_points": len(actuals), "reason": reason})
 

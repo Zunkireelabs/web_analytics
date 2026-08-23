@@ -96,6 +96,9 @@ export async function run({ siteId, start, end, pageCache, params }) {
     indexStatus: r.indexStatus, coreWebVitals: r.coreWebVitals, technicalAudit: r.technicalAudit,
     brokenLinks: null, // filled in below once the crawl results are known
     lastImpressions: r.impressions,
+    wordCount: r.analysis?.wordCount ?? null,
+    metaDescription: r.analysis?.metaDescription || null,
+    internalLinkCount: r.analysis?.internalLinks?.length ?? null,
   }).catch((err) => console.error(`[agents] technical-seo: failed to persist check for ${r.page}:`, err.message))));
 
   const crawl = await crawlInternalLinks(pageResults);
@@ -108,6 +111,9 @@ export async function run({ siteId, start, end, pageCache, params }) {
     return upsertTechnicalSeoCheck(siteId, r.page, {
       indexStatus: r.indexStatus, coreWebVitals: r.coreWebVitals, technicalAudit: r.technicalAudit,
       brokenLinks: { ok: true, broken, redirectChains }, lastImpressions: r.impressions,
+      wordCount: r.analysis?.wordCount ?? null,
+      metaDescription: r.analysis?.metaDescription || null,
+      internalLinkCount: r.analysis?.internalLinks?.length ?? null,
     }).catch((err) => console.error(`[agents] technical-seo: failed to persist link results for ${r.page}:`, err.message));
   }));
 

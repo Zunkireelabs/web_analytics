@@ -16,7 +16,7 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
@@ -382,6 +382,14 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     }
 
     const site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+
+    // Best-effort: a repo connect must succeed even if this queue-insert
+    // fails, since the 06:00 daily sweep (job.js) picks up any site still
+    // missing a profile as a fallback. This just removes the wait for sites
+    // connected mid-day.
+    queueDesignAgentDerivationForSite(site).catch((err) =>
+      console.error(`[clients] could not queue design-profile derivation for site ${site.id}:`, err.message)
+    );
 
     await recordAuditEvent(req, {
       action: 'tenant.repo_connected',

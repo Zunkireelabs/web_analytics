@@ -45,10 +45,15 @@ class KeywordClusteringCollector(Collector):
 
         since = window_end - timedelta(days=WINDOW_DAYS)
         rows = await get_gsc_breakdown(mcp, since.isoformat(), window_end.isoformat(), "query", KEYWORD_FETCH_LIMIT)
+        # get_gsc_breakdown's SUM(impressions)/SUM(clicks) are bigint/numeric
+        # aggregates — node-postgres serializes those as strings over JSON
+        # (precision, not a real int), never auto-cast to a JS number. Cast
+        # here at the one place this MCP tool's numbers enter Python, rather
+        # than at every downstream comparison.
         keywords = [
-            {"keyword": r["dim_value"], "impressions": r["impressions"], "avg_position": r.get("avg_position")}
+            {"keyword": r["dim_value"], "impressions": int(r["impressions"]), "avg_position": float(r["avg_position"]) if r.get("avg_position") is not None else None}
             for r in rows
-            if r.get("impressions") is not None and r["impressions"] >= ic.MIN_IMPRESSIONS
+            if r.get("impressions") is not None and int(r["impressions"]) >= ic.MIN_IMPRESSIONS
         ]
         if not keywords:
             logger.info("client %s: no keyword data in the last %d days, skipping", client.id, WINDOW_DAYS)
