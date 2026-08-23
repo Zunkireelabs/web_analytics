@@ -263,7 +263,7 @@ router.get('/action-center/generators', async (req, res, next) => {
 // custom wait budget in ms — dataAnalyst.js's "Generate Content Draft" button
 // uses a short one so a mid-derivation click gets a real result instead of
 // an immediate "come back later", without hanging the request for minutes.
-export async function generateDraft(siteId, { generatorId, params, source, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
+export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -509,7 +509,18 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   const memoryRefId = presetMemoryRefId ?? (memoryMatch[0]?.id ?? null);
 
   const draft = await createDraft(siteId, {
-    actionType: generatorId, source: source || 'manual', input: params || {}, content, findingId, gateResolvedPatterns,
+    actionType: generatorId, source: source || 'manual',
+    // The real detecting agent (e.g. 'opportunity'/'content-gap'/
+    // 'analyst-insights'), kept separate from `source` above — callers that
+    // ship on behalf of an existing recommendation (auto-remediation.js,
+    // the execution-engine path below) pass the recommendation's own
+    // detecting_agents[0] here while overwriting `source` with their own
+    // shipping-mechanism label; a caller with no separate origin (a manual
+    // click, where `source` already IS the real detecting agent) simply
+    // omits this and fix-verifications.js's isVerifiableDraft falls back to
+    // `source`. See migration 119.
+    findingOrigin: findingOrigin || null,
+    input: params || {}, content, findingId, gateResolvedPatterns,
     renderedBody, targetFilePath, memoryRefId,
   });
 
@@ -873,6 +884,7 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
   try {
     const draft = await generateDraft(siteId, {
       generatorId: rec.recommendation_type, params: rec.params, source: 'execution-engine', findingId: rec.finding_ids[0],
+      findingOrigin: rec.detecting_agents?.[0] || null,
     });
     await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });

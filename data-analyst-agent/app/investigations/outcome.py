@@ -21,7 +21,19 @@ Explicitly NOT a causality claim: outcome_status is a comparison between
 what was predicted and what actually happened, never "the fix caused this"
 — there is no real counterfactual (no way to know what would have happened
 without the approved fix), so 'decline_smaller_than_predicted' is worded and
-documented as a candidate signal for human judgment, not a proven result."""
+documented as a candidate signal for human judgment, not a proven result.
+
+get_investigation_outcome_reliability below closes this table's other loose
+end: how often THIS client's approved forecast_risk investigations turn out
+to be right, reused as one forecast-confidence factor (see
+app/forecast/confidence.py) via the SAME pattern app/forecast/accuracy.py's
+get_rolling_accuracy already established for raw forecast points — not
+forced into the generator/priority system, which this table has no natural
+relationship to: outcome_status is explicitly not a causality claim, and
+approving an investigation is a separate human workflow from the
+draft-trigger's own priority-gated action selection (see
+app/investigations/drafts.py)."""
+import logging
 from datetime import date
 
 from sqlalchemy import select
@@ -30,15 +42,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client, Investigation, InvestigationEvent, InvestigationOutcome, MetricObservation
 from app.db.session import SessionLocal
 
+logger = logging.getLogger(__name__)
+
+# Below this many evaluated outcomes for a client, there's no real signal to
+# ground a reliability figure on yet — approved forecast_risk investigations
+# are inherently rare, so this threshold is deliberately lower than
+# app/forecast/accuracy.py's MIN_EVALUATED_POINTS_FOR_SIGNAL (5), which draws
+# from every forecast point regardless of approval.
+MIN_EVALUATED_OUTCOMES_FOR_SIGNAL = 3
+
 
 async def run_investigation_outcome_evaluation() -> None:
+    """Per-investigation AND per-client isolation (same fix, same reasoning,
+    as app/investigations/drafts.py::run_draft_trigger — one malformed
+    forecast_outlook must only ever cost that one investigation's outcome
+    evaluation, never abort every remaining investigation for its client or
+    every subsequent client's evaluation for the whole night)."""
     async with SessionLocal() as session:
         clients = (await session.execute(select(Client).where(Client.status == "active"))).scalars().all()
 
     for client in clients:
-        async with SessionLocal() as session:
-            await _evaluate_client(session, client.id)
-            await session.commit()
+        try:
+            async with SessionLocal() as session:
+                await _evaluate_client(session, client.id)
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "run_investigation_outcome_evaluation: client %s raised outside the per-investigation loop — skipping this client only",
+                client.id,
+            )
 
 
 async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
@@ -63,7 +95,19 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
     for inv in candidates:
         if inv.id in already_evaluated:
             continue
-        await _evaluate_one(session, client_id, inv)
+        try:
+            await _evaluate_one(session, client_id, inv)
+            # Commit per-investigation: this session is shared across the
+            # whole client's candidate list, so a later investigation's
+            # rollback() would otherwise also discard an earlier
+            # investigation's already-computed InvestigationOutcome row.
+            await session.commit()
+        except Exception:
+            logger.exception(
+                "run_investigation_outcome_evaluation: client %s investigation %s raised — skipping this investigation only",
+                client_id, inv.id,
+            )
+            await session.rollback()
 
 
 async def _evaluate_one(session: AsyncSession, client_id: int, inv: Investigation) -> None:
@@ -115,3 +159,33 @@ async def _evaluate_one(session: AsyncSession, client_id: int, inv: Investigatio
         actor="system", detail={"outcome_status": outcome_status, "pct_actual_change": pct_actual_change, "pct_projected_change": pct_projected_change},
     ))
     inv.status = "completed"
+
+
+# A materialized outcome means the forecast_risk investigation's predicted
+# decline was real, whether or not it was as severe as projected —
+# 'decline_smaller_than_predicted' still means the decline HAPPENED, just
+# not to the predicted magnitude. Only 'no_decline_occurred' means the
+# forecast risk didn't pan out at all.
+_MATERIALIZED_STATUSES = ("decline_as_predicted_or_worse", "decline_smaller_than_predicted")
+
+
+async def get_investigation_outcome_reliability(session: AsyncSession, client_id: int) -> dict:
+    """Read-only accessor, same pattern as app/forecast/accuracy.py's
+    get_rolling_accuracy: how often an approved forecast_risk investigation's
+    predicted decline actually materialized — a signal about how much to
+    trust THIS client's forecast-risk investigations generally, reused as
+    one forecast-confidence factor (see app/forecast/confidence.py).
+    status='insufficient-data' below MIN_EVALUATED_OUTCOMES_FOR_SIGNAL, same
+    convention as every other engine in this codebase — never a noisy
+    fraction from one or two outcomes presented as reliable."""
+    statuses = (
+        await session.execute(
+            select(InvestigationOutcome.outcome_status).where(InvestigationOutcome.client_id == client_id)
+        )
+    ).scalars().all()
+
+    if len(statuses) < MIN_EVALUATED_OUTCOMES_FOR_SIGNAL:
+        return {"status": "insufficient-data", "evaluated_outcomes": len(statuses), "reliability": None}
+
+    materialized = sum(1 for s in statuses if s in _MATERIALIZED_STATUSES)
+    return {"status": "ok", "evaluated_outcomes": len(statuses), "reliability": materialized / len(statuses)}

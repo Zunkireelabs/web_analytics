@@ -35,13 +35,39 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
         select(func.max(IngestionRun.created_at)).where(IngestionRun.client_id == client.id, IngestionRun.status == "ok")
     )
 
+    insights = await _recent_insights(session, client.id)
+
+    return {
+        "client": {"id": client.id, "name": client.name, "timezone": client.timezone},
+        "last_ingested_at": last_ingested_at.isoformat() if last_ingested_at else None,
+        "groups": groups,
+        "insights": insights,
+    }
+
+
+@router.get("/clients/{client_id}/insights")
+async def get_insights(client: Client = Depends(get_active_client), session: AsyncSession = Depends(get_session)) -> dict:
+    """The same recent-insights read GET /dashboard/{client_id} already
+    builds (see _recent_insights), exposed on its own so a caller that only
+    wants insights — server/job.js's nightly runAnalystSyncForAllSites,
+    which turns eligible insights into Action Center recommendations via
+    analyst-seo-mapping.js's seoDraftEligibility — doesn't have to pay for
+    or parse the metric-card/forecast computation the full dashboard read
+    does. Same client scoping (get_active_client — 404s on a suspended/
+    unknown client, same as every other /clients/{client_id}/* route), same
+    insight shape, same resolved/dismissed exclusion, so the two callers can
+    never see divergent data for the same client."""
+    return {"insights": await _recent_insights(session, client.id)}
+
+
+async def _recent_insights(session: AsyncSession, client_id: int) -> list[dict]:
     # The dashboard groups these by metric_key client-side, so a cap that is
     # too tight silently drops signal rather than merely shortening a list: a
     # single noisy metric can occupy every slot and hide every other metric's
     # findings entirely. Still bounded — this is a cache-only read that must
     # stay fast — just bounded well above the number of metrics in the catalog.
     insights_rows = (
-        await session.execute(select(Insight).where(Insight.client_id == client.id).order_by(Insight.generated_at.desc()).limit(INSIGHT_LIMIT))
+        await session.execute(select(Insight).where(Insight.client_id == client_id).order_by(Insight.generated_at.desc()).limit(INSIGHT_LIMIT))
     ).scalars().all()
 
     # One query for every recommendation instead of one per insight. At the
@@ -76,13 +102,7 @@ async def get_dashboard(client: Client = Depends(get_active_client), session: As
             "recommendation": rec.recommendation_text if rec else None,
             "narration_status": rec.narration_status if rec else None,
         })
-
-    return {
-        "client": {"id": client.id, "name": client.name, "timezone": client.timezone},
-        "last_ingested_at": last_ingested_at.isoformat() if last_ingested_at else None,
-        "groups": groups,
-        "insights": insights,
-    }
+    return insights
 
 
 @router.get("/dashboard/{client_id}/series/{metric_key}")

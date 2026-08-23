@@ -14,16 +14,42 @@ let portable;
 let shipCalls;
 let shipError;
 let recordedOutcomes;
+let classification;
+let classifyError;
+let classifyCalls;
 
 mock.module(resolve('../../store/read.js'), {
   namedExports: { getSiteById: async () => site },
 });
 
+// Deliberately NOT filtering by evidence count here — the real
+// findPortableRepairs only applies its own trivial >=1-distinct-site floor
+// (see agent-memory.js's default), never a generator's real evidence tier.
+// The real gate is interceptWithLearnedRepairs' own post-compatibility
+// check, which these tests exercise directly against `portable`'s
+// `provenSiteCount` fixtures.
 mock.module(resolve('../../agent-memory.js'), {
+  // `.filter(Boolean)` rather than a bare `portable` so the "lookup failure"
+  // test below (portable = null) still exercises a real thrown rejection
+  // from this boundary, matching what a real DB error looks like to the
+  // caller.
   namedExports: {
-    findPortableRepairs: async ({ minDistinctSites }) =>
-      portable.filter((p) => p.provenSiteCount >= minDistinctSites),
+    findPortableRepairs: async () => portable.filter(Boolean),
     recordFixOutcome: async (args) => { recordedOutcomes.push(args); return 1; },
+  },
+});
+
+// The classifier module owns its own fail-open behavior (tested directly in
+// page-content-classifier.test.js) — mocked here at the module boundary so
+// these tests exercise how interceptWithLearnedRepairs USES the result
+// (match / mismatch / null / thrown), not the classifier's own internals.
+mock.module(resolve('./page-content-classifier.js'), {
+  namedExports: {
+    getOrClassifyPageContentType: async (siteId, pageUrl) => {
+      classifyCalls.push([siteId, pageUrl]);
+      if (classifyError) throw classifyError;
+      return classification;
+    },
   },
 });
 
@@ -43,7 +69,7 @@ const ELEVENTY_SITE = {
   },
 };
 
-// alt-text is a tier-2 generator (2 distinct sites required).
+// alt-text is an exact-match-or-refuse generator (1 distinct site required).
 const ALT_TEXT_ITEM = {
   id: 'accessibility:missing-alt:https://client.example/a',
   generatorId: 'alt-text',
@@ -67,10 +93,17 @@ beforeEach(() => {
   shipCalls = [];
   shipError = null;
   recordedOutcomes = [];
+  classifyCalls = [];
+  classifyError = null;
+  // Default: the target page classifies the same as the memory was proven
+  // on ('product') — the content-context layer's "match" case, so every
+  // pre-existing test below (written before this layer existed) keeps
+  // passing without having to know about classification at all.
+  classification = { contentType: 'product', confidence: 0.95 };
   portable = [{
     id: 42,
     generatorId: 'alt-text',
-    siteFingerprint: ['render:eleventy', 'target-ext:.njk', 'md:false'],
+    siteFingerprint: ['render:eleventy', 'target-ext:.njk', 'md:false', 'page-adapter:none', 'content-type:product'],
     repairRecipe: { kind: 'generator-chain', generatorId: 'alt-text', version: 1 },
     confidence: 0.9,
     provenSiteCount: 2,
@@ -145,14 +178,14 @@ describe('interceptWithLearnedRepairs — refusals all fall through to the Actio
   });
 
   test('evidence from too few distinct sites -> untouched', async () => {
-    portable[0].provenSiteCount = 1; // alt-text needs 2
+    portable[0].provenSiteCount = 0; // alt-text needs 1
     const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
     assert.equal(out.items.length, 1);
     assert.equal(shipCalls.length, 0);
   });
 
-  test('a fingerprint mismatch -> untouched even though the signature matched', async () => {
-    portable[0].siteFingerprint = ['render:nextjs', 'target-ext:.tsx'];
+  test('TECHNICAL mismatch -> untouched even though the signature matched', async () => {
+    portable[0].siteFingerprint = ['render:nextjs', 'target-ext:.tsx', 'content-type:product'];
     const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
     assert.equal(out.items.length, 1);
     assert.equal(shipCalls.length, 0);
@@ -170,6 +203,118 @@ describe('interceptWithLearnedRepairs — refusals all fall through to the Actio
     portable = null; // makes the mocked findPortableRepairs throw
     const out = await fresh(7, grounded(), { ship });
     assert.equal(out.items.length, 1);
+  });
+});
+
+describe('interceptWithLearnedRepairs — CONTENT-CONTEXT layer', () => {
+  test('content-context match -> reuses, exactly like the pre-existing happy path', async () => {
+    // classification defaults to 'product', same as portable[0]'s memory —
+    // this is the default beforeEach state, asserted explicitly here so the
+    // match case has its own named test rather than being implicit.
+    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    assert.equal(out.items.length, 0);
+    assert.equal(shipCalls.length, 1);
+  });
+
+  test('content-context mismatch (wrong page type) -> refuses even though technical/structural both match', async () => {
+    classification = { contentType: 'blog', confidence: 0.95 }; // memory was proven on a 'product' page
+    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    assert.equal(out.items.length, 1, 'must fall through to the Action Center, not reuse a repair proven on a different kind of page');
+    assert.equal(shipCalls.length, 0);
+  });
+
+  test('missing/uncertain content-context (classifier returns null) -> refuses, never assumed compatible', async () => {
+    classification = null; // e.g. below MIN_CONFIDENCE, or genuinely unclassifiable
+    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    assert.equal(out.items.length, 1);
+    assert.equal(shipCalls.length, 0);
+  });
+
+  test('LLM/classifier failure -> fails open to the Action Center, never throws or crashes the run', async () => {
+    classifyError = new Error('classifier upstream 500');
+    const out = await interceptWithLearnedRepairs(7, grounded(), { ship });
+    assert.equal(out.items.length, 1);
+    assert.equal(shipCalls.length, 0);
+  });
+
+  test('only classifies pages that already have a real evidence-backed candidate — never spent on a page with none', async () => {
+    portable = [];
+    await interceptWithLearnedRepairs(7, grounded(), { ship });
+    assert.equal(classifyCalls.length, 0, 'classification is the expensive step and must not run before findPortableRepairs has a real candidate');
+  });
+});
+
+// requiredEvidenceFor('faq') is 4 (LLM-prose tier) — used below specifically
+// because it needs a real per-candidate threshold higher than the trivial
+// >=1-distinct-site floor findPortableRepairs itself applies, so these tests
+// can prove the EVIDENCE gate runs as this module's own, separate, later
+// step — not folded into (or substitutable for) the compatibility gate.
+const FAQ_ITEM = {
+  id: 'content:faq-missing:https://client.example/a',
+  generatorId: 'faq',
+  source: 'opportunity',
+  tag: 'Add FAQ section',
+  params: { page: 'https://client.example/a' },
+};
+const FAQ_COMPATIBLE_FP = ['render:eleventy', 'target-ext:.njk', 'page-adapter:none', 'content-type:product'];
+const FAQ_INCOMPATIBLE_FP = ['render:nextjs', 'target-ext:.tsx', 'page-adapter:none', 'content-type:product'];
+
+describe('interceptWithLearnedRepairs — decision-chain ordering (technical/structural/content-context, THEN evidence)', () => {
+  test('evidence count alone can never authorize reuse: an incompatible candidate with abundant evidence is refused', async () => {
+    portable = [{
+      id: 1, generatorId: 'faq', siteFingerprint: FAQ_INCOMPATIBLE_FP,
+      repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+      confidence: 0.95, provenSiteCount: 100, // evidence far above the required 4
+    }];
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    assert.equal(out.items.length, 1, 'a technical mismatch must refuse no matter how much reuse evidence backs it');
+    assert.equal(shipCalls.length, 0);
+  });
+
+  test('a compatible-but-under-evidenced candidate is skipped in favor of a later, sufficiently-proven compatible one — never picked purely by rank/confidence', async () => {
+    portable = [
+      // Ranked first by confidence, and would win on evidence alone, but is
+      // technically incompatible — must never be chosen.
+      {
+        id: 1, generatorId: 'faq', siteFingerprint: FAQ_INCOMPATIBLE_FP,
+        repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+        confidence: 0.95, provenSiteCount: 100,
+      },
+      // Ranked second, lower confidence, but compatible and exactly at the
+      // required evidence bar (4) — this is the one that must be used.
+      {
+        id: 2, generatorId: 'faq', siteFingerprint: FAQ_COMPATIBLE_FP,
+        repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+        confidence: 0.5, provenSiteCount: 4,
+      },
+    ];
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    assert.equal(out.items.length, 0);
+    assert.equal(shipCalls.length, 1);
+    assert.equal(shipCalls[0][1].memoryRefId, 2, 'the compatible, sufficiently-proven candidate must win, not the higher-ranked incompatible one');
+  });
+
+  test('EVIDENCE gate applies even to a technically/structurally/content-context compatible candidate, independent of findPortableRepairs\' own floor', async () => {
+    portable = [{
+      id: 3, generatorId: 'faq', siteFingerprint: FAQ_COMPATIBLE_FP,
+      repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+      confidence: 0.9, provenSiteCount: 2, // compatible, but faq requires 4 distinct sites
+    }];
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    assert.equal(out.items.length, 1, 'compatibility alone is not enough either — the generator-specific evidence bar still applies');
+    assert.equal(shipCalls.length, 0);
+  });
+
+  test('a compatible candidate that clears its generator-specific evidence bar is reused', async () => {
+    portable = [{
+      id: 4, generatorId: 'faq', siteFingerprint: FAQ_COMPATIBLE_FP,
+      repairRecipe: { kind: 'generator-chain', generatorId: 'faq', version: 1 },
+      confidence: 0.9, provenSiteCount: 4,
+    }];
+    const out = await interceptWithLearnedRepairs(7, grounded([FAQ_ITEM]), { ship });
+    assert.equal(out.items.length, 0);
+    assert.equal(shipCalls.length, 1);
+    assert.equal(shipCalls[0][1].memoryRefId, 4);
   });
 });
 

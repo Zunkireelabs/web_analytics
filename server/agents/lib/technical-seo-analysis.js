@@ -143,17 +143,22 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS, headers = 
 // A link only gets reported broken after failing TWICE: once under
 // UA_HEADER's self-identifying bot UA at the normal timeout (the fast path
 // that resolves the overwhelming majority of real links), and — only if
-// that failed outright or came back 403 — once more under a real browser UA
-// and a longer timeout. A 403 is deliberately included alongside outright
-// failures: bot-protected sites (LinkedIn, Cloudflare-fronted blogs) return
-// 403 specifically FOR an unfamiliar bot UA while serving a real 200 to an
-// ordinary browser, so a lone 403 under UA_HEADER is not trustworthy
-// evidence a page is actually gone. Any other status (200, 404, 410, …) is
-// trusted on the first attempt — retrying those would waste every check's
-// budget doubling requests to sites that are answering honestly.
+// that failed outright or came back 403/429/503 — once more under a real
+// browser UA and a longer timeout. These three statuses are deliberately
+// included alongside outright failures: bot-protected sites (LinkedIn,
+// Cloudflare-fronted blogs) return 403 specifically FOR an unfamiliar bot
+// UA while serving a real 200 to an ordinary browser, and the same
+// bot-protection stacks just as often answer an unrecognized crawler with
+// 429 (rate-limited) or 503 (temporarily unavailable) instead — both are
+// UA-dependent and transient, not evidence the page is actually gone. Any
+// other status (200, 404, 410, …) is trusted on the first attempt —
+// retrying those would waste every check's budget doubling requests to
+// sites that are answering honestly.
+const RETRY_STATUSES = new Set([403, 429, 503]);
+
 async function followRedirectsWithRetry(startUrl, maxHops = MAX_REDIRECT_HOPS) {
   const first = await followRedirects(startUrl, maxHops);
-  if (!first.error && first.finalStatus !== 403) return first;
+  if (!first.error && !RETRY_STATUSES.has(first.finalStatus)) return first;
   return followRedirects(startUrl, maxHops, BROWSER_RETRY_UA_HEADER, RETRY_TIMEOUT_MS);
 }
 

@@ -396,4 +396,43 @@ def _render(insight: Insight, metric: MetricCatalog | None) -> str | None:
             f"{name} crossed the {e.get('crossed_band')} threshold, moving {e.get('direction')} "
             f"(from {e.get('prior_value')} to {e.get('current_value')})."
         )
+    if insight.insight_type == "content_decay":
+        changes = e.get("wow_pct_changes") or []
+        weeks = ", ".join(f"{c:.1f}%" for c in changes)
+        return (
+            f"{name} on this page has declined for 3 consecutive weeks ({weeks} week-over-week) and is also "
+            f"down {abs(e.get('mom_pct_change', 0)):.1f}% month-over-month — a sustained decline, not a one-off "
+            f"dip. Review this page's content for staleness, a competing page, or an algorithm/SERP change."
+        )
+    if insight.insight_type == "target_keyword_evidence":
+        classification = e.get("classification")
+        topic = e.get("topic", name)
+        if classification == "TARGET_WITH_CONTENT_GAP":
+            checked = "never checked for content depth" if e.get("word_count") is None else f"{e.get('word_count')} words vs a {e.get('thin_content_threshold_words')}-word minimum"
+            return f'Target keyword "{topic}" has a matching page ({e.get("existing_page_match")}) that is thin ({checked}) — expand it.'
+        if classification == "TARGET_WITH_EXISTING_DEMAND":
+            return (
+                f'Target keyword "{topic}" already gets real search demand ({e.get("impressions")} impressions '
+                f"over the evidence window) but no page ranks well for it (best position {e.get('best_avg_position')}) "
+                f"— a real content gap."
+            )
+        if classification == "TARGET_WITH_RANKING_SIGNAL":
+            return (
+                f'Target keyword "{topic}" already has a page ranking at position {e.get("best_avg_position")} '
+                f"with {e.get('impressions')} impressions — an optimization opportunity, not a content gap."
+            )
+        if classification == "TARGET_WITH_RELEVANT_EXISTING_PAGE":
+            return (
+                f'Target keyword "{topic}" already has a relevant existing page ({e.get("existing_page_match")}) '
+                f"with adequate content ({e.get('word_count')} words) — verify it's actually optimized for this term."
+            )
+        return None
+    if insight.insight_type == "cannibalization":
+        pages = e.get("pages") or []
+        page_list = ", ".join(p.get("page", "") for p in pages[:3])
+        return (
+            f"{len(pages)} of this site's own pages are competing for the same query "
+            f"({page_list}) with real, genuine rankings — consolidate or differentiate search intent so clicks "
+            f"stop splitting across pages."
+        )
     return None

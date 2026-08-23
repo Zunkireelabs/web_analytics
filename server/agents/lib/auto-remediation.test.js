@@ -16,7 +16,7 @@ let draftedFindingIds;
 let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
-const calls = { generated: [], approved: [], prsOpened: [], closed: [] };
+const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [] };
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
@@ -39,6 +39,7 @@ function reset() {
   calls.approved = [];
   calls.prsOpened = [];
   calls.closed = [];
+  calls.findingOrigins = [];
   failOn = () => false;
   refuseOn = () => false;
   staleOn = () => false;
@@ -51,8 +52,11 @@ function reset() {
 let generateAttempts;
 reset();
 
-function rec(id, { riskTier = 'safe', type = 'meta-title' } = {}) {
-  return { id, risk_tier: riskTier, recommendation_type: type, params: { page: `/p${id}` }, finding_ids: [`f${id}`] };
+function rec(id, { riskTier = 'safe', type = 'meta-title', detectingAgents = ['opportunity'] } = {}) {
+  return {
+    id, risk_tier: riskTier, recommendation_type: type, params: { page: `/p${id}` }, finding_ids: [`f${id}`],
+    detecting_agents: detectingAgents,
+  };
 }
 
 mock.module(resolve('../../store/recommendations.js'), {
@@ -86,7 +90,8 @@ mock.module(resolve('./generator-learning.js'), {
 });
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
-    generateDraft: async (siteId, { generatorId, findingId }) => {
+    generateDraft: async (siteId, { generatorId, findingId, findingOrigin }) => {
+      calls.findingOrigins.push(findingOrigin);
       const custom = generateError(++generateAttempts);
       if (custom) throw custom;
       // The shape real generators use to decline an item honestly — e.g. schema.js's
@@ -163,6 +168,26 @@ describe('auto-remediation — chain shape', () => {
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.shipped, 1);
     assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  // Prompt 7 audit, section 9: `source` is overwritten with the shipping
+  // mechanism's own label ('auto-remediation') below, which would silently
+  // discard the recommendation's real detecting agent unless it's threaded
+  // through separately as findingOrigin — the thing fix-verifications.js's
+  // isVerifiableDraft() actually needs to know whether a real tag-based 48h
+  // recheck exists for this fix.
+  test('passes the recommendation\'s real detecting agent through as findingOrigin, distinct from source', async () => {
+    recommendations = [rec(1, { detectingAgents: ['content-gap', 'ai-visibility'] })];
+    await autoRemediateSafeRecommendations(1);
+    assert.deepEqual(calls.findingOrigins, ['content-gap'], 'the FIRST detecting agent is the one recorded as the origin');
+  });
+
+  test('a recommendation with no detecting_agents (e.g. an older row) passes null, not a crash', async () => {
+    const r = rec(1);
+    delete r.detecting_agents;
+    recommendations = [r];
+    await autoRemediateSafeRecommendations(1);
+    assert.deepEqual(calls.findingOrigins, [null]);
   });
 });
 
@@ -590,5 +615,48 @@ describe('Phase 5 — learning actually changes what the loop does, not just wha
     const byGenerator = Object.fromEntries(recordedOutcomes.map((o) => [o.generatorId, o.outcome]));
     assert.equal(byGenerator['meta-title'], 'refused');
     assert.equal(byGenerator['faq'], 'failed');
+  });
+});
+
+describe('impactConfidence (measured business impact) tempers ranking within a tier, never blocks', () => {
+  beforeEach(reset);
+
+  test('same priority tier and expected impact: the generator with a stronger measured-impact history is attempted first', async () => {
+    recommendations = [
+      { ...rec(1, { type: 'weak-impact-history' }), priority: 'high', expected_impact: { value: 10 } },
+      { ...rec(2, { type: 'strong-impact-history' }), priority: 'high', expected_impact: { value: 10 } },
+    ];
+    learnedMap = new Map([
+      ['weak-impact-history', { confidence: 1, impactConfidence: 0.1 }],
+      ['strong-impact-history', { confidence: 1, impactConfidence: 0.9 }],
+    ]);
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 2, 'both still ship — impact only reorders within the tier, priority order remains the action-selection mechanism');
+    assert.deepEqual(calls.generated, ['f2', 'f1']);
+  });
+
+  test('a generator with weak measured impact history still ships — impact is a ranking input, never a hard gate', async () => {
+    recommendations = [rec(1, { type: 'weak-impact-history' })];
+    learnedMap = new Map([['weak-impact-history', { confidence: 1, impactConfidence: 0.01 }]]);
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f1']);
+  });
+
+  test('no impact history yet is treated as neutral (0.5), same convention as no technical confidence history', async () => {
+    recommendations = [
+      { ...rec(1, { type: 'no-history' }), priority: 'high', expected_impact: { value: 10 } },
+      { ...rec(2, { type: 'weak-impact-history' }), priority: 'high', expected_impact: { value: 10 } },
+    ];
+    learnedMap = new Map([['weak-impact-history', { confidence: 1, impactConfidence: 0.1 }]]);
+
+    await autoRemediateSafeRecommendations(1);
+
+    // no-history's neutral 0.5 outranks weak-impact-history's real, worse 0.1.
+    assert.deepEqual(calls.generated, ['f1', 'f2']);
   });
 });

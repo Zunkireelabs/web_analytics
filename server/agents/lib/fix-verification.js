@@ -6,6 +6,7 @@ import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categ
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint } from './site-fingerprint.js';
+import { getOrClassifyPageContentType } from './page-content-classifier.js';
 import { problemSignatureFor, buildRepairRecipe, tagsForGenerator } from './learned-repair.js';
 
 // Which real tag(s) a given generatorId's draft was meant to resolve, per
@@ -105,12 +106,25 @@ async function portabilityFor(row) {
   const site = await getSiteById(row.site_id);
   if (!site) return { fingerprint: null, recipe: null };
 
-  const fingerprint = computeSiteFingerprint(site, { targetFilePath: resolveFile(site, row.page_url) });
+  // Best-effort: getOrClassifyPageContentType never throws (fails open to
+  // null internally), but this call site catches too so a classifier bug
+  // can never turn a successful fix-verification into a failed one — the
+  // worst case is just an unclassified fingerprint, which fingerprintCompatible
+  // already refuses on rather than silently trusting.
+  const contentType = await getOrClassifyPageContentType(row.site_id, row.page_url).catch(() => null);
+  const fingerprint = computeSiteFingerprint(site, {
+    targetFilePath: resolveFile(site, row.page_url),
+    pageUrl: row.page_url,
+    actionType: row.generator_id,
+    contentType: contentType?.contentType || null,
+  });
   // fingerprintCompatible refuses when a required token is absent, so a
-  // fingerprint missing render:/target-ext: could never match anything
-  // anyway. Storing null instead makes that explicit in the data rather than
-  // leaving a row that looks portable and silently never is.
-  const hasRequired = fingerprint.some((t) => t.startsWith('render:')) && fingerprint.some((t) => t.startsWith('target-ext:'));
+  // fingerprint missing render:/target-ext:/page-adapter: could never match
+  // anything anyway. Storing null instead makes that explicit in the data
+  // rather than leaving a row that looks portable and silently never is.
+  const hasRequired = ['render:', 'target-ext:', 'page-adapter:', 'content-type:'].every((prefix) =>
+    fingerprint.some((t) => t.startsWith(prefix))
+  );
   return hasRequired ? { fingerprint, recipe } : { fingerprint: null, recipe: null };
 }
 

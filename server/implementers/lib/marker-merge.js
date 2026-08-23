@@ -485,7 +485,13 @@ function renderLinksHtml(suggestions, template = DEFAULT_LINKS_TEMPLATE) {
 
 const DEFAULT_EXPAND_TEMPLATE = {
   wrapper: '<div>\n{{ROWS}}\n</div>',
-  row: '  <h2>{{HEADING}}</h2>\n  <p>{{BODY}}</p>',
+  // No <p> wrapper here: markdownToHtml already wraps every block it emits
+  // (prose in <p>, "- " lists in <ul>) itself, since a body can legally
+  // contain both — a fixed outer <p> would nest a <ul> inside a <p>, which
+  // is invalid HTML that browsers recover from by force-closing the <p>
+  // early, silently dropping/misplacing whatever body text came after the
+  // list (see the marker-merge.test.js regression for a live example).
+  row: '  <h2>{{HEADING}}</h2>\n  {{BODY}}',
 };
 
 // Converts the light markdown expand-content's prompts sometimes produce
@@ -511,6 +517,13 @@ function markdownToHtml(text) {
   const escaped = escapeHtml(text);
   const parts = [];
   let listItems = [];
+  let textLines = [];
+  const flushText = () => {
+    if (textLines.length) {
+      parts.push(`<p>${textLines.map((line) => markdownInline(line)).join('\n')}</p>`);
+      textLines = [];
+    }
+  };
   const flushList = () => {
     if (listItems.length) {
       parts.push(`<ul>${listItems.map((item) => `<li>${markdownInline(item)}</li>`).join('')}</ul>`);
@@ -520,12 +533,14 @@ function markdownToHtml(text) {
   for (const line of escaped.split('\n')) {
     const bullet = /^-\s+(.*)$/.exec(line);
     if (bullet) {
+      flushText();
       listItems.push(bullet[1]);
     } else {
       flushList();
-      parts.push(markdownInline(line));
+      textLines.push(line);
     }
   }
+  flushText();
   flushList();
   return parts.join('\n');
 }

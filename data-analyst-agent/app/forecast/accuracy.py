@@ -75,20 +75,34 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
 
         session.add(ForecastAccuracy(
             client_id=client_id, metric_key=run.metric_key, forecast_point_id=point.id,
+            dimension_type=run.dimension_type, dimension_value=run.dimension_value,
             predicted_value=predicted, actual_value=actual_f, abs_pct_error=abs_pct_error,
         ))
 
 
-async def get_rolling_accuracy(session: AsyncSession, client_id: int, metric_key: str | None = None) -> dict:
+async def get_rolling_accuracy(
+    session: AsyncSession, client_id: int, metric_key: str | None = None,
+    dimension_type: str | None = None, dimension_value: str | None = None,
+) -> dict:
     """Read-only accessor other engines/routes can use once they're ready
     to fold this into their own formulas (not yet wired into
     prioritizer.py/opportunity_scoring.py in this milestone — see the
     Phase 3 rollout notes). status='insufficient-data' below
     MIN_EVALUATED_POINTS_FOR_SIGNAL, same convention as every other engine
-    in this codebase, never a noisy average presented as reliable."""
+    in this codebase, never a noisy average presented as reliable.
+
+    dimension_type/dimension_value are optional so existing callers that
+    want a metric-wide figure across every dimension keep working
+    unchanged; app/forecast/confidence.py passes both so a page/channel/
+    device forecast's historical accuracy never blends in another
+    dimension's error."""
     query = select(ForecastAccuracy.abs_pct_error).where(ForecastAccuracy.client_id == client_id)
     if metric_key:
         query = query.where(ForecastAccuracy.metric_key == metric_key)
+    if dimension_type:
+        query = query.where(ForecastAccuracy.dimension_type == dimension_type)
+    if dimension_value:
+        query = query.where(ForecastAccuracy.dimension_value == dimension_value)
     errors = [float(e) for e in (await session.execute(query)).scalars().all() if e is not None]
 
     if len(errors) < MIN_EVALUATED_POINTS_FOR_SIGNAL:

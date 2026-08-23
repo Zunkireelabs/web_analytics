@@ -7,6 +7,8 @@ import { computeSiteFingerprint, fingerprintCompatible } from './site-fingerprin
 // it must REFUSE on any missing or conflicting required signal, and it must
 // never carry client-identifying data (it is stored on a cross-tenant row).
 
+const ALPHA_PAGE = 'https://zunkireelabs.com/products/alpha';
+
 const ELEVENTY = {
   tech_stack: null,
   url_file_map: {
@@ -14,8 +16,11 @@ const ELEVENTY = {
       generator: 'eleventy',
       extensions: { '.njk': { markdown: false }, '.md': { markdown: true }, '.11ty.md': { markdown: true } },
     },
+    // Keyed by PATHNAME, not the full URL — getPageEntry (url-file-map.js)
+    // normalizes any pageUrl through `new URL(...).pathname` before looking
+    // it up, so a full-URL key here would silently never match.
     pages: {
-      'https://zunkireelabs.com/products/alpha': {
+      '/products/alpha': {
         file: 'src/pages/products/alpha.njk',
         adapters: { faq: { id: 'data-array-content' } },
       },
@@ -45,6 +50,31 @@ describe('computeSiteFingerprint', () => {
     assert.ok(fp.includes('md:false'));
   });
 
+  test('adds page-adapter for a (pageUrl, actionType) routed through an adapter', () => {
+    const fp = computeSiteFingerprint(ELEVENTY, { pageUrl: ALPHA_PAGE, actionType: 'faq' });
+    assert.ok(fp.includes('page-adapter:data-array-content'));
+  });
+
+  test('page-adapter is "none" for a (pageUrl, actionType) with no adapter — default routing is still a fact worth recording', () => {
+    const fp = computeSiteFingerprint(ELEVENTY, { pageUrl: ALPHA_PAGE, actionType: 'meta-title' });
+    assert.ok(fp.includes('page-adapter:none'));
+  });
+
+  test('omits page-adapter entirely when pageUrl/actionType are not given', () => {
+    const fp = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'src/pages/products/alpha.njk' });
+    assert.ok(!fp.some((t) => t.startsWith('page-adapter:')));
+  });
+
+  test('pushes content-type when the caller resolved one', () => {
+    const fp = computeSiteFingerprint(ELEVENTY, { contentType: 'blog' });
+    assert.ok(fp.includes('content-type:blog'));
+  });
+
+  test('omits content-type entirely when the caller has no resolved classification', () => {
+    const fp = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'src/pages/products/alpha.njk' });
+    assert.ok(!fp.some((t) => t.startsWith('content-type:')));
+  });
+
   test('resolves compound extensions the way the rendering gate does', () => {
     // .11ty.md must not be shadowed by a naive split on the last dot, or the
     // lesson would be matched against the wrong capability entry.
@@ -56,6 +86,19 @@ describe('computeSiteFingerprint', () => {
   test('omits tech_stack when it is null (the real state of every live site)', () => {
     assert.ok(!computeSiteFingerprint(ELEVENTY).some((t) => t.startsWith('stack:')));
     assert.ok(computeSiteFingerprint(NEXTJS).includes('stack:nextjs'));
+  });
+
+  test('AUDITED: never derives stack: from any other signal — only site.tech_stack, verbatim', () => {
+    // ELEVENTY has a populated renderCapabilities.generator ('eleventy') and
+    // real extensions/adapters, but tech_stack itself is null — no reliable
+    // auto-detection of stack exists in this codebase (tech_stack is staff-
+    // entered via connect-repo.js), so this must stay absent rather than be
+    // guessed from render:/ext:/adapter: tokens that ARE available. A future
+    // "helpful" heuristic here would let two sites that merely share a guess
+    // register as a false stack: agreement, or a real one register as a
+    // false conflict.
+    const fp = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'src/pages/products/alpha.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
+    assert.ok(!fp.some((t) => t.startsWith('stack:')), 'stack: must not be inferred from render:/ext:/adapter: signals');
   });
 
   test('a site with no renderCapabilities produces no required tokens rather than a false match', () => {
@@ -82,7 +125,12 @@ describe('computeSiteFingerprint', () => {
 });
 
 describe('fingerprintCompatible', () => {
-  const eleventyNjk = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk' });
+  // Every real caller (fix-verification.js, learned-repair.js) always has a
+  // pageUrl + actionType + a resolved contentType alongside targetFilePath,
+  // so the fixture here does too — a fingerprint missing one of these
+  // required tokens is the "learned before this token existed" / "still
+  // unclassified" case covered separately below, not the normal path.
+  const eleventyNjk = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
 
   test('a site matches itself', () => {
     const result = fingerprintCompatible(eleventyNjk, eleventyNjk);
@@ -90,29 +138,58 @@ describe('fingerprintCompatible', () => {
     assert.equal(result.score, 1);
   });
 
-  test('refuses across different generators', () => {
-    const other = computeSiteFingerprint(NEXTJS, { targetFilePath: 'a.tsx' });
+  test('TECHNICAL: refuses across different generators', () => {
+    const other = computeSiteFingerprint(NEXTJS, { targetFilePath: 'a.tsx', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
     const result = fingerprintCompatible(eleventyNjk, other);
     assert.equal(result.ok, false);
     assert.ok(result.missing.some((m) => m.startsWith('render:')));
   });
 
-  test('refuses across different target extensions on the same generator', () => {
-    const md = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.md' });
+  test('TECHNICAL: refuses across different target extensions on the same generator', () => {
+    const md = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.md', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
     assert.equal(fingerprintCompatible(eleventyNjk, md).ok, false);
+  });
+
+  test('STRUCTURAL: refuses across page-adapter routing even when generator/extension both match', () => {
+    // Same site, same file type, but this action IS adapter-routed on one
+    // side and default-routed (marker-merge) on the other — different write
+    // mechanisms, must not read as portable.
+    const adapterRouted = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'faq', contentType: 'product' });
+    const result = fingerprintCompatible(eleventyNjk, adapterRouted);
+    assert.equal(result.ok, false);
+    assert.ok(result.missing.some((m) => m.startsWith('page-adapter:')));
+  });
+
+  test('CONTENT-CONTEXT match: identical content-type on both sides is compatible', () => {
+    const sameType = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
+    assert.equal(fingerprintCompatible(eleventyNjk, sameType).ok, true);
+  });
+
+  test('CONTENT-CONTEXT mismatch (wrong page type): refuses even when every technical/structural token matches', () => {
+    const wrongType = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'blog' });
+    const result = fingerprintCompatible(eleventyNjk, wrongType);
+    assert.equal(result.ok, false);
+    assert.ok(result.missing.some((m) => m.startsWith('content-type:') && m.includes('product') && m.includes('blog')));
+  });
+
+  test('CONTENT-CONTEXT missing: an unclassified page (contentType omitted) refuses, never assumed compatible', () => {
+    const unclassified = computeSiteFingerprint(ELEVENTY, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title' });
+    const result = fingerprintCompatible(eleventyNjk, unclassified);
+    assert.equal(result.ok, false);
+    assert.ok(result.missing.some((m) => m.startsWith('content-type:') && m.includes('unknown')));
   });
 
   test('refuses when a required token is absent on EITHER side', () => {
     // A lesson learned before fingerprints existed, or a site with incomplete
     // renderCapabilities, must not read as "compatible with everything".
-    const noRender = computeSiteFingerprint({ url_file_map: {} }, { targetFilePath: 'a.njk' });
+    const noRender = computeSiteFingerprint({ url_file_map: {} }, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
     assert.equal(fingerprintCompatible(eleventyNjk, noRender).ok, false);
     assert.equal(fingerprintCompatible([], eleventyNjk).ok, false);
     assert.equal(fingerprintCompatible(eleventyNjk, []).ok, false);
   });
 
   test('names why it refused, so a dry run can explain itself', () => {
-    const noRender = computeSiteFingerprint({ url_file_map: {} }, { targetFilePath: 'a.njk' });
+    const noRender = computeSiteFingerprint({ url_file_map: {} }, { targetFilePath: 'a.njk', pageUrl: ALPHA_PAGE, actionType: 'meta-title', contentType: 'product' });
     const { missing } = fingerprintCompatible(eleventyNjk, noRender);
     assert.ok(missing.some((m) => m.includes('unknown')));
   });

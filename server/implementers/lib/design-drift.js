@@ -724,7 +724,7 @@ export async function persistDerivedComponentTemplates(site, componentTemplates,
 // only unblocking tomorrow's), not a substitute for that retry logic. Never
 // applied to the interactive HTTP path (routes/action-center.js's ordinary
 // generateDraft callers) — a user's own click should fail fast, not hang.
-const DESIGN_AGENT_WAIT_MS = Number(process.env.DESIGN_AGENT_WAIT_MS) || 5 * 60 * 1000;
+const DESIGN_AGENT_WAIT_MS = Number(process.env.DESIGN_AGENT_WAIT_MS) || 15 * 60 * 1000;
 const DESIGN_AGENT_POLL_INTERVAL_MS = 5000;
 
 const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

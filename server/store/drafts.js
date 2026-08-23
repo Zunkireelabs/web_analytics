@@ -9,7 +9,7 @@ import { sanitizeForCustomer } from '../lib/errors.js';
 // dashboard so, the same real-evidence pattern hasDraftSince() already
 // leans on for the Watchlist, one step further along.
 
-export async function createDraft(siteId, { actionType, source, input, content, findingId, gateResolvedPatterns, renderedBody, targetFilePath, memoryRefId }) {
+export async function createDraft(siteId, { actionType, source, findingOrigin, input, content, findingId, gateResolvedPatterns, renderedBody, targetFilePath, memoryRefId }) {
   // original_content (migration 091) is the generator's first output,
   // frozen here and never touched again — updateDraft below only ever
   // writes `content`, so a later diff of the two is how
@@ -24,13 +24,31 @@ export async function createDraft(siteId, { actionType, source, input, content, 
   // fast path for how they're consumed at apply/preview time. Both null for
   // an action type this doesn't apply to (marker-merge types, which must
   // still compute their splice fresh against the live file at apply time).
-  const { rows } = await query(
-    `INSERT INTO drafts (site_id, action_type, source, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path, memory_ref_id)
-     VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
-     RETURNING *`,
-    [siteId, actionType, source ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null, renderedBody ?? null, targetFilePath ?? null, memoryRefId ?? null]
-  );
-  return rows[0];
+  try {
+    const { rows } = await query(
+      `INSERT INTO drafts (site_id, action_type, source, finding_origin, input, content, original_content, finding_id, gate_resolved_patterns, rendered_body, target_file_path, memory_ref_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [siteId, actionType, source ?? null, findingOrigin ?? null, JSON.stringify(input ?? {}), JSON.stringify(content), findingId || null, gateResolvedPatterns || null, renderedBody ?? null, targetFilePath ?? null, memoryRefId ?? null]
+    );
+    return rows[0];
+  } catch (err) {
+    // drafts_site_finding_id_unique (migration 118) — the DB-level backstop
+    // for generateDraft()'s app-level getDraftByFindingId-then-insert check.
+    // That check-then-insert has a real window (up to two LLM generation
+    // attempts, the Quality Gate, and Design Agent resolution can all run
+    // between the read and this insert), which the two Analyst->Node paths
+    // (drafts.py's direct MCP push and auto-remediation.js's recommendation
+    // pull) can both fall into for the same finding_id. A losing concurrent
+    // insert here is not a real failure — the winner's row already
+    // represents this finding — so return it exactly as the app-level check
+    // would have, instead of throwing a duplicate-key error up to the caller.
+    if (err.code === '23505' && err.constraint === 'drafts_site_finding_id_unique' && findingId) {
+      const existing = await getDraftByFindingId(siteId, findingId);
+      if (existing) return existing;
+    }
+    throw err;
+  }
 }
 
 // Correlated subquery, not a separate lookup — avoids an N+1 query on the
@@ -439,7 +457,12 @@ export async function markDraftImplemented(siteId, id) {
       pageUrl: draft.input.page,
       generatorId: draft.action_type,
       queryText: draft.input.query ?? null,
-      source: draft.source,
+      // finding_origin (migration 119) carries the real detecting agent
+      // through any shipping mechanism (auto-remediation/execution-engine
+      // both overwrite draft.source with their own mechanism label) — fall
+      // back to source for rows created before that column existed, or for
+      // callers that never had a separate origin to record.
+      source: draft.finding_origin || draft.source,
       memoryRefId: draft.memory_ref_id ?? null,
     });
   }

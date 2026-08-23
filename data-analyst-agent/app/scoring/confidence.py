@@ -22,6 +22,13 @@ CONFIDENCE_FACTORS = (
     # by app/forecast/confidence.py today. Distinct from model_certainty,
     # which is an in-sample backtest error rather than a real-world record.
     "historical_forecast_accuracy",
+    # Phase 4 addition, same pattern as historical_forecast_accuracy just
+    # above but for approved forecast_risk Investigations rather than raw
+    # ForecastPoints (see app/investigations/outcome.py's
+    # get_investigation_outcome_reliability and its one caller,
+    # app/forecast/confidence.py) — how often THIS client's forecast-risk
+    # investigations' predicted declines actually materialized.
+    "investigation_outcome_reliability",
 )
 
 

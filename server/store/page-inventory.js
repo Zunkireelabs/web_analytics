@@ -91,7 +91,7 @@ export async function listContentHashesForSite(siteId) {
 
 export async function listPageInventory(siteId, { limit = 500 } = {}) {
   const { rows } = await query(
-    'SELECT page, discovered_via, first_seen_at, last_seen_at FROM page_inventory WHERE site_id = $1 ORDER BY last_seen_at DESC LIMIT $2',
+    'SELECT page, discovered_via, orphaned, first_seen_at, last_seen_at FROM page_inventory WHERE site_id = $1 ORDER BY last_seen_at DESC LIMIT $2',
     [siteId, limit]
   );
   return rows;

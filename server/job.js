@@ -1,4 +1,5 @@
 import { getOrCreateSite, query } from './db.js';
+import { callDataAnalystAgent } from './lib/data-analyst-client.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
 import { fetchCompetitorRankings } from './ingest/competitors.js';
@@ -778,15 +779,16 @@ export async function runAnalystSyncForAllSites() {
   return totals;
 }
 
-// Reads the Analyst service's own insights endpoint. Kept here rather than
-// importing routes/dataAnalyst.js's callPython, which is request-scoped and
-// not exported — one small fetch is cheaper than restructuring that module.
-async function fetchAnalystInsights(siteId) {
-  const base = process.env.DATA_ANALYST_AGENT_INTERNAL_URL || 'http://127.0.0.1:8000';
-  const url = new URL(`/clients/${siteId}/insights`, base);
-  const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  if (!res.ok) throw new Error(`analyst insights returned HTTP ${res.status}`);
-  const body = await res.json();
+// Reads the Analyst service's own insights endpoint (GET /clients/{client_id}
+// /insights — data-analyst-agent/app/api/routes/dashboard.py's
+// _recent_insights, the same recent-insights read GET /dashboard/{client_id}
+// itself builds from). Uses the shared admin-key-injecting client
+// (lib/data-analyst-client.js) like every other Node->Python call — a
+// hand-rolled fetch() here previously sent no X-Admin-Key at all, which
+// get_active_client's require_admin_key dependency rejects on every
+// /clients/{client_id}/* route.
+export async function fetchAnalystInsights(siteId) {
+  const body = await callDataAnalystAgent(`/clients/${siteId}/insights`);
   return Array.isArray(body) ? body : (body?.insights || []);
 }
 
@@ -910,19 +912,30 @@ export async function runFixImpactMeasurementsForAllSites() {
 // Fire-and-forget: queues, does not wait — the always-running design-agent
 // worker container drains the queue on its own schedule. One bad site's
 // queue-insert failure must never block another site's.
+//
+// Also called directly (not just from the 06:00 sweep) the moment a site's
+// repo gets connected — see routes/clients.js's repo-connect route — so a
+// site added mid-day starts deriving its design profile right away instead
+// of sitting unverified until the next 06:00 pass.
+export async function queueDesignAgentDerivationForSite(site) {
+  if (!site?.design_agent_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  if (siteHasUsableDesignProfile(site)) return false;
+  try {
+    const pending = await getQueuedComponentTemplateJob(site.id, DESIGN_PROFILE_JOB_KEY);
+    if (pending) return false;
+    await createDesignProfileJob(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) });
+    return true;
+  } catch (err) {
+    console.error(`[job] could not queue design-profile derivation for site ${site.id}:`, err.message);
+    return false;
+  }
+}
+
 export async function queueDesignAgentDerivationsForAllSites() {
   const sites = (await listSites()).filter((s) => s.design_agent_enabled && s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
-    if (siteHasUsableDesignProfile(site)) continue;
-    try {
-      const pending = await getQueuedComponentTemplateJob(site.id, DESIGN_PROFILE_JOB_KEY);
-      if (pending) continue;
-      await createDesignProfileJob(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) });
-      queued++;
-    } catch (err) {
-      console.error(`[job] could not queue design-profile derivation for site ${site.id}:`, err.message);
-    }
+    if (await queueDesignAgentDerivationForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
   return { queued };

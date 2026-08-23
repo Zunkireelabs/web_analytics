@@ -28,6 +28,18 @@ async def resolve_affected_page_count(
         # affected footprint, no need to re-query page_query_observations.
         return 1, "ok"
 
+    if dimension_type == "query":
+        # page_query_observations stores 'page' and 'query' dimension_value
+        # rows independently, with no column linking a given query to the
+        # specific page(s) that rank for it (that mapping only exists via
+        # the MCP get_query_page_metrics/get_cannibalized_queries tools,
+        # which this DB-only resolver has no access to). Falling through to
+        # the generic branch below would silently count every page on the
+        # site with page-level data, unrelated to this specific query — so,
+        # per this module's own "never guess" rule, this is honestly
+        # not-applicable rather than a fabricated site-wide number.
+        return None, "not-applicable"
+
     if metric_key not in PAGE_ATTRIBUTABLE_METRICS:
         return None, "not-applicable"
 

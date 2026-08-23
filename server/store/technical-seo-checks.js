@@ -32,13 +32,17 @@ export async function prioritizeForRecheck(siteId, page) {
   await query('UPDATE technical_seo_checks SET checked_at = NULL WHERE site_id = $1 AND page = $2', [siteId, page]);
 }
 
-export async function upsertTechnicalSeoCheck(siteId, page, { indexStatus, coreWebVitals, technicalAudit, brokenLinks, lastImpressions }) {
+export async function upsertTechnicalSeoCheck(siteId, page, {
+  indexStatus, coreWebVitals, technicalAudit, brokenLinks, lastImpressions,
+  wordCount, metaDescription, internalLinkCount,
+}) {
   const { rows } = await query(
-    `INSERT INTO technical_seo_checks (site_id, page, checked_at, index_status, core_web_vitals, technical_audit, broken_links, last_impressions)
-     VALUES ($1, $2, now(), $3, $4, $5, $6, $7)
+    `INSERT INTO technical_seo_checks (site_id, page, checked_at, index_status, core_web_vitals, technical_audit, broken_links, last_impressions, word_count, meta_description, internal_link_count)
+     VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (site_id, page) DO UPDATE SET
        checked_at = now(), index_status = EXCLUDED.index_status, core_web_vitals = EXCLUDED.core_web_vitals,
-       technical_audit = EXCLUDED.technical_audit, broken_links = EXCLUDED.broken_links, last_impressions = EXCLUDED.last_impressions
+       technical_audit = EXCLUDED.technical_audit, broken_links = EXCLUDED.broken_links, last_impressions = EXCLUDED.last_impressions,
+       word_count = EXCLUDED.word_count, meta_description = EXCLUDED.meta_description, internal_link_count = EXCLUDED.internal_link_count
      RETURNING *`,
     [
       siteId, page,
@@ -47,9 +51,42 @@ export async function upsertTechnicalSeoCheck(siteId, page, { indexStatus, coreW
       technicalAudit ? JSON.stringify(technicalAudit) : null,
       brokenLinks ? JSON.stringify(brokenLinks) : null,
       lastImpressions ?? null,
+      wordCount ?? null,
+      metaDescription || null,
+      internalLinkCount ?? null,
     ]
   );
   return rows[0];
+}
+
+// Read-only content + technical signal slice for MCP's get_technical_seo_signals
+// — every field here is either an already-persisted column or a value already
+// nested in technical_audit's JSONB (flattened out for a simpler tool result).
+// Absent/never-checked pages are simply omitted, same convention as
+// getCheckedAtForPages above.
+export async function getTechnicalSeoSignalsForPages(siteId, { pages, limit } = {}) {
+  const conditions = ['site_id = $1'];
+  const params = [siteId];
+  if (pages?.length) {
+    params.push(pages);
+    conditions.push(`page = ANY($${params.length})`);
+  }
+  let sql = `SELECT page, checked_at,
+                    technical_audit->>'title' AS title,
+                    (technical_audit->>'hasCanonical')::boolean AS has_canonical,
+                    (technical_audit->>'hasSchema')::boolean AS has_schema,
+                    technical_audit->'schemaTypes' AS schema_types,
+                    index_status, broken_links, last_impressions,
+                    word_count, meta_description, internal_link_count
+               FROM technical_seo_checks
+              WHERE ${conditions.join(' AND ')}
+              ORDER BY checked_at DESC NULLS LAST`;
+  if (limit) {
+    params.push(limit);
+    sql += ` LIMIT $${params.length}`;
+  }
+  const { rows } = await query(sql, params);
+  return rows;
 }
 
 // Real title + page for every page ever checked on this site — the site-wide

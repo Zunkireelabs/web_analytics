@@ -102,6 +102,53 @@ async def get_keyword_gaps(mcp: McpClient, status: str | None = None) -> list[di
     return await mcp.call_tool("get_keyword_gaps", args)
 
 
+async def get_page_inventory(mcp: McpClient, limit: int | None = None) -> list[dict]:
+    """[{page, discovered_via, orphaned, first_seen_at, last_seen_at}] — every
+    real URL known for this site (sitemap + a real crawl + GSC), how it was
+    first discovered ('sitemap'/'crawl'/'gsc'), and whether it's orphaned
+    (in the sitemap but unreachable via any real internal link found during
+    the last crawl). This is website STRUCTURE only — page CONTENT
+    (titles/headings/body/schema) is not persisted anywhere Node-side and so
+    has no equivalent read here yet."""
+    args = {"limit": limit} if limit else {}
+    return await mcp.call_tool("get_page_inventory", args)
+
+
+async def get_technical_seo_signals(mcp: McpClient, pages: list[str] | None = None, limit: int | None = None) -> list[dict]:
+    """[{page, checked_at, title, has_canonical, has_schema, schema_types,
+    index_status, broken_links, last_impressions, word_count,
+    meta_description, internal_link_count}] — already-persisted technical +
+    content signals (migration 120). Only covers pages this site's
+    technical-seo rotation has already checked; an absent page is "never
+    checked", never a false "no issues"."""
+    args = {}
+    if pages:
+        args["pages"] = pages
+    if limit:
+        args["limit"] = limit
+    return await mcp.call_tool("get_technical_seo_signals", args)
+
+
+async def get_query_page_metrics(mcp: McpClient, start: str, end: str, min_impressions: int = 5) -> list[dict]:
+    """[{query, page, clicks, impressions, avgPosition, ctr}] — one row per
+    (query, page) pair actually observed together over the range. No
+    estimated search volume anywhere in this data."""
+    return await mcp.call_tool("get_query_page_metrics", {"start": start, "end": end, "minImpressions": min_impressions})
+
+
+async def get_cannibalized_queries(
+    mcp: McpClient, start: str, end: str, min_impressions: int = 5, max_position: int = 20, limit: int = 20,
+) -> list[dict]:
+    """[{query, pages: [{page, clicks, impressions, avg_position}, ...]}] —
+    real queries where 2+ of this site's own pages both rank within
+    max_position over the range, sorted by combined clicks. Raw candidate
+    evidence only — NOT itself a finding; requires further grading (demand,
+    ownership stability) before use, per app/intelligence/cannibalization.py."""
+    return await mcp.call_tool("get_cannibalized_queries", {
+        "start": start, "end": end, "minImpressions": min_impressions, "maxPosition": max_position, "limit": limit,
+    })
+
+
 async def save_site_profile(mcp: McpClient, *, industry: str, main_topics: list[str], site_type: str | None) -> dict:
     """Upserts the current-state site profile row. Requires 'ai_actions'."""
     return await mcp.call_tool("save_site_profile", {"industry": industry, "mainTopics": main_topics, "siteType": site_type})
