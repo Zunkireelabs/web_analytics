@@ -28,6 +28,41 @@ export function pageFilterGroups(domains) {
   return [{ filters: [{ dimension: 'page', operator: 'includingRegex', expression: `^https?://(${alternation})([/?]|$)` }] }];
 }
 
+// Tripwire for the query-only dimension specifically — unlike page/
+// queryPage rows, a query-only row has no page/URL on it at all, so it
+// can never be hostname-checked the way queryPageRowsOwn above is. The
+// dimensionFilterGroups page-filter already confirmed unreliable on one
+// combined request (see fetchGscForDate) — there is no proof it is
+// reliable here either, just no independent way to re-check it directly.
+// The closest indirect check: a query's OWN total impressions (this
+// unfiltered per-query request) should already be fully accounted for by
+// that same query's impressions in queryPages (which IS hard-filtered to
+// ownDomains). A query with meaningfully MORE unfiltered impressions than
+// its filtered total suggests some of that volume came from a page
+// outside ownDomains that this call's filter let through anyway — the
+// same class of leak already found once. Tolerant of a real, benign gap:
+// queryPages caps at 250 rows, so a long-tail query spread across many
+// low-volume pages can legitimately be undercounted there without any
+// leak — hence a ratio threshold, not exact equality, and a minimum
+// impression floor so single-digit noise never fires this.
+export function detectQueryDimensionLeakage(queries, queryPages, { minImpressions = 20, toleranceRatio = 1.5 } = {}) {
+  const filteredImpressionsByQuery = new Map();
+  for (const r of queryPages) {
+    const key = r.query;
+    filteredImpressionsByQuery.set(key, (filteredImpressionsByQuery.get(key) || 0) + Number(r.impressions || 0));
+  }
+  const suspicious = [];
+  for (const q of queries) {
+    const unfilteredImpressions = Number(q.impressions || 0);
+    if (unfilteredImpressions < minImpressions) continue;
+    const filteredImpressions = filteredImpressionsByQuery.get(q.dim_value) || 0;
+    if (unfilteredImpressions > filteredImpressions * toleranceRatio) {
+      suspicious.push({ query: q.dim_value, unfilteredImpressions, filteredImpressions });
+    }
+  }
+  return suspicious;
+}
+
 // Fetch GSC Search Analytics for a single date, using `site`'s own Google
 // credentials if it has a dedicated file (secrets/clients/<site.id>/), else
 // the shared app-wide credentials.
@@ -101,6 +136,17 @@ export async function fetchGscForDate(site, date) {
     ctr: r.ctr ?? 0,
     position: r.position ?? 0,
   }));
+
+  if (domains) {
+    const suspicious = detectQueryDimensionLeakage(queries, queryPages);
+    if (suspicious.length) {
+      console.warn(
+        `[gsc] site ${site.id} ${date}: ${suspicious.length} quer${suspicious.length === 1 ? 'y' : 'ies'} may include impressions from outside ${domains.join(', ')} ` +
+        `(query-only totals can't be hostname-checked directly — see detectQueryDimensionLeakage):`,
+        suspicious.map((s) => `"${s.query}" (${s.unfilteredImpressions} unfiltered vs ${s.filteredImpressions} filtered)`).join('; ')
+      );
+    }
+  }
 
   return { date, totals, queries, pages, devices, countries, queryPages };
 }
