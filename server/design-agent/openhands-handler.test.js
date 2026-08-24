@@ -144,6 +144,23 @@ describe('createOpenHandsHandler — failure paths', () => {
     const handler = handlerWithStub('fake-design-task-ok.js', { fixtureDir: path.join(here, 'fixtures', 'does-not-exist') });
     await assert.rejects(handler({ id: 5 }));
   });
+
+  test('a container that dies mid-run is classified as a sandbox fault and its diagnostics reach cause, not the user-facing message', async () => {
+    const handler = handlerWithStub('fake-design-task-container-crashed.js');
+    const err = await handler({ id: 6 }).then(() => null, (e) => e);
+
+    assert.ok(err, 'handler must reject');
+    assert.equal(err.userFacing, true);
+    assert.equal(err.stage, 'python_environment', 'an ENVIRONMENT_* errorClass must route to the sandbox-unavailable stage, not result_validation');
+    assert.match(err.message, /sandbox is unavailable/i);
+    assert.doesNotMatch(err.message, /container stopped|exitCode|oomKilled|logsTail/i, 'raw diagnostic detail must never reach the persisted/customer-facing message');
+
+    assert.match(err.cause.message, /Container stopped unexpectedly/, 'the SDK\'s own detail must still be reachable internally');
+    assert.match(err.cause.message, /containerDiagnostics/, 'the diagnostic snapshot must reach the internal log');
+    assert.match(err.cause.message, /"exitCode":137/);
+    assert.match(err.cause.message, /"oomKilled":true/);
+    assert.match(err.cause.message, /killed \(out of memory\)/, 'the docker logs tail must be preserved');
+  });
 });
 
 describe('createOpenHandsHandler — isolation between concurrent jobs', () => {

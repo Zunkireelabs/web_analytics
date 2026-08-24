@@ -76,7 +76,12 @@ Prints two kinds of sentinel lines the Node handler looks for:
   reaches the final result line, and can issue its own `docker rm -f` as a
   backstop.
 - RESULT_PREFIX, exactly once, at the end: {"status": "ok"|"error", ...},
-  plus {"componentTemplates": {...}} for the component-templates mode.
+  plus {"componentTemplates": {...}} for the component-templates mode. An
+  error result may also carry `errorClass` (closed vocabulary, see the
+  ENVIRONMENT_* handling below) and, when the sandbox container died mid-run,
+  `containerDiagnostics` (docker inspect's exit code/OOM flag + a `docker
+  logs` tail, captured before cleanup removes the container — see
+  _capture_container_diagnostics / _ContainerRunError).
 Everything else on stdout/stderr is the SDK's own logging (it even prints a
 banner on import) and is ignored by the caller, but still visible if this
 script is run by hand for debugging.
@@ -128,6 +133,65 @@ def _install_sigterm_handler():
         raise _Terminated(f"terminated by signal {signum}")
 
     signal.signal(signal.SIGTERM, _handler)
+
+
+def _capture_container_diagnostics(container_id, docker_bin=None):
+    """Best-effort snapshot of why the sandbox container died — `docker
+    inspect` (exit code, OOM flag, state error) plus a tail of `docker logs`
+    — captured the moment conversation.run() raises, BEFORE the `with
+    DockerWorkspace(...)` block's own __exit__ (-> cleanup() -> `docker
+    stop`, which also removes it since `--rm` was used) can make the
+    container permanently unreachable. Without this, a mid-run container
+    death reached the job row as nothing more than the SDK's own generic
+    sentence ("Container stopped unexpectedly" / "No such container") with
+    no way to tell OOM, image crash, or a killed daemon apart after the
+    fact. Never allowed to raise itself — a diagnostics failure must not
+    mask the real one, so every step here is independently try/excepted."""
+    if not container_id:
+        return {}
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    diagnostics = {}
+    try:
+        inspect = subprocess.run(
+            [docker_bin, "inspect", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        if inspect.returncode == 0:
+            data = json.loads(inspect.stdout)
+            state = (data[0].get("State") or {}) if data else {}
+            diagnostics["exitCode"] = state.get("ExitCode")
+            diagnostics["oomKilled"] = state.get("OOMKilled")
+            diagnostics["status"] = state.get("Status")
+            if state.get("Error"):
+                diagnostics["stateError"] = state.get("Error")
+        else:
+            diagnostics["inspectError"] = (inspect.stderr or "").strip()[:500]
+    except Exception as diag_err:  # noqa: BLE001 — diagnostics must never mask the real failure
+        diagnostics["inspectError"] = str(diag_err)[:500]
+    try:
+        logs = subprocess.run(
+            [docker_bin, "logs", "--tail", "200", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        combined = (logs.stdout or "") + (logs.stderr or "")
+        if combined:
+            diagnostics["logsTail"] = combined[-4000:]
+    except Exception as diag_err:  # noqa: BLE001 — same as above
+        diagnostics["logsError"] = str(diag_err)[:500]
+    return diagnostics
+
+
+class _ContainerRunError(Exception):
+    """Raised when conversation.run()/send_message() fails while the sandbox
+    container is still known to exist (as opposed to DockerWorkspace()
+    itself failing to start one at all, which the outer except still
+    handles). Carries a best-effort diagnostic snapshot captured before
+    cleanup makes the container unreachable — see
+    _capture_container_diagnostics above for why that timing matters."""
+
+    def __init__(self, message, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 FIXTURE_DEMO_TASK = (
@@ -554,11 +618,21 @@ def main() -> int:
             volumes=[f"{workspace_dir}:/workspace"],
             working_dir="/workspace",
         ) as workspace:
-            print(CONTAINER_PREFIX + json.dumps({"container_id": workspace._container_id}))
+            container_id = workspace._container_id
+            print(CONTAINER_PREFIX + json.dumps({"container_id": container_id}))
 
             conversation = Conversation(agent=agent, workspace=workspace)
-            conversation.send_message(task)
-            conversation.run()
+            try:
+                conversation.send_message(task)
+                conversation.run()
+            except _Terminated:
+                raise
+            except Exception as run_err:  # noqa: BLE001 — captured, then re-raised as _ContainerRunError below
+                # The container is still known to exist at this point (we
+                # have container_id, and __exit__ below hasn't run yet) —
+                # this is the only window where `docker inspect`/`docker
+                # logs` can still see it once it has already stopped.
+                raise _ContainerRunError(str(run_err), _capture_container_diagnostics(container_id)) from run_err
 
             result = {"status": "ok", "detail": "conversation.run() completed"}
             if mode == "component-templates":
@@ -616,6 +690,36 @@ def main() -> int:
         return 0 if result["status"] == "ok" else 1
     except _Terminated as err:
         print(RESULT_PREFIX + json.dumps({"status": "error", "detail": str(err)}))
+        return 1
+    except _ContainerRunError as err:
+        # Same closed-vocabulary contract as the generic except below, plus
+        # `containerDiagnostics` — a snapshot captured while the container
+        # still existed, since __exit__ (docker stop, which removes it) has
+        # already run by the time we get here and nothing more can be
+        # learned about it now.
+        text = str(err).lower()
+        if "docker" in text or "daemon" in text:
+            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
+        elif "api key" in text or "unauthorized" in text or "authentication" in text:
+            error_class = "ENVIRONMENT_MODEL_AUTH"
+        elif "container" in text:
+            # Covers the OpenHands SDK's own wording for a sandbox that died
+            # mid-run — "Container stopped unexpectedly", "No such
+            # container" — which never mentions docker/daemon by name but is
+            # the same class of deployment fault: the analysis never really
+            # ran to completion. Confirmed live on staging: Docker daemon,
+            # socket, and model credentials were all present and this is
+            # exactly the failure that still slipped through as
+            # unclassified before this branch existed.
+            error_class = "ENVIRONMENT_CONTAINER_CRASHED"
+        else:
+            error_class = None
+        payload = {"status": "error", "detail": str(err)}
+        if error_class:
+            payload["errorClass"] = error_class
+        if err.diagnostics:
+            payload["containerDiagnostics"] = err.diagnostics
+        print(RESULT_PREFIX + json.dumps(payload))
         return 1
     except Exception as err:  # noqa: BLE001 — any SDK/LLM/Docker failure maps to a failed job, not a crash
         # `errorClass` is a structured, closed-vocabulary hint for the Node
