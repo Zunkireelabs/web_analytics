@@ -111,6 +111,14 @@ services:
       - NODE_ENV=production
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      # design_task.py's DockerWorkspace spawns sibling containers via this
+      # socket and needs to reach their published ports; its own
+      # 127.0.0.1 is a different network namespace from where `docker run
+      # -p` actually publishes them (the true Docker host's), so it reaches
+      # them via this host-gateway alias instead — see
+      # DESIGN_AGENT_SANDBOX_HOST in design_task.py.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       # No HTTP endpoint to poll (this is a background poller, not a web
       # service) — liveness is just "is the poll-loop process still
