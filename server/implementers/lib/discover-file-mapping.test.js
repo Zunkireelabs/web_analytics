@@ -16,12 +16,20 @@ mock.module(resolve('../../db.js'), {
   },
 });
 
-const { findCandidateFile, autoHealFileMapping, normalizedPath } = await import('./discover-file-mapping.js');
+let recordedRepairs = [];
+mock.module(resolve('../../store/capability-repairs.js'), {
+  namedExports: {
+    recordCapabilityRepair: async (siteId, attempt) => { recordedRepairs.push({ siteId, ...attempt }); },
+    listCapabilityRepairs: async () => [],
+  },
+});
+
+const { findCandidateFile, findCandidateFileBySiblingPattern, autoHealFileMapping, normalizedPath } = await import('./discover-file-mapping.js');
 
 const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map: {} };
 const treeOf = (...files) => async () => ({ files, truncated: false });
 
-beforeEach(() => { savedConfig = null; });
+beforeEach(() => { savedConfig = null; recordedRepairs = []; });
 
 describe('findCandidateFile — the never-guess evidence bar', () => {
   test('resolves when exactly one real filename matches the last URL segment', () => {
@@ -210,5 +218,103 @@ describe('autoHealFileMapping — refuses a candidate that is a shared target', 
     });
     assert.ok(healed);
     assert.deepEqual(savedConfig.urlFileMap.pages['/about'], { file: 'src/pages/about.njk' });
+  });
+});
+
+describe('findCandidateFileBySiblingPattern — reusing an already-trusted mapping', () => {
+  test('derives a new file from a sibling whose file literally contains its own slug', () => {
+    const siteWithSibling = { url_file_map: { pages: { '/services/foo': { file: 'src/services/foo.md' } } } };
+    const r = findCandidateFileBySiblingPattern(siteWithSibling, 'https://x.com/services/bar/', ['src/services/foo.md', 'src/services/bar.md']);
+    assert.deepEqual(r, { kind: 'resolved', file: 'src/services/bar.md' });
+  });
+
+  test('refuses when two siblings derive to two different real files', () => {
+    const conflicting = {
+      url_file_map: { pages: { '/services/foo': { file: 'src/services/foo.md' }, '/services/baz': { file: 'src/other/baz.md' } } },
+    };
+    const r = findCandidateFileBySiblingPattern(conflicting, 'https://x.com/services/bar/', ['src/services/bar.md', 'src/other/bar.md']);
+    assert.equal(r.kind, 'ambiguous');
+    assert.equal(r.candidates.length, 2);
+  });
+
+  test('agreement from multiple siblings on the SAME derived file still counts as one candidate', () => {
+    const agree = {
+      url_file_map: { pages: { '/services/foo': { file: 'src/services/foo.md' }, '/services/baz': { file: 'src/services/baz.md' } } },
+    };
+    const r = findCandidateFileBySiblingPattern(agree, 'https://x.com/services/bar/', ['src/services/bar.md']);
+    assert.deepEqual(r, { kind: 'resolved', file: 'src/services/bar.md' });
+  });
+
+  test('never invents a path that is not a real file in the tree', () => {
+    const siteWithSibling = { url_file_map: { pages: { '/services/foo': { file: 'src/services/foo.md' } } } };
+    const r = findCandidateFileBySiblingPattern(siteWithSibling, 'https://x.com/services/bar/', ['src/services/foo.md']);
+    assert.equal(r.kind, 'ambiguous');
+    assert.deepEqual(r.candidates, []);
+  });
+
+  test('no siblings under the same directory falls through harmlessly', () => {
+    const noSiblings = { url_file_map: { pages: { '/blog/hello': { file: 'src/blog/hello.md' } } } };
+    const r = findCandidateFileBySiblingPattern(noSiblings, 'https://x.com/services/bar/', ['src/services/bar.md']);
+    assert.equal(r.kind, 'ambiguous');
+  });
+});
+
+describe('autoHealFileMapping — own-domain guard', () => {
+  test('refuses a URL on a hostname this site never registered as its own', async () => {
+    const scoped = { ...site, website_domain: 'zunkireelabs.com', additional_own_domains: ['edgex.zunkireelabs.com'] };
+    let fetched = false;
+    const healed = await autoHealFileMapping(scoped, 'https://supreme-court.zunkireelabs.com/some-page/', 'meta-title', {
+      fetchTree: async () => { fetched = true; return { files: [], truncated: false }; },
+    });
+    assert.equal(healed, null);
+    assert.equal(fetched, false, 'must never even read the repo tree for a URL outside the registered own-domains');
+    assert.equal(recordedRepairs[0]?.outcome, 'foreign-domain');
+  });
+
+  test('allows a URL on a registered additional own-domain', async () => {
+    const scoped = { ...site, website_domain: 'zunkireelabs.com', additional_own_domains: ['edgex.zunkireelabs.com'] };
+    const healed = await autoHealFileMapping(scoped, 'https://edgex.zunkireelabs.com/pricing/', 'meta-title', {
+      fetchTree: treeOf('src/pages/pricing.njk'),
+    });
+    assert.ok(healed, 'edgex is a registered own-domain, not a foreign one');
+  });
+
+  test('passes through unfiltered when website_domain was never set — never risks excluding the site\'s own real pages on a guess', async () => {
+    const unscoped = { ...site, website_domain: null, additional_own_domains: [] };
+    const healed = await autoHealFileMapping(unscoped, 'https://anything.example.com/about/', 'meta-title', {
+      fetchTree: treeOf('src/pages/about.njk'),
+    });
+    assert.ok(healed);
+  });
+});
+
+describe('autoHealFileMapping — permalink-search is the last resort, only reached after sibling-pattern and filename-match both fail', () => {
+  test('resolves via code search when neither earlier tier finds a candidate', async () => {
+    const healed = await autoHealFileMapping(site, 'https://x.com/deeply/nested/page/', 'meta-title', {
+      fetchTree: treeOf('src/content/unrelated-name.md'),
+      searchCode: async (_s, literal) => (literal === '/deeply/nested/page' ? ['src/content/unrelated-name.md'] : []),
+    });
+    assert.ok(healed);
+    assert.equal(savedConfig.urlFileMap.pages['/deeply/nested/page'].file, 'src/content/unrelated-name.md');
+    assert.equal(recordedRepairs[0]?.evidenceTier, 'permalink-search');
+  });
+
+  test('a thrown/unavailable search is treated as no evidence, never as evidence of absence', async () => {
+    const healed = await autoHealFileMapping(site, 'https://x.com/deeply/nested/page/', 'meta-title', {
+      fetchTree: treeOf('src/content/unrelated-name.md'),
+      searchCode: async () => { throw new Error('rate limited'); },
+    });
+    assert.equal(healed, null);
+    assert.equal(recordedRepairs[0]?.outcome, 'ambiguous');
+  });
+
+  test('filename-match still wins over permalink-search when it alone resolves — search is never tried needlessly', async () => {
+    let searched = false;
+    const healed = await autoHealFileMapping(site, 'https://x.com/about/', 'meta-title', {
+      fetchTree: treeOf('src/pages/about.njk'),
+      searchCode: async () => { searched = true; return []; },
+    });
+    assert.ok(healed);
+    assert.equal(searched, false, 'filename-match already resolved it — the last-resort tier must not even run');
   });
 });

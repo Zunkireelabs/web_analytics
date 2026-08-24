@@ -6,6 +6,7 @@ import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
+import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 
 // The gates that decide whether a candidate recommendation is real, and
@@ -47,6 +48,7 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     fetchTree = getRepoTree,
     fetchFile = getFileContent,
     healFn = autoHealFileMapping,
+    healContentTargetFn = autoHealNewContentTarget,
     discoverRoutes = discoverPaginationRoutes,
     fetchFingerprint = fetchSoftNotFoundFingerprint,
     checkSoftNotFound = isSoftNotFound,
@@ -120,6 +122,23 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     const healed = await healFn(site, pageUrl, actionType, { fetchTree: cachedFetchTree, routes: paginationRoutes })
       .catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a file mapping for ${pageUrl}: ${err.message}`);
+        return null;
+      });
+    if (healed) site = healed;
+  };
+
+  // Once per (site, actionType) for this whole pass, not once per
+  // recommendation — newContentTargets is a SHARED capability: repairing it
+  // once for "blog-outline" unblocks every blog-outline recommendation this
+  // pass evaluates, not just the one that happened to trigger the attempt.
+  const contentTargetHealAttempted = new Set();
+  const healNewContentTarget = async (actionType) => {
+    if (!site?.repo_owner || !site?.repo_name) return;
+    if (contentTargetHealAttempted.has(actionType)) return;
+    contentTargetHealAttempted.add(actionType);
+    const healed = await healContentTargetFn(site, actionType, { fetchTree: cachedFetchTree })
+      .catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a content target for "${actionType}": ${err.message}`);
         return null;
       });
     if (healed) site = healed;
@@ -214,7 +233,14 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // validateRenderingBatch inside pushDraftBranch, which fails closed and is
     // the single choke point every implementer funnels through. Duplicating
     // that rule here would give it two definitions that could disagree.
+    //
+    // Missing target -> attempt the shared capability repair (once per
+    // actionType this pass, see healNewContentTarget) -> re-check. Same
+    // "classify, heal, re-check" shape as the page-mapping gate below.
     let mappingBlockedReason = null;
+    if (FRONTEND_ACTION_TYPES.has(generatorId) && !resolveNewContentTarget(site, generatorId, 'probe')) {
+      await healNewContentTarget(generatorId);
+    }
     if (FRONTEND_ACTION_TYPES.has(generatorId) && !resolveNewContentTarget(site, generatorId, 'probe')) {
       mappingBlockedReason = `No url_file_map.newContentTargets["${generatorId}"] is configured for this site, so there is nowhere in the repo to create the new file. Add one (e.g. {"dir":"src/blog","extension":".md"}) via 'npm run connect-repo' before this can be applied.`;
     }
