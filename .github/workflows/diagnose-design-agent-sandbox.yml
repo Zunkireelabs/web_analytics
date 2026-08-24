@@ -1,0 +1,64 @@
+name: Diagnose Design Agent Sandbox (read-only)
+
+# Manual, read-only diagnostic — does NOT rebuild or redeploy anything. Runs
+# a handful of inspection commands against the ALREADY-DEPLOYED
+# design-agent-worker-stage container (which already has the
+# host.docker.internal fix from PR #121/#122) to answer, with real evidence,
+# whether this VPS's Docker Engine actually supports `--add-host
+# host.docker.internal:host-gateway` and whether the exact health-check path
+# design_task.py relies on works — without needing to run a real (paid,
+# slow) Design Agent job to find out. Every command here is inspect/exec
+# against a throwaway test container this same job also removes; nothing
+# about the app's own containers, data, or config is touched.
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    name: Read-only sandbox diagnostics
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: SSH diagnostics
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            echo "── Docker Engine version (client + server) ──"
+            docker version
+
+            echo ""
+            echo "── design-agent-worker-stage: does host.docker.internal resolve? ──"
+            docker exec design-agent-worker-stage getent hosts host.docker.internal || echo "RESOLUTION FAILED"
+
+            echo ""
+            echo "── design-agent-worker-stage: full extra_hosts config as Docker sees it ──"
+            docker inspect design-agent-worker-stage --format '{{.HostConfig.ExtraHosts}}'
+
+            echo ""
+            echo "── Live reproduction of the exact DockerWorkspace() health-check path ──"
+            echo "Starting a throwaway sibling container from INSIDE design-agent-worker-stage,"
+            echo "exactly as design_task.py does, then curling its /health from inside the"
+            echo "same parent container via host.docker.internal — the exact call that keeps"
+            echo "failing in real jobs."
+            docker exec design-agent-worker-stage sh -c '
+              docker rm -f sandbox-diag-test 2>/dev/null
+              docker run -d --platform linux/amd64 --rm --name sandbox-diag-test -p 39555:8000 \
+                ghcr.io/openhands/agent-server:latest-python --host 0.0.0.0 --port 8000
+              echo "docker run exit: $?"
+              sleep 8
+              echo "--- docker inspect state ---"
+              docker inspect -f "Running={{.State.Running}} Status={{.State.Status}}" sandbox-diag-test
+              echo "--- curling http://host.docker.internal:39555/health from inside the parent ---"
+              wget -q -O - --timeout=5 http://host.docker.internal:39555/health; echo " WGET_EXIT:$?"
+              echo "--- cleanup ---"
+              docker rm -f sandbox-diag-test 2>/dev/null
+            '
+
+            echo ""
+            echo "── ufw / iptables state (read-only) ──"
+            sudo ufw status verbose 2>&1 || echo "ufw not installed/not accessible"
+            sudo iptables -L DOCKER-USER -n -v 2>&1 || echo "no DOCKER-USER chain"
