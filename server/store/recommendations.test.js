@@ -196,6 +196,32 @@ describe('classifyBlockedKind — the text-pattern -> UI-branch mapping', () => 
     assert.equal(classifyBlockedKind("No url_file_map entry resolves https://x.com/foo/ to a file in this site's repo. Add a mapping via 'npm run connect-repo'."), 'our-config');
   });
 
+  // implementers/lib/design-agent-status.js (2026-08-24) — a job actively
+  // executing is exactly as much "nothing to click, already in progress" as
+  // one still queued.
+  test('a "currently running" Design Agent status also reads as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design Agent setup is currently running.'), 'awaiting-derivation');
+  });
+
+  test('a queued Design Agent status reads as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design Agent setup is queued and will run shortly.'), 'awaiting-derivation');
+  });
+
+  // A FAILED attempt must never read as "nothing to do, wait" — falling
+  // through to our-config ("Blocked — setup needed" in the UI) is the
+  // correct, honest bucket: something genuinely needs attention now.
+  test('a failed Design Agent status does NOT read as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design Agent setup failed (job #628). See the latest attempt for details.'), 'our-config');
+  });
+
+  test('a repeated-failure Design Agent status does NOT read as awaiting-derivation either', () => {
+    assert.equal(classifyBlockedKind('Design Agent setup has failed 2 times in a row (most recently job #630, AGENT_SANDBOX_UNAVAILABLE). This needs attention — it will not resolve itself without intervention.'), 'our-config');
+  });
+
+  test('a never-attempted Design Agent status does NOT falsely read as "already in progress"', () => {
+    assert.equal(classifyBlockedKind('Design Agent setup has not been attempted yet.'), 'our-config');
+  });
+
   test('null blockedReason has no kind at all', () => {
     assert.equal(classifyBlockedKind(null), null);
     assert.equal(classifyBlockedKind(''), null);

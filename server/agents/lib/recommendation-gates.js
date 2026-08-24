@@ -1,5 +1,6 @@
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
+import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
@@ -52,6 +53,7 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     discoverRoutes = discoverPaginationRoutes,
     fetchFingerprint = fetchSoftNotFoundFingerprint,
     checkSoftNotFound = isSoftNotFound,
+    designAgentStatus = getDesignAgentStatus,
     log = console,
   } = deps;
 
@@ -86,6 +88,19 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     }
     dataFileCache.set(key, file);
     return file;
+  };
+
+  // One design-agent-status query for this WHOLE pass, no matter how many
+  // recommendations are blocked on it, and no matter which generator each
+  // one is (every action type's own template is ultimately projected from
+  // the SAME site-wide design-profile job — see design-drift.js's
+  // persistDesignProfile — so there is exactly one real job history to ask
+  // about per site, not one per actionType). Built lazily: a pass whose
+  // every design check already passes never queries execution_jobs at all.
+  let designAgentStatusPromise = null;
+  const cachedDesignAgentStatus = (succeeded) => {
+    if (!designAgentStatusPromise) designAgentStatusPromise = designAgentStatus(site, { succeeded });
+    return designAgentStatusPromise;
   };
 
   // One repo-tree read for this whole pass no matter how many unmapped pages
@@ -355,13 +370,42 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // an error. Pure in-memory check against the already-loaded `site` row.
     const designCheck = componentTemplateVerification(site, componentTemplateActionTypeFor(generatorId));
 
+    // Enrich a blocked design-check with the REAL, persisted Design Agent
+    // job status (implementers/lib/design-agent-status.js) instead of
+    // componentTemplateVerification's static "queued, no action needed"
+    // text — that text is deliberately generic (it's also read on
+    // generateDraft's HOT path in routes/action-center.js, where a DB query
+    // per call would be a real cost, see that function's own "safe on the
+    // hot path" comment), but THIS pass already does several other DB/
+    // network reads per site and is exactly where an honest, job-aware
+    // message belongs. Every actionType's own template is ultimately
+    // projected from the SAME site-wide design-profile job (see
+    // design-drift.js's persistDesignProfile), so one status lookup per
+    // site per pass covers every blocked recommendation regardless of
+    // generatorId — see cachedDesignAgentStatus above.
+    //
+    // Only attempted when the Design Agent could actually run for this site
+    // (same gate resolveOrCreateComponentTemplate itself checks) — a site
+    // that never opted in, or has no repo connected, will never have a job
+    // to ask about, and querying would only produce a misleading
+    // "never_attempted... will unblock automatically"-flavored message for
+    // a site where nothing is ever going to run automatically at all.
+    let designBlockedReason = designCheck.ok ? null : designCheck.detail;
+    if (!designCheck.ok && site.design_agent_enabled && site.repo_owner && site.repo_name) {
+      const status = await cachedDesignAgentStatus(false).catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not read Design Agent status: ${err.message}`);
+        return null;
+      });
+      if (status) designBlockedReason = status.detail;
+    }
+
     // Both blockers land in one field. The reason text says which one it was,
     // and nothing downstream needs to branch on the kind — blockedRiskTier
     // only checks truthiness. The mapping block is reported first when both
     // apply, because it's the more fundamental one: there is no point telling
     // someone to verify a component template for a page we can't locate a file
     // for.
-    return { drop: null, blockedReason: mappingBlockedReason || (designCheck.ok ? null : designCheck.detail) };
+    return { drop: null, blockedReason: mappingBlockedReason || designBlockedReason };
   }
 
   return {

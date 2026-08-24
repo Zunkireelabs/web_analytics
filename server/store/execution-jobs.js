@@ -100,6 +100,28 @@ export async function getLatestDesignAgentJob(siteId, actionType) {
   return rows[0] || null;
 }
 
+// Most recent N design_generate jobs for this site + component key, newest
+// first, WITH `result` (getLatestDesignAgentJob above deliberately omits it —
+// its one caller, design-drift.js's resolveOrCreateComponentTemplate, never
+// reads it). Added for implementers/lib/design-agent-status.js's honest
+// Action Center status: `result.failure` carries the real diagnostic
+// (failureClass/errorCode/stage/attempts — see lib/failure-classification.js
+// and worker.js's finishExecutionJob call), and a short run of consecutive
+// 'failed' rows is what distinguishes "one bad attempt" from "repeatedly
+// failing and needs a human" — see that module's countTrailingFailures.
+// Scoped by site_id like every other query in this file — a caller can never
+// see another tenant's job history through this function.
+export async function getRecentDesignAgentJobs(siteId, actionType, limit = 5) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at, result FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate'
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT $3`,
+    [siteId, actionType, limit]
+  );
+  return rows;
+}
+
 // Sentinel stored in params.componentKeys for a whole-site design-profile
 // job, so getQueuedComponentTemplateJob's existing "is one already pending"
 // check works unchanged for it. Not an action type — deliberately a reserved
