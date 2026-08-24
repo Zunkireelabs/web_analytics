@@ -160,6 +160,18 @@ describe('createOpenHandsHandler — failure paths', () => {
     assert.match(err.cause.message, /"exitCode":137/);
     assert.match(err.cause.message, /"oomKilled":true/);
     assert.match(err.cause.message, /killed \(out of memory\)/, 'the docker logs tail must be preserved');
+
+    // The specific sub-cause and the raw diagnostics must ALSO survive as
+    // real properties on the thrown error (not just embedded in a log
+    // string) — this is what lets lib/failure-classification.js persist a
+    // specific errorCode (AGENT_SANDBOX_CONTAINER_CRASHED, not the generic
+    // AGENT_SANDBOX_UNAVAILABLE) and the diagnostics themselves onto the job
+    // row, instead of both being lost the moment this function returns.
+    assert.equal(err.pythonErrorClass, 'ENVIRONMENT_CONTAINER_CRASHED');
+    assert.deepEqual(err.containerDiagnostics, {
+      exitCode: 137, oomKilled: true, status: 'exited',
+      logsTail: 'stub: killed (out of memory) while installing dependencies',
+    });
   });
 });
 

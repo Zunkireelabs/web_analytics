@@ -235,6 +235,12 @@ export const api = {
     // from real GSC query/page data + the keyword_gaps review queue, no
     // separate persistence. See server/agents/lib/growth-opportunities.js.
     growthOpportunities: (siteId) => req(`/internal/keywords/${siteId}/growth-opportunities`),
+    // Quick Win / Page 1 / Declining / Content Expansion "Send to Action
+    // Center" — Content Gap opportunities use updateGapStatus above instead.
+    generateOpportunityDraft: (siteId, opportunity) =>
+      req(`/internal/keywords/${siteId}/growth-opportunities/generate-draft`, {
+        method: 'POST', body: JSON.stringify({ opportunity }),
+      }),
     profile: (siteId) => req(`/internal/keywords/${siteId}/profile`),
     // Supplementary narrative (server/agents/keyword-narrative.js) — separate
     // from api.analyst.executiveSummary's Python pipeline.

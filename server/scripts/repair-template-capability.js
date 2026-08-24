@@ -5,8 +5,10 @@
 //   - 'plumbing-gap'        -> writes the missing url_file_map adapter config
 //                              directly (our own DB, immediately live).
 //   - 'safe-capability-gap' -> derives a template patch from a real sibling
-//                              route's own established pattern, builds the
-//                              client repo, and opens a PR (never merges).
+//                              route's own established pattern and opens a
+//                              PR (never merges) — validated by the CLIENT'S
+//                              OWN CI, not a local build (see the "Validate
+//                              + PR" section below for why).
 //   - 'architectural-gap'   -> left blocked; reported with a precise reason.
 //
 // Distinct BLOCKED RECOMMENDATIONS are deduped down to distinct CAPABILITY
@@ -15,8 +17,22 @@
 // one gap clears every recommendation it was blocking, and a single PR
 // covers all of them instead of one PR per row.
 //
-// Usage: node server/scripts/repair-template-capability.js --site-id 1 [--dry-run] [--build-cmd "npm run build"]
-
+// Callable two ways:
+//   node server/scripts/repair-template-capability.js --site-id 1 [--dry-run]
+//   import { repairTemplateCapabilitiesForSite } from this file (job.js/cron.js)
+//
+// This used to clone the client's repo with the `gh` CLI and run a real
+// `npm ci && npm run build` locally to validate a patch before opening its
+// PR — safe on a workstation with `gh` authenticated, but the production
+// container has neither `gh` nor the client's own dependency tree, so that
+// path would fail on every automated run. Reworked (2026-08-24) to push +
+// PR through the same GitHub REST client every other implementer in this
+// codebase already uses (github/client.js), and rely on the client's own
+// "rendering-validation" GitHub Actions workflow (installed once via
+// scripts/install-rendering-workflow.js) to build it — the same trust
+// boundary rendering-gate.js's Phase 2 (checkClientBuildStatus) already
+// uses for every other draft. A human reviewing the PR sees that check's
+// real pass/fail on the PR page before ever merging.
 import { query } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { updateSiteRepoConfig } from '../db.js';
@@ -26,20 +42,13 @@ import {
 import {
   classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, GENERATOR_VALUE_KEYS,
 } from '../agents/lib/template-capability-repair.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, dirname, basename, extname } from 'node:path';
-
-const execFileAsync = promisify(execFile);
+import { basename, extname } from 'node:path';
 
 function parseArgs(argv) {
   const args = { dryRun: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--site-id') args.siteId = Number(argv[++i]);
     else if (argv[i] === '--dry-run') args.dryRun = true;
-    else if (argv[i] === '--build-cmd') args.buildCmd = argv[++i];
   }
   return args;
 }
@@ -171,26 +180,23 @@ function makeTemplateResolver(site, ref, fileCache) {
   };
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (!args.siteId) {
-    console.error('Usage: node server/scripts/repair-template-capability.js --site-id <id> [--dry-run] [--build-cmd "npm run build"]');
-    process.exit(1);
-  }
-
-  const site = await getSiteById(args.siteId);
-  if (!site) throw new Error(`No site ${args.siteId}`);
-  if (!site.repo_owner || !site.repo_name) throw new Error(`Site ${args.siteId} has no repo connected — nothing to repair.`);
+// The callable core, usable both from the CLI (main() below) and from
+// job.js/cron.js for unattended nightly runs across every connected site.
+export async function repairTemplateCapabilitiesForSite(siteId, { dryRun = false } = {}) {
+  const args = { siteId, dryRun };
+  const site = await getSiteById(siteId);
+  if (!site) throw new Error(`No site ${siteId}`);
+  if (!site.repo_owner || !site.repo_name) throw new Error(`Site ${siteId} has no repo connected — nothing to repair.`);
 
   const { rows: recs } = await query(
     `SELECT id, page, recommendation_type, blocked_reason, blocked_kind
      FROM recommendations WHERE site_id = $1 AND status = 'open' AND blocked_reason IS NOT NULL`,
-    [args.siteId]
+    [siteId]
   );
 
   const report = {
     plumbingGapsFixed: [], safeCapabilityGapsRepaired: [], architecturalGapsBlocked: [],
-    filesChanged: [], testsRun: [], prsCreated: [], refusals: [],
+    filesChanged: [], prsCreated: [], refusals: [],
   };
 
   if (!recs.length) {
@@ -319,41 +325,19 @@ async function main() {
     });
   }
 
-  // ---- Validate + PR the template edits (if any), BEFORE touching our own DB ----
+  // ---- Push + PR the template edits (if any), BEFORE touching our own DB ----
+  //
+  // No local clone, no local build — this pushes real content straight
+  // through the same GitHub REST client every other implementer in this
+  // codebase already uses, and lets the CLIENT's own CI (the
+  // "rendering-validation" GitHub Actions workflow, installed once via
+  // scripts/install-rendering-workflow.js) build and report back on the
+  // PR itself, same trust boundary as rendering-gate.js's Phase 2
+  // (checkClientBuildStatus) for every other draft. A failed build shows up
+  // as a failed check on the PR — visible to the human who reviews it
+  // before merging, never silently hidden, just not pre-empted locally.
   if (pendingTemplateEdits.size) {
-    const workDir = await mkdtemp(join(tmpdir(), 'template-capability-repair-'));
-    console.log(`Cloning ${site.repo_owner}/${site.repo_name} into ${workDir} to validate the build...`);
-    await execFileAsync('gh', ['repo', 'clone', `${site.repo_owner}/${site.repo_name}`, workDir, '--', '--quiet']);
-    await execFileAsync('npm', ['ci'], { cwd: workDir });
-
-    for (const [layoutPath, edit] of pendingTemplateEdits) {
-      await mkdir(dirname(join(workDir, layoutPath)), { recursive: true });
-      await writeFile(join(workDir, layoutPath), edit.source, 'utf8');
-    }
-
-    const buildCmd = args.buildCmd || 'npm run build';
-    const [cmd, ...cmdArgs] = buildCmd.split(' ');
-    console.log(`Running production build to validate: ${buildCmd}`);
-    try {
-      await execFileAsync(cmd, cmdArgs, { cwd: workDir });
-      report.testsRun.push({ cmd: buildCmd, result: 'pass' });
-    } catch (err) {
-      report.testsRun.push({ cmd: buildCmd, result: 'fail', error: err.message });
-      // A failed build means the derived patch is NOT safe to open a PR
-      // with — move every gap that depended on it back to refusals instead
-      // of silently dropping them.
-      for (const [, edit] of pendingTemplateEdits) {
-        for (const g of edit.appliedGaps) {
-          report.refusals.push({ generatorId: g.generatorId, pages: [...g.pages], reason: `Derived template patch failed the client's own production build — refused to open a PR. Build error: ${err.message}` });
-        }
-      }
-      // Undo the url_file_map edits queued for these gaps' adapters, and
-      // remove their entries from the success report.
-      report.safeCapabilityGapsRepaired = [];
-      pendingTemplateEdits.clear();
-    }
-
-    if (pendingTemplateEdits.size && !args.dryRun) {
+    if (!args.dryRun) {
       const branchName = `action-center/template-capability-repair-${new Date().toISOString().slice(0, 10)}`;
       const fromSha = await getBranchSha(site, ref);
       await createBranch(site, branchName, fromSha);
@@ -365,11 +349,11 @@ async function main() {
       const pr = await openPullRequest(site, {
         branch: branchName,
         title: 'Add AI-managed content slot(s) for previously-blocked recommendations',
-        body: `Automatically derived from an existing sibling route's own established AI-managed-slot pattern in this repo — no new architecture introduced, no fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n**This PR does not merge itself.** Review the diff before merging — once merged, the corresponding recommendations become draftable in the Action Center.`,
+        body: `Automatically derived from an existing sibling route's own established AI-managed-slot pattern in this repo — no new architecture introduced, no fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n**This PR does not merge itself, and its build has not been validated locally** — check this PR's own CI status before merging. Once merged, the corresponding recommendations become draftable in the Action Center.`,
       });
       report.prsCreated.push({ url: pr.url, number: pr.number, files: files.map((f) => f.path) });
       report.filesChanged.push(...files.map((f) => f.path));
-    } else if (args.dryRun) {
+    } else {
       console.log('[dry-run] Would open a PR with:', [...pendingTemplateEdits.keys()]);
     }
   }
@@ -387,7 +371,12 @@ async function main() {
 
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
-  main().then((report) => {
+  const cliArgs = parseArgs(process.argv.slice(2));
+  if (!cliArgs.siteId) {
+    console.error('Usage: node server/scripts/repair-template-capability.js --site-id <id> [--dry-run]');
+    process.exit(1);
+  }
+  repairTemplateCapabilitiesForSite(cliArgs.siteId, { dryRun: cliArgs.dryRun }).then((report) => {
     console.log('\n=== REPAIR REPORT ===');
     console.log(JSON.stringify(report, null, 2));
   }).catch((err) => {

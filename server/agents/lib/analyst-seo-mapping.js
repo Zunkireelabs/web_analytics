@@ -493,6 +493,49 @@ export function seoDraftEligibility(site, insight) {
   }
 }
 
+// Website-wide Growth Opportunities (Analyst page, growth-opportunities.js)
+// -> Action Center draft, for the four types built from an existing ranking
+// page (quick-win/page1-opportunity/declining/content-expansion). Deliberately
+// excludes 'content-gap': that type has zero existing page by definition
+// (growth-opportunities.js's own doc comment) and already has its own
+// approval path — createActionCenterRecommendationForGap above, wired through
+// the gaps PUT route — which also runs relevance classification and the
+// existing-page check gapDraftEligibility needs. Mirrors
+// generatorForDecliningPage below: a CTR/click gap is a presentation problem
+// (title/meta), everything else here is a coverage/depth problem
+// (expand-content) — no generator here needs to guess a topic, same
+// discipline as seoDraftEligibility.
+const OPPORTUNITY_GENERATORS = {
+  'quick-win': (opp) => ({ generatorId: 'meta-title', params: { page: opp.page, query: opp.query } }),
+  'page1-opportunity': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
+  declining: (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
+  'content-expansion': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
+};
+
+// Returns null for anything not eligible — same "never throw" convention as
+// seoDraftEligibility/gapDraftEligibility above. Re-checked server-side by
+// the route that calls this; the frontend's own eligibility check is only a
+// UI convenience, never trusted alone.
+export function opportunityDraftEligibility(site, opp) {
+  const build = opp?.type && OPPORTUNITY_GENERATORS[opp.type];
+  if (!build || !opp.page) return null;
+
+  // Same primary-domain-only scoping as seoDraftEligibility — a growth
+  // opportunity's page comes from gsc_query_page, which (like GSC's page
+  // dimension) can legitimately name any hostname the property covers.
+  const primaryDomain = knownDomain(site);
+  if (primaryDomain && hostnameOf(opp.page) !== primaryDomain) return null;
+
+  const { generatorId, params } = build(opp);
+  return {
+    generatorId,
+    params,
+    // Deterministic per (type, page, query) — matches getDraftByFindingId's
+    // idempotency contract, same as every other findingId in this file.
+    findingId: `growth-opportunity:${opp.type}:${opp.page}:${opp.query || ''}`,
+  };
+}
+
 // AUTONOMOUS NIGHTLY SYNC — the missing last mile.
 //
 // The 3am pipeline (data-analyst-agent, ingest_schedule_hour_utc=3) already

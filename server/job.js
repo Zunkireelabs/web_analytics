@@ -827,6 +827,38 @@ async function globalRemainingSeed() {
   return Math.max(0, ceiling - alreadyShipped);
 }
 
+// Runs server/scripts/repair-template-capability.js's core for every
+// repo-connected site — the shared-template ('site-fact') half of the
+// capability-repair story, distinct from autoHealFileMapping/
+// autoHealNewContentTarget (implementers/lib/discover-*.js, already run
+// inline inside every recommendation-gates.js pass, no separate cron entry
+// needed). This one opens its own PR directly (bypassing the drafts table
+// entirely — see that file's own doc comment on why), so it gets its own
+// step here rather than folding into runAutoRemediationForAllSites, which
+// only ever ships already-drafted, already-approved recommendations.
+// Per-site error isolation, same as every other *ForAllSites function: one
+// site's repo/PR failure must never cost every other site its own run.
+export async function runTemplateCapabilityRepairForAllSites() {
+  const { repairTemplateCapabilitiesForSite } = await import('./scripts/repair-template-capability.js');
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const report = await repairTemplateCapabilitiesForSite(site.id);
+      const prCount = report.prsCreated.length;
+      const fixedCount = report.plumbingGapsFixed.length + report.safeCapabilityGapsRepaired.length;
+      if (prCount || fixedCount) {
+        console.log(`[job] template-capability-repair site ${site.id} "${site.name}": ${fixedCount} config fix(es), ${prCount} PR(s) opened, ${report.architecturalGapsBlocked.length} still needing a human decision.`);
+      }
+      results.push({ siteId: site.id, ...report });
+    } catch (err) {
+      console.error(`[job] template-capability-repair failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
 export async function runAutoRemediationForAllSites() {
   const sites = (await listSites()).filter(isShippable);
   const results = [];
