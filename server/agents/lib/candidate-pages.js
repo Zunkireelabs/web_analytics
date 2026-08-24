@@ -2,7 +2,7 @@ import { getSearchPerformanceRange, getSearchPerformanceForPages, getSiteById } 
 import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
 import { sortByRotation } from './rotation.js';
-import { ownDomains, filterOwnDomainPages } from './site-domain.js';
+import { knownDomain, filterOwnDomainPages } from './site-domain.js';
 
 const DEFAULT_GSC_LIMIT = 100;
 const DEFAULT_ZERO_TRAFFIC_LIMIT = 200;
@@ -38,7 +38,16 @@ export async function selectCandidatePages(siteId, agentId, {
     getSearchPerformanceRange(siteId, start, end, 'page', gscLimit),
     listPageInventory(siteId, { limit: zeroTrafficLimit + gscLimit }),
   ]);
-  const domain = ownDomains(site);
+  // knownDomain (primary website_domain only), NOT ownDomains — this is the
+  // page pool every finding-generating agent scans to CREATE recommendations
+  // from, and a site's additional_own_domains (e.g. Zunkiree Labs' edgex./
+  // zenly.zunkireelabs.com — separate products on their own subdomain, see
+  // migration 123) are registered for OTHER purposes (not being treated as
+  // foreign by the resolution/repair layer — see url-file-map.js's
+  // resolveHostScope) without being in scope for THIS site's own Action
+  // Center. Confirmed 2026-08-24: scanning ownDomains here is what let
+  // edgex.zunkireelabs.com pages generate real recommendations at all.
+  const domain = knownDomain(site);
   const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
   const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
 

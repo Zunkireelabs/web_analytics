@@ -74,8 +74,9 @@ mock.module(resolve('../../store/drafts.js'), {
     updateDraft: async () => null,
   },
 });
+const realRead = await import(resolve('../../store/read.js'));
 mock.module(resolve('../../store/read.js'), {
-  namedExports: { getSiteById: async () => site },
+  namedExports: { ...realRead, getSiteById: async () => site },
 });
 // Phase 5: what's under test in this file is auto-remediation's OWN control
 // flow, not the learning log — mocked to an empty map (no generator ever

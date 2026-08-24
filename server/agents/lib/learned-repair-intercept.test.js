@@ -18,8 +18,9 @@ let classification;
 let classifyError;
 let classifyCalls;
 
+const realRead = await import(resolve('../../store/read.js'));
 mock.module(resolve('../../store/read.js'), {
-  namedExports: { getSiteById: async () => site },
+  namedExports: { ...realRead, getSiteById: async () => site },
 });
 
 // Deliberately NOT filtering by evidence count here — the real

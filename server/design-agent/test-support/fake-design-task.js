@@ -61,6 +61,28 @@ export function runFakeTask(mode) {
     return;
   }
 
+  if (mode === 'container-crashed') {
+    // Mirrors design_task.py's _ContainerRunError path: the container
+    // existed (CONTAINER_PREFIX already printed above), then died mid-run.
+    // errorClass + containerDiagnostics match exactly what
+    // _capture_container_diagnostics/the except _ContainerRunError branch
+    // produce for real — a docker-inspect/docker-logs snapshot taken before
+    // cleanup could make the container unreachable.
+    console.log('DESIGN_AGENT_RESULT: ' + JSON.stringify({
+      status: 'error',
+      detail: 'Container stopped unexpectedly',
+      errorClass: 'ENVIRONMENT_CONTAINER_CRASHED',
+      containerDiagnostics: {
+        exitCode: 137,
+        oomKilled: true,
+        status: 'exited',
+        logsTail: 'stub: killed (out of memory) while installing dependencies',
+      },
+    }));
+    process.exitCode = 1;
+    return;
+  }
+
   if (mode === 'hang-honor-sigterm') {
     // Mirrors design_task.py's real _Terminated path: on SIGTERM, print an
     // error result line (as if its own `with DockerWorkspace(...)` cleanup

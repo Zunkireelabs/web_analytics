@@ -22,11 +22,11 @@ from app.api.routes.dashboard import _recent_insights
 from app.db.models import AnalystRecommendations, Insight
 
 
-def _insight(*, id=1, metric_key="gsc_impressions", period_start=date(2026, 8, 18)) -> Insight:
+def _insight(*, id=1, metric_key="gsc_impressions", period_start=date(2026, 8, 18), insight_type="trend_shift", evidence=None) -> Insight:
     return Insight(
         id=id, client_id=1, metric_key=metric_key, dimension_type="page",
         dimension_value="https://example.com/page", period_start=period_start,
-        insight_type="trend_shift", severity="high", evidence={"pct_change": -30},
+        insight_type=insight_type, severity="high", evidence=evidence if evidence is not None else {"pct_change": -30},
         generated_at=datetime(2026, 8, 19, tzinfo=timezone.utc),
     )
 
@@ -69,9 +69,23 @@ def test_returns_the_cross_service_contract_shape_json_analyst_seo_mapping_needs
     assert result == [{
         "id": 1, "metric_key": "gsc_impressions", "insight_type": "trend_shift", "severity": "high",
         "period_start": "2026-08-18", "evidence": {"pct_change": -30},
-        "dimension_type": "page", "dimension_value": "https://example.com/page",
+        "dimension_type": "page", "dimension_value": "https://example.com/page", "confidence": None,
         "recommendation_id": None, "root_cause": None, "recommendation": None, "narration_status": None,
     }]
+
+
+def test_forecast_risk_insight_carries_its_real_confidence():
+    # Only forecast_risk has an honest confidence value (the ForecastRun's
+    # own composite score, attached to evidence in
+    # app/insights/engine.py::_forecast_risk_insights) — every other
+    # insight_type is an observed fact, not a prediction, and must report
+    # null rather than a fabricated number (see test above).
+    insight = _insight(insight_type="forecast_risk", evidence={"pct_projected_change": -30, "confidence": 0.72})
+    session = _FakeSession([insight], [])
+
+    result = asyncio.run(_recent_insights(session, client_id=1))
+
+    assert result[0]["confidence"] == 0.72
 
 
 def test_no_second_query_issued_when_there_are_no_insights():

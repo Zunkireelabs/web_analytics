@@ -401,16 +401,21 @@ class InvestigationOutcome(Base):
         ForeignKey("investigations.id", ondelete="CASCADE"), nullable=False, unique=True,
     )
     baseline_value: Mapped[float] = mapped_column(Numeric, nullable=False)
-    predicted_value: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # Null for an observed-decline outcome (trend_shift/anomaly/milestone) —
+    # there was no prediction to compare against, only a before/after read.
+    # See app/investigations/outcome.py's _evaluate_observed_decline_one and
+    # migration 0039.
+    predicted_value: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     actual_value: Mapped[float] = mapped_column(Numeric, nullable=False)
-    pct_projected_change: Mapped[float] = mapped_column(Numeric, nullable=False)
+    pct_projected_change: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     pct_actual_change: Mapped[float] = mapped_column(Numeric, nullable=False)
     outcome_status: Mapped[str] = mapped_column(Text, nullable=False)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint(
-            "outcome_status IN ('no_decline_occurred','decline_smaller_than_predicted','decline_as_predicted_or_worse')",
+            "outcome_status IN ('no_decline_occurred','decline_smaller_than_predicted','decline_as_predicted_or_worse',"
+            "'improved','unchanged','worsened')",
             name="investigation_outcomes_status_check",
         ),
         Index("idx_investigation_outcomes_client", "client_id", "evaluated_at"),

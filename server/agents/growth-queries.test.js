@@ -23,6 +23,15 @@ describe('growth-queries agent meta', () => {
     assert.equal(meta.category, 'geo');
   });
 
+  // agent_runs.agent_version is NOT NULL — a missing version here means
+  // EVERY real run of this agent succeeds but saveAgentRun() throws and is
+  // silently swallowed by runner.js's .catch(), so the agent works but its
+  // run history never gets written (shows "Never run" in the Agent
+  // Taskforce forever, regardless of how many times it actually ran).
+  test('declares a version, or every run silently fails to persist its history', () => {
+    assert.equal(typeof meta.version, 'number');
+  });
+
   test('dataSources are honestly labeled connected/not-connected, never fabricated', () => {
     assert.ok(Array.isArray(meta.dataSources) && meta.dataSources.length > 0);
     for (const ds of meta.dataSources) {

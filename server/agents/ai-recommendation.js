@@ -1,6 +1,6 @@
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { analyzePageUrl } from './lib/page-content.js';
-import { resolveOwnDomain, ownDomains, filterOwnDomainPages } from './lib/site-domain.js';
+import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { sortByRotation } from './lib/rotation.js';
 import {
   listActivePrompts, upsertTrackedPrompt, getCheckedAtForPrompts,
@@ -190,7 +190,9 @@ export async function run({ siteId, start, end }) {
     getSearchPerformanceRange(siteId, start, end, 'page', 8),
     getSearchPerformanceRange(siteId, start, end, 'query', 15),
   ]);
-  const topPageUrls = filterOwnDomainPages(topPagesRaw, ownDomains(site)).map((p) => p.dim_value);
+  // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
+  // own comment on this same 2026-08-24 fix.
+  const topPageUrls = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
   const topQueryTexts = topQueries.map((q) => q.dim_value);
 
   // Refresh the prompt universe from real current data — idempotent

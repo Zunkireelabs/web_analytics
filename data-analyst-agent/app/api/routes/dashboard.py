@@ -97,6 +97,11 @@ async def _recent_insights(session: AsyncSession, client_id: int) -> list[dict]:
             "metric_key": i.metric_key, "insight_type": i.insight_type, "severity": i.severity,
             "period_start": i.period_start.isoformat(), "evidence": i.evidence,
             "dimension_type": i.dimension_type, "dimension_value": i.dimension_value,
+            # Only forecast_risk insights currently carry a real confidence value
+            # (the ForecastRun's own composite score) — everything else is an
+            # observed fact, not a prediction, so there is no honest confidence to
+            # report and this stays null rather than fabricating one.
+            "confidence": i.evidence.get("confidence") if i.insight_type == "forecast_risk" else None,
             "recommendation_id": rec.id if rec else None,
             "root_cause": rec.root_cause_text if rec else None,
             "recommendation": rec.recommendation_text if rec else None,

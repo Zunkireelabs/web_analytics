@@ -186,6 +186,14 @@ function MetricCard({ clientId, group, onChanged, defaultOpen }) {
                 {daysLabel(days)}
               </span>
             )}
+            {/* Real forecast confidence (data-analyst-agent's forecast/confidence.py),
+                only present on a forecast_risk insight — never shown for an observed
+                fact, which has no honest confidence value to report. */}
+            {primary?.confidence != null && (
+              <span className="an-chip an-chip-slate" title="Forecast confidence for this prediction">
+                Confidence: {Math.round(primary.confidence * 100)}%
+              </span>
+            )}
           </div>
 
           {/* The two tenses, always in the same order and always labelled, so

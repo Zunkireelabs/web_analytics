@@ -1,4 +1,4 @@
-import { knownDomain } from './site-domain.js';
+import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js';
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
@@ -131,7 +131,16 @@ export async function findExistingPageMatch(siteId, gap) {
   const topicWords = new Set(significantWords(gap.topic));
   if (!topicWords.size) return null;
 
-  const pages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
+  const rawPages = await listPageInventory(siteId, { limit: 500 }).catch(() => []);
+  // page_inventory is crawl/sitemap-discovered and carries no domain
+  // filtering of its own — knownDomain (primary domain only), same scoping
+  // as every other finding-generating agent (candidate-pages.js's own
+  // comment). Without this, a topic could get "covered_by" a real page on a
+  // registered-but-separate additional_own_domain (edgex./zenly.zunkireelabs.com)
+  // or a foreign one entirely — gap confirmed 2026-08-24.
+  const site = await getSiteById(siteId).catch(() => null);
+  const domain = site ? knownDomain(site) : null;
+  const pages = domain ? filterOwnDomainPages(rawPages, domain, (r) => r.page) : rawPages;
   const scored = pages
     .map((p) => {
       const urlWords = significantWords(p.page.replace(/^https?:\/\/[^/]+/, ''));
@@ -433,6 +442,17 @@ export function seoDraftEligibility(site, insight) {
   const page = absolutePageUrl(site, insight.dimension_value);
   if (!page) return null;
 
+  // GSC's page dimension is documented to return full absolute URLs, so
+  // `page` can legitimately be on ANY hostname the GSC property covers —
+  // including a registered additional_own_domain (edgex./zenly.zunkireelabs.com)
+  // or a foreign one entirely, neither of which is in scope for THIS site's
+  // Action Center (gap confirmed 2026-08-24: this bridge never checked
+  // domain at all before creating a recommendation). knownDomain (primary
+  // only) — never ownDomains — same scoping as every other finding-
+  // generating agent's page pool, see candidate-pages.js's own comment.
+  const primaryDomain = knownDomain(site);
+  if (primaryDomain && hostnameOf(page) !== primaryDomain) return null;
+
   return {
     ...generatorForDecliningPage(insight),
     // Deterministic per (metric, type, period, page) — getDraftByFindingId's
@@ -440,6 +460,11 @@ export function seoDraftEligibility(site, insight) {
     // for the same finding, not random per request.
     findingId: `analyst:${insight.metric_key}:${insight.insight_type}:${insight.period_start}:${insight.dimension_value}`,
     page,
+    // Only forecast_risk insights carry a real confidence value (the
+    // ForecastRun's own composite score, see data-analyst-agent's
+    // insights/engine.py) — everything else is an observed fact, not a
+    // prediction, so there is nothing honest to attach here.
+    confidence: insight.insight_type === 'forecast_risk' ? insight.confidence ?? null : null,
   };
 
   function generatorForDecliningPage(ins) {
@@ -533,6 +558,7 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
       priority: predicted ? 'medium' : 'high',
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
+      confidence: action.confidence,
     });
     created++;
   }

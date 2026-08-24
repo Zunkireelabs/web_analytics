@@ -1,7 +1,7 @@
 import { getSiteById, getSearchPerformanceRange, getTopPagePerQuery } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { analyzePageUrl } from './lib/page-content.js';
-import { knownDomain, ownDomains, filterOwnDomainPages } from './lib/site-domain.js';
+import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { sortByRotation } from './lib/rotation.js';
 import {
   upsertTrackedQuery, listActiveQueries, upsertQueryStatus,
@@ -27,6 +27,14 @@ export const meta = {
   id: 'growth-queries',
   name: 'Growth Query Discovery',
   category: 'geo',
+  // Missing until now — agent_runs.agent_version is NOT NULL, so every real
+  // run of this agent succeeded (it always returned real findings) but
+  // runner.js's saveAgentRun() silently failed on the constraint violation
+  // (caught and only console.error'd, never surfacing to a caller). The
+  // agent worked; its run history just never got written, which is why it
+  // showed "Never run" in the Agent Taskforce despite real weekly/on-demand
+  // runs happening the whole time.
+  version: 1,
   description: 'Discovers the real range of search/AI-assistant queries this site\'s category gets asked, checks whether the site\'s own content directly answers each one, and tracks whether newly-covered gaps actually start showing up in Google or AI assistants over time.',
   dataSources: [
     { id: 'gsc-query-data', status: 'connected', description: 'Real Google Search Console query/impression/position data for this site — the primary discovery signal.' },
@@ -166,7 +174,9 @@ export async function run({ siteId, start, end }) {
     getSearchPerformanceRange(siteId, start, end, 'page', 8),
     getTopPagePerQuery(siteId, start, end),
   ]);
-  const topPages = filterOwnDomainPages(topPagesRaw, ownDomains(site)).map((p) => p.dim_value);
+  // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
+  // own comment on this same 2026-08-24 fix.
+  const topPages = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
   const pageByQuery = new Map(topPageByQueryRows.map((p) => [p.query, p.page]));
   const top20ByImpressions = new Set(
     [...gscQueriesRaw].sort((a, b) => Number(b.impressions) - Number(a.impressions)).slice(0, TOP_N_FOR_TRACTION).map((q) => q.dim_value)
@@ -214,7 +224,9 @@ export async function run({ siteId, start, end }) {
   const byId = new Map(active.map((q) => [q.id, q]));
   const batch = rotatedIds.slice(0, COVERAGE_BATCH_SIZE).map((id) => byId.get(id));
 
-  const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), ownDomains(site), (r) => r.page);
+  // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
+  // own comment on this same 2026-08-24 fix.
+  const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), knownDomain(site), (r) => r.page);
   const inventoryUrls = inventory.map((r) => r.page);
   const pageAnalysisCache = new Map();
   async function analysisFor(url) {

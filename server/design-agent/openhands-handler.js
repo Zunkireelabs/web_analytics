@@ -239,11 +239,22 @@ export function createOpenHandsHandler({
         // reader at the wrong fix). design_task.py emits this as a closed
         // vocabulary; anything unrecognized keeps the old behaviour.
         const isEnvironment = typeof result.errorClass === 'string' && result.errorClass.startsWith('ENVIRONMENT_');
+        // result.containerDiagnostics (design_task.py's _capture_container_
+        // diagnostics) is a docker-inspect/docker-logs snapshot taken while
+        // the sandbox container still existed — the only place that detail
+        // survives once cleanup removes it. Folded into the cause message
+        // (never the user-facing one) so lib/errors.js's logInternal prints
+        // it via `caused by:` and an engineer reading the worker log for
+        // this job's ref id sees the exit code/OOM flag/log tail instead of
+        // just the SDK's generic "container stopped" sentence.
+        const causeDetail = result.containerDiagnostics
+          ? `OpenHands detail: ${result.detail || 'unknown error'} | containerDiagnostics: ${JSON.stringify(result.containerDiagnostics)}`
+          : `OpenHands detail: ${result.detail || 'unknown error'}`;
         const wrapped = new UserFacingError(
           isEnvironment
             ? 'The Design Agent could not run: its analysis sandbox is unavailable in this deployment (Docker or model credentials). This needs an engineer — it will not resolve on its own.'
             : "The Design Agent finished but reported that it could not analyse this site's repository.",
-          { cause: new Error(`OpenHands detail: ${result.detail || 'unknown error'}`) }
+          { cause: new Error(causeDetail) }
         );
         wrapped.stage = isEnvironment ? 'python_environment' : 'result_validation';
         throw wrapped;
