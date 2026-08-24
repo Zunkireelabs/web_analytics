@@ -90,6 +90,9 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      # See docker-compose.yml's design-agent-worker service for the full
+      # explanation — enables the same-network fallback in design_task.py.
+      - DESIGN_AGENT_SANDBOX_NETWORK=hosting
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:

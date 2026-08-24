@@ -182,6 +182,102 @@ describe('findScalarFieldRange / spliceScalarField', () => {
   });
 });
 
+// A plain (non-interpolating) backtick template literal is a real, common
+// JS content-authoring shape — not a Zunkiree-specific one — used whenever
+// a field's own value contains characters (apostrophes, quotes) that are
+// awkward inside "..."/'...'. Generic support for it, added 2026-08-24:
+// findScalarFieldRange previously only ever recognized "..."/'...' as a
+// scalar field's value delimiter, so ANY tenant's data file using backticks
+// for a content field (real, confirmed shape: zunkireelabs-web's own
+// locations.js/glossary.js/comparisons.js `content` field, used in the
+// fixtures below only as a real-world example, not the reason this
+// exists) silently failed to match at all — not a wrong edit, just
+// "field not found," indistinguishable from a genuinely missing field.
+describe('findScalarFieldRange / spliceScalarField — backtick template-literal fields', () => {
+  test('finds and replaces a real backtick-delimited field (locations.js\'s own `content`), preserving raw newlines', () => {
+    const objRange = findObjectRange(locations, 'id', 'kathmandu', 'js-export-array');
+    const range = findScalarFieldRange(locations, objRange, 'content', 'js-export-array');
+    assert.ok(range, 'expected to find the backtick-delimited content field');
+    assert.equal(range.quote, '`');
+
+    const newValue = "Line one with an apostrophe's quirk.\nLine two.";
+    const updated = spliceScalarField(locations, objRange, 'content', newValue, 'js-export-array');
+    assert.equal(assertValidContent(updated, 'js-export-array').ok, true);
+    // Raw newlines survive literally inside the backticks -- no \n escaping,
+    // unlike the "..."/'...' path above.
+    assert.match(updated, /content: `Line one with an apostrophe's quirk\.\nLine two\.`/);
+    // Every other real field on the same entry, and every other entry,
+    // must survive untouched.
+    assert.match(updated, /title: "AI Development Company in Kathmandu/);
+    const otherObjRange = findObjectRange(updated, 'id', 'pokhara', 'js-export-array');
+    assert.ok(otherObjRange, 'pokhara entry must still be findable after editing kathmandu\'s content field');
+  });
+
+  test('a plain template literal with no ${...} is recognized generically, not just for the one known real field name', () => {
+    const content = 'export default [\n  { id: "x", note: `Plain text with no interpolation.` }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    const range = findScalarFieldRange(content, objRange, 'note', 'js-export-array');
+    assert.ok(range);
+    assert.equal(range.quote, '`');
+    assert.equal(content.slice(range.valueStart, range.valueEnd), '`Plain text with no interpolation.`');
+  });
+
+  test('refuses (does not guess) a template literal that contains real ${...} interpolation', () => {
+    const content = 'export default [\n  { id: "x", note: `Hello ${name}, welcome.` }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    assert.equal(findScalarFieldRange(content, objRange, 'note', 'js-export-array'), null);
+    assert.equal(spliceScalarField(content, objRange, 'note', 'anything', 'js-export-array'), null);
+  });
+
+  test('refuses interpolation even when it is not the only content in the literal', () => {
+    const content = 'export default [\n  { id: "x", note: `Static prefix, then ${dynamic()} suffix.` }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    assert.equal(findScalarFieldRange(content, objRange, 'note', 'js-export-array'), null);
+  });
+
+  test('escapes a backtick and a literal "${" in the NEW value so it cannot introduce interpolation', () => {
+    const content = 'export default [\n  { id: "x", note: `old` }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    const updated = spliceScalarField(content, objRange, 'note', 'Price is ${10} using a `backtick` literally', 'js-export-array');
+    assert.equal(assertValidContent(updated, 'js-export-array').ok, true);
+    // The written source must contain the ESCAPED sequences, not raw ones
+    // that would themselves become interpolation/an early terminator.
+    assert.match(updated, /note: `Price is \\\$\{10\} using a \\`backtick\\` literally`/);
+    // And evaluating it back out must yield exactly the original plain text.
+    // eslint-disable-next-line no-new-func
+    const evaluated = new Function(updated.replace(/^export default/m, 'return'))();
+    assert.equal(evaluated[0].note, 'Price is ${10} using a `backtick` literally');
+  });
+
+  test('escapes a literal backslash correctly in a backtick field (no double-unescaping)', () => {
+    const content = 'export default [\n  { id: "x", note: `old` }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'js-export-array');
+    const updated = spliceScalarField(content, objRange, 'note', 'A path: C\\Users\\test', 'js-export-array');
+    assert.equal(assertValidContent(updated, 'js-export-array').ok, true);
+    // eslint-disable-next-line no-new-func
+    const evaluated = new Function(updated.replace(/^export default/m, 'return'))();
+    assert.equal(evaluated[0].note, 'A path: C\\Users\\test');
+  });
+
+  test('existing "..."/\'...\' scalar-field behavior is completely unchanged by adding backtick support', () => {
+    const objRange = findObjectRange(locations, 'id', 'kathmandu', 'js-export-array');
+    const range = findScalarFieldRange(locations, objRange, 'title', 'js-export-array');
+    assert.equal(range.quote, '"');
+    const updated = spliceScalarField(locations, objRange, 'title', 'Still a quoted string', 'js-export-array');
+    assert.match(updated, /title: "Still a quoted string"/);
+  });
+
+  test('json-array format never recognizes a backtick (not valid JSON syntax at all)', () => {
+    // json-array content can never legally contain a backtick-delimited
+    // value in the first place -- this just confirms the new branch does
+    // not change json-array behavior.
+    const content = '[\n  { "id": "x", "title": "old" }\n]';
+    const objRange = findObjectRange(content, 'id', 'x', 'json-array');
+    const updated = spliceScalarField(content, objRange, 'title', 'new value', 'json-array');
+    assert.equal(JSON.parse(updated)[0].title, 'new value');
+  });
+});
+
 describe('insertNewArrayField + assertValidContent', () => {
   test('inserts a new faqs field into a real, deeply-nested comparison entry and stays valid JS', () => {
     const objRange = findObjectRange(comparisons, 'id', 'zunkiree-vs-algolia', 'js-export-array');

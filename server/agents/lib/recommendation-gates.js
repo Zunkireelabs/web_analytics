@@ -386,12 +386,13 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     //
     // Only attempted when the Design Agent could actually run for this site
     // (same gate resolveOrCreateComponentTemplate itself checks) — a site
-    // that never opted in, or has no repo connected, will never have a job
-    // to ask about, and querying would only produce a misleading
-    // "never_attempted... will unblock automatically"-flavored message for
-    // a site where nothing is ever going to run automatically at all.
+    // that hasn't had its one-time auto-remediation review, or has no repo
+    // connected, will never have a job to ask about, and querying would
+    // only produce a misleading "never_attempted... will unblock
+    // automatically"-flavored message for a site where nothing is ever
+    // going to run automatically at all.
     let designBlockedReason = designCheck.ok ? null : designCheck.detail;
-    if (!designCheck.ok && site.design_agent_enabled && site.repo_owner && site.repo_name) {
+    if (!designCheck.ok && site.auto_remediation_enabled && site.repo_owner && site.repo_name) {
       const status = await cachedDesignAgentStatus(false).catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not read Design Agent status: ${err.message}`);
         return null;

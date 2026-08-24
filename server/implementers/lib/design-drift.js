@@ -585,6 +585,14 @@ export function siteHasUsableDesignProfile(site) {
   return isProfileUsable(getDesignProfile(site));
 }
 
+// Re-exported for discoverability alongside the rest of this module's
+// Design Agent readiness logic — the real implementation lives in
+// onboarding-readiness.js, a deliberately leaf-level module (see its own
+// comment) so callers that only need this one check don't pull in this
+// file's much heavier import graph (audit-log, agent-memory,
+// openhands-handler, ...).
+export { isOnboardingAnalysisPending } from './onboarding-readiness.js';
+
 // Validates and saves a freshly-derived profile, then projects EVERY
 // design-sensitive component template from it in the same pass. That is the
 // architectural point: one analysis yields the site's whole design-sensitive
@@ -709,13 +717,14 @@ export async function persistDerivedComponentTemplates(site, componentTemplates,
 // staff-triggered inspection UI to keep in sync with it.
 //
 // Never throws and never blocks the caller on a Design Agent failure —
-// `ok: false` (site.design_agent_enabled off, no repo configured, the
+// `ok: false` (site.auto_remediation_enabled off, no repo configured, the
 // OpenHands session itself failing, or an invalid derived template) means
 // "nothing to use," and every caller of this function already has its own
 // safe, zero-config fallback (marker-merge.js's DEFAULT_* templates,
 // newpage-render.js's plain-markdown output) for exactly this case — a
-// site that hasn't opted into (or can't currently reach) the Design Agent
-// keeps working exactly as it did before this function existed.
+// site that hasn't been through the one-time auto-remediation review (or
+// can't currently reach the Design Agent) keeps working exactly as it did
+// before this function existed.
 // How long the cron/auto-remediation path (waitForCompletion: true) will sit
 // polling a freshly-queued design-profile derivation before giving up and
 // falling back to the ordinary "queued, unblocks on its own" result. Bounded
@@ -783,11 +792,11 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
   // shipped CSS, blocked only for want of a stamp. The honest repair is to
   // check, and stamp what passes.
   //
-  // Deliberately NOT gated on design_agent_enabled or on a connected repo:
-  // this is one page fetch against the public site, not a repo analysis. A
-  // tenant who never opted into the Design Agent still gets their existing
-  // templates verified, which is the whole point — it removes a human step
-  // rather than relocating it.
+  // Deliberately NOT gated on auto_remediation_enabled or on a connected
+  // repo: this is one page fetch against the public site, not a repo
+  // analysis. A tenant who hasn't been through the auto-remediation review
+  // still gets their existing templates verified, which is the whole point
+  // — it removes a human step rather than relocating it.
   if (existing?.wrapper && isTemplateVerified(actionType, existing).reason === 'unverified') {
     const verified = await verifyTemplateAgainstLiveSite(actionType, existing, {
       pageUrl: sitePageUrl(site), fetchPage, fetchStylesheet,
@@ -825,7 +834,14 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // self-heal existed.
   }
 
-  if (!site.design_agent_enabled || !site.repo_owner || !site.repo_name) {
+  // Eligibility is derived from auto_remediation_enabled — the same
+  // real-repo-edit/PR consent this codebase already requires a human to
+  // grant once (routes/clients.js's /auto-remediation route) — rather than
+  // a second, separate design_agent_enabled toggle that had no route to
+  // ever set it. A repo-connected site becomes eligible for Design Agent
+  // derivation automatically the moment that one review has happened, with
+  // no further manual step.
+  if (!site.auto_remediation_enabled || !site.repo_owner || !site.repo_name) {
     return { ok: false, reason: 'not-available', template: null, componentKey };
   }
 

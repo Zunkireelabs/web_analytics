@@ -99,6 +99,10 @@ export function classifyFailure({ stage, err, exitCode, timedOut } = {}) {
         errorCode: 'AGENT_SANDBOX_CONTAINER_CRASHED',
         message: "The agent's analysis sandbox container stopped unexpectedly mid-run.",
       },
+      ENVIRONMENT_CONTAINER_UNHEALTHY: {
+        errorCode: 'AGENT_SANDBOX_CONTAINER_UNHEALTHY',
+        message: "The agent's analysis sandbox container started but never became healthy in time.",
+      },
     };
     const sub = SANDBOX_SUBCLASS[err?.pythonErrorClass] || null;
     const built = build(FAILURE_CLASS.DEPLOYMENT, sub?.errorCode || 'AGENT_SANDBOX_UNAVAILABLE', stage,
@@ -185,7 +189,7 @@ function build(failureClass, errorCode, stage, message, err) {
 // surface.
 function sanitizeContainerDiagnostics(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const { exitCode, oomKilled, status, stateError, inspectError, logsError, logsTail } = raw;
+  const { exitCode, oomKilled, status, stateError, inspectError, logsError, logsTail, rawError } = raw;
   const out = {};
   if (exitCode !== undefined) out.exitCode = exitCode;
   if (oomKilled !== undefined) out.oomKilled = oomKilled;
@@ -194,6 +198,13 @@ function sanitizeContainerDiagnostics(raw) {
   if (typeof inspectError === 'string') out.inspectError = inspectError.slice(0, 500);
   if (typeof logsError === 'string') out.logsError = logsError.slice(0, 500);
   if (typeof logsTail === 'string') out.logsTail = logsTail.slice(-4000);
+  // The raw exception text design_task.py's outer handler caught — the one
+  // field that actually distinguishes "permission denied on the socket"
+  // from "no such host" from a genuine timeout, all of which otherwise
+  // collapse into the same AGENT_SANDBOX_DOCKER_UNAVAILABLE code. Capped
+  // independently of design_task.py's own 1000-char cap, same defense-in-
+  // depth reasoning as logsTail above.
+  if (typeof rawError === 'string') out.rawError = rawError.slice(0, 1000);
   return out;
 }
 

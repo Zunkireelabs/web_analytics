@@ -62,6 +62,20 @@ describe('classifyFailure', () => {
       assert.match(c.message, /stopped unexpectedly/);
     });
 
+    // Added 2026-08-24: real staging job 1354 revealed design_task.py's
+    // DockerWorkspace()-construction exception handler only ever recognized
+    // docker/daemon/api-key text — a health-check-timeout failure (which
+    // never mentions either word) fell through to no errorClass at all,
+    // silently misclassified as AGENT_LOGIC. ENVIRONMENT_CONTAINER_UNHEALTHY
+    // is the fix on the Python side; this is its Node-side counterpart.
+    test('ENVIRONMENT_CONTAINER_UNHEALTHY gets its own errorCode and message', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_CONTAINER_UNHEALTHY' }) });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_CONTAINER_UNHEALTHY');
+      assert.match(c.message, /never became healthy/);
+      assert.equal(c.failureClass, FAILURE_CLASS.DEPLOYMENT);
+      assert.equal(c.infrastructure, true);
+    });
+
     test('an unrecognized pythonErrorClass falls back to the original generic code, never guessed', () => {
       const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_SOMETHING_FUTURE_PYTHON_ADDED' }) });
       assert.equal(c.errorCode, 'AGENT_SANDBOX_UNAVAILABLE');
@@ -100,6 +114,30 @@ describe('classifyFailure', () => {
     test('no containerDiagnostics at all means no diagnostics field is added — never a fabricated empty object', () => {
       const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_DOCKER_UNAVAILABLE' }) });
       assert.equal(c.diagnostics, undefined);
+    });
+
+    // Added 2026-08-24: the raw exception text design_task.py's outer
+    // handler caught is the one field that actually tells apart "permission
+    // denied on the socket" from "no such host" from a genuine timeout —
+    // all of which otherwise collapse into the same
+    // AGENT_SANDBOX_DOCKER_UNAVAILABLE code with no way to diagnose which
+    // one actually happened without shelling into the VPS.
+    test('rawError is carried through and capped independently of logsTail', () => {
+      const err = Object.assign(new Error('x'), {
+        pythonErrorClass: 'ENVIRONMENT_CONTAINER_UNHEALTHY',
+        containerDiagnostics: { rawError: 'Container failed to become healthy in time' },
+      });
+      const c = classifyFailure({ stage: 'python_environment', err });
+      assert.equal(c.diagnostics.rawError, 'Container failed to become healthy in time');
+    });
+
+    test('a very long rawError is capped to 1000 chars', () => {
+      const err = Object.assign(new Error('x'), {
+        pythonErrorClass: 'ENVIRONMENT_CONTAINER_UNHEALTHY',
+        containerDiagnostics: { rawError: 'x'.repeat(5000) },
+      });
+      const c = classifyFailure({ stage: 'python_environment', err });
+      assert.equal(c.diagnostics.rawError.length, 1000);
     });
   });
 

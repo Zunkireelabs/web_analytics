@@ -949,13 +949,29 @@ export async function runFixImpactMeasurementsForAllSites() {
 // repo gets connected — see routes/clients.js's repo-connect route — so a
 // site added mid-day starts deriving its design profile right away instead
 // of sitting unverified until the next 06:00 pass.
-export async function queueDesignAgentDerivationForSite(site) {
-  if (!site?.design_agent_enabled || !site?.repo_owner || !site?.repo_name) return false;
-  if (siteHasUsableDesignProfile(site)) return false;
+// Deps are injectable (same pattern as design-drift.js's
+// resolveOrCreateComponentTemplate) so the eligibility gate itself —
+// job.design-agent-eligibility.test.js — is unit-testable with plain
+// imports. job.js's own import graph reaches openai's formdata-node
+// dependency, which cannot load under node:test's module-mocking loader, so
+// mock.module is not an option here the way it is for smaller modules.
+export async function queueDesignAgentDerivationForSite(site, {
+  hasUsableProfile = siteHasUsableDesignProfile,
+  findQueuedProfileJob = getQueuedComponentTemplateJob,
+  enqueueProfileJob = createDesignProfileJob,
+  resolvePageUrl = sitePageUrl,
+} = {}) {
+  // Eligibility is derived from auto_remediation_enabled, not a separate
+  // Design Agent flag — see the comment on the gate in design-drift.js's
+  // resolveOrCreateComponentTemplate for why. A site becomes eligible the
+  // moment it has a repo connected AND a human has done the one-time
+  // auto-remediation review, with no second manual toggle to flip.
+  if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  if (hasUsableProfile(site)) return false;
   try {
-    const pending = await getQueuedComponentTemplateJob(site.id, DESIGN_PROFILE_JOB_KEY);
+    const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
     if (pending) return false;
-    await createDesignProfileJob(site.id, { requestedBy: null, pageUrl: sitePageUrl(site) });
+    await enqueueProfileJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
     return true;
   } catch (err) {
     console.error(`[job] could not queue design-profile derivation for site ${site.id}:`, err.message);
@@ -963,11 +979,14 @@ export async function queueDesignAgentDerivationForSite(site) {
   }
 }
 
-export async function queueDesignAgentDerivationsForAllSites() {
-  const sites = (await listSites()).filter((s) => s.design_agent_enabled && s.repo_owner && s.repo_name);
+export async function queueDesignAgentDerivationsForAllSites({
+  listAllSites = listSites,
+  queueForSite = queueDesignAgentDerivationForSite,
+} = {}) {
+  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
-    if (await queueDesignAgentDerivationForSite(site)) queued++;
+    if (await queueForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
   return { queued };

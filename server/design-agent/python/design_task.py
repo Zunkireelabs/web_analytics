@@ -69,6 +69,28 @@ existing call site/test that only ever passes argv[1]):
   a real branch + PR; nothing here ever commits, pushes, or opens a PR
   itself — this process only edits files on disk and validates.
 
+- "capability-repair" (server/agents/lib/template-capability-repair.js):
+  runs against argv[1], a real checkout of a TENANT'S own repo (same
+  workspaceSource as component-templates/design-profile mode — NOT the
+  platform's own repo like code-self-repair above). The one case
+  classifyCapabilityGap (template-capability-repair.js) calls
+  'architectural-gap': a recommendation type has no rendering slot on its
+  own template, and no sibling route sharing the same data file in this
+  site already solved it, so there is no existing pattern in this site's
+  own config to clone. argv[3] is a JSON object {generatorId, valueKey,
+  templatePath, templateSource, dataFilePath, dataFileSource,
+  conventionExamples} — every field real evidence gathered by the Node
+  side, never invented here. Like code-self-repair, this EDITS real
+  files (the one template + one data file named in the payload, and
+  nothing else — enforced structurally, see _snapshot_specific_files/
+  _validate_capability_repair below) to add the smallest new data field
+  + template rendering slot, then validates independently by running the
+  TENANT'S OWN build command (read from ITS OWN package.json — never
+  npm/yarn/pnpm assumed, never any repo-specific command hardcoded).
+  Generic across every tenant/data-shape/template-system by construction:
+  nothing in this mode's prompt or validation logic names a specific
+  site, field, or generator — those all come from `payload`.
+
 Prints two kinds of sentinel lines the Node handler looks for:
 - CONTAINER_PREFIX, as soon as the container exists — captured eagerly (the
   handler reads stdout line-by-line, not just at the end) so it still knows
@@ -102,6 +124,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 
 RESULT_PREFIX = "DESIGN_AGENT_RESULT: "
 CONTAINER_PREFIX = "DESIGN_AGENT_CONTAINER: "
@@ -122,6 +145,30 @@ DOCKER_IMAGE = os.getenv("DESIGN_AGENT_DOCKER_IMAGE", "ghcr.io/openhands/agent-s
 # run directly on a host with a real Docker daemon) can still use loopback.
 DESIGN_AGENT_SANDBOX_HOST = os.getenv("DESIGN_AGENT_SANDBOX_HOST", "host.docker.internal")
 
+# host.docker.internal:host-gateway (above) still crosses into the true
+# Docker host's own network namespace — a `docker run -p` publish is NAT'd
+# on the host itself, and that is exactly the kind of host-facing traffic a
+# host firewall (ufw's default INPUT policy is a common, well-documented
+# real case) can block even when the sandbox container is completely
+# healthy. Confirmed as the live, unresolved blocker on staging as of
+# 2026-08-24: the exact fixed image, run locally with the identical
+# Docker-outside-of-Docker topology and the identical fix, worked
+# perfectly — proving the code path itself is correct — yet a real staging
+# job still failed the same way, meaning something specific to that one
+# VPS's network path is still blocking it, most likely its firewall.
+#
+# When set, this is a second Docker network (in addition to whatever
+# network=None/default the sibling would otherwise get) both this process's
+# own container AND the sibling join, so a fallback path exists that never
+# needs the host-published port at all: container-to-container traffic over
+# a shared user-defined bridge stays inside Docker's own bridge/FORWARD-chain
+# handling, which a host firewall's INPUT rules typically do not govern —
+# unlike the host.docker.internal path above. Left unset by default so a
+# deployment that hasn't defined this network (e.g. plain local dev) is
+# completely unaffected; docker-compose.yml sets it to "hosting", the same
+# network design-agent-worker already joins.
+DESIGN_AGENT_SANDBOX_NETWORK = os.getenv("DESIGN_AGENT_SANDBOX_NETWORK") or None
+
 
 def sandbox_workspace_kwargs(port_finder):
     """The host_port/host DockerWorkspace kwargs that route its health check
@@ -135,10 +182,100 @@ def sandbox_workspace_kwargs(port_finder):
     port = port_finder()
     if port == -1:
         raise RuntimeError("No available TCP port found for the Design Agent sandbox container")
-    return {
+    kwargs = {
         "host_port": port,
         "host": f"http://{DESIGN_AGENT_SANDBOX_HOST}:{port}",
     }
+    if DESIGN_AGENT_SANDBOX_NETWORK:
+        kwargs["network"] = DESIGN_AGENT_SANDBOX_NETWORK
+    return kwargs
+
+
+def _container_ip_on_network(container_id, network, docker_bin=None):
+    """The sibling container's own IP address on `network` — used only by
+    the same-network fallback below, to reach it directly rather than via a
+    host-published port. Never raises; returns None on any failure (missing
+    container, network not joined, docker not reachable) so the caller can
+    cleanly fall through to re-raising the original error instead."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        inspect = subprocess.run(
+            [docker_bin, "inspect", "-f",
+             "{{(index .NetworkSettings.Networks \"" + network + "\").IPAddress}}", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        ip = inspect.stdout.strip()
+        return ip or None
+    except Exception:
+        return None
+
+
+def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server_image, volumes, working_dir, port_finder, network, alive_timeout=60):
+    """Start (or reconnect to) this job's sandbox container, preferring
+    DockerWorkspace's own host-published-port health check and falling back
+    to a direct same-network connection only when that specific path is what
+    failed — see DESIGN_AGENT_SANDBOX_NETWORK's docstring for why the two
+    differ (crossing into the host's network namespace vs. staying on a
+    shared Docker bridge) and why only ENVIRONMENT_CONTAINER_UNHEALTHY
+    (container started, health check on the host-published path couldn't
+    reach it) is eligible — every other failure (Docker itself unreachable,
+    `docker run` rejected) means there is no running sibling to fall back to
+    in the first place, so re-raising immediately is correct there.
+
+    Returns (workspace, cleanup, container_id, used_fallback) — cleanup must
+    always be called by the caller instead of relying on `with`, since the
+    fallback path returns a bare RemoteWorkspace that has no Docker-container
+    lifecycle of its own (see RemoteWorkspace's own docstring: it connects to
+    an already-running agent-server, it does not manage one) and cleanup
+    here must stop the container ourselves. `used_fallback` lets the caller
+    log which path actually served the job, for the same reason every other
+    branch in this file distinguishes its failure paths — silently
+    succeeding via a fallback with no record of it having been needed would
+    hide that the primary path is still broken.
+
+    dependency-injected classes/callables (docker_workspace_cls,
+    remote_workspace_cls, port_finder) purely so this is unit-testable
+    without a Docker daemon or the OpenHands SDK.
+    """
+    try:
+        workspace = docker_workspace_cls(
+            server_image=server_image, volumes=volumes, working_dir=working_dir,
+            **sandbox_workspace_kwargs(port_finder),
+        )
+        return workspace, workspace.cleanup, getattr(workspace, "_container_id", None), False
+    except Exception as err:
+        if not network or classify_sandbox_construction_error(str(err)) != "ENVIRONMENT_CONTAINER_UNHEALTHY":
+            raise
+        orphan_id = _find_orphaned_sandbox_container()
+        if not orphan_id:
+            raise
+        ip = _container_ip_on_network(orphan_id, network)
+        if not ip:
+            # Found the orphan but can't reach it even on the shared
+            # network (e.g. it wasn't actually joined to it) — a container
+            # we're never going to use from here on, so it must be stopped
+            # now rather than left running: nothing else in this process
+            # still holds its id once this exception propagates.
+            _try_stop_container(orphan_id)
+            raise
+        fallback = remote_workspace_cls(host=f"http://{ip}:8000", working_dir=working_dir)
+        deadline = time.time() + alive_timeout
+        while time.time() < deadline:
+            if fallback.alive:
+                break
+            time.sleep(1.0)
+        else:
+            # Reachable on the network but never became healthy within the
+            # timeout — genuinely broken, not just unreachable via the
+            # primary path. Same reasoning as above: stop it before giving
+            # up, or it leaks for good.
+            _try_stop_container(orphan_id)
+            raise
+
+        def cleanup():
+            _try_stop_container(orphan_id)
+
+        return fallback, cleanup, orphan_id, True
 
 # Mirrors server/implementers/lib/design-drift.js's REQUIRED_PLACEHOLDERS —
 # kept in sync by hand (small, stable, cross-language) rather than shared,
@@ -212,6 +349,80 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
     except Exception as diag_err:  # noqa: BLE001 — same as above
         diagnostics["logsError"] = str(diag_err)[:500]
     return diagnostics
+
+
+def classify_sandbox_construction_error(err_text):
+    """`errorClass` for a failure raised from inside DockerWorkspace()'s own
+    constructor (docker unreachable, `docker run` rejected, or
+    _wait_for_health() timing out/finding the container already exited) —
+    a structured, closed-vocabulary hint for lib/failure-classification.js,
+    not free text. Pulled out as its own function purely for unit-testing
+    without needing to actually trigger any of these failures.
+
+    `container`/`healthy` matches DockerWorkspace's own RuntimeError wording
+    ("Container failed to become healthy in time" / "Container stopped
+    unexpectedly...") for a container that started but never became usable —
+    distinct from ENVIRONMENT_CONTAINER_CRASHED, which is conversation.run()
+    failing on a container that WAS healthy (see _ContainerRunError's own
+    handler above). Checked after docker/daemon/api-key on purpose: a
+    docker-daemon-unreachable message could in principle also mention
+    "container" incidentally, and that more specific, more actionable class
+    should win."""
+    text = err_text.lower()
+    if "docker" in text or "daemon" in text:
+        return "ENVIRONMENT_DOCKER_UNAVAILABLE"
+    if "api key" in text or "unauthorized" in text or "authentication" in text:
+        return "ENVIRONMENT_MODEL_AUTH"
+    if "container" in text or "healthy" in text:
+        return "ENVIRONMENT_CONTAINER_UNHEALTHY"
+    return None
+
+
+def _try_stop_container(container_id, docker_bin=None):
+    """Best-effort `docker stop` — every container this process ever starts
+    is run with --rm, so stopping it is enough to also remove it. Used by
+    open_sandbox_workspace's own cleanup and by its failure branches that
+    found a real orphaned container but ultimately couldn't use it: those
+    must not leave it running just because they're giving up on it. Never
+    raises, so a cleanup failure never masks the real error being reported."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        subprocess.run([docker_bin, "stop", container_id], capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+
+def _find_orphaned_sandbox_container(docker_bin=None):
+    """Best-effort: find the sibling container DockerWorkspace's own
+    constructor started, for a failure raised from inside that constructor
+    itself (most commonly _wait_for_health() timing out) — we never get a
+    workspace instance back in that case (the `with` statement's __enter__
+    is never reached, since the exception comes from __init__), so there is
+    no container_id available the normal way. DockerWorkspace.cleanup() also
+    never runs for the same reason, so if `docker run` did succeed before
+    the failure, the container is both still on the host AND about to be
+    silently orphaned (leaking indefinitely) unless something finds and
+    removes it.
+
+    Identified by the SDK's own fixed naming convention
+    (f"agent-server-{uuid}") and `docker ps`'s default newest-first
+    ordering — one job runs one sandbox container at a time, so the most
+    recent match is always this attempt's own container, never a stale one
+    from an earlier job (those were already `--rm`-removed on any successful
+    exit). Never raises — same discipline as _capture_container_diagnostics;
+    a diagnostics failure must not mask the real one."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        listing = subprocess.run(
+            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}", "-n", "1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if listing.returncode != 0:
+            return None
+        container_id = listing.stdout.strip().splitlines()[0] if listing.stdout.strip() else None
+        return container_id or None
+    except Exception:
+        return None
 
 
 class _ContainerRunError(Exception):
@@ -456,6 +667,207 @@ def build_code_self_repair_task(payload):
     return "\n".join(lines)
 
 
+# Generic multi-tenant task for the ONE case
+# server/agents/lib/template-capability-repair.js's classifyCapabilityGap
+# calls 'architectural-gap': a recommendation type has no rendering slot on
+# its own template, AND no sibling route in this same site (one sharing the
+# same data file) already solved it either — so there is no existing
+# pattern in THIS site's own url_file_map config to safely clone. Runs
+# against a real client repo checkout (same workspaceSource as
+# component-templates/design-profile mode), but — like code-self-repair
+# mode — is an EDITING task: it adds the smallest new data field + template
+# rendering slot, never invented from nothing but derived from real evidence
+# the Node side supplies (this exact template's/data file's real current
+# content, plus any real example of this site's own AI-managed-slot
+# convention found ELSEWHERE in the repo, if one exists at all). Nothing
+# here is generator-, tenant-, or field-name-specific — every identifier in
+# the constructed prompt comes from `payload`.
+def build_capability_repair_task(payload):
+    generator_id = payload.get("generatorId") or "(unknown generator)"
+    value_key = payload.get("valueKey") or "(unknown value key)"
+    template_path = payload.get("templatePath") or "(unknown template path)"
+    template_source = payload.get("templateSource") or ""
+    data_file_path = payload.get("dataFilePath") or "(unknown data file path)"
+    data_file_source = payload.get("dataFileSource") or ""
+    examples = payload.get("conventionExamples") or []
+
+    lines = [
+        "This directory is a real, complete checkout of a client website's "
+        "actual source repository. This is a real code-editing task: you "
+        "may read and edit files, and run commands with the terminal "
+        "tool.\n",
+        f"A recommendation of type \"{generator_id}\" is blocked for every "
+        f"page rendered from {data_file_path} via the template "
+        f"{template_path}: there is no existing place on that page for "
+        "AI-generated content of this kind to render, and no sibling route "
+        "in this site's own configuration already solved it. Your job is "
+        "to add the SMALLEST new capability that lets it render — a new "
+        "field on the relevant data entries, and a rendering slot in "
+        f"{template_path} that displays it.\n",
+        f"The real current content of {template_path}:\n---\n{template_source}\n---\n",
+        f"The real current content of {data_file_path}:\n---\n{data_file_source}\n---\n",
+    ]
+    if examples:
+        lines.append(
+            "This site already expresses AI-managed content elsewhere "
+            "using this exact convention — match it precisely, do not "
+            "invent a different shape:\n"
+        )
+        for ex in examples:
+            lines.append(f"From {ex.get('path')}:\n---\n{ex.get('snippet')}\n---\n")
+    else:
+        lines.append(
+            "This site has no existing example of this convention "
+            "anywhere in the repository. Use this exact, minimal shape (a "
+            "Nunjucks comment naming this generator, then an if-guard, "
+            "then the output) so it stays machine-readable by this "
+            "platform later:\n"
+            "{# AI-managed: server/generators/" + generator_id + ".js #}\n"
+            "{% if <base>." + value_key + " %}\n"
+            "{{ <base>." + value_key + " | safe }}\n"
+            "{% endif %}\n"
+            "— replace <base> with whatever variable this template "
+            "already uses to reference the current data entry (read the "
+            "template to find it; never guess a name that doesn't appear "
+            "in it).\n"
+        )
+    lines.append(
+        f"Add the field as \"{value_key}\" (this exact name — it is what "
+        "the platform's own generator writes into later) to the data "
+        "file, matching its existing structure and quoting style exactly. "
+        "Do NOT populate it with placeholder content on every entry — the "
+        "field is meant to start absent/empty and be filled in later; the "
+        "template's own if-guard already handles that safely. Only add it "
+        "to the ONE entry you use to prove the change works end-to-end, "
+        "if you need a concrete example to validate against.\n"
+    )
+    lines.append(
+        f"Only touch {template_path} and {data_file_path}. Do not touch "
+        "any other file. Do not add speculative error handling, "
+        "comments, or abstractions beyond what this requires. Do not run "
+        "any git commands — do not commit, do not push; another process "
+        "handles that after you finish.\n"
+    )
+    lines.append(
+        "When you are done, respond with ONLY a JSON object (no prose, no "
+        "code fence) shaped exactly like:\n"
+        '{"summary": "<one sentence, what you added>", '
+        '"fieldName": "<the exact field name you added>", '
+        '"baseVar": "<the exact template variable you guarded on>"}'
+    )
+    return "\n".join(lines)
+
+
+# Reads the CLIENT repo's own package.json for a declared "build" script —
+# never assumes npm/yarn/pnpm, or any specific command, since that varies
+# per tenant and this must stay generic across all of them. Returns None
+# (never a guessed fallback) when no build script is declared at all, so
+# the caller fails honestly rather than running a command that might not
+# mean anything for this repo.
+def _detect_build_command(workspace_dir):
+    pkg_path = os.path.join(workspace_dir, "package.json")
+    if not os.path.isfile(pkg_path):
+        return None
+    try:
+        with open(pkg_path, "r", encoding="utf-8") as f:
+            pkg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(pkg.get("scripts"), dict) or not pkg["scripts"].get("build"):
+        return None
+    if os.path.isfile(os.path.join(workspace_dir, "pnpm-lock.yaml")):
+        return ["pnpm", "run", "build"]
+    if os.path.isfile(os.path.join(workspace_dir, "yarn.lock")):
+        return ["yarn", "build"]
+    return ["npm", "run", "build"]
+
+
+# Companion to _detect_build_command: the matching dependency-install
+# command for whichever package manager that function picked, keyed off
+# the exact same lockfile evidence so the two can never disagree. Unlike
+# server/scripts/repair-template-capability.js's own safe-capability-gap
+# path (which validates via the client's own GitHub Actions CI instead of
+# installing the client's dependency tree locally — see that script's own
+# header comment for why an EARLIER attempt at a local `npm ci && npm run
+# build` was abandoned there), this one runs inside the ephemeral OpenHands
+# sandbox container, not the long-lived design-agent-worker orchestrator —
+# a real, general-purpose dev environment with outbound network access and
+# nothing of any tenant's ever installed in it permanently, so installing
+# fresh here each run is the intended use of that sandbox rather than the
+# resource/isolation problem it would be inside the orchestrator.
+def _detect_install_command(workspace_dir):
+    if os.path.isfile(os.path.join(workspace_dir, "pnpm-lock.yaml")):
+        return ["pnpm", "install", "--frozen-lockfile"]
+    if os.path.isfile(os.path.join(workspace_dir, "yarn.lock")):
+        return ["yarn", "install", "--frozen-lockfile"]
+    return ["npm", "ci"]
+
+
+def _snapshot_specific_files(workspace_dir, relpaths):
+    """Narrower counterpart to _snapshot_code_files, for capability-repair
+    mode: only the exact files the agent was told it may touch, rather than
+    every .js/.mjs file in the repo. Bounding the snapshot to this known set
+    is itself the "only affects the intended page family" guarantee — any
+    file outside it is invisible to _diff_snapshots and so can never appear
+    in changed_files, regardless of what the agent's own final message
+    claims to have done."""
+    snapshot = {}
+    for relpath in relpaths:
+        if not relpath:
+            continue
+        try:
+            with open(os.path.join(workspace_dir, relpath), "r", encoding="utf-8") as f:
+                snapshot[relpath] = f.read()
+        except (OSError, UnicodeDecodeError):
+            snapshot[relpath] = None  # genuinely absent/unreadable before the agent's turn
+    return snapshot
+
+
+def _validate_capability_repair(workspace_dir, template_path, data_file_path, changed_files):
+    """Independent validation for a capability-repair task — never trusts
+    the agent's own self-report. In order: (1) only the two files it was
+    told about actually changed (enforced structurally by
+    _snapshot_specific_files above, checked again here as a second,
+    explicit gate); (2) the data file, if JS/JSON, is still syntactically
+    valid; (3) the client repo's OWN build command still succeeds — the
+    strongest real evidence the change is safe, since it exercises the
+    exact toolchain (Eleventy or otherwise) the client's real site is built
+    with. Never runs a guessed build command."""
+    if not changed_files:
+        return {"ok": False, "output": "Agent made no file changes."}
+
+    allowed = {p for p in (template_path, data_file_path) if p}
+    unexpected = [c["path"] for c in changed_files if c["path"] not in allowed]
+    if unexpected:
+        return {"ok": False, "output": f"Agent touched file(s) outside the intended scope: {unexpected}"}
+
+    for entry in changed_files:
+        if entry["path"] != data_file_path:
+            continue
+        if data_file_path.endswith((".js", ".mjs")):
+            check = _run_subprocess(["node", "--check", entry["path"]], cwd=workspace_dir, timeout=30)
+            if not check["ok"]:
+                return {"ok": False, "output": f"node --check failed for {entry['path']}:\n{check['output']}"}
+        elif data_file_path.endswith(".json"):
+            try:
+                json.loads(entry["newContent"])
+            except json.JSONDecodeError as err:
+                return {"ok": False, "output": f"{entry['path']} is not valid JSON after the change: {err}"}
+
+    build_cmd = _detect_build_command(workspace_dir)
+    if not build_cmd:
+        return {"ok": False, "output": "Could not find a \"build\" script in this repo's package.json — refusing to guess a build command."}
+
+    install_cmd = _detect_install_command(workspace_dir)
+    install_result = _run_subprocess(install_cmd, cwd=workspace_dir, timeout=600)
+    if not install_result["ok"]:
+        return {"ok": False, "output": f"$ {' '.join(install_cmd)}\n{install_result['output']}"}
+
+    result = _run_subprocess(build_cmd, cwd=workspace_dir, timeout=300)
+    output = f"$ {' '.join(install_cmd)}\n(installed OK)\n\n$ {' '.join(build_cmd)}\n{result['output']}"
+    return {"ok": result["ok"], "output": output}
+
+
 def _iter_code_files(root_dir):
     """Every real .js/.mjs source or test file under CODE_SELF_REPAIR_ROOT,
     skipping the excluded dirs — the bounded set this snapshots before/after
@@ -608,6 +1020,7 @@ def main() -> int:
         from openhands.tools.terminal import TerminalTool
         from openhands.workspace.docker import DockerWorkspace
         from openhands.workspace.docker.workspace import find_available_tcp_port
+        from openhands.sdk.workspace import RemoteWorkspace
 
         llm = LLM(
             model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
@@ -638,23 +1051,34 @@ def main() -> int:
             payload = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}
             task = build_code_self_repair_task(payload)
             code_repair_before = _snapshot_code_files(workspace_dir)
+        elif mode == "capability-repair":
+            payload = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}
+            task = build_capability_repair_task(payload)
+            capability_repair_before = _snapshot_specific_files(
+                workspace_dir, [payload.get("templatePath"), payload.get("dataFilePath")]
+            )
         else:
             task = FIXTURE_DEMO_TASK
 
         # One throwaway container per job (server_image is the default
         # pre-built OpenHands agent server — not our own image), bind-mounted
         # to this job's own host temp dir so no two jobs ever share a
-        # workspace, container, or host directory. `with` guarantees
-        # cleanup() runs on the way out, including on the _Terminated exit
-        # raised by the SIGTERM handler above.
-        with DockerWorkspace(
+        # workspace, container, or host directory. open_sandbox_workspace's
+        # own cleanup (in `finally` below) replaces `with`'s guarantee,
+        # since the fallback path it can take needs different cleanup than
+        # DockerWorkspace's own — still runs on the way out, including on
+        # the _Terminated exit raised by the SIGTERM handler above.
+        workspace, cleanup_workspace, container_id, used_fallback = open_sandbox_workspace(
+            docker_workspace_cls=DockerWorkspace,
+            remote_workspace_cls=RemoteWorkspace,
             server_image=DOCKER_IMAGE,
             volumes=[f"{workspace_dir}:/workspace"],
             working_dir="/workspace",
-            **sandbox_workspace_kwargs(find_available_tcp_port),
-        ) as workspace:
-            container_id = workspace._container_id
-            print(CONTAINER_PREFIX + json.dumps({"container_id": container_id}))
+            port_finder=find_available_tcp_port,
+            network=DESIGN_AGENT_SANDBOX_NETWORK,
+        )
+        try:
+            print(CONTAINER_PREFIX + json.dumps({"container_id": container_id, "usedSameNetworkFallback": used_fallback}))
 
             conversation = Conversation(agent=agent, workspace=workspace)
             try:
@@ -720,6 +1144,36 @@ def main() -> int:
                         "patch": "\n".join(f["patch"] for f in changed_files),
                         "filesChanged": [{"path": f["path"], "newContent": f["newContent"]} for f in changed_files],
                     })
+            elif mode == "capability-repair":
+                message_text = _last_agent_message_text(conversation)
+                parsed = _extract_json_object(message_text) or {}
+                capability_repair_after = _snapshot_specific_files(
+                    workspace_dir, [payload.get("templatePath"), payload.get("dataFilePath")]
+                )
+                changed_files = _diff_snapshots(capability_repair_before, capability_repair_after)
+                validation = _validate_capability_repair(
+                    workspace_dir, payload.get("templatePath"), payload.get("dataFilePath"), changed_files
+                )
+                if not validation["ok"]:
+                    result = {
+                        "status": "error",
+                        "detail": f"Capability repair could not be validated: {validation['output']}",
+                        "summary": parsed.get("summary"),
+                        "testsPassed": False,
+                        "testOutput": validation["output"],
+                    }
+                else:
+                    result.update({
+                        "summary": parsed.get("summary"),
+                        "fieldName": parsed.get("fieldName"),
+                        "baseVar": parsed.get("baseVar"),
+                        "testsPassed": True,
+                        "testOutput": validation["output"],
+                        "patch": "\n".join(f["patch"] for f in changed_files),
+                        "filesChanged": [{"path": f["path"], "newContent": f["newContent"]} for f in changed_files],
+                    })
+        finally:
+            cleanup_workspace()
 
         print(RESULT_PREFIX + json.dumps(result))
         return 0 if result["status"] == "ok" else 1
@@ -768,16 +1222,47 @@ def main() -> int:
         # This is a trusted INTERNAL channel (our own script), which is why
         # matching on it is legitimate where matching a third-party provider's
         # message text would not be.
-        text = str(err).lower()
-        if "docker" in text or "daemon" in text:
-            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
-        elif "api key" in text or "unauthorized" in text or "authentication" in text:
-            error_class = "ENVIRONMENT_MODEL_AUTH"
-        else:
-            error_class = None
+        # Previously this handler only checked docker/daemon/api-key text,
+        # so a health-check-timeout failure (which never mentions "docker"
+        # or "daemon") fell through to error_class=None — completely
+        # unclassified. See classify_sandbox_construction_error's own
+        # docstring for the full reasoning.
+        error_class = classify_sandbox_construction_error(str(err))
+
+        # The container DockerWorkspace() started (if `docker run` got that
+        # far before failing) is orphaned here — cleanup() never ran, since
+        # the exception came from inside its own constructor. This is the
+        # only window left to learn anything from it, and the only place
+        # that stops it leaking on the host forever.
+        diagnostics = None
+        orphan_id = _find_orphaned_sandbox_container()
+        if orphan_id:
+            diagnostics = _capture_container_diagnostics(orphan_id)
+            try:
+                subprocess.run(
+                    [os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker"), "rm", "-f", orphan_id],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+        # The raw exception text itself — not just its bucketed errorClass —
+        # is the one thing that actually tells apart "permission denied on
+        # the socket" / "no such host" / "API version mismatch" / a genuine
+        # timeout, all of which currently collapse into the same
+        # ENVIRONMENT_DOCKER_UNAVAILABLE code. Previously this text only
+        # ever reached the worker container's own stdout (via
+        # openhands-handler.js's `causeDetail`, console-logged and
+        # discarded) — never the job row, so diagnosing a real staging
+        # failure required a manual docker-logs/SSH session. Capped and
+        # merged into the same diagnostics object as the docker-inspect
+        # fields so it flows through the same sanitized, engineer-only path.
+        diagnostics = {**(diagnostics or {}), "rawError": str(err)[:1000]}
+
         payload = {"status": "error", "detail": str(err)}
         if error_class:
             payload["errorClass"] = error_class
+        payload["containerDiagnostics"] = diagnostics
         print(RESULT_PREFIX + json.dumps(payload))
         return 1
 

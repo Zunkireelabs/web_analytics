@@ -307,10 +307,24 @@ export function findScalarFieldRange(content, objRange, fieldName, format = 'js-
       let j = m.index + m[0].length;
       while (j < content.length && /\s/.test(content[j])) j++;
       const quote = content[j];
-      if (quote === '"' || quote === "'") {
+      if (quote === '"' || quote === "'" || quote === '`') {
         let k = j + 1;
         while (k < content.length && content[k] !== quote) { if (content[k] === '\\') k++; k++; }
-        if (k < content.length) found.push({ valueStart: j, valueEnd: k + 1, quote });
+        if (k < content.length) {
+          // A backtick field holding real `${...}` interpolation is not a
+          // plain string value -- this splicer works by string-scanning,
+          // never evaluating JS, so it has no way to know what that
+          // expression means or whether overwriting it would be safe.
+          // Refused outright (not found, same as any other disqualified
+          // field) rather than guessed at, matching every other ambiguous
+          // case in this file. Plain multi-line template-literal content
+          // (zunkireelabs-web's own locations.js/glossary.js/comparisons.js
+          // `content` fields, none of which interpolate) is the case this
+          // exists to support -- only fields that actually interpolate are
+          // excluded.
+          const isDisqualifiedTemplateLiteral = quote === '`' && content.slice(j + 1, k).includes('${');
+          if (!isDisqualifiedTemplateLiteral) found.push({ valueStart: j, valueEnd: k + 1, quote });
+        }
       }
     }
     keyRe.lastIndex = m.index + 1;
@@ -340,6 +354,24 @@ function escapeJsStringLiteral(value, quote) {
     .replace(new RegExp(escapeRegExp(quote), 'g'), `\\${quote}`);
 }
 
+// Counterpart to escapeJsStringLiteral for a backtick-delimited field
+// (findScalarFieldRange only ever hands this quote='`' for a field it has
+// already confirmed holds no `${...}` interpolation). Escapes backslashes,
+// the backtick delimiter itself, and any `${` sequence in the NEW value --
+// the last one is not optional: without it, generated content that happens
+// to contain a literal "${" (rare, but real prose can) would silently turn
+// into live interpolation syntax in the written file. Raw newlines/CR are
+// deliberately left untouched, unlike escapeJsStringLiteral -- a template
+// literal allows them literally, which is the entire reason to prefer this
+// quote type for multi-line generated content (expand-content's rendered
+// HTML) instead of always forcing it through \n-escaped "..."/'...'.
+function escapeJsTemplateLiteral(value) {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(/\$\{/g, '\\${');
+}
+
 // Replaces an existing scalar field's string value in place, re-escaping
 // backslashes and the field's own quote character the same minimal way
 // lib/marker-merge.js's applyMarker does for a LINE marker's quoted value —
@@ -348,7 +380,9 @@ function escapeJsStringLiteral(value, quote) {
 export function spliceScalarField(content, objRange, fieldName, newValue, format = 'js-export-array') {
   const range = findScalarFieldRange(content, objRange, fieldName, format);
   if (!range) return null;
-  const escaped = escapeJsStringLiteral(String(newValue), range.quote);
+  const escaped = range.quote === '`'
+    ? escapeJsTemplateLiteral(String(newValue))
+    : escapeJsStringLiteral(String(newValue), range.quote);
   return content.slice(0, range.valueStart) + range.quote + escaped + range.quote + content.slice(range.valueEnd);
 }
 

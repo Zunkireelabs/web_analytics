@@ -109,6 +109,14 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      # Enables design_task.py's same-network fallback (see
+      # DESIGN_AGENT_SANDBOX_NETWORK's docstring) for when the
+      # host.docker.internal path below is blocked by something on the host
+      # itself (e.g. a firewall) even though the sandbox container is
+      # healthy — must match the `networks:` entry below, since that is
+      # what makes the sibling container reachable by IP on this network at
+      # all.
+      - DESIGN_AGENT_SANDBOX_NETWORK=hosting
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
