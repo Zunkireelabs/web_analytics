@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seoDraftEligibility } from './analyst-seo-mapping.js';
+import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility } from './analyst-seo-mapping.js';
 
 // Regression coverage for the audit finding this module had NO test file at
 // all — the one place a Node/Python drift in generator selection would
@@ -109,5 +109,108 @@ describe('seoDraftEligibility — domain scoping (only the site\'s own primary d
     const unscopedSite = { id: 1 };
     const insight = decline({ dimensionValue: 'https://anything.example.com/page' });
     assert.notEqual(seoDraftEligibility(unscopedSite, insight), null);
+  });
+});
+
+// Regression coverage for the audit finding this function (added alongside
+// AnalystGrowthOpportunities.jsx's "Send to Action Center" button for the
+// four opportunity types that were never eligible for
+// createActionCenterRecommendationForGap, which only ever handles
+// content-gap) had no test file at all.
+function opp({ type = 'quick-win', page = 'https://example.com/page', query = 'some query' } = {}) {
+  return { type, page, query };
+}
+
+describe('opportunityDraftEligibility — generator mapping', () => {
+  test('quick-win -> meta-title, with query carried through (a CTR/presentation problem)', () => {
+    const action = opportunityDraftEligibility(site, opp({ type: 'quick-win', query: 'best widgets' }));
+    assert.equal(action.generatorId, 'meta-title');
+    assert.deepEqual(action.params, { page: 'https://example.com/page', query: 'best widgets' });
+  });
+
+  for (const type of ['page1-opportunity', 'declining', 'content-expansion']) {
+    test(`${type} -> expand-content (a coverage/depth problem, no query needed)`, () => {
+      const action = opportunityDraftEligibility(site, opp({ type }));
+      assert.equal(action.generatorId, 'expand-content');
+      assert.deepEqual(action.params, { page: 'https://example.com/page' });
+    });
+  }
+
+  test('finding_id is deterministic per (type, page, query)', () => {
+    const action = opportunityDraftEligibility(site, opp({ type: 'quick-win', query: 'best widgets' }));
+    assert.equal(action.findingId, 'growth-opportunity:quick-win:https://example.com/page:best widgets');
+  });
+
+  test('a missing query still produces a stable finding_id (empty string, not "undefined")', () => {
+    const action = opportunityDraftEligibility(site, opp({ type: 'page1-opportunity', query: null }));
+    assert.equal(action.findingId, 'growth-opportunity:page1-opportunity:https://example.com/page:');
+  });
+});
+
+describe('opportunityDraftEligibility — eligibility gates', () => {
+  test('content-gap is NOT eligible here — it has its own approval path (createActionCenterRecommendationForGap)', () => {
+    assert.equal(opportunityDraftEligibility(site, opp({ type: 'content-gap' })), null);
+  });
+
+  test('an unknown/future opportunity type is not eligible rather than guessing a generator', () => {
+    assert.equal(opportunityDraftEligibility(site, opp({ type: 'something-new' })), null);
+  });
+
+  test('no page (e.g. a query with no landing page recorded) is not eligible — nothing to draft against', () => {
+    assert.equal(opportunityDraftEligibility(site, opp({ page: null })), null);
+  });
+
+  test('a page on a registered additional_own_domain is NOT eligible — same primary-domain-only scoping as seoDraftEligibility', () => {
+    const multiDomainSite = { ...site, additional_own_domains: ['edgex.example.com'] };
+    assert.equal(opportunityDraftEligibility(multiDomainSite, opp({ page: 'https://edgex.example.com/page' })), null);
+  });
+
+  test('a page on a completely foreign hostname is NOT eligible', () => {
+    assert.equal(opportunityDraftEligibility(site, opp({ page: 'https://some-other-site.com/page' })), null);
+  });
+});
+
+describe('gapDraftEligibility', () => {
+  const gap = (overrides = {}) => ({ id: 1, topic: 'best crm software', priority: 'medium', ...overrides });
+
+  test('a malformed gap (no id or topic) is not eligible', () => {
+    assert.equal(gapDraftEligibility({ topic: 'x' }), null);
+    assert.equal(gapDraftEligibility({ id: 1 }), null);
+  });
+
+  test('already covered by an existing page, non-question shape -> nothing to draft (the page already covers it)', () => {
+    assert.equal(gapDraftEligibility(gap({ existing_page_match: 'https://example.com/crm' })), null);
+  });
+
+  test('already covered by an existing page, QUESTION shape -> a real FAQ opportunity, not nothing', () => {
+    const action = gapDraftEligibility(gap({ topic: 'how does crm software work', existing_page_match: 'https://example.com/crm' }));
+    assert.equal(action.generatorId, 'faq');
+    assert.equal(action.existingPage, 'https://example.com/crm');
+  });
+
+  test('unrelated + informational + low priority -> a real "do nothing" outcome', () => {
+    assert.equal(gapDraftEligibility(gap({ product_relevance: 'unrelated', search_intent: 'informational', priority: 'low' })), null);
+  });
+
+  test('a comparison-shaped topic is eligible but flagged as requiring future infrastructure, never silently drafted as something it isn\'t', () => {
+    const action = gapDraftEligibility(gap({ topic: 'zunkiree vs competitor' }));
+    assert.equal(action.eligible, true);
+    assert.equal(action.requiresFutureInfrastructure, true);
+    assert.ok(!action.generatorId);
+  });
+
+  test('commercial/transactional intent + direct product relevance -> landing-page', () => {
+    const action = gapDraftEligibility(gap({ search_intent: 'commercial', product_relevance: 'direct' }));
+    assert.equal(action.generatorId, 'landing-page');
+  });
+
+  test('everything else -> blog-outline, the default', () => {
+    const action = gapDraftEligibility(gap({ search_intent: 'informational', product_relevance: 'supporting' }));
+    assert.equal(action.generatorId, 'blog-outline');
+  });
+
+  test('a question-shaped topic with no existing page carries a shapeHint for whichever generator was picked', () => {
+    const action = gapDraftEligibility(gap({ topic: 'how does crm software work' }));
+    assert.match(action.shapeHint, /QUESTION-phrased/);
   });
 });

@@ -40,11 +40,10 @@ import { Activity, AlertTriangle } from 'lucide-react';
 // past decline appeared in one and its forecast decline in the other, with no
 // indication they were the same story.
 //
-// Growth Opportunities (agents/lib/growth-opportunities.js) and the older
-// Keyword Opportunities section below it currently have two SEPARATE
-// "close to page 1" views — the older one still reads the stale
-// keyword_clusters snapshot. Rewiring it onto the same canonical model is
-// the next phase, not done here.
+// Growth Opportunities (agents/lib/growth-opportunities.js) and the
+// Keyword Opportunities section below it both read the exact same
+// page1-opportunity data from growth-opportunities.js — there is exactly
+// one "close to page 1" definition on this page.
 //
 // This page previously rendered nine sections wrapped in a personalization
 // layer (drag-to-reorder, show/hide toggles, four layout presets, theme and
