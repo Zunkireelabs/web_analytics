@@ -1,16 +1,9 @@
 import cron from 'node-cron';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, runTemplateCapabilityRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
-
-const execFileAsync = promisify(execFile);
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -34,6 +27,20 @@ export function startCron() {
         console.log(`[cron] daily job finished — ${results.length} site(s) processed`);
       } catch (err) {
         console.error('[cron] daily job error:', err.message);
+      }
+
+      // Shared-template ('site-fact') capability repair, right after
+      // detection and before shipping — it reads that run's freshly-blocked
+      // recommendations and opens its own PR directly (see job.js's own
+      // comment on why this is a separate step from the shipping run
+      // below, which only ships already-drafted/approved recommendations).
+      console.log(`[cron] template-capability repair run started ${new Date().toISOString()}`);
+      try {
+        const results = await runTemplateCapabilityRepairForAllSites();
+        const prsOpened = results.reduce((n, r) => n + (r.prsCreated?.length || 0), 0);
+        console.log(`[cron] template-capability repair run finished — ${prsOpened} PR(s) opened across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] template-capability repair run error:', err.message);
       }
 
       // Shipping runs in the SAME morning pass, immediately after detection,
@@ -381,38 +388,17 @@ export function startCron() {
   }, { timezone: tz });
   console.log('[cron] stale audit-run reap scheduled (fires at :30 each hour)');
 
-  // Keyword Clustering — standalone Python agent (agents/clustering.py), not
-  // a job.js function like the jobs above, so it's spawned as a subprocess
-  // instead of imported. Runs every 14 days per its own docstring's
-  // suggested cadence; day-of-month */14 lands on the 1st/15th/29th, close
-  // enough to "every 14 days" for a re-profiling job. Override with
-  // CLUSTERING_CRON_SCHEDULE; override the interpreter with PYTHON_BIN.
-  const clustering = process.env.CLUSTERING_CRON_SCHEDULE || '0 3 */14 * *';
-  if (!cron.validate(clustering)) {
-    console.error(`[cron] invalid CLUSTERING_CRON_SCHEDULE "${clustering}" — keyword clustering NOT scheduled.`);
-  } else {
-    cron.schedule(
-      clustering,
-      async () => {
-        console.log(`[cron] keyword clustering started ${new Date().toISOString()}`);
-        try {
-          const { stdout } = await execFileAsync(process.env.PYTHON_BIN || 'python3', ['agents/clustering.py'], { cwd: repoRoot });
-          if (stdout.trim()) console.log(stdout.trim());
-          console.log('[cron] keyword clustering finished');
-        } catch (err) {
-          console.error('[cron] keyword clustering error:', err.message);
-        }
-      },
-      { timezone: tz }
-    );
-    console.log(`[cron] keyword clustering scheduled "${clustering}" (${tz})`);
-  }
-
   // Keyword Narrative — server/agents/keyword-narrative.js, a supplementary
   // narrative synthesizing keyword gaps/clusters/site profile/AI-visibility
-  // score. Separate from the Python executive-summary pipeline. Same 14-day
-  // cadence as clustering (reads clustering's own output), offset 2 hours
-  // later so a fresh clustering run has already landed for the day.
+  // score. Separate from the Python executive-summary pipeline. Real keyword
+  // clustering itself now runs inside data-analyst-agent's nightly pipeline
+  // (KeywordClusteringCollector, self-gated to a real per-site 14-day
+  // interval via RECLUSTER_INTERVAL_DAYS) — the standalone agents/
+  // clustering.py subprocess this job used to run alongside was deleted
+  // 2026-08-11 when that migration happened, silently ENOENT'ing on every
+  // firing since (caught and logged, never surfaced) until removed here.
+  // Same nominal 14-day cadence as before, offset 2 hours into the morning
+  // so a nightly (22:00 UTC) clustering pass has already landed.
   const keywordNarrative = process.env.KEYWORD_NARRATIVE_CRON_SCHEDULE || '0 5 */14 * *';
   if (!cron.validate(keywordNarrative)) {
     console.error(`[cron] invalid KEYWORD_NARRATIVE_CRON_SCHEDULE "${keywordNarrative}" — keyword narrative NOT scheduled.`);
