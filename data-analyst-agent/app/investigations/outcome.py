@@ -3,16 +3,32 @@ learning loop). Closes the Investigation lifecycle's last, previously-unused
 transition: 'approved' -> 'completed' (the status CHECK constraint already
 allowed both, but nothing in this codebase ever wrote them before this).
 
-Scope: only forecast_risk investigations a human actually approved
+Two evaluation paths, covering every investigation a human actually approved
 (status == 'approved' — see app/api/routes/investigations.py's approve
-endpoint), once the investigation's own captured forecast_outlook's
-predicted_date has passed and a real actual value has landed for it. Every
-input is a row an earlier stage already wrote (Investigation.forecast_outlook
-is literally the triggering Insight's own evidence — see
-app/investigations/engine.py) compared against a real MetricObservation,
-never a sampled or estimated actual — same discipline as
-app/forecast/accuracy.py, which this module deliberately does not
-duplicate: that one tracks raw forecast-point accuracy for every forecast
+endpoint), not just forecast_risk:
+
+- forecast_risk (_evaluate_one): a real prediction exists (the investigation's
+  captured forecast_outlook — predicted_date/last_actual/pct_projected_change,
+  literally the triggering Insight's own evidence, see
+  app/investigations/engine.py), so the outcome compares that prediction
+  against the real actual once predicted_date has passed.
+- trend_shift / anomaly / milestone (_evaluate_observed_decline_one): these
+  insight_types have no prediction to check — they observe a decline that
+  ALREADY happened — so the honest question is different: did the metric
+  recover after a human approved the investigation, or keep declining?
+  Baseline is the real value captured in the insight's own evidence at
+  investigation time (evidence.current_value / evidence.value), actual is the
+  first real MetricObservation on or after OBSERVED_EVALUATION_HORIZON_DAYS
+  past approval — never a sampled or estimated value, same discipline as the
+  forecast_risk path. content_decay/cannibalization/target_keyword_evidence
+  are deliberately NOT included here: their evidence carries no single
+  before-value field (content_decay is 3 weeks of pct_change, not a level),
+  so there is nothing honest to set a baseline from without inventing one.
+
+Every input to both paths is a row an earlier stage already wrote, compared
+against a real MetricObservation, never a sampled or estimated actual — same
+discipline as app/forecast/accuracy.py, which this module deliberately does
+not duplicate: that one tracks raw forecast-point accuracy for every forecast
 regardless of whether anyone acted on it; this one only evaluates
 investigations a human approved, so it answers "did the fix help", not
 "was the forecast accurate" (already covered).
@@ -34,7 +50,7 @@ approving an investigation is a separate human workflow from the
 draft-trigger's own priority-gated action selection (see
 app/investigations/drafts.py)."""
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +66,20 @@ logger = logging.getLogger(__name__)
 # app/forecast/accuracy.py's MIN_EVALUATED_POINTS_FOR_SIGNAL (5), which draws
 # from every forecast point regardless of approval.
 MIN_EVALUATED_OUTCOMES_FOR_SIGNAL = 3
+
+# How long to wait after a human approves a trend_shift/anomaly/milestone
+# investigation before checking whether the metric recovered — long enough
+# for a shipped fix to plausibly show up in GSC/GA4 reporting (GSC in
+# particular lags real-world changes by days), short enough that "did this
+# help" is still answered on a useful timescale rather than never.
+OBSERVED_EVALUATION_HORIZON_DAYS = 30
+
+# Within this band, the metric is read as flat rather than meaningfully
+# recovered or worsened — avoids a coin-flip 'improved'/'worsened' label on
+# ordinary day-to-day noise around the baseline.
+OBSERVED_FLAT_BAND_PCT = 3.0
+
+OBSERVED_DECLINE_INSIGHT_TYPES = ("trend_shift", "anomaly", "milestone")
 
 
 async def run_investigation_outcome_evaluation() -> None:
@@ -87,7 +117,7 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
             select(Investigation).where(
                 Investigation.client_id == client_id,
                 Investigation.status == "approved",
-                Investigation.insight_type == "forecast_risk",
+                Investigation.insight_type.in_(("forecast_risk", *OBSERVED_DECLINE_INSIGHT_TYPES)),
             )
         )
     ).scalars().all()
@@ -96,7 +126,10 @@ async def _evaluate_client(session: AsyncSession, client_id: int) -> None:
         if inv.id in already_evaluated:
             continue
         try:
-            await _evaluate_one(session, client_id, inv)
+            if inv.insight_type == "forecast_risk":
+                await _evaluate_one(session, client_id, inv)
+            else:
+                await _evaluate_observed_decline_one(session, client_id, inv)
             # Commit per-investigation: this session is shared across the
             # whole client's candidate list, so a later investigation's
             # rollback() would otherwise also discard an earlier
@@ -161,6 +194,62 @@ async def _evaluate_one(session: AsyncSession, client_id: int, inv: Investigatio
     inv.status = "completed"
 
 
+async def _evaluate_observed_decline_one(session: AsyncSession, client_id: int, inv: Investigation) -> None:
+    baseline_raw = inv.evidence.get("current_value") if inv.evidence else None
+    if baseline_raw is None and inv.evidence:
+        baseline_raw = inv.evidence.get("value")  # anomaly's evidence key
+    if baseline_raw is None:
+        return  # this insight_type's evidence carries no real before-value — never invent one
+
+    baseline_value = float(baseline_raw)
+    if baseline_value == 0:
+        return  # a 0 baseline makes pct_change undefined, not a real signal to evaluate
+
+    approved_at = await session.scalar(
+        select(InvestigationEvent.created_at).where(
+            InvestigationEvent.investigation_id == inv.id, InvestigationEvent.to_status == "approved",
+        ).order_by(InvestigationEvent.created_at.desc()).limit(1)
+    )
+    if approved_at is None:
+        return  # status is 'approved' but no event recorded the transition — nothing to measure from
+
+    horizon_date = approved_at.date() + timedelta(days=OBSERVED_EVALUATION_HORIZON_DAYS)
+    if horizon_date > date.today():
+        return  # too early — retry a later night once the horizon has actually passed
+
+    actual = await session.scalar(
+        select(MetricObservation.value).where(
+            MetricObservation.client_id == client_id, MetricObservation.metric_key == inv.metric_key,
+            MetricObservation.dimension_type == inv.dimension_type, MetricObservation.dimension_value == inv.dimension_value,
+            MetricObservation.period_start >= horizon_date,
+        ).order_by(MetricObservation.period_start.asc()).limit(1)
+    )
+    if actual is None:
+        return  # no real observation has landed at or past the horizon yet — retry a later night
+
+    actual_value = float(actual)
+    pct_actual_change = (actual_value - baseline_value) / baseline_value * 100
+
+    if pct_actual_change > OBSERVED_FLAT_BAND_PCT:
+        outcome_status = "improved"
+    elif pct_actual_change < -OBSERVED_FLAT_BAND_PCT:
+        outcome_status = "worsened"
+    else:
+        outcome_status = "unchanged"
+
+    session.add(InvestigationOutcome(
+        client_id=client_id, investigation_id=inv.id,
+        baseline_value=baseline_value, predicted_value=None,
+        actual_value=actual_value, pct_projected_change=None, pct_actual_change=pct_actual_change,
+        outcome_status=outcome_status,
+    ))
+    session.add(InvestigationEvent(
+        investigation_id=inv.id, from_status=inv.status, to_status="completed",
+        actor="system", detail={"outcome_status": outcome_status, "pct_actual_change": pct_actual_change},
+    ))
+    inv.status = "completed"
+
+
 # A materialized outcome means the forecast_risk investigation's predicted
 # decline was real, whether or not it was as severe as projected —
 # 'decline_smaller_than_predicted' still means the decline HAPPENED, just
@@ -177,10 +266,18 @@ async def get_investigation_outcome_reliability(session: AsyncSession, client_id
     one forecast-confidence factor (see app/forecast/confidence.py).
     status='insufficient-data' below MIN_EVALUATED_OUTCOMES_FOR_SIGNAL, same
     convention as every other engine in this codebase — never a noisy
-    fraction from one or two outcomes presented as reliable."""
+    fraction from one or two outcomes presented as reliable.
+
+    Scoped to forecast_risk rows only (predicted_value IS NOT NULL — see
+    migration 0039) — an 'improved'/'unchanged'/'worsened' observed-decline
+    outcome answers "did the metric recover", not "was the forecast right",
+    and mixing the two in would silently corrupt this forecast-confidence
+    signal with unrelated data."""
     statuses = (
         await session.execute(
-            select(InvestigationOutcome.outcome_status).where(InvestigationOutcome.client_id == client_id)
+            select(InvestigationOutcome.outcome_status).where(
+                InvestigationOutcome.client_id == client_id, InvestigationOutcome.predicted_value.is_not(None),
+            )
         )
     ).scalars().all()
 

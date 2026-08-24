@@ -440,6 +440,11 @@ export function seoDraftEligibility(site, insight) {
     // for the same finding, not random per request.
     findingId: `analyst:${insight.metric_key}:${insight.insight_type}:${insight.period_start}:${insight.dimension_value}`,
     page,
+    // Only forecast_risk insights carry a real confidence value (the
+    // ForecastRun's own composite score, see data-analyst-agent's
+    // insights/engine.py) — everything else is an observed fact, not a
+    // prediction, so there is nothing honest to attach here.
+    confidence: insight.insight_type === 'forecast_risk' ? insight.confidence ?? null : null,
   };
 
   function generatorForDecliningPage(ins) {
@@ -533,6 +538,7 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
       priority: predicted ? 'medium' : 'high',
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
+      confidence: action.confidence,
     });
     created++;
   }

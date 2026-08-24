@@ -36,17 +36,18 @@ export async function findOpenRecommendation(siteId, page, recommendationType) {
 
 export async function insertRecommendation(siteId, {
   page, recommendationType, issue, reason, params, findingId, detectingAgent, priority, expectedImpact, riskTier,
-  blockedReason,
+  blockedReason, confidence,
 }) {
   const { rows } = await query(
     `INSERT INTO recommendations
-       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason, blocked_kind, blocked_since)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $12::text IS NOT NULL THEN now() ELSE NULL END)
+       (site_id, page, recommendation_type, issue, reason, params, finding_ids, detecting_agents, priority, expected_impact, risk_tier, blocked_reason, blocked_kind, blocked_since, confidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CASE WHEN $12::text IS NOT NULL THEN now() ELSE NULL END, $14)
      RETURNING *`,
     [
       siteId, page, recommendationType, issue, reason || null, JSON.stringify(params || {}),
       [findingId], [detectingAgent], priority || 'medium', expectedImpact ? JSON.stringify(expectedImpact) : null,
       riskTier || 'manual', blockedReason ?? null, classifyBlockedKind(blockedReason),
+      confidence ?? null,
     ]
   );
   return rows[0];
@@ -60,7 +61,7 @@ export async function insertRecommendation(siteId, {
 // supporting_agents is "who else corroborated it." Never changes `status` —
 // closing a recommendation is out of scope for M1 (see
 // recommendation-coordinator.js's syncFromGrounded doc comment).
-export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier }) {
+export async function mergeIntoRecommendation(id, { findingId, agentId, reason, params, priority, expectedImpact, blockedReason, riskTier, confidence }) {
   // risk_tier is NOT NULL and is now written unconditionally, so an omitted
   // riskTier would surface as a constraint violation deep in the driver.
   // Reject it here instead, where the caller is still in the stack trace.
@@ -76,6 +77,12 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
        params = COALESCE($5, params),
        priority = COALESCE($6, priority),
        expected_impact = COALESCE($7, expected_impact),
+       -- Refreshed to the latest sync's value like expected_impact above (a
+       -- forecast_risk insight's confidence moves run to run) — COALESCE so a
+       -- merge from a caller that doesn't compute confidence (e.g. keyword
+       -- gaps, which have no honest confidence signal) never blanks out a
+       -- value a forecast-based sync already set.
+       confidence = COALESCE($11, confidence),
        -- Deliberately NOT COALESCE: these two must be able to go back to
        -- NULL/'safe' when whatever was blocking clears — a component template
        -- gets verified, or a url_file_map entry finally resolves (possibly via
@@ -113,6 +120,7 @@ export async function mergeIntoRecommendation(id, { findingId, agentId, reason, 
       params ? JSON.stringify(params) : null, priority || null,
       expectedImpact ? JSON.stringify(expectedImpact) : null,
       blockedReason ?? null, classifyBlockedKind(blockedReason), riskTier,
+      confidence ?? null,
     ]
   );
   return rows[0];

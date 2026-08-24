@@ -196,3 +196,99 @@ def test_one_bad_client_does_not_block_subsequent_clients(monkeypatch):
 
     assert seen == [inv_b.id]
     assert session_b.committed is True
+
+
+# ---------------------------------------------------------------------------
+# _evaluate_observed_decline_one — the trend_shift/anomaly/milestone path
+# added alongside the existing forecast_risk one (migration 0039). No real
+# prediction exists for these insight_types, so the outcome compares a real
+# before-value (the insight's own evidence) against a real after-value
+# (a landed MetricObservation at/after the evaluation horizon), never a
+# sampled or estimated number.
+# ---------------------------------------------------------------------------
+from datetime import date, datetime, timedelta, timezone
+
+from app.investigations.outcome import OBSERVED_EVALUATION_HORIZON_DAYS, _evaluate_observed_decline_one
+
+
+class _ScalarSession:
+    """Serves _evaluate_observed_decline_one's sequential .scalar() calls
+    (approved_at, then actual value) and records everything .add()ed."""
+
+    def __init__(self, scalars):
+        self._scalars = iter(scalars)
+        self.added = []
+
+    async def scalar(self, *_a, **_kw):
+        return next(self._scalars)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def _fake_observed_investigation(evidence, status="approved"):
+    return Investigation(
+        id=1, client_id=1, metric_key="gsc_clicks", dimension_type="page", dimension_value="https://example.com/page",
+        insight_type="trend_shift", severity="high", status=status, affected_metrics=[], evidence=evidence,
+    )
+
+
+def _old_enough_approval():
+    return datetime.now(timezone.utc) - timedelta(days=OBSERVED_EVALUATION_HORIZON_DAYS + 5)
+
+
+def test_observed_decline_missing_baseline_evidence_is_skipped():
+    inv = _fake_observed_investigation(evidence={})
+    session = _ScalarSession([])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added == []  # nothing to compute a baseline from — never invent one
+
+
+def test_observed_decline_too_early_to_evaluate_is_skipped():
+    inv = _fake_observed_investigation(evidence={"current_value": 100.0})
+    recent_approval = datetime.now(timezone.utc) - timedelta(days=1)
+    session = _ScalarSession([recent_approval])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added == []  # horizon hasn't passed yet — retry a later night
+
+
+def test_observed_decline_no_actual_value_landed_yet_is_skipped():
+    inv = _fake_observed_investigation(evidence={"current_value": 100.0})
+    session = _ScalarSession([_old_enough_approval(), None])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added == []
+
+
+def test_observed_decline_recovered_is_improved():
+    inv = _fake_observed_investigation(evidence={"current_value": 100.0})
+    session = _ScalarSession([_old_enough_approval(), 130.0])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    outcome = session.added[0]
+    assert outcome.outcome_status == "improved"
+    assert outcome.predicted_value is None  # no prediction existed for this insight_type
+    assert outcome.pct_projected_change is None
+    assert inv.status == "completed"
+
+
+def test_observed_decline_kept_falling_is_worsened():
+    inv = _fake_observed_investigation(evidence={"current_value": 100.0})
+    session = _ScalarSession([_old_enough_approval(), 60.0])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added[0].outcome_status == "worsened"
+
+
+def test_observed_decline_within_flat_band_is_unchanged():
+    inv = _fake_observed_investigation(evidence={"current_value": 100.0})
+    session = _ScalarSession([_old_enough_approval(), 101.0])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added[0].outcome_status == "unchanged"
+
+
+def test_observed_decline_anomaly_evidence_uses_value_key():
+    # anomaly insights key their evidence 'value', not 'current_value'
+    # (app/insights/engine.py::_anomaly_insights) — must be read too.
+    inv = _fake_observed_investigation(evidence={"value": 50.0})
+    inv.insight_type = "anomaly"
+    session = _ScalarSession([_old_enough_approval(), 20.0])
+    asyncio.run(_evaluate_observed_decline_one(session, 1, inv))
+    assert session.added[0].outcome_status == "worsened"

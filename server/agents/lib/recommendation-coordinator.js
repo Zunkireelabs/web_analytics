@@ -287,6 +287,10 @@ export async function getRecommendations(siteId) {
         tag: r.issue, generatorId: r.recommendation_type, bucket, category,
         reason: r.reason, params: r.params, priority: r.priority, expectedImpact: r.expected_impact,
         riskTier: r.risk_tier,
+        // Only forecast_risk-driven recommendations carry a real value here
+        // (see analyst-seo-mapping.js's seoDraftEligibility) — everything
+        // else is null, not a fabricated number.
+        confidence: r.confidence != null ? Number(r.confidence) : null,
         // Non-null means Action Center should show this as "blocked pending
         // design verification" with this exact reason, and must not offer a
         // Generate Draft affordance — generateDraft would 422 anyway (that's

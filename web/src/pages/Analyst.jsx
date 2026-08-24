@@ -13,23 +13,28 @@ import AnalystSkeletonLoader from '../components/AnalystSkeletonLoader.jsx';
 import AnalystEmptyState from '../components/AnalystEmptyState.jsx';
 import { Activity, AlertTriangle } from 'lucide-react';
 
-// The page reads top-to-bottom as one argument, future first:
+// The page reads top-to-bottom as one AI decision flow, future first:
 //
-//   1. Growth Outlook — the hero. Every forecastable headline metric (not
-//      just impressions and clicks) with its projected direction, plus the
-//      Past → Today → Forecast chart, promoted here from the bottom of the
-//      page where it used to be buried inside Impression Forecast.
-//   2. What needs attention — one card per METRIC, merging the observed
-//      decline, the projected one, the root cause and the fix into a single
-//      story, with the low-volume noise demoted below a fold.
-//   3. Growth Opportunities — website-wide, ranked, built from real GSC
-//      query+page data + the keyword_gaps queue (not the stale 14-day
-//      keyword_clusters snapshot). Answers "where can this site grow next?"
-//      without requiring a keyword to already be picked.
-//   4. Product Capabilities / Topic Map — context for what the site sells.
-//   5. Keyword Opportunities (Close to Page 1 + Discovery) + Grow a keyword.
+//   1. Briefing — one AI-written paragraph orienting the reader.
+//   2. Growth Outlook — what is happening, what is predicted next. Every
+//      forecastable headline metric with its projected direction, plus the
+//      Past → Today → Forecast chart.
+//   3. What AI found — one card per declining METRIC: the problem, why,
+//      confidence (real, only where a forecast backs it — see
+//      AnalystMetricIntelligence), and the recommended fix, with "Send to
+//      Action Center" right on the card. Low-volume noise stays demoted
+//      below a fold instead of competing with it.
+//   4. Growth Opportunities — where can this site grow next, website-wide,
+//      ranked, built from real GSC query+page data + the keyword_gaps queue.
+//   5. Keyword Opportunities — AI-discovered (Close to Page 1 + Discovery)
+//      plus "Grow a keyword", the user-driven investigate-this-keyword path.
+//   6. Evidence — Product Capabilities and the Topic Map, i.e. context for
+//      what the site sells and how discovered keywords relate to it. Both
+//      start collapsed and load lazily: this is reference material an AI
+//      decision can cite, not a decision itself, so it sits last and never
+//      competes with sections 2-5 for attention.
 //
-// Growth Outlook and What-needs-attention together replace the old
+// Growth Outlook and "What AI found" together replace the old
 // AnalystGrowthPulse + AnalystImpressionForecast pair, which split the same
 // intelligence across two sections at opposite ends of the page: a metric's
 // past decline appeared in one and its forecast decline in the other, with no
@@ -44,9 +49,14 @@ import { Activity, AlertTriangle } from 'lucide-react';
 // This page previously rendered nine sections wrapped in a personalization
 // layer (drag-to-reorder, show/hide toggles, four layout presets, theme and
 // density settings, a command palette, a customizer drawer, a shortcuts modal
-// and an AI-layout banner). All of it is gone. The components behind the
-// removed sections are still on disk, just no longer mounted — nothing was
-// deleted, so any of them can be brought back by importing it again.
+// and an AI-layout banner). All of that — and the components behind those
+// removed sections — has been deleted outright (see the AI Analyst Workspace
+// redesign that removed AnalystCommandPalette.jsx, AnalystHeaderOS.jsx,
+// AnalystImpressionForecast.jsx, AnalystGrowthPulse.jsx,
+// AnalystFindingPipeline.jsx, AnalystInsightCard.jsx,
+// AnalystInvestigationWorkspace.jsx and their supporting files): none of it
+// was mounted, and keeping dead code on disk "in case it comes back" is how
+// this fragmentation happened the first time.
 
 function AnalystBody({ clientId }) {
   const [dashboard, setDashboard] = useState(null);
@@ -134,16 +144,24 @@ function AnalystBody({ clientId }) {
 
       <AnalystGrowthOpportunities clientId={clientId} />
 
-      <AnalystProductCapabilities clientId={clientId} />
-
-      <AnalystTopicMap clientId={clientId} />
-
       <AnalystKeywordOpportunities clientId={clientId} refreshToken={keywordRefreshToken} />
 
       <AnalystGrowKeyword
         clientId={clientId}
         onKeywordQueued={() => setKeywordRefreshToken((n) => n + 1)}
       />
+
+      {/* Evidence — context an AI decision above can cite, never a decision
+          in its own right. Both start collapsed (see each component's own
+          `expanded` state), so they sit last and stay quiet until opened. */}
+      <div className="space-y-2.5">
+        <div className="flex items-center gap-2 px-1">
+          <span className="an-label">Evidence</span>
+          <span className="text-[10.5px] font-medium text-slate-400">What the site sells, and how discovered keywords relate to it</span>
+        </div>
+        <AnalystProductCapabilities clientId={clientId} />
+        <AnalystTopicMap clientId={clientId} />
+      </div>
 
       <AnalystChatDrawer clientId={clientId} dashboard={dashboard} />
     </div>

@@ -314,7 +314,12 @@ async def _forecast_risk_insights(session: AsyncSession, client_id: int) -> None
             evidence={"model": run.model, "horizon_periods": run.horizon_periods,
                       "last_actual": float(last_actual), "projected_last_point": float(points[-1].point_estimate),
                       "predicted_date": breach_point.target_period.isoformat(), "days_until_drop": days_until_drop,
-                      "pct_projected_change": pct_projected_change},
+                      "pct_projected_change": pct_projected_change,
+                      # The ForecastRun's own composite confidence (forecast/confidence.py),
+                      # carried onto the insight so a downstream consumer (Node's Action
+                      # Center recommendation, the Analyst UI's decision card) can show the
+                      # real confidence behind THIS prediction instead of omitting it.
+                      "confidence": float(run.confidence) if run.confidence is not None else None},
         )
 
 
