@@ -97,5 +97,66 @@ class ContainerDiagnosticsUnaffectedTest(unittest.TestCase):
         self.assertTrue(result.get("inspectError") or result.get("stateError"))
 
 
+class ClassifySandboxConstructionErrorTest(unittest.TestCase):
+    """Regression coverage for the 2026-08-24 finding that a real staging
+    verification job (1354) reported AGENT_SANDBOX_DOCKER_UNAVAILABLE with
+    the exact same duration/shape as every pre-fix failure — meaning the
+    generic DockerWorkspace()-construction exception handler was very likely
+    never reaching the health-check path this session's earlier fix
+    targeted at all, since only "docker"/"daemon" text was ever recognized
+    here and the SDK's own health-check-timeout wording contains neither."""
+
+    def test_docker_daemon_unreachable_is_still_recognized(self):
+        self.assertEqual(
+            design_task.classify_sandbox_construction_error("Docker is not available. Please install and start Docker Desktop/daemon."),
+            "ENVIRONMENT_DOCKER_UNAVAILABLE",
+        )
+
+    def test_model_auth_is_still_recognized(self):
+        self.assertEqual(
+            design_task.classify_sandbox_construction_error("401 Unauthorized: invalid api key"),
+            "ENVIRONMENT_MODEL_AUTH",
+        )
+
+    def test_health_check_timeout_is_no_longer_unclassified(self):
+        # The exact SDK wording (openhands/workspace/docker/workspace.py's
+        # _wait_for_health) — contains neither "docker" nor "daemon", which
+        # is exactly why this fell through to error_class=None before this
+        # branch existed.
+        self.assertEqual(
+            design_task.classify_sandbox_construction_error("Container failed to become healthy in time"),
+            "ENVIRONMENT_CONTAINER_UNHEALTHY",
+        )
+
+    def test_container_stopped_unexpectedly_is_no_longer_unclassified(self):
+        self.assertEqual(
+            design_task.classify_sandbox_construction_error("Container stopped unexpectedly. Logs:\nsome stdout\nsome stderr"),
+            "ENVIRONMENT_CONTAINER_UNHEALTHY",
+        )
+
+    def test_an_unrecognized_message_stays_unclassified_not_guessed(self):
+        self.assertIsNone(design_task.classify_sandbox_construction_error("some completely novel SDK failure"))
+
+    def test_docker_wording_wins_over_container_wording_when_both_present(self):
+        # A docker-daemon-unreachable message could incidentally mention
+        # "container" too; the more specific, more actionable class must win.
+        self.assertEqual(
+            design_task.classify_sandbox_construction_error("Failed to run docker container: permission denied"),
+            "ENVIRONMENT_DOCKER_UNAVAILABLE",
+        )
+
+
+class FindOrphanedSandboxContainerTest(unittest.TestCase):
+    """The container DockerWorkspace() itself started (if `docker run`
+    succeeded before _wait_for_health() failed) is never cleaned up by the
+    SDK in that case — its cleanup() never runs, since the exception comes
+    from inside its own constructor. Without this, every health-check
+    timeout would leak one sandbox container on the host forever."""
+
+    def test_a_missing_docker_binary_returns_none_rather_than_raising(self):
+        result = design_task._find_orphaned_sandbox_container(docker_bin="/definitely/not/a/real/docker/binary")
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

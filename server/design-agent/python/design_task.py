@@ -214,6 +214,66 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
     return diagnostics
 
 
+def classify_sandbox_construction_error(err_text):
+    """`errorClass` for a failure raised from inside DockerWorkspace()'s own
+    constructor (docker unreachable, `docker run` rejected, or
+    _wait_for_health() timing out/finding the container already exited) —
+    a structured, closed-vocabulary hint for lib/failure-classification.js,
+    not free text. Pulled out as its own function purely for unit-testing
+    without needing to actually trigger any of these failures.
+
+    `container`/`healthy` matches DockerWorkspace's own RuntimeError wording
+    ("Container failed to become healthy in time" / "Container stopped
+    unexpectedly...") for a container that started but never became usable —
+    distinct from ENVIRONMENT_CONTAINER_CRASHED, which is conversation.run()
+    failing on a container that WAS healthy (see _ContainerRunError's own
+    handler above). Checked after docker/daemon/api-key on purpose: a
+    docker-daemon-unreachable message could in principle also mention
+    "container" incidentally, and that more specific, more actionable class
+    should win."""
+    text = err_text.lower()
+    if "docker" in text or "daemon" in text:
+        return "ENVIRONMENT_DOCKER_UNAVAILABLE"
+    if "api key" in text or "unauthorized" in text or "authentication" in text:
+        return "ENVIRONMENT_MODEL_AUTH"
+    if "container" in text or "healthy" in text:
+        return "ENVIRONMENT_CONTAINER_UNHEALTHY"
+    return None
+
+
+def _find_orphaned_sandbox_container(docker_bin=None):
+    """Best-effort: find the sibling container DockerWorkspace's own
+    constructor started, for a failure raised from inside that constructor
+    itself (most commonly _wait_for_health() timing out) — we never get a
+    workspace instance back in that case (the `with` statement's __enter__
+    is never reached, since the exception comes from __init__), so there is
+    no container_id available the normal way. DockerWorkspace.cleanup() also
+    never runs for the same reason, so if `docker run` did succeed before
+    the failure, the container is both still on the host AND about to be
+    silently orphaned (leaking indefinitely) unless something finds and
+    removes it.
+
+    Identified by the SDK's own fixed naming convention
+    (f"agent-server-{uuid}") and `docker ps`'s default newest-first
+    ordering — one job runs one sandbox container at a time, so the most
+    recent match is always this attempt's own container, never a stale one
+    from an earlier job (those were already `--rm`-removed on any successful
+    exit). Never raises — same discipline as _capture_container_diagnostics;
+    a diagnostics failure must not mask the real one."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        listing = subprocess.run(
+            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}", "-n", "1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if listing.returncode != 0:
+            return None
+        container_id = listing.stdout.strip().splitlines()[0] if listing.stdout.strip() else None
+        return container_id or None
+    except Exception:
+        return None
+
+
 class _ContainerRunError(Exception):
     """Raised when conversation.run()/send_message() fails while the sandbox
     container is still known to exist (as opposed to DockerWorkspace()
@@ -768,16 +828,47 @@ def main() -> int:
         # This is a trusted INTERNAL channel (our own script), which is why
         # matching on it is legitimate where matching a third-party provider's
         # message text would not be.
-        text = str(err).lower()
-        if "docker" in text or "daemon" in text:
-            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
-        elif "api key" in text or "unauthorized" in text or "authentication" in text:
-            error_class = "ENVIRONMENT_MODEL_AUTH"
-        else:
-            error_class = None
+        # Previously this handler only checked docker/daemon/api-key text,
+        # so a health-check-timeout failure (which never mentions "docker"
+        # or "daemon") fell through to error_class=None — completely
+        # unclassified. See classify_sandbox_construction_error's own
+        # docstring for the full reasoning.
+        error_class = classify_sandbox_construction_error(str(err))
+
+        # The container DockerWorkspace() started (if `docker run` got that
+        # far before failing) is orphaned here — cleanup() never ran, since
+        # the exception came from inside its own constructor. This is the
+        # only window left to learn anything from it, and the only place
+        # that stops it leaking on the host forever.
+        diagnostics = None
+        orphan_id = _find_orphaned_sandbox_container()
+        if orphan_id:
+            diagnostics = _capture_container_diagnostics(orphan_id)
+            try:
+                subprocess.run(
+                    [os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker"), "rm", "-f", orphan_id],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+        # The raw exception text itself — not just its bucketed errorClass —
+        # is the one thing that actually tells apart "permission denied on
+        # the socket" / "no such host" / "API version mismatch" / a genuine
+        # timeout, all of which currently collapse into the same
+        # ENVIRONMENT_DOCKER_UNAVAILABLE code. Previously this text only
+        # ever reached the worker container's own stdout (via
+        # openhands-handler.js's `causeDetail`, console-logged and
+        # discarded) — never the job row, so diagnosing a real staging
+        # failure required a manual docker-logs/SSH session. Capped and
+        # merged into the same diagnostics object as the docker-inspect
+        # fields so it flows through the same sanitized, engineer-only path.
+        diagnostics = {**(diagnostics or {}), "rawError": str(err)[:1000]}
+
         payload = {"status": "error", "detail": str(err)}
         if error_class:
             payload["errorClass"] = error_class
+        payload["containerDiagnostics"] = diagnostics
         print(RESULT_PREFIX + json.dumps(payload))
         return 1
 
