@@ -107,6 +107,39 @@ RESULT_PREFIX = "DESIGN_AGENT_RESULT: "
 CONTAINER_PREFIX = "DESIGN_AGENT_CONTAINER: "
 DOCKER_IMAGE = os.getenv("DESIGN_AGENT_DOCKER_IMAGE", "ghcr.io/openhands/agent-server:latest-python")
 
+# This process itself normally runs inside a container (design-agent-worker)
+# that only has the host's Docker socket mounted, not --network host. It then
+# asks that socket to start a *sibling* container and publish a port for it.
+# DockerWorkspace defaults its health-check/API host to 127.0.0.1, which is
+# this process's own loopback — a different network namespace from the one
+# `docker run -p` actually publishes the sibling's port on, so that default
+# refuses the connection every time regardless of whether the sibling started
+# fine. Confirmed by direct reproduction of this exact parent/sibling
+# topology (2026-08-24): 127.0.0.1 got connection-refused every time; the
+# compose-level `extra_hosts: host.docker.internal:host-gateway` entry on
+# design-agent-worker plus reaching the sibling via that hostname resolved
+# it. Overridable so a non-Docker-outside-of-Docker deployment (this script
+# run directly on a host with a real Docker daemon) can still use loopback.
+DESIGN_AGENT_SANDBOX_HOST = os.getenv("DESIGN_AGENT_SANDBOX_HOST", "host.docker.internal")
+
+
+def sandbox_workspace_kwargs(port_finder):
+    """The host_port/host DockerWorkspace kwargs that route its health check
+    and API calls through DESIGN_AGENT_SANDBOX_HOST instead of its own
+    127.0.0.1 default. Pulled out as its own function (rather than inlined at
+    the call site) purely so it's unit-testable without a Docker daemon or
+    the OpenHands SDK — `port_finder` is the SDK's own
+    find_available_tcp_port, passed in rather than imported here so tests can
+    substitute a deterministic one.
+    """
+    port = port_finder()
+    if port == -1:
+        raise RuntimeError("No available TCP port found for the Design Agent sandbox container")
+    return {
+        "host_port": port,
+        "host": f"http://{DESIGN_AGENT_SANDBOX_HOST}:{port}",
+    }
+
 # Mirrors server/implementers/lib/design-drift.js's REQUIRED_PLACEHOLDERS —
 # kept in sync by hand (small, stable, cross-language) rather than shared,
 # same as any other JS<->Python contract in this repo. The Node-side
@@ -574,6 +607,7 @@ def main() -> int:
         from openhands.tools.task_tracker import TaskTrackerTool
         from openhands.tools.terminal import TerminalTool
         from openhands.workspace.docker import DockerWorkspace
+        from openhands.workspace.docker.workspace import find_available_tcp_port
 
         llm = LLM(
             model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
@@ -617,6 +651,7 @@ def main() -> int:
             server_image=DOCKER_IMAGE,
             volumes=[f"{workspace_dir}:/workspace"],
             working_dir="/workspace",
+            **sandbox_workspace_kwargs(find_available_tcp_port),
         ) as workspace:
             container_id = workspace._container_id
             print(CONTAINER_PREFIX + json.dumps({"container_id": container_id}))
