@@ -166,6 +166,13 @@ class ContainerIpOnNetworkTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TryStopContainerTest(unittest.TestCase):
+    def test_a_missing_docker_binary_never_raises(self):
+        # Called from failure branches that are already unwinding an
+        # exception — a cleanup failure here must never replace or mask it.
+        design_task._try_stop_container("fake-container-id", docker_bin="/definitely/not/a/real/docker/binary")
+
+
 class _FakeDockerWorkspace:
     """Stands in for the real DockerWorkspace in OpenSandboxWorkspaceTest —
     never touches Docker or the OpenHands SDK."""
@@ -261,10 +268,16 @@ class OpenSandboxWorkspaceTest(unittest.TestCase):
             design_task._find_orphaned_sandbox_container = original
 
     def test_a_health_check_failure_with_an_orphan_but_no_ip_still_raises(self):
+        # Regression: this branch used to re-raise without ever stopping the
+        # orphan it had just found — leaking a real running container every
+        # time this specific failure occurred.
         original_find = design_task._find_orphaned_sandbox_container
         original_ip = design_task._container_ip_on_network
+        original_stop = design_task._try_stop_container
+        stopped = []
         design_task._find_orphaned_sandbox_container = lambda *a, **k: "orphan-id"
         design_task._container_ip_on_network = lambda *a, **k: None
+        design_task._try_stop_container = lambda cid, **k: stopped.append(cid)
         try:
             with self.assertRaises(RuntimeError):
                 design_task.open_sandbox_workspace(
@@ -273,9 +286,11 @@ class OpenSandboxWorkspaceTest(unittest.TestCase):
                     server_image="fake-image", volumes=[], working_dir="/workspace",
                     port_finder=lambda: 34567, network="hosting",
                 )
+            self.assertEqual(stopped, ["orphan-id"], "the orphan found but never reachable must still be stopped, not leaked")
         finally:
             design_task._find_orphaned_sandbox_container = original_find
             design_task._container_ip_on_network = original_ip
+            design_task._try_stop_container = original_stop
 
     def test_a_health_check_failure_with_a_reachable_orphan_falls_back_successfully(self):
         original_find = design_task._find_orphaned_sandbox_container
@@ -298,14 +313,20 @@ class OpenSandboxWorkspaceTest(unittest.TestCase):
             design_task._container_ip_on_network = original_ip
 
     def test_a_reachable_orphan_that_never_becomes_alive_still_raises_rather_than_hanging_forever(self):
+        # Same regression as the no-IP case above, for the other leak path:
+        # found the orphan, got its IP, but it never actually answers health
+        # checks within the timeout — still not allowed to leak it.
         class _NeverAliveRemoteWorkspace:
             def __init__(self, **kwargs):
                 self.alive = False
 
         original_find = design_task._find_orphaned_sandbox_container
         original_ip = design_task._container_ip_on_network
+        original_stop = design_task._try_stop_container
+        stopped = []
         design_task._find_orphaned_sandbox_container = lambda *a, **k: "orphan-id"
         design_task._container_ip_on_network = lambda *a, **k: "172.20.0.5"
+        design_task._try_stop_container = lambda cid, **k: stopped.append(cid)
         try:
             with self.assertRaises(RuntimeError):
                 design_task.open_sandbox_workspace(
@@ -315,9 +336,11 @@ class OpenSandboxWorkspaceTest(unittest.TestCase):
                     port_finder=lambda: 34567, network="hosting",
                     alive_timeout=0.05,
                 )
+            self.assertEqual(stopped, ["orphan-id"], "an orphan that never becomes alive must still be stopped, not leaked")
         finally:
             design_task._find_orphaned_sandbox_container = original_find
             design_task._container_ip_on_network = original_ip
+            design_task._try_stop_container = original_stop
 
 
 if __name__ == "__main__":

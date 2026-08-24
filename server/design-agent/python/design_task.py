@@ -229,6 +229,12 @@ def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server
             raise
         ip = _container_ip_on_network(orphan_id, network)
         if not ip:
+            # Found the orphan but can't reach it even on the shared
+            # network (e.g. it wasn't actually joined to it) — a container
+            # we're never going to use from here on, so it must be stopped
+            # now rather than left running: nothing else in this process
+            # still holds its id once this exception propagates.
+            _try_stop_container(orphan_id)
             raise
         fallback = remote_workspace_cls(host=f"http://{ip}:8000", working_dir=working_dir)
         deadline = time.time() + alive_timeout
@@ -237,16 +243,15 @@ def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server
                 break
             time.sleep(1.0)
         else:
+            # Reachable on the network but never became healthy within the
+            # timeout — genuinely broken, not just unreachable via the
+            # primary path. Same reasoning as above: stop it before giving
+            # up, or it leaks for good.
+            _try_stop_container(orphan_id)
             raise
 
         def cleanup():
-            try:
-                subprocess.run(
-                    [os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker"), "stop", orphan_id],
-                    capture_output=True, timeout=30,
-                )
-            except Exception:
-                pass
+            _try_stop_container(orphan_id)
 
         return fallback, cleanup, orphan_id, True
 
@@ -349,6 +354,20 @@ def classify_sandbox_construction_error(err_text):
     if "container" in text or "healthy" in text:
         return "ENVIRONMENT_CONTAINER_UNHEALTHY"
     return None
+
+
+def _try_stop_container(container_id, docker_bin=None):
+    """Best-effort `docker stop` — every container this process ever starts
+    is run with --rm, so stopping it is enough to also remove it. Used by
+    open_sandbox_workspace's own cleanup and by its failure branches that
+    found a real orphaned container but ultimately couldn't use it: those
+    must not leave it running just because they're giving up on it. Never
+    raises, so a cleanup failure never masks the real error being reported."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        subprocess.run([docker_bin, "stop", container_id], capture_output=True, timeout=30)
+    except Exception:
+        pass
 
 
 def _find_orphaned_sandbox_container(docker_bin=None):
