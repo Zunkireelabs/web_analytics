@@ -32,6 +32,77 @@ describe('classifyFailure', () => {
     assert.equal(c.infrastructure, true);
   });
 
+  // design_task.py already tells apart WHY the sandbox was unavailable —
+  // Docker itself unreachable, the model API key rejected, or the container
+  // crashed after it started — each needing a different fix. Real incident
+  // (2026-08-24): jobs 628 and 1091 on site 1 both collapsed into the one
+  // generic AGENT_SANDBOX_UNAVAILABLE code with causeCode: null, because
+  // only a boolean (isEnvironment) crossed from openhands-handler.js into
+  // this function — the specific errorClass Python computed was discarded
+  // at that boundary, even though job 1091 ran AFTER container-diagnostic
+  // capture was added, so the data existed and was still lost.
+  describe('classifyFailure — the specific sandbox sub-cause (err.pythonErrorClass), not just "unavailable"', () => {
+    test('ENVIRONMENT_DOCKER_UNAVAILABLE gets its own errorCode and message', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_DOCKER_UNAVAILABLE' }) });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_DOCKER_UNAVAILABLE');
+      assert.match(c.message, /Docker/);
+      assert.equal(c.failureClass, FAILURE_CLASS.DEPLOYMENT);
+      assert.equal(c.infrastructure, true);
+    });
+
+    test('ENVIRONMENT_MODEL_AUTH gets its own errorCode and message', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_MODEL_AUTH' }) });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_MODEL_AUTH_FAILED');
+      assert.match(c.message, /credentials/);
+    });
+
+    test('ENVIRONMENT_CONTAINER_CRASHED gets its own errorCode and message', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_CONTAINER_CRASHED' }) });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_CONTAINER_CRASHED');
+      assert.match(c.message, /stopped unexpectedly/);
+    });
+
+    test('an unrecognized pythonErrorClass falls back to the original generic code, never guessed', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_SOMETHING_FUTURE_PYTHON_ADDED' }) });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_UNAVAILABLE');
+    });
+
+    test('no pythonErrorClass at all (the pre-fix shape) is unchanged — exact backward compatibility', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: new Error('Docker is not available') });
+      assert.equal(c.errorCode, 'AGENT_SANDBOX_UNAVAILABLE');
+      assert.equal(c.diagnostics, undefined);
+    });
+
+    test('containerDiagnostics carried on the error are persisted, structurally filtered', () => {
+      const err = Object.assign(new Error('x'), {
+        pythonErrorClass: 'ENVIRONMENT_CONTAINER_CRASHED',
+        containerDiagnostics: {
+          exitCode: 137, oomKilled: true, status: 'exited', logsTail: 'boot log line\nOOMKilled',
+          notARealField: 'should be dropped',
+        },
+      });
+      const c = classifyFailure({ stage: 'python_environment', err });
+      assert.deepEqual(c.diagnostics, {
+        exitCode: 137, oomKilled: true, status: 'exited', logsTail: 'boot log line\nOOMKilled',
+      });
+      assert.equal('notARealField' in c.diagnostics, false, 'only the known docker-inspect/docker-logs fields are ever carried through');
+    });
+
+    test('a very long logsTail is capped, matching the Python side\'s own 4000-char limit', () => {
+      const err = Object.assign(new Error('x'), {
+        pythonErrorClass: 'ENVIRONMENT_CONTAINER_CRASHED',
+        containerDiagnostics: { logsTail: 'x'.repeat(10000) },
+      });
+      const c = classifyFailure({ stage: 'python_environment', err });
+      assert.equal(c.diagnostics.logsTail.length, 4000);
+    });
+
+    test('no containerDiagnostics at all means no diagnostics field is added — never a fabricated empty object', () => {
+      const c = classifyFailure({ stage: 'python_environment', err: Object.assign(new Error('x'), { pythonErrorClass: 'ENVIRONMENT_DOCKER_UNAVAILABLE' }) });
+      assert.equal(c.diagnostics, undefined);
+    });
+  });
+
   test('a rejected repo is the CLIENT\'s to fix, and is not retried', () => {
     const c = classifyFailure({ stage: 'repo_checkout', err: new Error('401 Bad credentials') });
     assert.equal(c.failureClass, FAILURE_CLASS.CLIENT_REPO);

@@ -257,6 +257,25 @@ export function createOpenHandsHandler({
           { cause: new Error(causeDetail) }
         );
         wrapped.stage = isEnvironment ? 'python_environment' : 'result_validation';
+        // design_task.py already distinguishes WHICH environment fault this
+        // was (Docker unreachable / model credentials rejected / the sandbox
+        // container crashed mid-run — three different fixes) and, for the
+        // mid-run-crash case, already captured a real docker-inspect/docker-logs
+        // snapshot (_capture_container_diagnostics) while the container still
+        // existed. Both used to die right here: only `isEnvironment` (a
+        // boolean) crossed into classifyFailure, so every one of those three
+        // distinct causes — and the diagnostics themselves — collapsed into
+        // the single generic AGENT_SANDBOX_UNAVAILABLE code with no way to
+        // tell them apart after the fact (confirmed: jobs 628 and 1091 on
+        // site 1 both show causeCode: null, no exit code, no OOM flag,
+        // despite job 1091 running AFTER the diagnostics-capture commit —
+        // the capture worked, but nothing carried it past this line).
+        // Carried on the error object (not thrown away) so
+        // lib/failure-classification.js can persist the real distinction.
+        if (isEnvironment) {
+          wrapped.pythonErrorClass = result.errorClass;
+          if (result.containerDiagnostics) wrapped.containerDiagnostics = result.containerDiagnostics;
+        }
         throw wrapped;
       }
       return mapResult(result, job);

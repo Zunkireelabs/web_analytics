@@ -75,9 +75,42 @@ export function classifyFailure({ stage, err, exitCode, timedOut } = {}) {
   // Python started, but its sandbox/credentials were absent — the analysis
   // never ran. Deployment, not agent logic (see design_task.py's ENVIRONMENT_*
   // codes); misclassifying this points the reader at the wrong fix entirely.
+  //
+  // design_task.py already tells the three of these apart (Docker itself
+  // unreachable, the model API key rejected, or the sandbox container
+  // crashed mid-run after starting) — carried here via err.pythonErrorClass
+  // rather than collapsed into one generic code, since each needs a
+  // different fix and conflating them is what made two real staging
+  // failures (jobs 628/1091) indistinguishable after the fact. Any
+  // ENVIRONMENT_* value this doesn't recognize (a future Python-side
+  // addition) falls back to the original generic code/message rather than
+  // guessing — never silently mapped to the wrong specific one.
   if (stage === 'python_environment') {
-    return build(FAILURE_CLASS.DEPLOYMENT, 'AGENT_SANDBOX_UNAVAILABLE', stage,
-      "The agent's analysis sandbox (Docker) or model credentials are unavailable in this environment.", err);
+    const SANDBOX_SUBCLASS = {
+      ENVIRONMENT_DOCKER_UNAVAILABLE: {
+        errorCode: 'AGENT_SANDBOX_DOCKER_UNAVAILABLE',
+        message: "The agent's analysis sandbox could not reach Docker in this environment.",
+      },
+      ENVIRONMENT_MODEL_AUTH: {
+        errorCode: 'AGENT_SANDBOX_MODEL_AUTH_FAILED',
+        message: "The agent's model credentials were rejected in this environment.",
+      },
+      ENVIRONMENT_CONTAINER_CRASHED: {
+        errorCode: 'AGENT_SANDBOX_CONTAINER_CRASHED',
+        message: "The agent's analysis sandbox container stopped unexpectedly mid-run.",
+      },
+    };
+    const sub = SANDBOX_SUBCLASS[err?.pythonErrorClass] || null;
+    const built = build(FAILURE_CLASS.DEPLOYMENT, sub?.errorCode || 'AGENT_SANDBOX_UNAVAILABLE', stage,
+      sub?.message || "The agent's analysis sandbox (Docker) or model credentials are unavailable in this environment.", err);
+    // Internal-only — a docker-inspect/docker-logs snapshot can carry
+    // container output verbatim (a stray printed token, a repo URL). Never
+    // added to design-agent-status.js's publicFailure() allowlist, which is
+    // the one place this object's fields reach a customer-facing message —
+    // this key existing at all is what an engineer queries execution_jobs
+    // for; it is not meant to flow anywhere else.
+    if (err?.containerDiagnostics) built.diagnostics = sanitizeContainerDiagnostics(err.containerDiagnostics);
+    return built;
   }
 
   if (stage === 'repo_checkout') {
@@ -138,6 +171,30 @@ function build(failureClass, errorCode, stage, message, err) {
     // so a provider's error body can't reach a job row a customer can read.
     causeCode: err?.code || null,
   };
+}
+
+// Structural allowlist over design_task.py's _capture_container_diagnostics
+// output — defense in depth on top of that function's own 4000-char cap on
+// logsTail, so a future Python-side field this module doesn't yet know
+// about is dropped by default rather than passed through unexamined.
+// `logsTail` is real container stdout/stderr and can in principle carry
+// anything the container printed; it stays in the returned object (this is
+// the internal diagnostic value the whole exercise exists to preserve) but
+// is never added to design-agent-status.js's publicFailure() allowlist —
+// that boundary, not this one, is what keeps it off any customer-facing
+// surface.
+function sanitizeContainerDiagnostics(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const { exitCode, oomKilled, status, stateError, inspectError, logsError, logsTail } = raw;
+  const out = {};
+  if (exitCode !== undefined) out.exitCode = exitCode;
+  if (oomKilled !== undefined) out.oomKilled = oomKilled;
+  if (status !== undefined) out.status = status;
+  if (typeof stateError === 'string') out.stateError = stateError.slice(0, 500);
+  if (typeof inspectError === 'string') out.inspectError = inspectError.slice(0, 500);
+  if (typeof logsError === 'string') out.logsError = logsError.slice(0, 500);
+  if (typeof logsTail === 'string') out.logsTail = logsTail.slice(-4000);
+  return out;
 }
 
 // True only when an automatic retry is both safe and plausibly useful.
