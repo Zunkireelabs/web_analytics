@@ -126,6 +126,16 @@ describe('processOneJob — single-job lifecycle', () => {
     assert.equal(await processOneJob({ handler: createMockHandler(), siteId }), null);
   });
 
+  test('leaves a queued job untouched during quiet hours, instead of claiming and stranding it', async () => {
+    const siteId = await makeSite();
+    const job = await makeQueuedJob(siteId);
+    const result = await processOneJob({ handler: createMockHandler(), siteId, isQuietHours: () => true });
+    assert.equal(result, null);
+
+    const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [job.id]);
+    assert.equal(rows[0].status, 'queued');
+  });
+
   test('claims a queued job, transitions to executing then completed, and logs both', async () => {
     const siteId = await makeSite();
     const jobIdRef = { current: null };

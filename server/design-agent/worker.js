@@ -4,6 +4,7 @@ import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
 import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
+import { isDesignAgentQuietHours } from '../lib/design-agent-window.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 
@@ -89,7 +90,15 @@ export async function processOneJob({
   persistProfile = persistDesignProfile,
   maxAttempts = 3,
   sleep = defaultSleep,
+  isQuietHours = isDesignAgentQuietHours,
 } = {}) {
+  // Deliberately checked BEFORE claiming, not after: claimNextDesignAgentJob
+  // marks the row 'executing', so claiming during the quiet window and then
+  // bailing would strand it there instead of leaving it 'queued' for the
+  // next poll once the window closes. A job left queued costs nothing —
+  // this worker polls every few seconds for the rest of its life.
+  if (isQuietHours()) return null;
+
   const job = await claimNextDesignAgentJob(siteId);
   if (!job) return null;
 
