@@ -128,7 +128,7 @@ describe('createRecommendationGates — Design Agent status enrichment (honest b
   // check can be the source of any blockedReason — isolates what's under test
   // from the (already covered elsewhere) page-mapping gate.
   const designSite = {
-    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', design_agent_enabled: true,
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true,
     url_file_map: { pages: { '/page': { file: 'src/pages/page.njk' } } }, // no componentTemplates entry -> design check fails
   };
   // The page mapping above already resolves, so evaluate()'s file-existence
@@ -166,11 +166,11 @@ describe('createRecommendationGates — Design Agent status enrichment (honest b
     assert.equal(calls, 1, 'every actionType\'s template is projected from the SAME site-wide design-profile job — one lookup covers all of them');
   });
 
-  test('never queried for a site that has not opted into the Design Agent at all — nothing will ever run automatically for it', async () => {
+  test('never queried for a site that has not been through its auto-remediation review — nothing will ever run automatically for it', async () => {
     let calls = 0;
     const designAgentStatus = async () => { calls++; return { state: 'never_attempted', detail: 'x' }; };
-    const optedOutSite = { ...designSite, design_agent_enabled: false };
-    const gates = createRecommendationGates(1, optedOutSite, designDeps({ designAgentStatus }));
+    const unreviewedSite = { ...designSite, auto_remediation_enabled: false };
+    const gates = createRecommendationGates(1, unreviewedSite, designDeps({ designAgentStatus }));
 
     const result = await gates.evaluate('expand-content', { page: 'https://acme.com/page' });
 
@@ -218,7 +218,7 @@ describe('createRecommendationGates — Design Agent status enrichment (honest b
 
   test('the mapping gate still wins over the design gate when both would block — unchanged precedence', async () => {
     const designAgentStatus = async () => ({ state: 'failed', detail: 'Design Agent setup failed.' });
-    const unmappedSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', design_agent_enabled: true, url_file_map: {} };
+    const unmappedSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true, url_file_map: {} };
     const gates = createRecommendationGates(1, unmappedSite, {
       ...neutralDeps(), designAgentStatus, healFn: async () => null, fetchTree: async () => ({ files: [], truncated: false }),
     });

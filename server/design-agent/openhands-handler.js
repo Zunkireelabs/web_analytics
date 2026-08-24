@@ -439,3 +439,42 @@ export function createCodeSelfRepairHandler({ checkoutRepoTarballFn = checkoutRe
     }),
   });
 }
+
+// server/scripts/repair-template-capability.js's 'architectural-gap' case:
+// design_task.py's "capability-repair" mode, which — unlike
+// createCodeSelfRepairHandler above — runs against a real CLIENT repo
+// checkout (same workspaceSource as createComponentTemplateHandler), and
+// EDITS it (unlike createComponentTemplateHandler's read-only analysis).
+// job shape: { id, site_id, payload: { generatorId, valueKey,
+// templatePath, templateSource, dataFilePath, dataFileSource,
+// conventionExamples } } — `payload` is exactly the derivedTaskPayload
+// repair-template-capability.js already constructs from real evidence for
+// its dry-run report; this handler just runs it for real. No
+// tenant/generator/field name is hardcoded anywhere in this function.
+export function createCapabilityRepairHandler({
+  getSiteByIdFn = getSiteById, checkoutRepoTarballFn = checkoutRepoTarball, ...options
+} = {}) {
+  return createOpenHandsHandler({
+    ...options,
+    workspaceSource: async (destDir, job) => {
+      const site = await getSiteByIdFn(job.site_id);
+      await checkoutRepoTarballFn(site, destDir);
+    },
+    buildArgs: (job) => ['capability-repair', JSON.stringify(job.payload || {})],
+    // Same reasoning as createCodeSelfRepairHandler's own mapResult: only
+    // ever built from a status:'ok' result (a failed/errored run throws
+    // instead), carries the full new content of the (at most two) files
+    // the agent touched plus a diff for the PR body — the workspace is
+    // deleted right after this resolves.
+    mapResult: (result, job) => ({
+      jobId: job.id,
+      summary: result.summary || null,
+      fieldName: result.fieldName || null,
+      baseVar: result.baseVar || null,
+      testsPassed: result.testsPassed === true,
+      testOutput: result.testOutput || null,
+      patch: result.patch || null,
+      filesChanged: Array.isArray(result.filesChanged) ? result.filesChanged : [],
+    }),
+  });
+}

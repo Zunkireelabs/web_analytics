@@ -314,7 +314,7 @@ describe('templateActionRequiresRow', () => {
 });
 
 describe('resolveOrCreateComponentTemplate', () => {
-  const baseSite = { id: 1, name: 'Test Site', repo_owner: 'acme', repo_name: 'acme-web', design_agent_enabled: true, url_file_map: {} };
+  const baseSite = { id: 1, name: 'Test Site', repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true, url_file_map: {} };
 
   const verifiedWrapper = {
     wrapper: '<div>{{BODY}}</div>',
@@ -621,8 +621,8 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(result.reason, 'no-concept');
   });
 
-  test('site without design_agent_enabled reports not-available, and queues nothing', async () => {
-    const result = await resolveOrCreateComponentTemplate({ ...baseSite, design_agent_enabled: false }, 'faq', noopDeps());
+  test('site without its auto-remediation review reports not-available, and queues nothing', async () => {
+    const result = await resolveOrCreateComponentTemplate({ ...baseSite, auto_remediation_enabled: false }, 'faq', noopDeps());
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'not-available');
   });

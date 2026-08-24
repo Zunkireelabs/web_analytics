@@ -69,6 +69,28 @@ existing call site/test that only ever passes argv[1]):
   a real branch + PR; nothing here ever commits, pushes, or opens a PR
   itself — this process only edits files on disk and validates.
 
+- "capability-repair" (server/agents/lib/template-capability-repair.js):
+  runs against argv[1], a real checkout of a TENANT'S own repo (same
+  workspaceSource as component-templates/design-profile mode — NOT the
+  platform's own repo like code-self-repair above). The one case
+  classifyCapabilityGap (template-capability-repair.js) calls
+  'architectural-gap': a recommendation type has no rendering slot on its
+  own template, and no sibling route sharing the same data file in this
+  site already solved it, so there is no existing pattern in this site's
+  own config to clone. argv[3] is a JSON object {generatorId, valueKey,
+  templatePath, templateSource, dataFilePath, dataFileSource,
+  conventionExamples} — every field real evidence gathered by the Node
+  side, never invented here. Like code-self-repair, this EDITS real
+  files (the one template + one data file named in the payload, and
+  nothing else — enforced structurally, see _snapshot_specific_files/
+  _validate_capability_repair below) to add the smallest new data field
+  + template rendering slot, then validates independently by running the
+  TENANT'S OWN build command (read from ITS OWN package.json — never
+  npm/yarn/pnpm assumed, never any repo-specific command hardcoded).
+  Generic across every tenant/data-shape/template-system by construction:
+  nothing in this mode's prompt or validation logic names a specific
+  site, field, or generator — those all come from `payload`.
+
 Prints two kinds of sentinel lines the Node handler looks for:
 - CONTAINER_PREFIX, as soon as the container exists — captured eagerly (the
   handler reads stdout line-by-line, not just at the end) so it still knows
@@ -645,6 +667,207 @@ def build_code_self_repair_task(payload):
     return "\n".join(lines)
 
 
+# Generic multi-tenant task for the ONE case
+# server/agents/lib/template-capability-repair.js's classifyCapabilityGap
+# calls 'architectural-gap': a recommendation type has no rendering slot on
+# its own template, AND no sibling route in this same site (one sharing the
+# same data file) already solved it either — so there is no existing
+# pattern in THIS site's own url_file_map config to safely clone. Runs
+# against a real client repo checkout (same workspaceSource as
+# component-templates/design-profile mode), but — like code-self-repair
+# mode — is an EDITING task: it adds the smallest new data field + template
+# rendering slot, never invented from nothing but derived from real evidence
+# the Node side supplies (this exact template's/data file's real current
+# content, plus any real example of this site's own AI-managed-slot
+# convention found ELSEWHERE in the repo, if one exists at all). Nothing
+# here is generator-, tenant-, or field-name-specific — every identifier in
+# the constructed prompt comes from `payload`.
+def build_capability_repair_task(payload):
+    generator_id = payload.get("generatorId") or "(unknown generator)"
+    value_key = payload.get("valueKey") or "(unknown value key)"
+    template_path = payload.get("templatePath") or "(unknown template path)"
+    template_source = payload.get("templateSource") or ""
+    data_file_path = payload.get("dataFilePath") or "(unknown data file path)"
+    data_file_source = payload.get("dataFileSource") or ""
+    examples = payload.get("conventionExamples") or []
+
+    lines = [
+        "This directory is a real, complete checkout of a client website's "
+        "actual source repository. This is a real code-editing task: you "
+        "may read and edit files, and run commands with the terminal "
+        "tool.\n",
+        f"A recommendation of type \"{generator_id}\" is blocked for every "
+        f"page rendered from {data_file_path} via the template "
+        f"{template_path}: there is no existing place on that page for "
+        "AI-generated content of this kind to render, and no sibling route "
+        "in this site's own configuration already solved it. Your job is "
+        "to add the SMALLEST new capability that lets it render — a new "
+        "field on the relevant data entries, and a rendering slot in "
+        f"{template_path} that displays it.\n",
+        f"The real current content of {template_path}:\n---\n{template_source}\n---\n",
+        f"The real current content of {data_file_path}:\n---\n{data_file_source}\n---\n",
+    ]
+    if examples:
+        lines.append(
+            "This site already expresses AI-managed content elsewhere "
+            "using this exact convention — match it precisely, do not "
+            "invent a different shape:\n"
+        )
+        for ex in examples:
+            lines.append(f"From {ex.get('path')}:\n---\n{ex.get('snippet')}\n---\n")
+    else:
+        lines.append(
+            "This site has no existing example of this convention "
+            "anywhere in the repository. Use this exact, minimal shape (a "
+            "Nunjucks comment naming this generator, then an if-guard, "
+            "then the output) so it stays machine-readable by this "
+            "platform later:\n"
+            "{# AI-managed: server/generators/" + generator_id + ".js #}\n"
+            "{% if <base>." + value_key + " %}\n"
+            "{{ <base>." + value_key + " | safe }}\n"
+            "{% endif %}\n"
+            "— replace <base> with whatever variable this template "
+            "already uses to reference the current data entry (read the "
+            "template to find it; never guess a name that doesn't appear "
+            "in it).\n"
+        )
+    lines.append(
+        f"Add the field as \"{value_key}\" (this exact name — it is what "
+        "the platform's own generator writes into later) to the data "
+        "file, matching its existing structure and quoting style exactly. "
+        "Do NOT populate it with placeholder content on every entry — the "
+        "field is meant to start absent/empty and be filled in later; the "
+        "template's own if-guard already handles that safely. Only add it "
+        "to the ONE entry you use to prove the change works end-to-end, "
+        "if you need a concrete example to validate against.\n"
+    )
+    lines.append(
+        f"Only touch {template_path} and {data_file_path}. Do not touch "
+        "any other file. Do not add speculative error handling, "
+        "comments, or abstractions beyond what this requires. Do not run "
+        "any git commands — do not commit, do not push; another process "
+        "handles that after you finish.\n"
+    )
+    lines.append(
+        "When you are done, respond with ONLY a JSON object (no prose, no "
+        "code fence) shaped exactly like:\n"
+        '{"summary": "<one sentence, what you added>", '
+        '"fieldName": "<the exact field name you added>", '
+        '"baseVar": "<the exact template variable you guarded on>"}'
+    )
+    return "\n".join(lines)
+
+
+# Reads the CLIENT repo's own package.json for a declared "build" script —
+# never assumes npm/yarn/pnpm, or any specific command, since that varies
+# per tenant and this must stay generic across all of them. Returns None
+# (never a guessed fallback) when no build script is declared at all, so
+# the caller fails honestly rather than running a command that might not
+# mean anything for this repo.
+def _detect_build_command(workspace_dir):
+    pkg_path = os.path.join(workspace_dir, "package.json")
+    if not os.path.isfile(pkg_path):
+        return None
+    try:
+        with open(pkg_path, "r", encoding="utf-8") as f:
+            pkg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(pkg.get("scripts"), dict) or not pkg["scripts"].get("build"):
+        return None
+    if os.path.isfile(os.path.join(workspace_dir, "pnpm-lock.yaml")):
+        return ["pnpm", "run", "build"]
+    if os.path.isfile(os.path.join(workspace_dir, "yarn.lock")):
+        return ["yarn", "build"]
+    return ["npm", "run", "build"]
+
+
+# Companion to _detect_build_command: the matching dependency-install
+# command for whichever package manager that function picked, keyed off
+# the exact same lockfile evidence so the two can never disagree. Unlike
+# server/scripts/repair-template-capability.js's own safe-capability-gap
+# path (which validates via the client's own GitHub Actions CI instead of
+# installing the client's dependency tree locally — see that script's own
+# header comment for why an EARLIER attempt at a local `npm ci && npm run
+# build` was abandoned there), this one runs inside the ephemeral OpenHands
+# sandbox container, not the long-lived design-agent-worker orchestrator —
+# a real, general-purpose dev environment with outbound network access and
+# nothing of any tenant's ever installed in it permanently, so installing
+# fresh here each run is the intended use of that sandbox rather than the
+# resource/isolation problem it would be inside the orchestrator.
+def _detect_install_command(workspace_dir):
+    if os.path.isfile(os.path.join(workspace_dir, "pnpm-lock.yaml")):
+        return ["pnpm", "install", "--frozen-lockfile"]
+    if os.path.isfile(os.path.join(workspace_dir, "yarn.lock")):
+        return ["yarn", "install", "--frozen-lockfile"]
+    return ["npm", "ci"]
+
+
+def _snapshot_specific_files(workspace_dir, relpaths):
+    """Narrower counterpart to _snapshot_code_files, for capability-repair
+    mode: only the exact files the agent was told it may touch, rather than
+    every .js/.mjs file in the repo. Bounding the snapshot to this known set
+    is itself the "only affects the intended page family" guarantee — any
+    file outside it is invisible to _diff_snapshots and so can never appear
+    in changed_files, regardless of what the agent's own final message
+    claims to have done."""
+    snapshot = {}
+    for relpath in relpaths:
+        if not relpath:
+            continue
+        try:
+            with open(os.path.join(workspace_dir, relpath), "r", encoding="utf-8") as f:
+                snapshot[relpath] = f.read()
+        except (OSError, UnicodeDecodeError):
+            snapshot[relpath] = None  # genuinely absent/unreadable before the agent's turn
+    return snapshot
+
+
+def _validate_capability_repair(workspace_dir, template_path, data_file_path, changed_files):
+    """Independent validation for a capability-repair task — never trusts
+    the agent's own self-report. In order: (1) only the two files it was
+    told about actually changed (enforced structurally by
+    _snapshot_specific_files above, checked again here as a second,
+    explicit gate); (2) the data file, if JS/JSON, is still syntactically
+    valid; (3) the client repo's OWN build command still succeeds — the
+    strongest real evidence the change is safe, since it exercises the
+    exact toolchain (Eleventy or otherwise) the client's real site is built
+    with. Never runs a guessed build command."""
+    if not changed_files:
+        return {"ok": False, "output": "Agent made no file changes."}
+
+    allowed = {p for p in (template_path, data_file_path) if p}
+    unexpected = [c["path"] for c in changed_files if c["path"] not in allowed]
+    if unexpected:
+        return {"ok": False, "output": f"Agent touched file(s) outside the intended scope: {unexpected}"}
+
+    for entry in changed_files:
+        if entry["path"] != data_file_path:
+            continue
+        if data_file_path.endswith((".js", ".mjs")):
+            check = _run_subprocess(["node", "--check", entry["path"]], cwd=workspace_dir, timeout=30)
+            if not check["ok"]:
+                return {"ok": False, "output": f"node --check failed for {entry['path']}:\n{check['output']}"}
+        elif data_file_path.endswith(".json"):
+            try:
+                json.loads(entry["newContent"])
+            except json.JSONDecodeError as err:
+                return {"ok": False, "output": f"{entry['path']} is not valid JSON after the change: {err}"}
+
+    build_cmd = _detect_build_command(workspace_dir)
+    if not build_cmd:
+        return {"ok": False, "output": "Could not find a \"build\" script in this repo's package.json — refusing to guess a build command."}
+
+    install_cmd = _detect_install_command(workspace_dir)
+    install_result = _run_subprocess(install_cmd, cwd=workspace_dir, timeout=600)
+    if not install_result["ok"]:
+        return {"ok": False, "output": f"$ {' '.join(install_cmd)}\n{install_result['output']}"}
+
+    result = _run_subprocess(build_cmd, cwd=workspace_dir, timeout=300)
+    output = f"$ {' '.join(install_cmd)}\n(installed OK)\n\n$ {' '.join(build_cmd)}\n{result['output']}"
+    return {"ok": result["ok"], "output": output}
+
+
 def _iter_code_files(root_dir):
     """Every real .js/.mjs source or test file under CODE_SELF_REPAIR_ROOT,
     skipping the excluded dirs — the bounded set this snapshots before/after
@@ -828,6 +1051,12 @@ def main() -> int:
             payload = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}
             task = build_code_self_repair_task(payload)
             code_repair_before = _snapshot_code_files(workspace_dir)
+        elif mode == "capability-repair":
+            payload = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}
+            task = build_capability_repair_task(payload)
+            capability_repair_before = _snapshot_specific_files(
+                workspace_dir, [payload.get("templatePath"), payload.get("dataFilePath")]
+            )
         else:
             task = FIXTURE_DEMO_TASK
 
@@ -910,6 +1139,34 @@ def main() -> int:
                     result.update({
                         "rootCause": parsed.get("rootCause"),
                         "summary": parsed.get("summary"),
+                        "testsPassed": True,
+                        "testOutput": validation["output"],
+                        "patch": "\n".join(f["patch"] for f in changed_files),
+                        "filesChanged": [{"path": f["path"], "newContent": f["newContent"]} for f in changed_files],
+                    })
+            elif mode == "capability-repair":
+                message_text = _last_agent_message_text(conversation)
+                parsed = _extract_json_object(message_text) or {}
+                capability_repair_after = _snapshot_specific_files(
+                    workspace_dir, [payload.get("templatePath"), payload.get("dataFilePath")]
+                )
+                changed_files = _diff_snapshots(capability_repair_before, capability_repair_after)
+                validation = _validate_capability_repair(
+                    workspace_dir, payload.get("templatePath"), payload.get("dataFilePath"), changed_files
+                )
+                if not validation["ok"]:
+                    result = {
+                        "status": "error",
+                        "detail": f"Capability repair could not be validated: {validation['output']}",
+                        "summary": parsed.get("summary"),
+                        "testsPassed": False,
+                        "testOutput": validation["output"],
+                    }
+                else:
+                    result.update({
+                        "summary": parsed.get("summary"),
+                        "fieldName": parsed.get("fieldName"),
+                        "baseVar": parsed.get("baseVar"),
                         "testsPassed": True,
                         "testOutput": validation["output"],
                         "patch": "\n".join(f["patch"] for f in changed_files),

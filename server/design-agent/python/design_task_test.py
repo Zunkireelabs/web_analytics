@@ -15,8 +15,10 @@ suites (openhands-handler.test.js, failure-classification.test.js) — not
 duplicated here.
 """
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -341,6 +343,176 @@ class OpenSandboxWorkspaceTest(unittest.TestCase):
             design_task._find_orphaned_sandbox_container = original_find
             design_task._container_ip_on_network = original_ip
             design_task._try_stop_container = original_stop
+
+
+class BuildCapabilityRepairTaskTest(unittest.TestCase):
+    """Generic multi-tenant task builder for the 'architectural-gap' case —
+    every identifier in the constructed prompt must come from `payload`,
+    never a hardcoded tenant/field/generator name."""
+
+    def test_names_the_real_generator_field_and_paths_from_payload_only(self):
+        task = design_task.build_capability_repair_task({
+            "generatorId": "some-generator", "valueKey": "someValueKey",
+            "templatePath": "src/templates/widget.njk", "templateSource": "<div>{{ widget.title }}</div>",
+            "dataFilePath": "src/_data/widgets.js", "dataFileSource": "export default [{id: 'a', title: 'A'}]",
+        })
+        self.assertIn("some-generator", task)
+        self.assertIn("someValueKey", task)
+        self.assertIn("src/templates/widget.njk", task)
+        self.assertIn("src/_data/widgets.js", task)
+        self.assertIn("<div>{{ widget.title }}</div>", task)
+        self.assertNotIn("zunkiree", task.lower())
+
+    def test_includes_real_convention_examples_when_provided_instead_of_inventing_one(self):
+        task = design_task.build_capability_repair_task({
+            "generatorId": "g", "valueKey": "v", "templatePath": "t.njk", "dataFilePath": "d.js",
+            "conventionExamples": [{"path": "other.njk", "snippet": "{% if x.v %}{{ x.v | safe }}{% endif %}"}],
+        })
+        self.assertIn("other.njk", task)
+        self.assertIn("{% if x.v %}{{ x.v | safe }}{% endif %}", task)
+        self.assertNotIn("has no existing example", task)
+
+    def test_falls_back_to_the_documented_minimal_shape_when_no_convention_exists_anywhere(self):
+        task = design_task.build_capability_repair_task({
+            "generatorId": "g", "valueKey": "v", "templatePath": "t.njk", "dataFilePath": "d.js",
+            "conventionExamples": [],
+        })
+        self.assertIn("has no existing example", task)
+        self.assertIn("server/generators/g.js", task)
+
+    def test_instructs_scope_limited_to_exactly_the_two_named_files(self):
+        task = design_task.build_capability_repair_task({
+            "generatorId": "g", "valueKey": "v", "templatePath": "only/this.njk", "dataFilePath": "only/this.js",
+        })
+        self.assertIn("Only touch only/this.njk and only/this.js", task)
+
+
+class DetectBuildCommandTest(unittest.TestCase):
+    """Never assumes a package manager or command — reads the tenant's own
+    package.json, generic across every tenant's own toolchain choice."""
+
+    def _make_repo(self, scripts=None, lockfile=None):
+        d = tempfile.mkdtemp()
+        pkg = {"name": "x"}
+        if scripts is not None:
+            pkg["scripts"] = scripts
+        with open(os.path.join(d, "package.json"), "w") as f:
+            json.dump(pkg, f)
+        if lockfile:
+            open(os.path.join(d, lockfile), "w").close()
+        return d
+
+    def test_no_package_json_returns_none_not_a_guess(self):
+        d = tempfile.mkdtemp()
+        self.assertIsNone(design_task._detect_build_command(d))
+
+    def test_no_build_script_returns_none(self):
+        d = self._make_repo(scripts={"start": "node index.js"})
+        self.assertIsNone(design_task._detect_build_command(d))
+
+    def test_npm_is_the_default_when_no_lockfile_hints_otherwise(self):
+        d = self._make_repo(scripts={"build": "eleventy"})
+        self.assertEqual(design_task._detect_build_command(d), ["npm", "run", "build"])
+
+    def test_detects_pnpm_from_its_own_lockfile(self):
+        d = self._make_repo(scripts={"build": "eleventy"}, lockfile="pnpm-lock.yaml")
+        self.assertEqual(design_task._detect_build_command(d), ["pnpm", "run", "build"])
+
+    def test_detects_yarn_from_its_own_lockfile(self):
+        d = self._make_repo(scripts={"build": "eleventy"}, lockfile="yarn.lock")
+        self.assertEqual(design_task._detect_build_command(d), ["yarn", "build"])
+
+
+class SnapshotSpecificFilesTest(unittest.TestCase):
+    def test_snapshots_only_the_named_files_not_the_whole_repo(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.js"), "w") as f:
+            f.write("const a = 1;")
+        with open(os.path.join(d, "b.js"), "w") as f:
+            f.write("const b = 2;")
+        snap = design_task._snapshot_specific_files(d, ["a.js"])
+        self.assertEqual(snap, {"a.js": "const a = 1;"})
+        self.assertNotIn("b.js", snap)
+
+    def test_a_file_that_does_not_exist_yet_records_none_not_an_error(self):
+        d = tempfile.mkdtemp()
+        snap = design_task._snapshot_specific_files(d, ["never-created.js"])
+        self.assertEqual(snap, {"never-created.js": None})
+
+
+class ValidateCapabilityRepairTest(unittest.TestCase):
+    """This is the enforcement point for 'only affects the intended page
+    family' and 'validate with the client's own build' — never trusts the
+    agent's own self-report."""
+
+    def test_no_changed_files_is_not_a_validated_repair(self):
+        result = design_task._validate_capability_repair("/tmp", "t.njk", "d.js", [])
+        self.assertFalse(result["ok"])
+
+    def test_a_file_outside_the_two_named_paths_fails_validation(self):
+        result = design_task._validate_capability_repair(
+            "/tmp", "t.njk", "d.js",
+            [{"path": "t.njk", "newContent": "x"}, {"path": "unrelated/other.js", "newContent": "y"}],
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("unrelated/other.js", result["output"])
+
+    def test_invalid_json_data_file_fails_validation(self):
+        result = design_task._validate_capability_repair(
+            "/tmp", "t.njk", "d.json",
+            [{"path": "d.json", "newContent": "{not valid json"}],
+        )
+        self.assertFalse(result["ok"])
+
+    def test_no_build_script_in_repo_fails_honestly_rather_than_guessing_a_command(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "t.njk"), "w") as f:
+            f.write("<div></div>")
+        result = design_task._validate_capability_repair(
+            d, "t.njk", "d.js", [{"path": "t.njk", "newContent": "<div>x</div>"}],
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("build", result["output"])
+
+    def test_a_successful_build_validates_the_repair(self):
+        # A real (but dependency-free) package.json + lockfile so `npm ci`
+        # completes near-instantly with no network access, keeping this
+        # test fast and hermetic while still exercising the real install ->
+        # build sequence, not a mocked one.
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "package.json"), "w") as f:
+            json.dump({"name": "fixture", "version": "1.0.0", "scripts": {"build": "echo built-ok"}}, f)
+        with open(os.path.join(d, "package-lock.json"), "w") as f:
+            json.dump({
+                "name": "fixture", "version": "1.0.0", "lockfileVersion": 3,
+                "packages": {"": {"name": "fixture", "version": "1.0.0"}},
+            }, f)
+        with open(os.path.join(d, "t.njk"), "w") as f:
+            f.write("<div></div>")
+        result = design_task._validate_capability_repair(
+            d, "t.njk", "d.js", [{"path": "t.njk", "newContent": "<div>x</div>"}],
+        )
+        self.assertTrue(result["ok"], result["output"])
+        self.assertIn("built-ok", result["output"])
+
+
+class DetectInstallCommandTest(unittest.TestCase):
+    def _make_repo(self, lockfile=None):
+        d = tempfile.mkdtemp()
+        if lockfile:
+            open(os.path.join(d, lockfile), "w").close()
+        return d
+
+    def test_npm_ci_is_the_default_when_no_lockfile_hints_otherwise(self):
+        self.assertEqual(design_task._detect_install_command(self._make_repo()), ["npm", "ci"])
+
+    def test_detects_pnpm_from_its_own_lockfile(self):
+        d = self._make_repo(lockfile="pnpm-lock.yaml")
+        self.assertEqual(design_task._detect_install_command(d), ["pnpm", "install", "--frozen-lockfile"])
+
+    def test_detects_yarn_from_its_own_lockfile(self):
+        d = self._make_repo(lockfile="yarn.lock")
+        self.assertEqual(design_task._detect_install_command(d), ["yarn", "install", "--frozen-lockfile"])
 
 
 if __name__ == "__main__":
