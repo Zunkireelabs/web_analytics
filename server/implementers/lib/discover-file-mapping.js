@@ -1,6 +1,6 @@
 import { getRepoTree, getFileContent, searchCodeForString } from '../../github/client.js';
 import { baseBranch } from './github-ops.js';
-import { resolveFile, resolveAdapter } from './url-file-map.js';
+import { resolveFile, resolveAdapter, resolveHostScope } from './url-file-map.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { matchPaginationRoute, parsePaginationFrontMatter } from './pagination-routes.js';
 import { ownDomains, hostnameOf } from '../../agents/lib/site-domain.js';
@@ -68,7 +68,11 @@ export function findCandidateFileBySiblingPattern(site, pageUrl, repoFiles) {
   const parentPath = `/${segments.slice(0, -1).join('/')}`;
   const targetPath = normalizedPath(pageUrl);
 
-  const siblings = Object.entries(site.url_file_map?.pages || {})
+  // Siblings are drawn from pageUrl's OWN hostname scope (see url-file-map.js's
+  // resolveHostScope) — a sibling on a different hostname is not evidence
+  // for this one, even if it shares the same path shape.
+  const { pages: scopedPages } = resolveHostScope(site, pageUrl);
+  const siblings = Object.entries(scopedPages || {})
     .filter(([url, entry]) => typeof entry?.file === 'string')
     .map(([url, entry]) => ({ url: normalizedPath(url), file: entry.file }))
     .filter((s) => s.url !== targetPath && s.url.startsWith(`${parentPath === '/' ? '' : parentPath}/`));
@@ -82,6 +86,81 @@ export function findCandidateFileBySiblingPattern(site, pageUrl, repoFiles) {
   }
   if (derived.size === 1) return { kind: 'resolved', file: [...derived][0] };
   return { kind: 'ambiguous', candidates: [...derived] };
+}
+
+// The directory-index convention findCandidateFile cannot see: a directory
+// named after the URL's own last segment, containing a file literally named
+// `index.<ext>` — e.g. /compare/ served by src/compare/index.njk, not by any
+// file named "compare.njk". findCandidateFile only ever looks for a file
+// whose OWN name matches the URL segment; it has no notion of "or a same-named
+// directory's index file", so this pattern always fell through to ambiguous
+// no matter how unambiguous the repo evidence actually was. Root (`/`) has no
+// last segment to look for a directory of, so it is deliberately out of scope
+// here — see findCandidateFileByPermalink below for that case instead.
+export function findCandidateFileByDirectoryIndex(pageUrl, repoFiles) {
+  const segments = normalizedPath(pageUrl).split('/').filter(Boolean);
+  if (!segments.length) return { kind: 'ambiguous', candidates: [] };
+  const lastSegment = segments[segments.length - 1];
+
+  const indexPattern = new RegExp(`(^|/)${lastSegment}/index\\.(${TEMPLATE_EXTENSIONS.join('|')})$`);
+  let candidates = repoFiles.filter((f) => indexPattern.test(f));
+
+  if (candidates.length > 1 && segments.length > 1) {
+    const otherSegments = segments.slice(0, -1);
+    const narrowed = candidates.filter((f) => otherSegments.every((seg) => f.includes(seg)));
+    if (narrowed.length) candidates = narrowed;
+  }
+
+  if (candidates.length === 1) return { kind: 'resolved', file: candidates[0] };
+  return { kind: 'ambiguous', candidates };
+}
+
+// Builds a permalink -> [files] index by reading every template file's real
+// front matter once — the only way to discover a page whose URL isn't
+// derivable from its filename or directory at all (the site root chief among
+// them: `/` has no path segment for any of the tree-only tiers above to key
+// on). This is the moderate-cost tier: real evidence (a literal `permalink:`
+// declaration is as authoritative as a route gets — the framework itself
+// reads the same field to decide where the page renders), but one Contents
+// API fetch per template file, so callers resolving many pages in one pass
+// should build this ONCE and pass it through via `permalinkIndex` rather
+// than letting every call rebuild it — the same sharing discipline `tree`
+// already gets via `fetchTree`.
+export async function buildPermalinkIndex(site, tree, { fetchFile = getFileContent, branch } = {}) {
+  const templateFiles = tree.files.filter((f) => TEMPLATE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)));
+  const index = new Map(); // permalink -> [files]
+  await Promise.all(templateFiles.map(async (file) => {
+    let content;
+    try { content = (await fetchFile(site, file, branch))?.content; } catch { content = null; }
+    if (!content) return;
+    // A pagination template's permalink is itself a template expression
+    // (`/locations/{{ location.id }}/`), never a literal path — matched here
+    // only to explicitly EXCLUDE it from the index, so a dynamic template is
+    // never mistaken for a static page's own file just because it happens to
+    // have a `permalink:` line at all.
+    const m = content.match(/^permalink:\s*(.+)$/m);
+    if (!m) return;
+    const raw = m[1].trim().replace(/^['"]|['"]$/g, '');
+    if (/[{}]/.test(raw)) return; // template expression, not a literal path — see above
+    // normalizedPath's trailing-slash-stripping applies just as correctly to
+    // a bare frontmatter path as to a full URL (its try/catch already falls
+    // back to treating a non-URL string as the path itself) — reused here so
+    // "/compare/" (as written in front matter) and "/compare" (a lookup key
+    // built from a full URL) are the same key, not two that silently never match.
+    const literal = normalizedPath(raw);
+    if (!index.has(literal)) index.set(literal, []);
+    index.get(literal).push(file);
+  }));
+  return index;
+}
+
+// Pure lookup against an already-built index — never fetches anything
+// itself, so it stays cheap to call per-URL once the index exists.
+export function findCandidateFileByPermalink(pageUrl, permalinkIndex) {
+  const path = normalizedPath(pageUrl);
+  const files = permalinkIndex.get(path) || [];
+  if (files.length === 1) return { kind: 'resolved', file: files[0] };
+  return { kind: 'ambiguous', candidates: files };
 }
 
 // Last-resort evidence tier, only reached when neither the sibling pattern
@@ -135,7 +214,7 @@ async function sharedTargetVeto(site, pageUrl, candidateFile, { routes, fetchFil
   if (/\/(_includes|_layouts)\//.test(`/${candidateFile}`)) {
     return `${candidateFile} is a shared layout/include, not a per-page file.`;
   }
-  const existingForOtherUrl = Object.entries(site.url_file_map?.pages || {})
+  const existingForOtherUrl = Object.entries(resolveHostScope(site, pageUrl).pages || {})
     .find(([url, entry]) => entry?.file === candidateFile && normalizedPath(url) !== normalizedPath(pageUrl));
   if (existingForOtherUrl) {
     return `${candidateFile} is already mapped to ${existingForOtherUrl[0]} — mapping a second URL to the same file would make a page-specific fix apply to both.`;
@@ -175,7 +254,7 @@ async function sharedTargetVeto(site, pageUrl, candidateFile, { routes, fetchFil
 // it is already caching for its own gates, so this never re-discovers routes
 // once per page.
 export async function autoHealFileMapping(site, pageUrl, actionType, {
-  fetchTree = getRepoTree, fetchFile = getFileContent, searchCode = searchCodeForString, routes,
+  fetchTree = getRepoTree, fetchFile = getFileContent, searchCode = searchCodeForString, routes, permalinkIndex,
 } = {}) {
   if (!site.repo_owner || !site.repo_name) return null;
   if (resolveFile(site, pageUrl)) return null; // already resolvable, nothing to heal
@@ -199,17 +278,61 @@ export async function autoHealFileMapping(site, pageUrl, actionType, {
     return null;
   }
 
+  // A REGISTERED but non-primary hostname (e.g. edgex.zunkireelabs.com when
+  // website_domain is zunkireelabs.com) is not a foreign domain — but the
+  // evidence tiers below cannot safely resolve it either. Every one of them
+  // reasons about ONE shared repo's routes (a filename, a directory, a
+  // literal `permalink:` declaration) with no way to know which of the
+  // site's several real hostnames that route is actually served on — a
+  // `permalink: /` match proves a file serves ITS hostname's root, never
+  // which hostname that is on a multi-domain site. Real incident: this
+  // exact ambiguity is what produced the false edgex.zunkireelabs.com/ ->
+  // src/pages/index.njk mapping this guard now prevents (see
+  // resolveHostScope's own doc comment in url-file-map.js). A non-primary
+  // hostname's pages resolve ONLY from an explicit
+  // url_file_map.hosts[hostname] entry — never auto-discovered.
+  const scope = resolveHostScope(site, pageUrl);
+  if (scope.scope === 'host') {
+    console.warn(`[auto-heal] site #${site.id}: ${pageUrl} is on a registered non-primary hostname (${scope.host}) — auto-discovery is not safe across hostnames on a shared repo; refusing. Add an explicit url_file_map.hosts["${scope.host}"] entry instead.`);
+    await recordCapabilityRepair(site.id, {
+      capabilityType: 'url-file-map-page', target: pageUrl, outcome: 'requires-explicit-host-config',
+      detail: { hostname: scope.host },
+    });
+    return null;
+  }
+
   const branch = baseBranch(site);
   const tree = await fetchTree(site, branch);
 
-  // Evidence tiers, strongest/cheapest-to-verify first. Each is tried in
-  // isolation — a tier that returns >1 candidate is ambiguous on its OWN
-  // evidence and the next tier gets a fresh attempt, never a merge across
-  // tiers. The first tier to resolve to exactly one (still-unvetoed)
-  // candidate wins.
+  // Evidence tiers, cheapest/most-certain first, expensive/rate-limited
+  // last. Each is tried in isolation — a tier that returns >1 candidate is
+  // ambiguous on its OWN evidence and the next tier gets a fresh attempt,
+  // never a merge across tiers. The first tier to resolve to exactly one
+  // (still-unvetoed) candidate wins.
+  //
+  // sibling-pattern / filename-match / directory-index are all pure reads of
+  // the already-fetched tree — free once `tree` exists. permalink-frontmatter
+  // is the one moderate-cost tier (one Contents fetch per template file,
+  // amortized across a whole pass via the injectable `permalinkIndex`) —
+  // still ordered before permalink-search because it is real, literal
+  // evidence (the framework's own routing field), not a last-resort proxy
+  // for it.
   const tiers = [
     ['sibling-pattern', () => findCandidateFileBySiblingPattern(site, pageUrl, tree.files)],
     ['filename-match', () => findCandidateFile(pageUrl, tree.files)],
+    ['directory-index', () => findCandidateFileByDirectoryIndex(pageUrl, tree.files)],
+    ['permalink-frontmatter', async () => {
+      // permalinkIndex may be a pre-built Map, a (lazy) function returning
+      // one, or omitted — only actually building it (one Contents fetch per
+      // template file) if this tier is reached at all. A caller resolving
+      // many pages in one pass should pass a memoizing function so the FIRST
+      // page that needs this tier pays the cost and every later one reuses
+      // the result — see recommendation-gates.js's cachedPermalinkIndex.
+      const index = typeof permalinkIndex === 'function'
+        ? await permalinkIndex()
+        : permalinkIndex || await buildPermalinkIndex(site, tree, { fetchFile, branch });
+      return findCandidateFileByPermalink(pageUrl, index);
+    }],
     ['permalink-search', () => findCandidateFileByCodeSearch(site, pageUrl, { searchCode })],
   ];
 

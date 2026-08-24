@@ -5,7 +5,7 @@ import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-an
 import { FRONTEND_ACTION_TYPES } from '../../implementers/frontend.js';
 import { getFileContent, getRepoTree } from '../../github/client.js';
 import { baseBranch } from '../../implementers/lib/github-ops.js';
-import { autoHealFileMapping } from '../../implementers/lib/discover-file-mapping.js';
+import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib/discover-file-mapping.js';
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 
@@ -98,6 +98,24 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     return treeCache.get(key);
   };
 
+  // Built at most once per pass, no matter how many unmapped pages need
+  // discovering — buildPermalinkIndex reads every template file's real
+  // content, so without this a page after the first would pay for the same
+  // repo-wide scan again. Lazy (only built the first time a page actually
+  // needs it): a site whose pages all resolve some other way never pays this
+  // cost at all. Reuses cachedFetchFile so a file read here and later
+  // re-read by sharedTargetVeto (if it becomes the resolved candidate) is
+  // fetched from GitHub only once either way.
+  let permalinkIndexPromise = null;
+  const cachedPermalinkIndex = async () => {
+    if (!permalinkIndexPromise) {
+      const branch = baseBranch(site);
+      permalinkIndexPromise = cachedFetchTree(site, branch)
+        .then((tree) => buildPermalinkIndex(site, tree, { fetchFile: cachedFetchFile, branch }));
+    }
+    return permalinkIndexPromise;
+  };
+
   // Attempts are deduped per (page, actionType) rather than per page: whether
   // a page needs file-mapping healing at all depends on the action type,
   // because an adapter configured for one type and not another makes
@@ -119,7 +137,9 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // autoHealFileMapping's own shared-target veto — it is the strongest and
     // cheapest of that veto's checks, and this is the one call site that
     // already has the routes cached.
-    const healed = await healFn(site, pageUrl, actionType, { fetchTree: cachedFetchTree, routes: paginationRoutes })
+    const healed = await healFn(site, pageUrl, actionType, {
+      fetchTree: cachedFetchTree, fetchFile: cachedFetchFile, routes: paginationRoutes, permalinkIndex: cachedPermalinkIndex,
+    })
       .catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a file mapping for ${pageUrl}: ${err.message}`);
         return null;

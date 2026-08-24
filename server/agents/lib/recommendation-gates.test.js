@@ -17,11 +17,15 @@ const baseSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_br
 
 // Neutralizes every gate this test isn't about: no pagination routes, no
 // soft-404 signal, healFn is never reached (net-new content has no
-// params.page to heal).
+// params.page to heal), and no real GitHub reads — healUnmappedPage now also
+// builds a permalink index (buildPermalinkIndex) before invoking healFn, so
+// even a test whose healFn ignores the tree entirely still needs a
+// non-network fetchTree here or it hits the real GitHub API.
 const neutralDeps = () => ({
   discoverRoutes: async () => [],
   fetchFingerprint: async () => null,
   healFn: async () => null,
+  fetchTree: async () => ({ files: [], truncated: false }),
   log: { log: () => {}, warn: () => {} },
 });
 

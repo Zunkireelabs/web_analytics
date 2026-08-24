@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { writeFileSync } from 'node:fs';
 import { pool } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
-import { resolveFile, resolveMarkers, resolveAdapter } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveMarkers, resolveAdapter, resolveHostScope } from '../implementers/lib/url-file-map.js';
 import { hasMarker } from '../implementers/lib/marker-merge.js';
 import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent, getRepoTree } from '../github/client.js';
@@ -148,6 +148,27 @@ export async function discoverSite(siteId) {
     let filePath = resolveFile(site, page);
     let discoveredFile = null;
 
+    // Same boundary as autoHealFileMapping (implementers/lib/discover-
+    // file-mapping.js): findCandidateFile below matches by real filename
+    // against the WHOLE repo tree, with no notion of which of a site's
+    // several registered hostnames a given route is meant to serve — real
+    // evidence for the PRIMARY domain, no evidence at all for a registered
+    // non-primary one (edgex.zunkireelabs.com etc.), which is a completely
+    // separate real incident this exact ambiguity already caused once
+    // (2026-08-24). A page that doesn't already resolve on a non-primary
+    // host is reported for manual review, never guessed at.
+    const hostScope = resolveHostScope(site, page);
+    if (!filePath && hostScope.scope === 'host') {
+      needsReview.push({
+        page,
+        reason: `page is on a registered non-primary hostname (${hostScope.host}) with no explicit ` +
+          `url_file_map.hosts["${hostScope.host}"].pages entry — auto-discovery is not safe across ` +
+          `hostnames on a shared repo (a filename/route match proves nothing about which hostname it's meant to serve). ` +
+          `Add an explicit hosts[] entry by hand.`,
+      });
+      continue;
+    }
+
     if (!filePath) {
       if (!repoTree) {
         repoTree = await getRepoTree(site, branch);
@@ -219,20 +240,38 @@ export async function discoverSite(siteId) {
 // url_file_map (the site's real current config, resolved pages merged in).
 // Shared by this script's own CLI output and connect-repo.js's post-connect
 // auto-discovery, so both write byte-identical proposals.
+//
+// Writes into the SAME hostname scope resolveFile/resolveAdapter would read
+// from for that exact page (see url-file-map.js's resolveHostScope) — a
+// resolved item on a registered non-primary hostname (only reachable here
+// via an ALREADY-explicit hosts[] entry; discoverSite refuses to guess a
+// new file mapping across hostnames, see above) is written back into that
+// same `hosts[hostname]` namespace, never into the flat top-level `pages`,
+// which is exactly the write-side mistake that caused the real
+// edgex.zunkireelabs.com collision this script is now guarded against.
 export function buildProposedUrlFileMap(result) {
   const cfg = JSON.parse(JSON.stringify(result.site.url_file_map || {}));
   cfg.pages = cfg.pages || {};
-  for (const { path, config, discoveredFile } of result.resolved) {
-    cfg.pages[path] = {
-      ...(cfg.pages[path] || {}),
+  cfg.hosts = cfg.hosts || {};
+  for (const { page, path, config, discoveredFile } of result.resolved) {
+    const { scope, host } = resolveHostScope(result.site, page);
+    let pages = cfg.pages;
+    if (scope === 'host') {
+      cfg.hosts[host] = cfg.hosts[host] || {};
+      cfg.hosts[host].pages = cfg.hosts[host].pages || {};
+      pages = cfg.hosts[host].pages;
+    }
+
+    pages[path] = {
+      ...(pages[path] || {}),
       ...(discoveredFile ? { file: discoveredFile } : {}),
-      adapters: { ...(cfg.pages[path]?.adapters || {}), faq: config },
+      adapters: { ...(pages[path]?.adapters || {}), faq: config },
     };
     // The proposed adapter supersedes any stale marker config for this
     // action type (resolveAdapter is checked before resolveMarkers — see
     // url-file-map.js) — drop it so the config doesn't carry dead,
     // misleading marker settings forward.
-    if (cfg.pages[path].placements?.faq) delete cfg.pages[path].placements.faq;
+    if (pages[path].placements?.faq) delete pages[path].placements.faq;
   }
   return cfg;
 }

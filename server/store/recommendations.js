@@ -184,6 +184,18 @@ export async function closeRecommendation(id) {
   await query(`UPDATE recommendations SET status = 'superseded', updated_at = now() WHERE id = $1`, [id]);
 }
 
+// 'dismissed' has been a valid status since migration 077b/110, but until
+// now nothing in this codebase ever wrote it — 'superseded' (a re-check no
+// longer detecting the issue) and 'unfixable' (proven dead) were the only
+// real close paths. Distinct from both: a human deciding a recommendation is
+// not real/not worth acting on RIGHT NOW, without claiming the underlying
+// finding resolved itself or is permanently impossible. Frees the dedup key
+// the same way every other terminal status does (status != 'open'), so if
+// the same page + type genuinely regresses later it opens a fresh row.
+export async function dismissRecommendation(id) {
+  await query(`UPDATE recommendations SET status = 'dismissed', updated_at = now() WHERE id = $1`, [id]);
+}
+
 // risk_tier is not currently exposed on execution_job_id's caller, but every
 // safe-tier recommendation not already claimed by an in-flight job is a
 // candidate for executeSafeFixes (agents/lib/execution-engine.js) —

@@ -4,29 +4,78 @@
 // map matches, callers must treat that as an honest "not configured yet"
 // failure (reason: 'no-file-mapping'), not attempt a fallback guess.
 
-// Shared by every resolver below — normalizes a page URL to its pathname
-// (with/without a trailing slash) and looks up the matching `pages` entry,
-// so path-normalization logic exists exactly once.
-function getPageEntry(site, pageUrl) {
-  const map = site.url_file_map || {};
-  if (!pageUrl) return null;
-  let path;
-  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
-  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-  return map.pages?.[path] || map.pages?.[normalized] || null;
+import { knownDomain, hostnameOf } from '../../agents/lib/site-domain.js';
+
+// `pages`/`patterns` at the TOP of url_file_map are host-agnostic by
+// original design — every site used to have exactly one hostname, so a bare
+// path was the whole identity of a page. That stopped being true the moment
+// a site could register more than one real hostname (additional_own_domains,
+// migration 123 — a hero product on its own subdomain, e.g. Zunkiree Labs'
+// edgex.zunkireelabs.com CRM alongside the main marketing site): `/` and
+// `/contact/` exist on EVERY hostname, and without hostname in the identity,
+// resolving edgex.zunkireelabs.com/ silently returned the MAIN site's
+// homepage file — a real incident, not a hypothetical (dismissed
+// recommendations 60-63/71/78-89 on site 1, 2026-08-24).
+//
+// Fix: hostname is now part of a page's identity, via a NEW,
+// EXPLICIT-ONLY `url_file_map.hosts[hostname] = { pages, patterns }`
+// namespace, resolved here — everything below this point (resolveFile,
+// resolveAdapter, resolvePlacement, resolveLinkDataSources, isPageMapped)
+// is unaffected: they all still just call getPageEntry/getMatchingPattern.
+//
+// Scoping rule, in order:
+//   1. No hostname could be parsed from pageUrl (a bare path was passed —
+//      every internal caller that already did this keeps working exactly as
+//      before), OR the site has no `website_domain` configured yet (nothing
+//      to compare a hostname against) -> LEGACY scope: the flat top-level
+//      `pages`/`patterns`, unchanged, unscoped. This is what keeps every
+//      existing single-hostname site's mappings working with zero migration.
+//   2. hostname === the site's own primary website_domain -> PRIMARY scope:
+//      also the flat top-level `pages`/`patterns` — the common case (one
+//      hostname per site) behaves identically to before this change.
+//   3. Any other hostname (a registered additional_own_domain, OR a foreign
+//      one — this function does not itself distinguish the two; the
+//      own-domain guard in discover-file-mapping.js's autoHealFileMapping is
+//      what refuses a foreign one before ever reaching here) -> HOST scope:
+//      `url_file_map.hosts[hostname]`, which starts empty and is populated
+//      ONLY by an explicit config write. A path with no entry here resolves
+//      to nothing, however identical it looks to a path the primary domain
+//      already has mapped — that is the whole fix.
+export function resolveHostScope(site, pageUrl) {
+  const map = site?.url_file_map || {};
+  const host = hostnameOf(pageUrl);
+  const primary = knownDomain(site);
+  if (!host || !primary || host === primary) {
+    return { pages: map.pages || {}, patterns: map.patterns || [], scope: host && primary ? 'primary' : 'legacy', host: host || primary || null };
+  }
+  const hostMap = map.hosts?.[host];
+  return { pages: hostMap?.pages || {}, patterns: hostMap?.patterns || [], scope: 'host', host };
 }
 
-// The first `patterns[]` entry whose regex matches this URL — same matching
-// logic resolveFile uses for file paths, shared here so pattern-level
-// placement config (resolvePlacement below) can reuse it instead of a
-// second regex-matching implementation.
-function getMatchingPattern(site, pageUrl) {
-  const map = site.url_file_map || {};
+// Shared by every resolver below — normalizes a page URL to its pathname
+// (with/without a trailing slash) and looks up the matching `pages` entry
+// from the correct hostname scope (see resolveHostScope above), so both
+// path-normalization AND host-scoping logic exist exactly once.
+function getPageEntry(site, pageUrl) {
   if (!pageUrl) return null;
+  const { pages } = resolveHostScope(site, pageUrl);
   let path;
   try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
   const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
-  for (const p of map.patterns || []) {
+  return pages?.[path] || pages?.[normalized] || null;
+}
+
+// The first `patterns[]` entry whose regex matches this URL, from the
+// correct hostname scope — same matching logic resolveFile uses for file
+// paths, shared here so pattern-level placement config (resolvePlacement
+// below) can reuse it instead of a second regex-matching implementation.
+function getMatchingPattern(site, pageUrl) {
+  if (!pageUrl) return null;
+  const { patterns } = resolveHostScope(site, pageUrl);
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { path = String(pageUrl); }
+  const normalized = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  for (const p of patterns || []) {
     if (!p.match) continue;
     const re = new RegExp(p.match);
     if (re.test(normalized) || re.test(path)) return p;
