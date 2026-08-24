@@ -102,6 +102,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 
 RESULT_PREFIX = "DESIGN_AGENT_RESULT: "
 CONTAINER_PREFIX = "DESIGN_AGENT_CONTAINER: "
@@ -122,6 +123,30 @@ DOCKER_IMAGE = os.getenv("DESIGN_AGENT_DOCKER_IMAGE", "ghcr.io/openhands/agent-s
 # run directly on a host with a real Docker daemon) can still use loopback.
 DESIGN_AGENT_SANDBOX_HOST = os.getenv("DESIGN_AGENT_SANDBOX_HOST", "host.docker.internal")
 
+# host.docker.internal:host-gateway (above) still crosses into the true
+# Docker host's own network namespace — a `docker run -p` publish is NAT'd
+# on the host itself, and that is exactly the kind of host-facing traffic a
+# host firewall (ufw's default INPUT policy is a common, well-documented
+# real case) can block even when the sandbox container is completely
+# healthy. Confirmed as the live, unresolved blocker on staging as of
+# 2026-08-24: the exact fixed image, run locally with the identical
+# Docker-outside-of-Docker topology and the identical fix, worked
+# perfectly — proving the code path itself is correct — yet a real staging
+# job still failed the same way, meaning something specific to that one
+# VPS's network path is still blocking it, most likely its firewall.
+#
+# When set, this is a second Docker network (in addition to whatever
+# network=None/default the sibling would otherwise get) both this process's
+# own container AND the sibling join, so a fallback path exists that never
+# needs the host-published port at all: container-to-container traffic over
+# a shared user-defined bridge stays inside Docker's own bridge/FORWARD-chain
+# handling, which a host firewall's INPUT rules typically do not govern —
+# unlike the host.docker.internal path above. Left unset by default so a
+# deployment that hasn't defined this network (e.g. plain local dev) is
+# completely unaffected; docker-compose.yml sets it to "hosting", the same
+# network design-agent-worker already joins.
+DESIGN_AGENT_SANDBOX_NETWORK = os.getenv("DESIGN_AGENT_SANDBOX_NETWORK") or None
+
 
 def sandbox_workspace_kwargs(port_finder):
     """The host_port/host DockerWorkspace kwargs that route its health check
@@ -135,10 +160,95 @@ def sandbox_workspace_kwargs(port_finder):
     port = port_finder()
     if port == -1:
         raise RuntimeError("No available TCP port found for the Design Agent sandbox container")
-    return {
+    kwargs = {
         "host_port": port,
         "host": f"http://{DESIGN_AGENT_SANDBOX_HOST}:{port}",
     }
+    if DESIGN_AGENT_SANDBOX_NETWORK:
+        kwargs["network"] = DESIGN_AGENT_SANDBOX_NETWORK
+    return kwargs
+
+
+def _container_ip_on_network(container_id, network, docker_bin=None):
+    """The sibling container's own IP address on `network` — used only by
+    the same-network fallback below, to reach it directly rather than via a
+    host-published port. Never raises; returns None on any failure (missing
+    container, network not joined, docker not reachable) so the caller can
+    cleanly fall through to re-raising the original error instead."""
+    docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    try:
+        inspect = subprocess.run(
+            [docker_bin, "inspect", "-f",
+             "{{(index .NetworkSettings.Networks \"" + network + "\").IPAddress}}", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        ip = inspect.stdout.strip()
+        return ip or None
+    except Exception:
+        return None
+
+
+def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server_image, volumes, working_dir, port_finder, network, alive_timeout=60):
+    """Start (or reconnect to) this job's sandbox container, preferring
+    DockerWorkspace's own host-published-port health check and falling back
+    to a direct same-network connection only when that specific path is what
+    failed — see DESIGN_AGENT_SANDBOX_NETWORK's docstring for why the two
+    differ (crossing into the host's network namespace vs. staying on a
+    shared Docker bridge) and why only ENVIRONMENT_CONTAINER_UNHEALTHY
+    (container started, health check on the host-published path couldn't
+    reach it) is eligible — every other failure (Docker itself unreachable,
+    `docker run` rejected) means there is no running sibling to fall back to
+    in the first place, so re-raising immediately is correct there.
+
+    Returns (workspace, cleanup, container_id, used_fallback) — cleanup must
+    always be called by the caller instead of relying on `with`, since the
+    fallback path returns a bare RemoteWorkspace that has no Docker-container
+    lifecycle of its own (see RemoteWorkspace's own docstring: it connects to
+    an already-running agent-server, it does not manage one) and cleanup
+    here must stop the container ourselves. `used_fallback` lets the caller
+    log which path actually served the job, for the same reason every other
+    branch in this file distinguishes its failure paths — silently
+    succeeding via a fallback with no record of it having been needed would
+    hide that the primary path is still broken.
+
+    dependency-injected classes/callables (docker_workspace_cls,
+    remote_workspace_cls, port_finder) purely so this is unit-testable
+    without a Docker daemon or the OpenHands SDK.
+    """
+    try:
+        workspace = docker_workspace_cls(
+            server_image=server_image, volumes=volumes, working_dir=working_dir,
+            **sandbox_workspace_kwargs(port_finder),
+        )
+        return workspace, workspace.cleanup, getattr(workspace, "_container_id", None), False
+    except Exception as err:
+        if not network or classify_sandbox_construction_error(str(err)) != "ENVIRONMENT_CONTAINER_UNHEALTHY":
+            raise
+        orphan_id = _find_orphaned_sandbox_container()
+        if not orphan_id:
+            raise
+        ip = _container_ip_on_network(orphan_id, network)
+        if not ip:
+            raise
+        fallback = remote_workspace_cls(host=f"http://{ip}:8000", working_dir=working_dir)
+        deadline = time.time() + alive_timeout
+        while time.time() < deadline:
+            if fallback.alive:
+                break
+            time.sleep(1.0)
+        else:
+            raise
+
+        def cleanup():
+            try:
+                subprocess.run(
+                    [os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker"), "stop", orphan_id],
+                    capture_output=True, timeout=30,
+                )
+            except Exception:
+                pass
+
+        return fallback, cleanup, orphan_id, True
 
 # Mirrors server/implementers/lib/design-drift.js's REQUIRED_PLACEHOLDERS —
 # kept in sync by hand (small, stable, cross-language) rather than shared,
@@ -668,6 +778,7 @@ def main() -> int:
         from openhands.tools.terminal import TerminalTool
         from openhands.workspace.docker import DockerWorkspace
         from openhands.workspace.docker.workspace import find_available_tcp_port
+        from openhands.sdk.workspace import RemoteWorkspace
 
         llm = LLM(
             model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
@@ -704,17 +815,22 @@ def main() -> int:
         # One throwaway container per job (server_image is the default
         # pre-built OpenHands agent server — not our own image), bind-mounted
         # to this job's own host temp dir so no two jobs ever share a
-        # workspace, container, or host directory. `with` guarantees
-        # cleanup() runs on the way out, including on the _Terminated exit
-        # raised by the SIGTERM handler above.
-        with DockerWorkspace(
+        # workspace, container, or host directory. open_sandbox_workspace's
+        # own cleanup (in `finally` below) replaces `with`'s guarantee,
+        # since the fallback path it can take needs different cleanup than
+        # DockerWorkspace's own — still runs on the way out, including on
+        # the _Terminated exit raised by the SIGTERM handler above.
+        workspace, cleanup_workspace, container_id, used_fallback = open_sandbox_workspace(
+            docker_workspace_cls=DockerWorkspace,
+            remote_workspace_cls=RemoteWorkspace,
             server_image=DOCKER_IMAGE,
             volumes=[f"{workspace_dir}:/workspace"],
             working_dir="/workspace",
-            **sandbox_workspace_kwargs(find_available_tcp_port),
-        ) as workspace:
-            container_id = workspace._container_id
-            print(CONTAINER_PREFIX + json.dumps({"container_id": container_id}))
+            port_finder=find_available_tcp_port,
+            network=DESIGN_AGENT_SANDBOX_NETWORK,
+        )
+        try:
+            print(CONTAINER_PREFIX + json.dumps({"container_id": container_id, "usedSameNetworkFallback": used_fallback}))
 
             conversation = Conversation(agent=agent, workspace=workspace)
             try:
@@ -780,6 +896,8 @@ def main() -> int:
                         "patch": "\n".join(f["patch"] for f in changed_files),
                         "filesChanged": [{"path": f["path"], "newContent": f["newContent"]} for f in changed_files],
                     })
+        finally:
+            cleanup_workspace()
 
         print(RESULT_PREFIX + json.dumps(result))
         return 0 if result["status"] == "ok" else 1

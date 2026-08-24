@@ -158,5 +158,167 @@ class FindOrphanedSandboxContainerTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class ContainerIpOnNetworkTest(unittest.TestCase):
+    def test_a_missing_docker_binary_returns_none_rather_than_raising(self):
+        result = design_task._container_ip_on_network(
+            "fake-container-id", "hosting", docker_bin="/definitely/not/a/real/docker/binary"
+        )
+        self.assertIsNone(result)
+
+
+class _FakeDockerWorkspace:
+    """Stands in for the real DockerWorkspace in OpenSandboxWorkspaceTest —
+    never touches Docker or the OpenHands SDK."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self._container_id = "docker-workspace-container-id"
+
+    def cleanup(self):
+        self.cleanup_called = True
+
+
+class _FailingDockerWorkspace:
+    def __init__(self, **kwargs):
+        raise RuntimeError("Container failed to become healthy in time")
+
+
+class _DockerUnavailableDockerWorkspace:
+    def __init__(self, **kwargs):
+        raise RuntimeError("Docker is not available. Please install and start Docker Desktop/daemon.")
+
+
+class _FakeRemoteWorkspace:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.alive = True
+
+
+class OpenSandboxWorkspaceTest(unittest.TestCase):
+    """2026-08-24: proven live (by running the real image locally, in the
+    real Docker-outside-of-Docker topology, with the real fix) that
+    DockerWorkspace() itself works correctly given a working
+    host.docker.internal path — yet a real staging job still failed the
+    same way, meaning something specific to that one VPS (most likely its
+    firewall) blocks the host-published-port path even when the sandbox
+    container is completely healthy. This is the fallback: reach the same
+    already-running sibling container directly by its own IP on a shared
+    Docker network instead — traffic that never crosses into the host's own
+    network namespace, so a host firewall's INPUT rules do not apply to it.
+    All Docker/SDK interaction is dependency-injected or monkeypatched here
+    — no real Docker daemon needed."""
+
+    def test_the_normal_path_returns_a_docker_workspace_unchanged_when_it_succeeds(self):
+        workspace, cleanup, container_id, used_fallback = design_task.open_sandbox_workspace(
+            docker_workspace_cls=_FakeDockerWorkspace,
+            remote_workspace_cls=_FakeRemoteWorkspace,
+            server_image="fake-image", volumes=[], working_dir="/workspace",
+            port_finder=lambda: 34567, network="hosting",
+        )
+        self.assertIsInstance(workspace, _FakeDockerWorkspace)
+        self.assertEqual(container_id, "docker-workspace-container-id")
+        self.assertFalse(used_fallback)
+        cleanup()
+        self.assertTrue(workspace.cleanup_called)
+
+    def test_a_failure_unrelated_to_the_health_check_is_never_retried_via_fallback(self):
+        # Docker itself being unreachable means there is no running sibling
+        # to fall back to in the first place — retrying via the fallback
+        # path here would just be a confusing second failure mode for the
+        # same root cause.
+        with self.assertRaises(RuntimeError):
+            design_task.open_sandbox_workspace(
+                docker_workspace_cls=_DockerUnavailableDockerWorkspace,
+                remote_workspace_cls=_FakeRemoteWorkspace,
+                server_image="fake-image", volumes=[], working_dir="/workspace",
+                port_finder=lambda: 34567, network="hosting",
+            )
+
+    def test_no_network_configured_means_no_fallback_attempted(self):
+        # network=None (the default — nothing set DESIGN_AGENT_SANDBOX_NETWORK)
+        # means there is no shared network to find the sibling's IP on, so
+        # the original error must propagate rather than silently swallowing it.
+        with self.assertRaises(RuntimeError):
+            design_task.open_sandbox_workspace(
+                docker_workspace_cls=_FailingDockerWorkspace,
+                remote_workspace_cls=_FakeRemoteWorkspace,
+                server_image="fake-image", volumes=[], working_dir="/workspace",
+                port_finder=lambda: 34567, network=None,
+            )
+
+    def test_a_health_check_failure_with_no_discoverable_orphan_still_raises(self):
+        original = design_task._find_orphaned_sandbox_container
+        design_task._find_orphaned_sandbox_container = lambda *a, **k: None
+        try:
+            with self.assertRaises(RuntimeError):
+                design_task.open_sandbox_workspace(
+                    docker_workspace_cls=_FailingDockerWorkspace,
+                    remote_workspace_cls=_FakeRemoteWorkspace,
+                    server_image="fake-image", volumes=[], working_dir="/workspace",
+                    port_finder=lambda: 34567, network="hosting",
+                )
+        finally:
+            design_task._find_orphaned_sandbox_container = original
+
+    def test_a_health_check_failure_with_an_orphan_but_no_ip_still_raises(self):
+        original_find = design_task._find_orphaned_sandbox_container
+        original_ip = design_task._container_ip_on_network
+        design_task._find_orphaned_sandbox_container = lambda *a, **k: "orphan-id"
+        design_task._container_ip_on_network = lambda *a, **k: None
+        try:
+            with self.assertRaises(RuntimeError):
+                design_task.open_sandbox_workspace(
+                    docker_workspace_cls=_FailingDockerWorkspace,
+                    remote_workspace_cls=_FakeRemoteWorkspace,
+                    server_image="fake-image", volumes=[], working_dir="/workspace",
+                    port_finder=lambda: 34567, network="hosting",
+                )
+        finally:
+            design_task._find_orphaned_sandbox_container = original_find
+            design_task._container_ip_on_network = original_ip
+
+    def test_a_health_check_failure_with_a_reachable_orphan_falls_back_successfully(self):
+        original_find = design_task._find_orphaned_sandbox_container
+        original_ip = design_task._container_ip_on_network
+        design_task._find_orphaned_sandbox_container = lambda *a, **k: "orphan-id"
+        design_task._container_ip_on_network = lambda *a, **k: "172.20.0.5"
+        try:
+            workspace, cleanup, container_id, used_fallback = design_task.open_sandbox_workspace(
+                docker_workspace_cls=_FailingDockerWorkspace,
+                remote_workspace_cls=_FakeRemoteWorkspace,
+                server_image="fake-image", volumes=[], working_dir="/workspace",
+                port_finder=lambda: 34567, network="hosting",
+            )
+            self.assertIsInstance(workspace, _FakeRemoteWorkspace)
+            self.assertEqual(workspace.kwargs["host"], "http://172.20.0.5:8000")
+            self.assertEqual(container_id, "orphan-id")
+            self.assertTrue(used_fallback)
+        finally:
+            design_task._find_orphaned_sandbox_container = original_find
+            design_task._container_ip_on_network = original_ip
+
+    def test_a_reachable_orphan_that_never_becomes_alive_still_raises_rather_than_hanging_forever(self):
+        class _NeverAliveRemoteWorkspace:
+            def __init__(self, **kwargs):
+                self.alive = False
+
+        original_find = design_task._find_orphaned_sandbox_container
+        original_ip = design_task._container_ip_on_network
+        design_task._find_orphaned_sandbox_container = lambda *a, **k: "orphan-id"
+        design_task._container_ip_on_network = lambda *a, **k: "172.20.0.5"
+        try:
+            with self.assertRaises(RuntimeError):
+                design_task.open_sandbox_workspace(
+                    docker_workspace_cls=_FailingDockerWorkspace,
+                    remote_workspace_cls=_NeverAliveRemoteWorkspace,
+                    server_image="fake-image", volumes=[], working_dir="/workspace",
+                    port_finder=lambda: 34567, network="hosting",
+                    alive_timeout=0.05,
+                )
+        finally:
+            design_task._find_orphaned_sandbox_container = original_find
+            design_task._container_ip_on_network = original_ip
+
+
 if __name__ == "__main__":
     unittest.main()
