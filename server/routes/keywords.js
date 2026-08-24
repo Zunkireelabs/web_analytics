@@ -7,8 +7,15 @@ import {
   getLatestLayoutSuggestion, saveLayoutSuggestion, createUserKeywordGap,
   getProductCapabilities, createProductCapability, updateProductCapabilityStatus,
 } from '../store/data-analyst.js';
-import { createActionCenterRecommendationForGap, buildProductTopicMap } from '../agents/lib/analyst-seo-mapping.js';
+import { createActionCenterRecommendationForGap, buildProductTopicMap, opportunityDraftEligibility } from '../agents/lib/analyst-seo-mapping.js';
 import { buildGrowthOpportunities } from '../agents/lib/growth-opportunities.js';
+import { generateDraft } from './action-center.js';
+import { getSiteById } from '../store/read.js';
+
+// Matches dataAnalyst.js's ANALYST_DRAFT_DESIGN_WAIT_MS — a short bounded
+// wait so a click that lands mid-Design-Agent-derivation gets a real result
+// instead of an immediate "come back later", without hanging the request.
+const OPPORTUNITY_DRAFT_DESIGN_WAIT_MS = 45_000;
 
 // Keyword Discovery — clusters/gaps/site-profile produced by agents/clustering.py
 // (see server/store/data-analyst.js for the read/write layer). Unlike
@@ -35,6 +42,33 @@ router.get('/internal/keywords/:siteId/clusters', async (req, res, next) => {
 router.get('/internal/keywords/:siteId/growth-opportunities', async (req, res, next) => {
   try {
     res.json(await buildGrowthOpportunities(req.params.siteId));
+  } catch (e) { next(e); }
+});
+
+// "Send to Action Center" for a Quick Win / Page 1 / Declining / Content
+// Expansion growth opportunity — re-validates eligibility server-side (never
+// trusts the frontend's own check alone), same discipline as dataAnalyst.js's
+// insights/generate-draft route. The opportunity body comes straight from
+// buildGrowthOpportunities' own read-time output (no separate persisted
+// resource to look up by id), so the frontend just resends the row it
+// already has.
+router.post('/internal/keywords/:siteId/growth-opportunities/generate-draft', async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.params.siteId);
+    if (!site) { const err = new Error('Client not found.'); err.status = 404; throw err; }
+    const { opportunity } = req.body || {};
+    const action = opportunityDraftEligibility(site, opportunity);
+    if (!action) {
+      const err = new Error('This opportunity is not eligible for draft generation.');
+      err.status = 400;
+      throw err;
+    }
+    const draft = await generateDraft(site.id, {
+      generatorId: action.generatorId, params: action.params,
+      source: 'analyst-growth-opportunity', findingId: action.findingId,
+      waitForDesignAgent: OPPORTUNITY_DRAFT_DESIGN_WAIT_MS,
+    });
+    res.json(draft);
   } catch (e) { next(e); }
 });
 

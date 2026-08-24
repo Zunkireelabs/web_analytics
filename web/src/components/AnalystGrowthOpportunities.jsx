@@ -17,6 +17,11 @@ const TYPE_META = {
 const FILTER_TYPES = ['quick-win', 'page1-opportunity', 'declining', 'content-expansion', 'content-gap'];
 
 const SEVERITY_DOT = { high: 'bg-rose-500', medium: 'bg-amber-500', low: 'bg-slate-400' };
+// Mirrors server/agents/lib/analyst-seo-mapping.js's OPPORTUNITY_GENERATORS
+// so the button only shows when the server would accept it. content-gap is
+// excluded — it has its own approve-to-Action-Center path below (no existing
+// page to draft against).
+const DRAFTABLE_TYPES = new Set(['quick-win', 'page1-opportunity', 'declining', 'content-expansion']);
 
 function pctLabel(v) {
   return v == null ? '—' : `${(v * 100).toFixed(1)}%`;
@@ -27,6 +32,7 @@ function OpportunityRow({ opp, clientId, onGapResolved }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [sent, setSent] = useState(false);
+  const [draftedId, setDraftedId] = useState(null);
   const meta = TYPE_META[opp.type] || { label: opp.type, chip: 'an-chip-slate' };
 
   const title = opp.type === 'content-expansion'
@@ -39,6 +45,17 @@ function OpportunityRow({ opp, clientId, onGapResolved }) {
       await api.keywords.updateGapStatus(clientId, opp.gapId, 'approved');
       setSent(true);
       onGapResolved?.();
+    } catch (e) {
+      setError(e.message || 'Could not send this to Action Center.');
+    } finally { setBusy(false); }
+  };
+
+  const canDraft = DRAFTABLE_TYPES.has(opp.type) && Boolean(opp.page);
+  const sendOpportunityToActionCenter = async () => {
+    setBusy(true); setError(null);
+    try {
+      const draft = await api.keywords.generateOpportunityDraft(clientId, opp);
+      setDraftedId(draft.id);
     } catch (e) {
       setError(e.message || 'Could not send this to Action Center.');
     } finally { setBusy(false); }
@@ -98,6 +115,21 @@ function OpportunityRow({ opp, clientId, onGapResolved }) {
               >
                 <ExternalLink size={11} /> View Page
               </a>
+            )}
+            {canDraft && (
+              draftedId ? (
+                <a href={`/action-center?siteId=${clientId}`} className="text-[11px] font-bold text-emerald-700 hover:underline flex items-center gap-1.5">
+                  <CheckCircle2 size={11} /> In Action Center
+                </a>
+              ) : (
+                <button
+                  type="button" onClick={sendOpportunityToActionCenter} disabled={busy}
+                  className="an-grad-btn text-[11px] font-bold px-3 py-1.5 rounded-xl text-white flex items-center gap-1.5 cursor-pointer"
+                >
+                  {busy ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
+                  Send to Action Center
+                </button>
+              )
             )}
             {opp.type === 'content-gap' && (
               sent ? (
