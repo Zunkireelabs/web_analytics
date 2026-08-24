@@ -3,7 +3,7 @@ import { scorePageCategories } from './visibility-score.js';
 import { getSearchPerformanceRange, getSiteById } from '../../store/read.js';
 import { getCompetitorProvider, competitorProviderConfigured } from '../../ingest/competitor-providers/index.js';
 import { callLLM } from '../../llm.js';
-import { resolveOwnDomain, ownDomains, filterOwnDomainPages } from './site-domain.js';
+import { resolveOwnDomain, knownDomain, filterOwnDomainPages } from './site-domain.js';
 
 // LLM-driven competitor discovery + crawl + compare — the MVP pipeline that
 // makes competitor-intelligence work with zero external SEO API, so it's
@@ -184,7 +184,9 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
     getSearchPerformanceRange(siteId, start, end, 'query', TOP_QUERIES_FOR_CONTEXT),
   ]);
   const ownDomain = await resolveOwnDomain(site, siteId, start, end);
-  const topPageUrls = filterOwnDomainPages(topPagesRaw, ownDomains(site)).map((p) => p.dim_value);
+  // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
+  // own comment on this same 2026-08-24 fix.
+  const topPageUrls = filterOwnDomainPages(topPagesRaw, knownDomain(site)).map((p) => p.dim_value);
   if (!topPageUrls.length) return { ownDomain, competitors: [] };
 
   const ownPageFetch = await analyzePageUrl(topPageUrls[0]);

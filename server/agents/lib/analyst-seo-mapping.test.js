@@ -79,3 +79,35 @@ describe('seoDraftEligibility — eligibility gates', () => {
     assert.notEqual(seoDraftEligibility(site, insight), null);
   });
 });
+
+// GSC's page dimension is documented to return full absolute URLs — the
+// insight's own page can legitimately be on ANY hostname the GSC property
+// covers, including a registered-but-separate additional_own_domain or a
+// foreign one entirely. Gap confirmed 2026-08-24: this bridge created a real
+// recommendation for such pages with no domain check at all.
+describe('seoDraftEligibility — domain scoping (only the site\'s own primary domain)', () => {
+  test('an insight on the site\'s own primary domain is eligible, as before', () => {
+    assert.notEqual(seoDraftEligibility(site, decline({ dimensionValue: 'https://example.com/page' })), null);
+  });
+
+  test('an insight on a registered additional_own_domain (a separate product) is NOT eligible', () => {
+    const multiDomainSite = { ...site, additional_own_domains: ['edgex.example.com'] };
+    const insight = decline({ dimensionValue: 'https://edgex.example.com/page' });
+    assert.equal(seoDraftEligibility(multiDomainSite, insight), null);
+  });
+
+  test('an insight on a completely foreign hostname is NOT eligible', () => {
+    const insight = decline({ dimensionValue: 'https://some-other-site.com/page' });
+    assert.equal(seoDraftEligibility(site, insight), null);
+  });
+
+  test('a relative dimension_value (resolved against the site\'s own domain by absolutePageUrl) is still eligible', () => {
+    assert.notEqual(seoDraftEligibility(site, decline({ dimensionValue: '/blog/post' })), null);
+  });
+
+  test('no website_domain configured passes through unfiltered — never risks excluding the site\'s own real pages on an unset config', () => {
+    const unscopedSite = { id: 1 };
+    const insight = decline({ dimensionValue: 'https://anything.example.com/page' });
+    assert.notEqual(seoDraftEligibility(unscopedSite, insight), null);
+  });
+});

@@ -1,5 +1,5 @@
 import { getGa4BreakdownRange, getGa4BreakdownDelta, getSearchPerformanceRange, getSiteById } from '../store/read.js';
-import { ownDomains, filterOwnDomainPages } from './lib/site-domain.js';
+import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { flagLowCtr } from './lib/ctr-anomaly.js';
 import { effortForGenerator } from './lib/page-content.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
@@ -51,7 +51,11 @@ export async function run({ siteId, start, end }) {
     getSearchPerformanceRange(siteId, start, end, 'country', 50),
     getSearchPerformanceRange(siteId, start, end, 'page', TOP_LIMIT),
   ]);
-  const domain = ownDomains(site);
+  // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
+  // own comment on this same 2026-08-24 fix; a finding-generating agent must
+  // only ever pick a page from the site's own primary domain, never a
+  // registered-but-separate additional_own_domain like edgex./zenly.zunkireelabs.com.
+  const domain = knownDomain(site);
   // GA4 doesn't track sessions broken down by page+language together, so
   // there's no real "this language's top page" to point a translation
   // draft at — the site's own single top-traffic page (by impressions) is
