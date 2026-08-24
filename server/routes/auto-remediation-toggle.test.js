@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import clientsRouter, { validateAutoRemediationRequest } from './clients.js';
+import clientsRouter, { validateAutoRemediationRequest, shouldAutoEnableOnConnect } from './clients.js';
 
 // The switch that decides whether a site's agents open pull requests against
 // a real customer repository with nobody watching. Before this existed,
@@ -58,6 +58,51 @@ describe('validateAutoRemediationRequest — enabled flag', () => {
       assert.match(err, /true or false/i);
     });
   }
+});
+
+// Full onboarding autonomy (no per-tenant admin click): connect-repo grants
+// the same consent this file's /auto-remediation route otherwise requires an
+// admin to set by hand, but ONLY on a genuinely first-time connection — never
+// silently reversing a human's later decision to turn it off. Fixtures use
+// generic ids/names throughout — this must behave identically for any tenant.
+describe('shouldAutoEnableOnConnect', () => {
+  test('a brand-new site connecting its repo for the first time is granted autonomy', () => {
+    const existing = { id: 1, name: 'Any Client', repo_owner: null, repo_name: null };
+    const site = { id: 1, name: 'Any Client', repo_owner: 'anyone', repo_name: 'anyone-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), true);
+  });
+
+  test('re-saving an already-connected repo\'s config never re-grants — respects whatever the current value already is', () => {
+    const existing = { id: 2, name: 'Any Client', repo_owner: 'anyone', repo_name: 'anyone-web' };
+    const site = { id: 2, name: 'Any Client', repo_owner: 'anyone', repo_name: 'renamed-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), false);
+  });
+
+  test('a half-configured previous repo (owner but no name) still counts as "already connected", not first-time', () => {
+    const existing = { id: 3, repo_owner: 'anyone', repo_name: null };
+    const site = { id: 3, repo_owner: 'anyone', repo_name: 'anyone-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), false);
+  });
+
+  test('already enabled (e.g. re-entrant call) is never re-written — idempotent', () => {
+    const existing = { id: 4, repo_owner: null, repo_name: null };
+    const site = { id: 4, repo_owner: 'anyone', repo_name: 'anyone-web', auto_remediation_enabled: true, auto_remediation_daily_limit: 60 };
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), false);
+  });
+
+  test('defers to validateAutoRemediationRequest\'s own rules — an invalid daily limit refuses the auto-grant too', () => {
+    const existing = { id: 5, repo_owner: null, repo_name: null };
+    const site = { id: 5, repo_owner: 'anyone', repo_name: 'anyone-web', auto_remediation_enabled: false, auto_remediation_daily_limit: -1 };
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), false);
+  });
+
+  test('generic across tenants — no name/id-based special-casing', () => {
+    for (const name of ['Zunkiree', 'Acme Corp', 'Some Other Client', 'client-42']) {
+      const existing = { id: 99, name, repo_owner: null, repo_name: null };
+      const site = { id: 99, name, repo_owner: 'x', repo_name: 'x-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
+      assert.equal(shouldAutoEnableOnConnect({ existing, site }), true, `must grant autonomy identically regardless of tenant name (${name})`);
+    }
+  });
 });
 
 describe('route registration', () => {

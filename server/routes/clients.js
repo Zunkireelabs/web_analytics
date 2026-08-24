@@ -352,7 +352,9 @@ router.post('/internal/clients/:id/retry-baseline', async (req, res, next) => {
 
 // Optional step 3 — GitHub repo config for the Action Center's PR-apply
 // flow. Genuinely optional (many clients won't need it on day one) —
-// separate from the required GSC/GA4 connect step above.
+// separate from the required GSC/GA4 connect step above. On a genuinely
+// first-time connection, this is also the single moment a tenant enters full
+// autonomy: see the auto_remediation_enabled block below.
 router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
   try {
     const siteId = Number(req.params.id);
@@ -381,7 +383,27 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       }
     }
 
-    const site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+    let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+
+    // Full onboarding autonomy: a genuinely first-time repo connection
+    // automatically grants the same consent the platform_admin-only
+    // /auto-remediation route below exists to collect by hand — no separate
+    // manual click, no per-tenant setup, so every newly onboarded client
+    // enters the self-healing/auto-remediation pipeline the moment its repo
+    // is connected. See shouldAutoEnableOnConnect's own comment for why this
+    // is scoped to first connections only.
+    if (shouldAutoEnableOnConnect({ existing, site })) {
+      site = await updateSiteAutoRemediation({ siteId, enabled: true, dailyLimit: site.auto_remediation_daily_limit });
+      await recordAuditEvent(req, {
+        action: 'tenant.auto_remediation_enabled',
+        targetType: 'site',
+        targetId: String(siteId),
+        tenantSiteId: siteId,
+        tenantName: site.name,
+        metadata: { enabled: true, dailyLimit: site.auto_remediation_daily_limit, autoEnabledAtOnboarding: true },
+        success: true,
+      });
+    }
 
     // Best-effort: a repo connect must succeed even if this queue-insert
     // fails, since the 06:00 daily sweep (job.js) picks up any site still
@@ -401,7 +423,11 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       success: true,
     });
 
-    res.json({ id: site.id, repoOwner: site.repo_owner, repoName: site.repo_name });
+    res.json({
+      id: site.id, repoOwner: site.repo_owner, repoName: site.repo_name,
+      autoRemediationEnabled: site.auto_remediation_enabled,
+      autoRemediationDailyLimit: site.auto_remediation_daily_limit,
+    });
   } catch (e) { next(e); }
 });
 
@@ -542,6 +568,35 @@ router.post('/internal/clients/:id/learned-repair', async (req, res, next) => {
 // unattended are unit-testable without an HTTP layer (this repo has no
 // supertest convention). Returns null when the request is acceptable, or the
 // customer-facing reason it isn't.
+// Whether a connect-repo request (routes/clients.js's own /connect-repo
+// route, above) should ALSO auto-grant the same auto_remediation_enabled
+// consent the admin-only route just below normally collects by hand. Pure
+// and exported, same reasoning as validateAutoRemediationRequest's own
+// comment (no supertest convention in this repo — decision logic has to be
+// testable on its own).
+//
+// `existing` is the site row from BEFORE this connect-repo request ran;
+// `site` is the row AFTER updateSiteRepoConfig already saved the new repo
+// config. Scoped to a genuinely FIRST connection (existing had no
+// repo_owner/repo_name at all) — re-saving an already-connected site's repo
+// config (a different owner/name, a refreshed url_file_map) must never
+// silently re-flip this back on. There is no separate "an admin explicitly
+// disabled this" flag in the schema, so this is the only way to avoid
+// overwriting that decision: a site that already had a repo could only have
+// auto_remediation_enabled=false because either nobody has enabled it yet
+// (correct to grant now, but that already happened on ITS first connection)
+// or a human turned it off on purpose (must never be silently reversed by a
+// routine config edit). Reuses validateAutoRemediationRequest itself rather
+// than duplicating its rules, so the two paths can never drift apart.
+export function shouldAutoEnableOnConnect({ existing, site }) {
+  const isFirstRepoConnection = !existing?.repo_owner && !existing?.repo_name;
+  if (!isFirstRepoConnection || site?.auto_remediation_enabled) return false;
+  const invalid = validateAutoRemediationRequest({
+    enabled: true, dailyLimit: site?.auto_remediation_daily_limit, site,
+  });
+  return !invalid;
+}
+
 export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
   if (typeof enabled !== 'boolean') return 'enabled must be true or false.';
   // Matches migration 101's own CHECK (>= 0) rather than inventing a second,

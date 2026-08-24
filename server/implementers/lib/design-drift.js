@@ -585,6 +585,14 @@ export function siteHasUsableDesignProfile(site) {
   return isProfileUsable(getDesignProfile(site));
 }
 
+// Re-exported for discoverability alongside the rest of this module's
+// Design Agent readiness logic — the real implementation lives in
+// onboarding-readiness.js, a deliberately leaf-level module (see its own
+// comment) so callers that only need this one check don't pull in this
+// file's much heavier import graph (audit-log, agent-memory,
+// openhands-handler, ...).
+export { isOnboardingAnalysisPending } from './onboarding-readiness.js';
+
 // Validates and saves a freshly-derived profile, then projects EVERY
 // design-sensitive component template from it in the same pass. That is the
 // architectural point: one analysis yields the site's whole design-sensitive

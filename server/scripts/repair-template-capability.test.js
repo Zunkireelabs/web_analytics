@@ -334,6 +334,48 @@ describe('repairTemplateCapabilitiesForSite — live architectural-gap execution
     assert.match(report.architecturalGapsBlocked[0].reason, /auto_remediation_enabled is off/);
     assert.equal(githubCalls.openPullRequest.length, 0);
   });
+
+  // Two-stage onboarding: connect-repo grants auto_remediation_enabled AND
+  // queues the whole-site analysis job, but repair execution must still wait
+  // for that analysis to finish — auto_remediation_enabled alone is not
+  // sufficient the very same pass a brand-new tenant connects.
+  describe('two-stage onboarding — repair waits for the analysis job, not just auto_remediation_enabled', () => {
+    test('onboarding analysis still pending -> stays blocked, no job dispatched, even though auto_remediation_enabled is true', async () => {
+      const report = await repairTemplateCapabilitiesForSite(1, { onboardingAnalysisPending: async () => true });
+      assert.equal(capabilityRepairCalls.length, 0);
+      assert.equal(report.architecturalGapsRepaired.length, 0);
+      assert.equal(report.architecturalGapsBlocked.length, 1);
+      assert.match(report.architecturalGapsBlocked[0].reason, /onboarding analysis is still in progress/);
+      assert.equal(githubCalls.openPullRequest.length, 0);
+    });
+
+    test('dry-run also reports honestly that onboarding analysis is pending, not "would queue"', async () => {
+      const report = await repairTemplateCapabilitiesForSite(1, { dryRun: true, onboardingAnalysisPending: async () => true });
+      assert.equal(capabilityRepairCalls.length, 0);
+      assert.equal(report.architecturalGapsWithDerivedTask.length, 0);
+      assert.equal(report.architecturalGapsBlocked.length, 1);
+      assert.match(report.architecturalGapsBlocked[0].reason, /onboarding analysis is still in progress/);
+    });
+
+    test('onboarding analysis terminal (not pending) -> proceeds to the normal live repair path', async () => {
+      capabilityRepairJobResult = {
+        filesChanged: [
+          { path: 'src/_includes/layouts/service.njk', newContent: TEMPLATE_AFTER },
+          { path: 'src/_data/servicesShared.js', newContent: DATA_AFTER },
+        ],
+      };
+      const report = await repairTemplateCapabilitiesForSite(1, { onboardingAnalysisPending: async () => false });
+      assert.equal(report.architecturalGapsRepaired.length, 1);
+      assert.equal(report.architecturalGapsBlocked.length, 0);
+      assert.equal(capabilityRepairCalls.length, 1);
+    });
+
+    test('the onboarding-pending check runs once per site call, not once per gap (checked via call count)', async () => {
+      let calls = 0;
+      await repairTemplateCapabilitiesForSite(1, { onboardingAnalysisPending: async () => { calls++; return true; } });
+      assert.equal(calls, 1);
+    });
+  });
 });
 
 describe('repairTemplateCapabilitiesForSite — Pass 0: page-level file-mapping auto-heal', () => {

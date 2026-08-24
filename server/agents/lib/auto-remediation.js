@@ -5,6 +5,7 @@ import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
+import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -122,9 +123,22 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
 // caller (routes/action-center.js's executeSafeFixes, a human-triggered
 // batch, is never subject to it — same reasoning as pacing above, a human
 // asking for a batch isn't the runaway this ceiling exists to catch).
-export async function autoRemediateSafeRecommendations(siteId, { globalRemaining = Infinity } = {}) {
+export async function autoRemediateSafeRecommendations(siteId, {
+  globalRemaining = Infinity,
+  onboardingAnalysisPending = isOnboardingAnalysisPending,
+} = {}) {
   const site = await getSiteById(siteId);
   if (!site?.auto_remediation_enabled) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
+
+  // Two-stage onboarding: a genuinely new tenant's repo connection queues
+  // ONLY the whole-site analysis job (job.js's queueDesignAgentDerivationForSite)
+  // — this loop must not open a single PR until that analysis has reached a
+  // terminal state, however many cron passes that takes. See
+  // isOnboardingAnalysisPending's own comment for exactly what "pending"
+  // means and why a site that predates this gate is never newly blocked.
+  if (await onboardingAnalysisPending(site)) {
+    return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' };
+  }
 
   const [rows, draftedFindingIds, spentToday, learnedMap] = await Promise.all([
     listOpenRecommendations(siteId),

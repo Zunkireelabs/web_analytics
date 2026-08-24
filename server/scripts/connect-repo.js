@@ -1,8 +1,18 @@
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
-import { pool, updateSiteRepoConfig } from '../db.js';
+import { pool, updateSiteRepoConfig, updateSiteAutoRemediation } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { auditSite } from './audit-url-file-map.js';
+import { shouldAutoEnableOnConnect } from '../routes/clients.js';
+import { queueDesignAgentDerivationForSite } from '../job.js';
+import { recordAuditEvent } from '../store/admin/audit-log.js';
+
+// A synthetic req so recordAuditEvent's resolveActor(req) records this as a
+// 'system' actor rather than throwing on a missing req.userId — same shape
+// design-drift.js's own systemActorReq uses for the same reason.
+function systemActorReq(siteId) {
+  return { userId: null, siteId, ip: null, get: () => null };
+}
 
 // Attach a GitHub repo to a site already created via `npm run create-client`,
 // so the Action Center can apply approved drafts as real pull requests
@@ -88,7 +98,7 @@ async function main() {
     throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
   }
 
-  const updated = await updateSiteRepoConfig({ siteId, ...update });
+  let updated = await updateSiteRepoConfig({ siteId, ...update });
   console.log(`Updated site #${updated.id} "${updated.name}":`);
   if (update.repoOwner !== undefined) console.log(`  repo_owner → ${updated.repo_owner}`);
   if (update.repoName !== undefined) console.log(`  repo_name → ${updated.repo_name}`);
@@ -101,6 +111,35 @@ async function main() {
 
   if (updated.repo_owner && updated.repo_name) {
     console.log(`Repo configured: ${updated.repo_owner}/${updated.repo_name}. Make sure the ${updated.github_pat_env_var} env var is set, then check Integration Health for "GitHub (Action Center)".`);
+
+    // Full onboarding autonomy — same rule and same shouldAutoEnableOnConnect
+    // function routes/clients.js's HTTP /connect-repo route uses, so a site
+    // connected via this CLI script (the path staff actually use for
+    // onboarding, per the action-center-onboarding runbook) enters the
+    // self-healing/auto-remediation pipeline exactly the same way a site
+    // connected through the admin UI would — no separate manual click either
+    // way. Scoped to a genuinely first connection only; see that function's
+    // own comment for why re-running this script against an already-connected
+    // site must never re-flip a human's later decision to turn it off.
+    if (shouldAutoEnableOnConnect({ existing: site, site: updated })) {
+      updated = await updateSiteAutoRemediation({ siteId, enabled: true, dailyLimit: updated.auto_remediation_daily_limit });
+      console.log(`  auto_remediation_enabled → true (daily limit ${updated.auto_remediation_daily_limit}) — full onboarding autonomy granted on this first repo connection.`);
+      await recordAuditEvent(systemActorReq(siteId), {
+        action: 'tenant.auto_remediation_enabled',
+        targetType: 'site',
+        targetId: String(siteId),
+        tenantSiteId: siteId,
+        tenantName: updated.name,
+        metadata: { enabled: true, dailyLimit: updated.auto_remediation_daily_limit, autoEnabledAtOnboarding: true, via: 'connect-repo.js' },
+        success: true,
+      }).catch((err) => console.warn(`Could not record audit event: ${err.message}`));
+    }
+
+    // Best-effort, same as the HTTP route: queue the whole-site Design Agent
+    // derivation right away rather than waiting for the next 06:00 sweep.
+    queueDesignAgentDerivationForSite(updated).catch((err) =>
+      console.warn(`Could not queue Design Agent derivation: ${err.message} — the next daily sweep will pick this up instead.`)
+    );
 
     // Auto-run the same config-completeness check `npm run audit-url-file-map`
     // does, right now, instead of leaving it as a separate step someone has

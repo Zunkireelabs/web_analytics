@@ -28,9 +28,11 @@ let generateError;
 let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the normal production path)
 let recordedOutcomes; // Phase 5: [{generatorId, outcome}] recorded via the mocked recordOutcome below
 let learnedMap; // Phase 5: generatorId -> {demote, ...} fed to classifyRecommendation via the mocked getLearnedConfidenceMap
+let onboardingPending; // two-stage onboarding: whether the whole-site analysis job is still in flight
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
+  onboardingPending = false; // matches every existing test's assumption: analysis already done, repair may proceed
   recommendations = [];
   draftedFindingIds = new Set();
   spentToday = 0;
@@ -89,6 +91,15 @@ mock.module(resolve('./generator-learning.js'), {
     recordOutcome: async (siteId, generatorId, outcome) => { recordedOutcomes.push({ generatorId, outcome }); },
   },
 });
+// The real implementation (implementers/lib/onboarding-readiness.js) hits a
+// real DB via getLatestDesignAgentJob — mocked here the same way every other
+// collaborator in this file is, so the default (`onboardingPending = false`
+// via reset()) matches every existing test's assumption that onboarding
+// analysis has already completed. The two-stage-onboarding describe block
+// below flips `onboardingPending` to exercise the gate itself.
+mock.module(resolve('../../implementers/lib/onboarding-readiness.js'), {
+  namedExports: { isOnboardingAnalysisPending: async () => onboardingPending },
+});
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
     generateDraft: async (siteId, { generatorId, findingId, findingOrigin }) => {
@@ -137,6 +148,49 @@ describe('auto-remediation — opt-in gate', () => {
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.stoppedReason, 'disabled');
     assert.equal(calls.generated.length, 0, 'must not touch a site that never opted in');
+  });
+});
+
+// Two-stage onboarding: connect-repo grants auto_remediation_enabled AND
+// queues the whole-site analysis job in the same moment, but this loop must
+// still wait for that analysis to finish before opening a single PR — being
+// enabled is necessary but not sufficient the very same pass a brand-new
+// tenant connects its repo.
+describe('auto-remediation — two-stage onboarding gate', () => {
+  beforeEach(reset);
+
+  test('onboarding analysis still pending -> does nothing, even though auto_remediation_enabled is true', async () => {
+    onboardingPending = true;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'onboarding-analysis-pending');
+    assert.equal(calls.generated.length, 0, 'must not open any PR while onboarding analysis is still in flight');
+  });
+
+  test('onboarding analysis terminal (not pending) -> proceeds normally', async () => {
+    onboardingPending = false;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.notEqual(result.stoppedReason, 'onboarding-analysis-pending');
+    assert.equal(calls.generated.length, 1);
+  });
+
+  test('the injectable onboardingAnalysisPending option is honored independently of the mocked module default', async () => {
+    // onboardingPending (module-level mock) is false via reset(), but the
+    // explicit per-call option must still win — same DI pattern as every
+    // other injectable dependency in this codebase.
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1, { onboardingAnalysisPending: async () => true });
+    assert.equal(result.stoppedReason, 'onboarding-analysis-pending');
+    assert.equal(calls.generated.length, 0);
+  });
+
+  test('disabled still wins over onboarding-pending when both are true — the more fundamental reason is reported', async () => {
+    site.auto_remediation_enabled = false;
+    onboardingPending = true;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'disabled');
   });
 });
 

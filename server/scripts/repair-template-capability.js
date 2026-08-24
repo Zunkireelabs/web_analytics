@@ -43,6 +43,7 @@ import {
   classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, GENERATOR_VALUE_KEYS, parseAiManagedSlots,
   findSlotForGenerator, fieldNameFromExpr,
 } from '../agents/lib/template-capability-repair.js';
+import { isOnboardingAnalysisPending } from '../implementers/lib/onboarding-readiness.js';
 import { createCapabilityRepairHandler } from '../design-agent/openhands-handler.js';
 import { recordCapabilityRepair } from '../store/capability-repairs.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
@@ -223,11 +224,23 @@ async function findConventionExamples(site, ref, generatorId, {
 
 // The callable core, usable both from the CLI (main() below) and from
 // job.js/cron.js for unattended nightly runs across every connected site.
-export async function repairTemplateCapabilitiesForSite(siteId, { dryRun = false } = {}) {
+export async function repairTemplateCapabilitiesForSite(siteId, {
+  dryRun = false,
+  onboardingAnalysisPending = isOnboardingAnalysisPending,
+} = {}) {
   const args = { siteId, dryRun };
   let site = await getSiteById(siteId);
   if (!site) throw new Error(`No site ${siteId}`);
   if (!site.repo_owner || !site.repo_name) throw new Error(`Site ${siteId} has no repo connected — nothing to repair.`);
+
+  // Two-stage onboarding: computed once per run (not per gap group below) —
+  // a genuinely new tenant's repo connection queues ONLY the whole-site
+  // analysis job, and the live architectural-gap branch further down must
+  // not open a single PR until that analysis is terminal. See
+  // isOnboardingAnalysisPending's own comment (design-drift.js) for exactly
+  // what "pending" means and why an existing, already-running tenant is
+  // never newly blocked by it.
+  const onboardingPending = await onboardingAnalysisPending(site);
 
   const { rows: recs } = await query(
     `SELECT id, page, recommendation_type, blocked_reason, blocked_kind
@@ -540,6 +553,20 @@ export async function repairTemplateCapabilitiesForSite(siteId, { dryRun = false
       report.architecturalGapsBlocked.push({
         generatorId: group.generatorId, pages: [...group.pages], recIds: group.recIds,
         reason: `A capability-repair Design Agent job could derive a fix for "${group.generatorId}" on ${resolved.layoutPath}, but this site has not been through its one-time auto-remediation review (auto_remediation_enabled is off) — no autonomous edit to the client's real repo will run until that consent is granted.`,
+      });
+      continue;
+    }
+
+    // Two-stage onboarding: this site's whole-site analysis (queued at
+    // connect-repo time) hasn't reached a terminal state yet — repair
+    // execution waits for whatever LATER cron pass finds it done, never
+    // runs the same pass regardless of completion. Checked here (not just
+    // once at the top) for the same dry-run-honesty reason as the
+    // auto_remediation_enabled check just above.
+    if (onboardingPending) {
+      report.architecturalGapsBlocked.push({
+        generatorId: group.generatorId, pages: [...group.pages], recIds: group.recIds,
+        reason: `A capability-repair Design Agent job could derive a fix for "${group.generatorId}" on ${resolved.layoutPath}, but this site's initial onboarding analysis is still in progress — no autonomous edit to the client's real repo will run until that analysis finishes. This will resolve itself automatically on a later scheduled run.`,
       });
       continue;
     }
