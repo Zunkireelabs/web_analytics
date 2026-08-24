@@ -2,6 +2,7 @@ import { getKeywordGaps, getKeywordClusters, getSiteProfile, saveKeywordNarrativ
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { listConnectedSites } from '../job.js';
 import { callLLM } from '../llm.js';
+import { runAgent } from './runner.js';
 
 const SYSTEM_PROMPT = `You are an SEO and AI visibility analyst.
 Write a brief 3 paragraph narrative summary.
@@ -105,8 +106,9 @@ function buildFindings(facts) {
 // "skipping keyword-narrative.js" on every load and the agent was invisible
 // to orchestrator.js, the Copilot, and agentic-orchestrator.js's tool loop —
 // the LLM there builds its tool list from listAgentMeta(), so it could never
-// call keyword narrative no matter how relevant the question. It ran only via
-// the cron path below.
+// call keyword narrative no matter how relevant the question. The cron path
+// below now calls this directly too (via runAgent), instead of a separate
+// duplicate-work path — see that function's comment.
 export async function run({ siteId }) {
   const facts = await collectFacts(siteId);
   if (!facts) {
@@ -120,6 +122,10 @@ export async function run({ siteId }) {
   const narrative = await callLLM(SYSTEM_PROMPT, `Facts: ${JSON.stringify(facts)}`, { maxTokens: 400 })
     .catch((err) => { console.warn('[agents] keyword-narrative narrative failed:', err.message); return null; });
 
+  // Dashboard-read side effect lives here now, not in a second parallel
+  // code path — see runKeywordNarrativeForAllSites below for why.
+  if (narrative) await saveKeywordNarrative(siteId, narrative);
+
   return {
     meta, status: 'ok',
     facts: { ...facts, findings: buildFindings(facts) },
@@ -128,31 +134,22 @@ export async function run({ siteId }) {
   };
 }
 
-// Supplementary to the Python executive-summary pipeline in data-analyst-agent/
-// (never imported by it, never imports from it) — synthesizes keyword-gap,
-// clustering, and AI-visibility data that pipeline doesn't currently read.
-//
-// Kept as its own export rather than folded into run(): this one PERSISTS the
-// narrative via saveKeywordNarrative (the dashboard reads that row), whereas
-// run() returns it for the caller to do with as it likes and lets
-// agents/runner.js persist the agent_runs history row. Same facts, two
-// different destinations.
-export async function generateKeywordNarrative(siteId) {
-  const facts = await collectFacts(siteId);
-  if (!facts) return null;
-
-  const narrative = await callLLM(SYSTEM_PROMPT, `Facts: ${JSON.stringify(facts)}`, { maxTokens: 400 });
-  await saveKeywordNarrative(siteId, narrative);
-  return narrative;
-}
-
+// Cron entry point (server/cron.js's 14-day keyword-narrative schedule).
+// Previously called a separate generateKeywordNarrative() that duplicated
+// collectFacts()+callLLM() and wrote ONLY saveKeywordNarrative — it never
+// went through agents/runner.js's runAgent(), so this cron firing (even
+// successfully, every 14 days) never wrote an agent_runs row. That's why
+// the Agent Taskforce showed "Never run" for this agent regardless of
+// whether the cron had actually fired — routing through runAgent() here
+// fixes both the missing history AND the double LLM call the two parallel
+// paths used to make for the same site on the same tick.
 export async function runKeywordNarrativeForAllSites() {
   const sites = await listConnectedSites();
   const results = [];
   for (const site of sites) {
     try {
-      const narrative = await generateKeywordNarrative(site.id);
-      results.push({ siteId: site.id, status: narrative ? 'ok' : 'skipped' });
+      const output = await runAgent('keyword-narrative', { siteId: site.id }, { persist: true });
+      results.push({ siteId: site.id, status: output.status });
     } catch (err) {
       console.error(`[keyword-narrative] site ${site.id} "${site.name}" failed:`, err.message);
       results.push({ siteId: site.id, status: 'error' });

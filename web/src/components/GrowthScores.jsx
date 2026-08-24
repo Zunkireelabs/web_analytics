@@ -1,5 +1,3 @@
-import { timeAgo } from '../api.js';
-
 // Compact top-of-page score tiles for AI Growth: Overall (Website Health),
 // SEO (Authority Score), AEO (AI-visibility readiness), GEO (geo-audit).
 // Each value is a real, independently-computed 0-100 number — the same
@@ -72,7 +70,6 @@ function ScoreTile({ label, icon, iconBg, score, sublabel, meta, loading, accent
 export default function GrowthScores({ data, loading }) {
   const geoScore = data?.geoAudit?.score ?? null;
   const geoMeta = data?.geoAuditMeta;
-  const geoSublabel = geoMeta?.lastRunAt ? `Updated ${timeAgo(geoMeta.lastRunAt)}` : 'No audit run yet';
 
   const healthScore = data?.health?.score ?? null;
   const healthTrend = data?.health?.trendWeek;
@@ -123,7 +120,7 @@ export default function GrowthScores({ data, loading }) {
         iconBg="#f0f9ff"
         accent="#0ea5e9"
         score={loading ? null : geoScore}
-        sublabel={geoSublabel}
+        sublabel="Generative engine visibility"
         meta={geoMeta}
         loading={loading}
       />

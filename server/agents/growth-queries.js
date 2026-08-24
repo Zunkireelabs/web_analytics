@@ -27,6 +27,14 @@ export const meta = {
   id: 'growth-queries',
   name: 'Growth Query Discovery',
   category: 'geo',
+  // Missing until now — agent_runs.agent_version is NOT NULL, so every real
+  // run of this agent succeeded (it always returned real findings) but
+  // runner.js's saveAgentRun() silently failed on the constraint violation
+  // (caught and only console.error'd, never surfacing to a caller). The
+  // agent worked; its run history just never got written, which is why it
+  // showed "Never run" in the Agent Taskforce despite real weekly/on-demand
+  // runs happening the whole time.
+  version: 1,
   description: 'Discovers the real range of search/AI-assistant queries this site\'s category gets asked, checks whether the site\'s own content directly answers each one, and tracks whether newly-covered gaps actually start showing up in Google or AI assistants over time.',
   dataSources: [
     { id: 'gsc-query-data', status: 'connected', description: 'Real Google Search Console query/impression/position data for this site — the primary discovery signal.' },
