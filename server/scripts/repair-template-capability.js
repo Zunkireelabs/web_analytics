@@ -44,13 +44,68 @@ import {
   findSlotForGenerator, fieldNameFromExpr,
 } from '../agents/lib/template-capability-repair.js';
 import { isOnboardingAnalysisPending } from '../implementers/lib/onboarding-readiness.js';
-import { createCapabilityRepairHandler } from '../design-agent/openhands-handler.js';
+import { createDesignAgentJob, getDesignAgentJobById } from '../store/execution-jobs.js';
 import { recordCapabilityRepair } from '../store/capability-repairs.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { autoHealNewContentTarget } from '../implementers/lib/discover-content-target.js';
 import { resolveFile, resolveNewContentTarget } from '../implementers/lib/url-file-map.js';
 import { FRONTEND_ACTION_TYPES } from '../implementers/frontend.js';
 import { basename, extname } from 'node:path';
+
+// Runs one capability-repair Design Agent job through the SAME queue +
+// worker.js poll loop every other Design Agent job uses (090's
+// execution_jobs machinery), instead of calling openhands-handler.js's
+// createCapabilityRepairHandler() directly in-process.
+//
+// That direct call is what this replaced, and it was a real, currently-live
+// bug: this script runs inside the main app container (root Dockerfile,
+// plain node:20-alpine) via server/cron.js, which has neither the Python
+// venv nor the Docker socket createCapabilityRepairHandler needs — those
+// exist only in design-agent-worker's own image (see its Dockerfile).
+// Every architectural-gap repair attempt was failing at the Python-spawn
+// step, every single day, for every eligible site, landing silently in
+// architecturalGapsBlocked with a deployment-fault message no one was
+// watching for.
+//
+// Mirrors design-drift.js's resolveOrCreateComponentTemplate
+// (waitForCompletion path) exactly: enqueue via the generic
+// createDesignAgentJob, then poll the job row's status rather than the
+// container itself, since only design-agent-worker's own process — a
+// different container — actually claims and runs it. Bounded by
+// waitBudgetMs so one slow/stuck job can't hang the whole daily pass
+// forever; a timeout is reported the same way a real failure is, and the
+// gap is picked up again on the next run. A pass-scoped timeout (not
+// caller-set retries) is correct here: this script already treats each
+// gap as independent and moves on to the next one on any failure.
+const CAPABILITY_REPAIR_WAIT_MS = Number(process.env.DESIGN_AGENT_WAIT_MS) || 15 * 60 * 1000;
+const CAPABILITY_REPAIR_POLL_INTERVAL_MS = 5000;
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+async function runCapabilityRepairJob(siteId, payload, {
+  enqueue = createDesignAgentJob, pollJobStatus = getDesignAgentJobById,
+  sleep = defaultSleep, waitBudgetMs = CAPABILITY_REPAIR_WAIT_MS,
+} = {}) {
+  const queued = await enqueue(siteId, null, { params: { mode: 'capability-repair', payload } });
+  const deadline = Date.now() + waitBudgetMs;
+  let finished = null;
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const job = await pollJobStatus(queued.id).catch(() => null);
+    if (job && job.status !== 'queued' && job.status !== 'executing') {
+      finished = job;
+      break;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(CAPABILITY_REPAIR_POLL_INTERVAL_MS);
+  }
+  if (!finished) {
+    throw new Error(`capability-repair job ${queued.id} did not finish within ${waitBudgetMs}ms — still queued or executing`);
+  }
+  if (finished.status !== 'completed') {
+    throw new Error(finished.result?.failure?.message || `capability-repair job ${queued.id} failed`);
+  }
+  return finished.result;
+}
 
 function parseArgs(argv) {
   const args = { dryRun: false };
@@ -610,11 +665,7 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
 
     let jobResult;
     try {
-      jobResult = await createCapabilityRepairHandler()({
-        id: `capability-repair-${group.patternIdx}-${group.generatorId}`,
-        site_id: site.id,
-        payload: derivedTaskPayload,
-      });
+      jobResult = await runCapabilityRepairJob(site.id, derivedTaskPayload);
     } catch (err) {
       report.architecturalGapsBlocked.push({
         generatorId: group.generatorId, pages: [...group.pages], recIds: group.recIds,
