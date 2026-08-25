@@ -119,7 +119,7 @@ mock.module(resolve('../../routes/action-center.js'), {
       calls.generated.push(findingId);
       return { id: `d-${findingId}`, status: 'draft', content: {} };
     },
-    approveAndPublishDraft: async (siteId, draftId) => {
+    approveAndPublishDraftUnattended: async (siteId, draftId) => {
       calls.approved.push(draftId);
       // approveAndPublishDraft ends in markDraftPrOpened whenever the resolved
       // implementer exposes mergeToStage — which every real one does — so in
