@@ -148,6 +148,47 @@ class ClassifySandboxConstructionErrorTest(unittest.TestCase):
         )
 
 
+class ClassifyContainerRunErrorTest(unittest.TestCase):
+    """Regression coverage for job 1742 on staging: a container that exited
+    cleanly (exitCode 0, not OOM-killed) and was already auto-removed
+    (--rm) by the time its logs were requested reported "Container stopped
+    unexpectedly...Error response from daemon: can not get logs from
+    container which is dead or marked for removal" — and the old handler's
+    "docker"/"daemon" check ran before its "container" check, so this
+    routine Docker CLI wording sent it to ENVIRONMENT_DOCKER_UNAVAILABLE
+    instead of ENVIRONMENT_CONTAINER_CRASHED, five times in a row."""
+
+    def test_container_stopped_unexpectedly_wins_even_when_daemon_is_mentioned(self):
+        self.assertEqual(
+            design_task.classify_container_run_error(
+                "Container stopped unexpectedly. Logs:\n\n"
+                "Error response from daemon: can not get logs from container which is dead or marked for removal"
+            ),
+            "ENVIRONMENT_CONTAINER_CRASHED",
+        )
+
+    def test_no_such_container_wins_even_when_docker_is_mentioned(self):
+        self.assertEqual(
+            design_task.classify_container_run_error("No such container: docker could not find it"),
+            "ENVIRONMENT_CONTAINER_CRASHED",
+        )
+
+    def test_genuine_docker_unavailable_is_still_recognized(self):
+        self.assertEqual(
+            design_task.classify_container_run_error("Docker is not available. Please install and start Docker Desktop/daemon."),
+            "ENVIRONMENT_DOCKER_UNAVAILABLE",
+        )
+
+    def test_model_auth_is_still_recognized(self):
+        self.assertEqual(
+            design_task.classify_container_run_error("401 Unauthorized: invalid api key"),
+            "ENVIRONMENT_MODEL_AUTH",
+        )
+
+    def test_an_unrecognized_message_stays_unclassified_not_guessed(self):
+        self.assertIsNone(design_task.classify_container_run_error("some completely novel SDK failure"))
+
+
 class FindOrphanedSandboxContainerTest(unittest.TestCase):
     """The container DockerWorkspace() itself started (if `docker run`
     succeeded before _wait_for_health() failed) is never cleaned up by the

@@ -378,6 +378,38 @@ def classify_sandbox_construction_error(err_text):
     return None
 
 
+def classify_container_run_error(err_text):
+    """`errorClass` for a failure raised from _ContainerRunError — the
+    container passed its own health check and conversation.run() failed on
+    it afterward. Pulled out as its own function for the same testability
+    reason as classify_sandbox_construction_error above.
+
+    Checked BEFORE the generic docker/daemon match, unlike the sibling
+    function: Docker's own CLI/API wraps almost any daemon-returned error as
+    "Error response from daemon: ...", including the completely routine
+    "can not get logs from container which is dead or marked for removal"
+    that fires whenever this code asks for logs from a sandbox that already
+    exited and was auto-removed (--rm) — so a message reporting a crashed
+    container will very often incidentally contain "daemon" too, and here
+    (unlike the construction-error case) that mention is not evidence the
+    daemon itself was unreachable. Confirmed live: job 1742 exited cleanly
+    (exitCode 0, not OOM-killed — see containerDiagnostics) and was reported
+    as ENVIRONMENT_DOCKER_UNAVAILABLE purely because its "Container stopped
+    unexpectedly...Error response from daemon" message matched the old
+    docker/daemon check first, sending five straight investigations at a
+    Docker daemon that was never actually broken."""
+    text = err_text.lower()
+    if "container stopped unexpectedly" in text or "no such container" in text:
+        return "ENVIRONMENT_CONTAINER_CRASHED"
+    if "docker" in text or "daemon" in text:
+        return "ENVIRONMENT_DOCKER_UNAVAILABLE"
+    if "api key" in text or "unauthorized" in text or "authentication" in text:
+        return "ENVIRONMENT_MODEL_AUTH"
+    if "container" in text:
+        return "ENVIRONMENT_CONTAINER_CRASHED"
+    return None
+
+
 def _try_stop_container(container_id, docker_bin=None):
     """Best-effort `docker stop` — every container this process ever starts
     is run with --rm, so stopping it is enough to also remove it. Used by
@@ -1186,23 +1218,7 @@ def main() -> int:
         # still existed, since __exit__ (docker stop, which removes it) has
         # already run by the time we get here and nothing more can be
         # learned about it now.
-        text = str(err).lower()
-        if "docker" in text or "daemon" in text:
-            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
-        elif "api key" in text or "unauthorized" in text or "authentication" in text:
-            error_class = "ENVIRONMENT_MODEL_AUTH"
-        elif "container" in text:
-            # Covers the OpenHands SDK's own wording for a sandbox that died
-            # mid-run — "Container stopped unexpectedly", "No such
-            # container" — which never mentions docker/daemon by name but is
-            # the same class of deployment fault: the analysis never really
-            # ran to completion. Confirmed live on staging: Docker daemon,
-            # socket, and model credentials were all present and this is
-            # exactly the failure that still slipped through as
-            # unclassified before this branch existed.
-            error_class = "ENVIRONMENT_CONTAINER_CRASHED"
-        else:
-            error_class = None
+        error_class = classify_container_run_error(str(err))
         payload = {"status": "error", "detail": str(err)}
         if error_class:
             payload["errorClass"] = error_class
