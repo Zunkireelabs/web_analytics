@@ -381,9 +381,21 @@ export function createDesignAgentHandler(options = {}) {
   const fixtureDemoHandler = createOpenHandsHandler(options);
   const componentTemplateHandler = createComponentTemplateHandler(options);
   const designProfileHandler = createDesignProfileHandler(options);
+  // createCapabilityRepairHandler (below) expects job.site_id (already a
+  // real column on every execution_jobs row, no adaptation needed) and
+  // job.payload — but a queued row's payload travels in the jsonb `params`
+  // column like every other mode here, not a top-level `payload` field
+  // (createCapabilityRepairHandler's own buildArgs was written for a
+  // synchronous, hand-built job object — see repair-template-capability.js's
+  // 2026-08-25 fix, which moved its one caller from calling this handler
+  // in-process to queuing through this dispatcher instead, since that
+  // caller's own container has neither Python nor the Docker socket this
+  // handler needs).
+  const capabilityRepairHandler = createCapabilityRepairHandler(options);
   return async function dispatchingHandler(job) {
     if (job.params?.mode === 'design-profile') return designProfileHandler(job);
     if (job.params?.mode === 'component-templates') return componentTemplateHandler(job);
+    if (job.params?.mode === 'capability-repair') return capabilityRepairHandler({ ...job, payload: job.params?.payload });
     return fixtureDemoHandler(job);
   };
 }

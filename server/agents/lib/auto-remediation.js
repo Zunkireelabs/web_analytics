@@ -1,7 +1,7 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
-import { generateDraft, approveAndPublishDraft, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
+import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
@@ -438,7 +438,7 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   const submitted = await submitDraftForApproval(siteId, draft.id);
   if (!submitted) throw new Error('Draft was not in a submittable state');
 
-  const approved = await approveAndPublishDraft(siteId, draft.id, { userId: null });
+  const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null });
   if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
   return approved;
 }

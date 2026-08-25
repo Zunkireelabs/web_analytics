@@ -237,16 +237,24 @@ def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server
     remote_workspace_cls, port_finder) purely so this is unit-testable
     without a Docker daemon or the OpenHands SDK.
     """
+    # Reserved once, up front, so it's available to every except branch below
+    # even though DockerWorkspace() itself never hands it back on failure —
+    # this is what lets orphan discovery below be scoped to a container this
+    # attempt could actually have started, instead of "whatever agent-server-*
+    # container is newest" (see _find_orphaned_sandbox_container's docstring
+    # for why that used to be unsafe).
+    kwargs = sandbox_workspace_kwargs(port_finder)
+    host_port = kwargs["host_port"]
     try:
         workspace = docker_workspace_cls(
-            server_image=server_image, volumes=volumes, working_dir=working_dir,
-            **sandbox_workspace_kwargs(port_finder),
+            server_image=server_image, volumes=volumes, working_dir=working_dir, **kwargs,
         )
         return workspace, workspace.cleanup, getattr(workspace, "_container_id", None), False
     except Exception as err:
+        err.host_port = host_port
         if not network or classify_sandbox_construction_error(str(err)) != "ENVIRONMENT_CONTAINER_UNHEALTHY":
             raise
-        orphan_id = _find_orphaned_sandbox_container()
+        orphan_id = _find_orphaned_sandbox_container(host_port=host_port)
         if not orphan_id:
             raise
         ip = _container_ip_on_network(orphan_id, network)
@@ -321,6 +329,27 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
         return {}
     docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
     diagnostics = {}
+    # `docker logs` first, `docker inspect` second — a container that has
+    # already stopped keeps serving its last recorded State to `inspect` for
+    # a bit after `--rm` starts removing it, but stops serving `logs` sooner
+    # ("can not get logs from container which is dead or marked for
+    # removal"). Confirmed live on job 1742: inspect still returned a real
+    # exitCode/oomKilled/status, but the logs call one step later hit that
+    # exact error — losing the one piece of evidence (the container's own
+    # stdout/stderr right before it died) that would have said WHY it
+    # stopped, leaving every future occurrence just as unexplained as this
+    # one. Capturing logs first does not fix the underlying race, only
+    # narrows the window enough for `logs` to also have a shot at it.
+    try:
+        logs = subprocess.run(
+            [docker_bin, "logs", "--tail", "200", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        combined = (logs.stdout or "") + (logs.stderr or "")
+        if combined:
+            diagnostics["logsTail"] = combined[-4000:]
+    except Exception as diag_err:  # noqa: BLE001 — diagnostics must never mask the real failure
+        diagnostics["logsError"] = str(diag_err)[:500]
     try:
         inspect = subprocess.run(
             [docker_bin, "inspect", container_id],
@@ -336,18 +365,8 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
                 diagnostics["stateError"] = state.get("Error")
         else:
             diagnostics["inspectError"] = (inspect.stderr or "").strip()[:500]
-    except Exception as diag_err:  # noqa: BLE001 — diagnostics must never mask the real failure
-        diagnostics["inspectError"] = str(diag_err)[:500]
-    try:
-        logs = subprocess.run(
-            [docker_bin, "logs", "--tail", "200", container_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        combined = (logs.stdout or "") + (logs.stderr or "")
-        if combined:
-            diagnostics["logsTail"] = combined[-4000:]
     except Exception as diag_err:  # noqa: BLE001 — same as above
-        diagnostics["logsError"] = str(diag_err)[:500]
+        diagnostics["inspectError"] = str(diag_err)[:500]
     return diagnostics
 
 
@@ -378,6 +397,38 @@ def classify_sandbox_construction_error(err_text):
     return None
 
 
+def classify_container_run_error(err_text):
+    """`errorClass` for a failure raised from _ContainerRunError — the
+    container passed its own health check and conversation.run() failed on
+    it afterward. Pulled out as its own function for the same testability
+    reason as classify_sandbox_construction_error above.
+
+    Checked BEFORE the generic docker/daemon match, unlike the sibling
+    function: Docker's own CLI/API wraps almost any daemon-returned error as
+    "Error response from daemon: ...", including the completely routine
+    "can not get logs from container which is dead or marked for removal"
+    that fires whenever this code asks for logs from a sandbox that already
+    exited and was auto-removed (--rm) — so a message reporting a crashed
+    container will very often incidentally contain "daemon" too, and here
+    (unlike the construction-error case) that mention is not evidence the
+    daemon itself was unreachable. Confirmed live: job 1742 exited cleanly
+    (exitCode 0, not OOM-killed — see containerDiagnostics) and was reported
+    as ENVIRONMENT_DOCKER_UNAVAILABLE purely because its "Container stopped
+    unexpectedly...Error response from daemon" message matched the old
+    docker/daemon check first, sending five straight investigations at a
+    Docker daemon that was never actually broken."""
+    text = err_text.lower()
+    if "container stopped unexpectedly" in text or "no such container" in text:
+        return "ENVIRONMENT_CONTAINER_CRASHED"
+    if "docker" in text or "daemon" in text:
+        return "ENVIRONMENT_DOCKER_UNAVAILABLE"
+    if "api key" in text or "unauthorized" in text or "authentication" in text:
+        return "ENVIRONMENT_MODEL_AUTH"
+    if "container" in text:
+        return "ENVIRONMENT_CONTAINER_CRASHED"
+    return None
+
+
 def _try_stop_container(container_id, docker_bin=None):
     """Best-effort `docker stop` — every container this process ever starts
     is run with --rm, so stopping it is enough to also remove it. Used by
@@ -392,7 +443,7 @@ def _try_stop_container(container_id, docker_bin=None):
         pass
 
 
-def _find_orphaned_sandbox_container(docker_bin=None):
+def _find_orphaned_sandbox_container(docker_bin=None, host_port=None):
     """Best-effort: find the sibling container DockerWorkspace's own
     constructor started, for a failure raised from inside that constructor
     itself (most commonly _wait_for_health() timing out) — we never get a
@@ -404,23 +455,47 @@ def _find_orphaned_sandbox_container(docker_bin=None):
     silently orphaned (leaking indefinitely) unless something finds and
     removes it.
 
-    Identified by the SDK's own fixed naming convention
-    (f"agent-server-{uuid}") and `docker ps`'s default newest-first
-    ordering — one job runs one sandbox container at a time, so the most
-    recent match is always this attempt's own container, never a stale one
-    from an earlier job (those were already `--rm`-removed on any successful
-    exit). Never raises — same discipline as _capture_container_diagnostics;
-    a diagnostics failure must not mask the real one."""
+    Scoped by `host_port` — the exact `-p {host_port}:8000` this attempt
+    reserved via port_finder() before calling DockerWorkspace() (see
+    open_sandbox_workspace) — NOT by "docker ps's newest agent-server-*
+    match", which this used to rely on. That assumed one job runs one
+    sandbox container at a time on the whole host, so the most recent match
+    was always this attempt's own container. That assumption breaks the
+    moment any two agent-server-* containers exist on the host at once — a
+    second worker, a manual run, or (per this platform's own stated
+    direction) a self-healing escalation path invoked outside the normal
+    queue — and there is nothing distinguishing "my own just-failed
+    container" from "someone else's perfectly healthy one" in the name
+    alone; grabbing the newest match unconditionally risked `docker rm -f`
+    force-killing a live sibling job's container (this branch) or, in
+    open_sandbox_workspace's fallback branch, hijacking it as this job's own
+    workspace. `host_port` is unique per attempt (port_finder() only ever
+    hands out an unused port), so matching on it can only ever identify a
+    container this exact attempt could have started.
+
+    When host_port is None (a caller that predates this scoping, or one that
+    genuinely has no port to give), this returns None rather than falling
+    back to the old unscoped newest-match behavior — a real orphan going
+    briefly unswept is a much smaller cost than force-killing someone else's
+    running job. Never raises — same discipline as
+    _capture_container_diagnostics; a diagnostics failure must not mask the
+    real one."""
+    if host_port is None:
+        return None
     docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    port_marker = f":{host_port}->"
     try:
         listing = subprocess.run(
-            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}", "-n", "1"],
+            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}\t{{.Ports}}"],
             capture_output=True, text=True, timeout=10,
         )
         if listing.returncode != 0:
             return None
-        container_id = listing.stdout.strip().splitlines()[0] if listing.stdout.strip() else None
-        return container_id or None
+        for line in listing.stdout.splitlines():
+            container_id, _, ports = line.partition("\t")
+            if container_id and port_marker in ports:
+                return container_id
+        return None
     except Exception:
         return None
 
@@ -1186,23 +1261,7 @@ def main() -> int:
         # still existed, since __exit__ (docker stop, which removes it) has
         # already run by the time we get here and nothing more can be
         # learned about it now.
-        text = str(err).lower()
-        if "docker" in text or "daemon" in text:
-            error_class = "ENVIRONMENT_DOCKER_UNAVAILABLE"
-        elif "api key" in text or "unauthorized" in text or "authentication" in text:
-            error_class = "ENVIRONMENT_MODEL_AUTH"
-        elif "container" in text:
-            # Covers the OpenHands SDK's own wording for a sandbox that died
-            # mid-run — "Container stopped unexpectedly", "No such
-            # container" — which never mentions docker/daemon by name but is
-            # the same class of deployment fault: the analysis never really
-            # ran to completion. Confirmed live on staging: Docker daemon,
-            # socket, and model credentials were all present and this is
-            # exactly the failure that still slipped through as
-            # unclassified before this branch existed.
-            error_class = "ENVIRONMENT_CONTAINER_CRASHED"
-        else:
-            error_class = None
+        error_class = classify_container_run_error(str(err))
         payload = {"status": "error", "detail": str(err)}
         if error_class:
             payload["errorClass"] = error_class
@@ -1234,8 +1293,17 @@ def main() -> int:
         # the exception came from inside its own constructor. This is the
         # only window left to learn anything from it, and the only place
         # that stops it leaking on the host forever.
+        #
+        # host_port (set on `err` by open_sandbox_workspace, if that's where
+        # this came from) scopes the search to a container this attempt
+        # could actually have started — see _find_orphaned_sandbox_container's
+        # docstring. Without it, this branch used to `docker rm -f` the
+        # single newest agent-server-* container on the whole host with no
+        # check that it belonged to this attempt at all — on any host ever
+        # running more than one of these at once, that is a live sibling
+        # job's container, not this one's, force-killed out from under it.
         diagnostics = None
-        orphan_id = _find_orphaned_sandbox_container()
+        orphan_id = _find_orphaned_sandbox_container(host_port=getattr(err, "host_port", None))
         if orphan_id:
             diagnostics = _capture_container_diagnostics(orphan_id)
             try:

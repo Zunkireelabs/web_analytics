@@ -92,18 +92,35 @@ mock.module(resolve('../agents/lib/template-capability-repair.js'), {
   },
 });
 
-// capabilityRepairJobResult: what the mocked createCapabilityRepairHandler's
-// returned handler resolves to (or throws, if set to an Error) for the live
-// (non-dry-run) architectural-gap execution path.
+// capabilityRepairJobResult: what the queued capability-repair job's row
+// resolves to once "claimed and run" (or an Error, for a failed job) —
+// stands in for design-agent-worker's own separate process actually
+// completing it, which this script now waits on by polling the job row
+// (see repair-template-capability.js's runCapabilityRepairJob) instead of
+// calling openhands-handler.js's handler in-process (2026-08-25: that
+// in-process call was a real, currently-live bug — this script's own
+// container has neither the Python nor the Docker access that handler
+// needs, only design-agent-worker's container does).
 let capabilityRepairJobResult;
-let capabilityRepairCalls;
-mock.module(resolve('../design-agent/openhands-handler.js'), {
+let capabilityRepairCalls; // { siteId, payload } per createDesignAgentJob call
+const realExecutionJobs = await import(resolve('../store/execution-jobs.js'));
+mock.module(resolve('../store/execution-jobs.js'), {
   namedExports: {
-    createCapabilityRepairHandler: () => async (job) => {
-      capabilityRepairCalls.push(job);
-      if (capabilityRepairJobResult instanceof Error) throw capabilityRepairJobResult;
-      return capabilityRepairJobResult;
+    ...realExecutionJobs,
+    // Resolves 'completed'/'failed' on the very first poll — this script's
+    // own polling loop treats any non-queued/non-executing status as done,
+    // so there is nothing to wait out here; a real deployment's wait is
+    // exercised separately by design-drift.test.js's equivalent coverage of
+    // the same waitForCompletion pattern this mirrors.
+    createDesignAgentJob: async (siteId, recommendationId, { params } = {}) => {
+      capabilityRepairCalls.push({ siteId, payload: params?.payload });
+      return { id: 1 };
     },
+    getDesignAgentJobById: async (jobId) => (
+      capabilityRepairJobResult instanceof Error
+        ? { id: jobId, status: 'failed', result: { failure: { message: capabilityRepairJobResult.message } } }
+        : { id: jobId, status: 'completed', result: capabilityRepairJobResult }
+    ),
   },
 });
 

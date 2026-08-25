@@ -1,6 +1,25 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta } from './faq.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+
+let dataSourceResult; // what findRealFaqDataSource should return for the next call
+let siteForPage;
+
+mock.module(resolve('../store/read.js'), {
+  namedExports: { getSiteById: async () => siteForPage },
+});
+mock.module(resolve('./lib/faq-data-source.js'), {
+  namedExports: { findRealFaqDataSource: async () => dataSourceResult },
+});
+mock.module(resolve('../agents/lib/page-content.js'), {
+  namedExports: {
+    analyzePageUrl: async () => ({ ok: false, error: 'not used in these tests' }),
+    hasSufficientGroundingContent: () => false,
+  },
+});
+
+const { generate, meta } = await import('./faq.js');
 
 // Only exercises the input-validation path, which throws before ever
 // calling the LLM — no real network/API key needed, same convention as the
@@ -14,5 +33,40 @@ describe('faq generator', () => {
 
   test('meta.id matches the generatorId agents wire into recommendedAction', () => {
     assert.equal(meta.id, 'faq');
+  });
+});
+
+// Real incident, 2026-08-25: faq.js fabricated a brand-new, mismatched FAQ
+// for a page (/resources/) that already had real, correct FAQ content
+// sitting in the repo's own data file. These cover the fix: prefer real
+// data when it's found, and refuse rather than fabricate when the page
+// clearly has FAQ content this generator can't confidently ground in.
+describe('faq generator — real-data grounding (2026-08-25 fix)', () => {
+  siteForPage = { id: 1, repo_owner: 'Zunkireelabs', repo_name: 'zunkireelabs-web' };
+
+  test('uses real Q&A pairs verbatim, with no LLM call, when the page has real backing data', async () => {
+    dataSourceResult = {
+      ok: true,
+      dataFile: 'src/_data/faq.json',
+      items: [
+        { question: 'What is Zunkiree Labs?', answer: 'An AI development company in Kathmandu, Nepal.' },
+        { question: 'Is Zunkiree Labs based in Nepal?', answer: 'Yes, headquartered in Kathmandu.' },
+      ],
+    };
+    const { content, summary } = await generate({ siteId: 1, params: { page: 'https://zunkireelabs.com/resources/', query: 'resources' } });
+    assert.equal(content.groundedInRealData, 'src/_data/faq.json');
+    assert.equal(content.items.length, 2);
+    assert.equal(content.items[0].question, 'What is Zunkiree Labs?');
+    assert.equal(content.schemaJsonLd.mainEntity.length, 2);
+    assert.equal(content.schemaJsonLd.mainEntity[0].name, 'What is Zunkiree Labs?');
+    assert.match(summary, /real FAQ item/);
+  });
+
+  test('refuses rather than fabricates when the page has organic FAQ content that could not be confidently read', async () => {
+    dataSourceResult = { ok: false, organicSignal: true };
+    await assert.rejects(
+      generate({ siteId: 1, params: { page: 'https://zunkireelabs.com/resources/', query: 'resources' } }),
+      /already has real FAQ content/,
+    );
   });
 });

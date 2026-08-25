@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createOpenHandsHandler, createCodeSelfRepairHandler } from './openhands-handler.js';
+import { createOpenHandsHandler, createCodeSelfRepairHandler, createDesignAgentHandler } from './openhands-handler.js';
 
 // Stubs the entire Python+Docker boundary (see test-support/
 // fake-design-task-*.js and fake-docker.js) — pythonBin/scriptPath/dockerBin
@@ -289,6 +289,56 @@ describe('createCodeSelfRepairHandler — platform-repo checkout, payload, and r
       assert.equal(result.filesChanged.length, 1);
       assert.equal(result.filesChanged[0].path, 'server/stub.js');
       assert.match(result.patch, /diff --git/);
+    });
+  });
+});
+
+describe('createDesignAgentHandler — capability-repair dispatch (2026-08-25)', () => {
+  // Regression coverage for the fix that moved repair-template-capability.js
+  // off calling createCapabilityRepairHandler() directly in-process (its own
+  // container has no Python/Docker) onto queuing a real design_generate job
+  // for design-agent-worker's poll loop to claim — which routes every job
+  // through THIS dispatcher, not through createCapabilityRepairHandler
+  // directly. Two things had to be verified, not assumed: that
+  // job.params.mode === 'capability-repair' actually reaches
+  // createCapabilityRepairHandler at all (every other mode already had its
+  // own dispatch branch; this one is new), and that its payload — carried
+  // in job.params.payload on a real queued row, unlike the payload/site_id
+  // shape createCapabilityRepairHandler's own buildArgs was written
+  // against — survives the dispatcher's field remap intact.
+  test('routes params.mode "capability-repair" to createCapabilityRepairHandler with params.payload remapped to job.payload', async () => {
+    const payloadLog = tempLogPath('capability-repair-payload');
+    const site = { id: 42, repo_owner: 'acme', repo_name: 'site' };
+    const getSiteByIdCalls = [];
+    const checkoutCalls = [];
+    await withTestLogs({ DESIGN_AGENT_TEST_PAYLOAD_LOG: payloadLog }, async () => {
+      const handler = createDesignAgentHandler({
+        pythonBin: process.execPath,
+        // Reused, not mode-specific — it just echoes back whatever payload
+        // it received and a result shape (summary/testsPassed/testOutput/
+        // patch/filesChanged) that happens to match createCapabilityRepair
+        // Handler's mapResult fields too.
+        scriptPath: path.join(testSupportDir, 'fake-design-task-code-self-repair.js'),
+        dockerBin: fakeDockerBin,
+        killGraceMs: 300,
+        getSiteByIdFn: async (siteId) => { getSiteByIdCalls.push(siteId); return site; },
+        checkoutRepoTarballFn: async (s, destDir) => { checkoutCalls.push(s); fs.mkdirSync(destDir, { recursive: true }); },
+      });
+
+      const result = await handler({
+        id: 99,
+        site_id: 42,
+        params: { mode: 'capability-repair', payload: { generatorId: 'expand-content', valueKey: 'expandedContent' } },
+      });
+
+      assert.deepEqual(getSiteByIdCalls, [42], 'must resolve the CLIENT site by job.site_id, not treat it as a platform-repo job');
+      assert.deepEqual(checkoutCalls, [site]);
+
+      const payload = JSON.parse(readIfExists(payloadLog));
+      assert.deepEqual(payload, { generatorId: 'expand-content', valueKey: 'expandedContent' }, 'job.params.payload must reach the script, not be dropped or left under the wrong field');
+
+      assert.equal(result.testsPassed, true);
+      assert.equal(result.filesChanged.length, 1);
     });
   });
 });

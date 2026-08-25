@@ -21,7 +21,27 @@ const MIN_PARAGRAPH_WORDS = 8;
 // generation failed the Quality Gate on every attempt, permanently, for any
 // page — 100% of items[].answer collided with schemaJsonLd.mainEntity[].
 // acceptedAnswer.text by construction).
-const NON_PROSE_KEYS = new Set(['schemaJsonLd', 'jsonLd']);
+//
+// meta-title.js's `titles` is a set of alternative <title> candidates for the
+// SAME query, meant for a human to pick one from — not sequential prose an
+// LLM could be caught repeating. All 3 are independently tightened to the
+// same 50-60 character window by the same rewrite prompt, so they routinely
+// differ only in punctuation/casing/a swapped connector (e.g. "Austin, TX"
+// vs "Austin TX"), which this guard's normalization strips before comparing
+// — collapsing two genuinely-alternative candidates into a false collision
+// (real incident, 2026-08-25: a meta-title draft could never be approved,
+// permanently, because 2 of its 3 title candidates normalized identically).
+//
+// open-graph.js's `twitterTitle`/`twitterDescription` deterministically
+// mirror `ogTitle`/`ogDescription` verbatim (no second grounding decision,
+// no LLM call at all) — same shape as the schemaJsonLd mirror above, just a
+// plain string copy instead of a JSON-LD transform. Left unexempted, any
+// draft with a real (non-placeholder) og:description would fail this check
+// on every attempt, permanently, since the two fields are always identical
+// by construction.
+const NON_PROSE_KEYS = new Set([
+  'schemaJsonLd', 'jsonLd', 'titles', 'twitterTitle', 'twitterDescription',
+]);
 
 function collectParagraphs(value, path, out) {
   if (typeof value === 'string') {

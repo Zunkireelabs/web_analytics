@@ -849,6 +849,41 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   });
 }
 
+// Wraps approveAndPublishDraft for the two UNATTENDED auto-ship paths —
+// auto-remediation.js's shipDraftForRecommendation and this file's own
+// shipRecommendation (execution-engine). Never used for a human clicking
+// Approve in DraftModal.jsx, which must see the failure and be able to
+// edit/retry, not have its draft vanish out from under it.
+//
+// approveAndPublishDraft can throw AFTER submitDraftForApproval already left
+// a real, durable draft row at 'submitted_for_approval' — a render-mode-
+// uncertain resolution, a failed implementer preview, or a rejected
+// rendering-gate check, none of which revert the row. getDraftedFindingIds()
+// then treats that row as "already handled" forever (status != 'abandoned'
+// AND apply_error IS NULL both hold for it), which permanently hides the
+// underlying recommendation from every future unattended pass — the exact
+// same strand-and-hide shape the duplicate-paragraph Quality Gate bug had
+// (see generators/lib/duplicate-content-guard.js), just triggered by a
+// different failure point inside this same function (confirmed live,
+// 2026-08-25: 31 real drafts stuck this way on site #1, across
+// broken-link-fix/alt-text/schema-repair/analytics-install). Abandoning the
+// draft here on failure is what makes getDraftedFindingIds() correctly stop
+// counting it, so the next scheduled run can actually retry the
+// recommendation instead of silently never seeing it again.
+export async function approveAndPublishDraftUnattended(siteId, draftId, opts, {
+  approveFn = approveAndPublishDraft,
+  abandonFn = markDraftAbandoned,
+} = {}) {
+  try {
+    return await approveFn(siteId, draftId, opts);
+  } catch (err) {
+    await abandonFn(siteId, draftId, `Auto-ship failed: ${String(err.message || err).slice(0, 500)}`, null).catch((abandonErr) => {
+      console.error(`[action-center] could not abandon draft ${draftId} after unattended ship failure:`, abandonErr.message);
+    });
+    throw err;
+  }
+}
+
 // Phase 4 M3 — the Execution Engine. Drives the exact same
 // generateDraft -> submitDraftForApproval -> approveAndPublishDraft chain
 // the manual per-draft UI already uses (defined just above), just without a
@@ -915,7 +950,7 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     if (!submitted) throw new Error('Draft was not in a submittable state');
     await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
 
-    const approved = await approveAndPublishDraft(siteId, draft.id, { userId });
+    const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId });
     if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
     await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
