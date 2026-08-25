@@ -218,10 +218,59 @@ class FindOrphanedSandboxContainerTest(unittest.TestCase):
     succeeded before _wait_for_health() failed) is never cleaned up by the
     SDK in that case — its cleanup() never runs, since the exception comes
     from inside its own constructor. Without this, every health-check
-    timeout would leak one sandbox container on the host forever."""
+    timeout would leak one sandbox container on the host forever.
+
+    Regression coverage for the unscoped-match bug this session found: the
+    old implementation picked `docker ps`'s single newest agent-server-*
+    match with no check that it belonged to this attempt at all, so on any
+    host running more than one sandbox container at once, a health-check
+    timeout on job A could force-kill (or hijack as its own fallback
+    workspace) job B's perfectly healthy, actively-running container."""
+
+    def test_no_host_port_returns_none_without_even_calling_docker(self):
+        # A caller with nothing to scope the search by must not fall back to
+        # the old unscoped "grab the newest match" behavior — a real orphan
+        # going briefly unswept is a far smaller cost than force-killing a
+        # sibling job's live container.
+        result = design_task._find_orphaned_sandbox_container(
+            docker_bin="/definitely/not/a/real/docker/binary", host_port=None,
+        )
+        self.assertIsNone(result)
 
     def test_a_missing_docker_binary_returns_none_rather_than_raising(self):
-        result = design_task._find_orphaned_sandbox_container(docker_bin="/definitely/not/a/real/docker/binary")
+        result = design_task._find_orphaned_sandbox_container(
+            docker_bin="/definitely/not/a/real/docker/binary", host_port=34567,
+        )
+        self.assertIsNone(result)
+
+    def test_matches_the_container_publishing_this_attempts_reserved_port(self):
+        def fake_run(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "some-other-containers-id\t0.0.0.0:19999->8000/tcp\n"
+                    "this-attempts-container-id\t0.0.0.0:34567->8000/tcp\n"
+                ),
+                stderr="",
+            )
+
+        with unittest.mock.patch("design_task.subprocess.run", side_effect=fake_run):
+            result = design_task._find_orphaned_sandbox_container(host_port=34567)
+        self.assertEqual(result, "this-attempts-container-id")
+
+    def test_a_live_sibling_jobs_container_on_a_different_port_is_never_matched(self):
+        # The exact collision this fix closes: a sibling job's container is
+        # the newest (and only) match by name, but it is running on a
+        # different port than this attempt reserved — must not be returned.
+        def fake_run(cmd, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout="sibling-jobs-live-container-id\t0.0.0.0:19999->8000/tcp\n",
+                stderr="",
+            )
+
+        with unittest.mock.patch("design_task.subprocess.run", side_effect=fake_run):
+            result = design_task._find_orphaned_sandbox_container(host_port=34567)
         self.assertIsNone(result)
 
 

@@ -237,16 +237,24 @@ def open_sandbox_workspace(*, docker_workspace_cls, remote_workspace_cls, server
     remote_workspace_cls, port_finder) purely so this is unit-testable
     without a Docker daemon or the OpenHands SDK.
     """
+    # Reserved once, up front, so it's available to every except branch below
+    # even though DockerWorkspace() itself never hands it back on failure —
+    # this is what lets orphan discovery below be scoped to a container this
+    # attempt could actually have started, instead of "whatever agent-server-*
+    # container is newest" (see _find_orphaned_sandbox_container's docstring
+    # for why that used to be unsafe).
+    kwargs = sandbox_workspace_kwargs(port_finder)
+    host_port = kwargs["host_port"]
     try:
         workspace = docker_workspace_cls(
-            server_image=server_image, volumes=volumes, working_dir=working_dir,
-            **sandbox_workspace_kwargs(port_finder),
+            server_image=server_image, volumes=volumes, working_dir=working_dir, **kwargs,
         )
         return workspace, workspace.cleanup, getattr(workspace, "_container_id", None), False
     except Exception as err:
+        err.host_port = host_port
         if not network or classify_sandbox_construction_error(str(err)) != "ENVIRONMENT_CONTAINER_UNHEALTHY":
             raise
-        orphan_id = _find_orphaned_sandbox_container()
+        orphan_id = _find_orphaned_sandbox_container(host_port=host_port)
         if not orphan_id:
             raise
         ip = _container_ip_on_network(orphan_id, network)
@@ -435,7 +443,7 @@ def _try_stop_container(container_id, docker_bin=None):
         pass
 
 
-def _find_orphaned_sandbox_container(docker_bin=None):
+def _find_orphaned_sandbox_container(docker_bin=None, host_port=None):
     """Best-effort: find the sibling container DockerWorkspace's own
     constructor started, for a failure raised from inside that constructor
     itself (most commonly _wait_for_health() timing out) — we never get a
@@ -447,23 +455,47 @@ def _find_orphaned_sandbox_container(docker_bin=None):
     silently orphaned (leaking indefinitely) unless something finds and
     removes it.
 
-    Identified by the SDK's own fixed naming convention
-    (f"agent-server-{uuid}") and `docker ps`'s default newest-first
-    ordering — one job runs one sandbox container at a time, so the most
-    recent match is always this attempt's own container, never a stale one
-    from an earlier job (those were already `--rm`-removed on any successful
-    exit). Never raises — same discipline as _capture_container_diagnostics;
-    a diagnostics failure must not mask the real one."""
+    Scoped by `host_port` — the exact `-p {host_port}:8000` this attempt
+    reserved via port_finder() before calling DockerWorkspace() (see
+    open_sandbox_workspace) — NOT by "docker ps's newest agent-server-*
+    match", which this used to rely on. That assumed one job runs one
+    sandbox container at a time on the whole host, so the most recent match
+    was always this attempt's own container. That assumption breaks the
+    moment any two agent-server-* containers exist on the host at once — a
+    second worker, a manual run, or (per this platform's own stated
+    direction) a self-healing escalation path invoked outside the normal
+    queue — and there is nothing distinguishing "my own just-failed
+    container" from "someone else's perfectly healthy one" in the name
+    alone; grabbing the newest match unconditionally risked `docker rm -f`
+    force-killing a live sibling job's container (this branch) or, in
+    open_sandbox_workspace's fallback branch, hijacking it as this job's own
+    workspace. `host_port` is unique per attempt (port_finder() only ever
+    hands out an unused port), so matching on it can only ever identify a
+    container this exact attempt could have started.
+
+    When host_port is None (a caller that predates this scoping, or one that
+    genuinely has no port to give), this returns None rather than falling
+    back to the old unscoped newest-match behavior — a real orphan going
+    briefly unswept is a much smaller cost than force-killing someone else's
+    running job. Never raises — same discipline as
+    _capture_container_diagnostics; a diagnostics failure must not mask the
+    real one."""
+    if host_port is None:
+        return None
     docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
+    port_marker = f":{host_port}->"
     try:
         listing = subprocess.run(
-            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}", "-n", "1"],
+            [docker_bin, "ps", "-a", "--filter", "name=^agent-server-", "--format", "{{.ID}}\t{{.Ports}}"],
             capture_output=True, text=True, timeout=10,
         )
         if listing.returncode != 0:
             return None
-        container_id = listing.stdout.strip().splitlines()[0] if listing.stdout.strip() else None
-        return container_id or None
+        for line in listing.stdout.splitlines():
+            container_id, _, ports = line.partition("\t")
+            if container_id and port_marker in ports:
+                return container_id
+        return None
     except Exception:
         return None
 
@@ -1261,8 +1293,17 @@ def main() -> int:
         # the exception came from inside its own constructor. This is the
         # only window left to learn anything from it, and the only place
         # that stops it leaking on the host forever.
+        #
+        # host_port (set on `err` by open_sandbox_workspace, if that's where
+        # this came from) scopes the search to a container this attempt
+        # could actually have started — see _find_orphaned_sandbox_container's
+        # docstring. Without it, this branch used to `docker rm -f` the
+        # single newest agent-server-* container on the whole host with no
+        # check that it belonged to this attempt at all — on any host ever
+        # running more than one of these at once, that is a live sibling
+        # job's container, not this one's, force-killed out from under it.
         diagnostics = None
-        orphan_id = _find_orphaned_sandbox_container()
+        orphan_id = _find_orphaned_sandbox_container(host_port=getattr(err, "host_port", None))
         if orphan_id:
             diagnostics = _capture_container_diagnostics(orphan_id)
             try:
