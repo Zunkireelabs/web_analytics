@@ -32,3 +32,25 @@ test('does not flag short strings under the word-count floor', () => {
   const content = { q1: 'Yes.', q2: 'Yes.', heading1: 'Overview', heading2: 'Overview' };
   assert.deepEqual(findDuplicateParagraphs(content), []);
 });
+
+test('does not flag near-identical entries within a titles[] candidate list', () => {
+  const content = {
+    titles: [
+      'Best Appliance Repair Services in Austin, TX | ABC Co',
+      'Best Appliance Repair Services in Austin TX - ABC Co',
+      'Top Appliance Repair in Austin, Texas | ABC Company',
+    ],
+    metaDescription: 'A completely separate meta description paragraph with its own distinct wording here.',
+  };
+  assert.deepEqual(findDuplicateParagraphs(content), []);
+});
+
+test('does not flag twitterTitle/twitterDescription mirroring ogTitle/ogDescription', () => {
+  const content = {
+    ogTitle: 'A Real Page Title Grounded In Fetched Content',
+    ogDescription: 'A real meta description excerpt long enough to trip the paragraph floor easily.',
+    twitterTitle: 'A Real Page Title Grounded In Fetched Content',
+    twitterDescription: 'A real meta description excerpt long enough to trip the paragraph floor easily.',
+  };
+  assert.deepEqual(findDuplicateParagraphs(content), []);
+});
