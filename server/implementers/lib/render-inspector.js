@@ -1,5 +1,6 @@
 import { callLLM } from '../../llm.js';
 import { safeMessage } from '../../lib/errors.js';
+import { stripManagedMarkers } from '../../lib/managed-markers.js';
 
 // Deterministic-first, fully autonomous render-mode inspection: replaces the
 // old static url_file_map.pages[url].render config as the source of truth
@@ -111,19 +112,6 @@ export function hasVisibleFaqSignal(fileContent) {
   const organicContent = stripManagedMarkers(fileContent);
   return hasLoopQaPattern(organicContent) ||
     (ACCORDION_KEYWORD_PATTERN.test(organicContent) && FAQ_TEXT_PATTERN.test(organicContent));
-}
-
-// The Action Center's own SEOAI marker comments are infrastructure, not
-// organic page content — an empty `<!-- SEOAI:FAQ:START --><!-- SEOAI:FAQ:END -->`
-// marker literally contains the substring "FAQ", which would otherwise
-// falsely trip scanVisibleFaqSignals' text-match signal on a page that has
-// no real visible FAQ at all (confirmed in practice: /contact/ went from a
-// clean 'none'/90%-confidence read to a false 'weak' escalation the moment
-// its marker was added). Evidence-gathering must only ever look at what a
-// human/existing component actually put on the page.
-const MANAGED_MARKER_PATTERN = /<!--\s*SEOAI:\w+:START\s*-->[\s\S]*?<!--\s*SEOAI:\w+:END\s*-->|(?:#\s*SEOAI:\w+\s*|<!--\s*SEOAI:\w+\s*-->)/gi;
-function stripManagedMarkers(fileContent) {
-  return fileContent.replace(MANAGED_MARKER_PATTERN, '');
 }
 
 // Structural sanity only — true for the overwhelming majority of real

@@ -1,5 +1,7 @@
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { callLLMForJson } from '../llm.js';
+import { getSiteById } from '../store/read.js';
+import { findRealFaqDataSource } from './lib/faq-data-source.js';
 
 export const meta = {
   id: 'faq',
@@ -36,6 +38,41 @@ export async function generate({ siteId, params }) {
   const { page, query, topic, schemaType } = params;
   const subject = query || topic;
   if (!subject) throw Object.assign(new Error('query or topic is required'), { status: 400 });
+
+  // Prefer the page's own REAL, already-existing FAQ data over LLM
+  // fabrication whenever one exists — never invent a second, possibly
+  // mismatched FAQ for a page that already answers these questions for
+  // real (real incident, 2026-08-25: /resources/ ended up with two
+  // disagreeing FAQ sources — a real organic accordion and this
+  // generator's own fabricated schema — because nothing here ever checked
+  // for real data first). When real data can't be confirmed but organic
+  // FAQ evidence still exists (a hand-authored accordion with no readable
+  // backing data file), refuse outright rather than risk the same
+  // mismatch — see faq-data-source.js's return contract.
+  if (page) {
+    const site = await getSiteById(siteId).catch(() => null);
+    const dataSource = await findRealFaqDataSource(site, page);
+    if (dataSource?.ok) {
+      const items = dataSource.items;
+      const schemaJsonLd = {
+        '@context': 'https://schema.org',
+        '@type': 'FAQPage',
+        mainEntity: items.map((i) => ({
+          '@type': 'Question',
+          name: i.question,
+          acceptedAnswer: { '@type': 'Answer', text: i.answer },
+        })),
+      };
+      const content = { subject, page, items, schemaJsonLd, groundedInRealData: dataSource.dataFile };
+      return { content, summary: `${items.length} real FAQ item(s) grounded in ${dataSource.dataFile}` };
+    }
+    if (dataSource && !dataSource.ok && dataSource.organicSignal) {
+      throw Object.assign(
+        new Error(`"${page}" already has real FAQ content that couldn't be confidently read from the repo — drafting another FAQ risks disagreeing with it. Add/update it by hand instead.`),
+        { status: 400, userFacing: true, refusal: true },
+      );
+    }
+  }
 
   let bodyExcerpt = null;
   if (page) {
