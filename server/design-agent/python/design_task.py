@@ -321,6 +321,27 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
         return {}
     docker_bin = docker_bin or os.getenv("DESIGN_AGENT_DOCKER_BIN", "docker")
     diagnostics = {}
+    # `docker logs` first, `docker inspect` second — a container that has
+    # already stopped keeps serving its last recorded State to `inspect` for
+    # a bit after `--rm` starts removing it, but stops serving `logs` sooner
+    # ("can not get logs from container which is dead or marked for
+    # removal"). Confirmed live on job 1742: inspect still returned a real
+    # exitCode/oomKilled/status, but the logs call one step later hit that
+    # exact error — losing the one piece of evidence (the container's own
+    # stdout/stderr right before it died) that would have said WHY it
+    # stopped, leaving every future occurrence just as unexplained as this
+    # one. Capturing logs first does not fix the underlying race, only
+    # narrows the window enough for `logs` to also have a shot at it.
+    try:
+        logs = subprocess.run(
+            [docker_bin, "logs", "--tail", "200", container_id],
+            capture_output=True, text=True, timeout=10,
+        )
+        combined = (logs.stdout or "") + (logs.stderr or "")
+        if combined:
+            diagnostics["logsTail"] = combined[-4000:]
+    except Exception as diag_err:  # noqa: BLE001 — diagnostics must never mask the real failure
+        diagnostics["logsError"] = str(diag_err)[:500]
     try:
         inspect = subprocess.run(
             [docker_bin, "inspect", container_id],
@@ -336,18 +357,8 @@ def _capture_container_diagnostics(container_id, docker_bin=None):
                 diagnostics["stateError"] = state.get("Error")
         else:
             diagnostics["inspectError"] = (inspect.stderr or "").strip()[:500]
-    except Exception as diag_err:  # noqa: BLE001 — diagnostics must never mask the real failure
-        diagnostics["inspectError"] = str(diag_err)[:500]
-    try:
-        logs = subprocess.run(
-            [docker_bin, "logs", "--tail", "200", container_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        combined = (logs.stdout or "") + (logs.stderr or "")
-        if combined:
-            diagnostics["logsTail"] = combined[-4000:]
     except Exception as diag_err:  # noqa: BLE001 — same as above
-        diagnostics["logsError"] = str(diag_err)[:500]
+        diagnostics["inspectError"] = str(diag_err)[:500]
     return diagnostics
 
 

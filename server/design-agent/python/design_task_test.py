@@ -20,6 +20,8 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -97,6 +99,28 @@ class ContainerDiagnosticsUnaffectedTest(unittest.TestCase):
         )
         self.assertIsInstance(result, dict)
         self.assertTrue(result.get("inspectError") or result.get("stateError"))
+
+    def test_logs_are_fetched_before_inspect(self):
+        # Job 1742: `docker inspect` still returned a real State (exitCode,
+        # oomKilled, status) after the container started removing, but the
+        # `docker logs` call one step later hit "can not get logs from
+        # container which is dead or marked for removal" — losing the one
+        # piece of evidence (the container's own stdout/stderr) that would
+        # explain why it stopped. Asserts logs is attempted strictly before
+        # inspect, so a real occurrence gets the narrower race, not the
+        # wider one.
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd[1])  # "logs" or "inspect"
+            if cmd[1] == "inspect":
+                return SimpleNamespace(returncode=0, stdout="[{\"State\": {}}]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with unittest.mock.patch("design_task.subprocess.run", side_effect=fake_run):
+            design_task._capture_container_diagnostics("some-container-id")
+
+        self.assertEqual(calls, ["logs", "inspect"])
 
 
 class ClassifySandboxConstructionErrorTest(unittest.TestCase):
