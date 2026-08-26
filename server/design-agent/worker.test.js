@@ -396,6 +396,50 @@ describe('createWorker — polling lifecycle', () => {
     const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [job.id]);
     assert.equal(rows[0].status, 'queued');
   });
+
+  test('reclaims stale-executing jobs on the very first tick, then not again before reclaimIntervalMs', async () => {
+    const siteId = await makeSite();
+    let calls = 0;
+    const worker = createWorker({
+      pollIntervalMs: 5,
+      reclaimIntervalMs: 10_000, // long enough that this test's short run never crosses it a second time
+      handler: createMockHandler({ delayMs: 1 }),
+      reclaim: async () => { calls += 1; return []; },
+      siteId,
+    });
+    try {
+      worker.start();
+      await waitFor(() => calls >= 1, { timeoutMs: 5_000 });
+      // A few more poll ticks (pollIntervalMs=5) all land well inside the
+      // 10s reclaimIntervalMs — call count must stay at exactly 1.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(calls, 1, 'reclaim must not re-run on every 5ms poll tick — only once per reclaimIntervalMs');
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  test('a failing reclaim never blocks the job-claiming poll loop', async () => {
+    const siteId = await makeSite();
+    const job = await makeQueuedJob(siteId);
+    const worker = createWorker({
+      pollIntervalMs: 10,
+      handler: createMockHandler({ delayMs: 1 }),
+      reclaim: async () => { throw new Error('DB unavailable'); },
+      siteId,
+    });
+    try {
+      worker.start();
+      await waitFor(async () => {
+        const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [job.id]);
+        return rows[0].status !== 'queued';
+      }, { timeoutMs: 5_000 });
+    } finally {
+      await worker.stop();
+    }
+    const { rows } = await query('SELECT status FROM execution_jobs WHERE id = $1', [job.id]);
+    assert.ok(['completed', 'failed'].includes(rows[0].status), 'the real job still got claimed and processed despite reclaim erroring every tick');
+  });
 });
 
 describe('componentTemplates job — full real-DB lifecycle through the dispatching handler', () => {
