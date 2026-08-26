@@ -5,7 +5,7 @@ import {
 } from '../../store/data-analyst.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js';
-import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { getSiteById } from '../../store/read.js';
@@ -387,20 +387,35 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
     : { drop: null, blockedReason: null };
   if (gate.drop) return { eligible: false, dropped: gate.drop };
 
-  const recommendationId = existing
-    ? existing.id
-    : (await insertRecommendation(siteId, {
-        page,
-        recommendationType: eligibility.generatorId,
-        issue: `Keyword gap: ${gap.topic}`,
-        reason,
-        params,
-        findingId: eligibility.findingId,
-        detectingAgent: 'analyst-keyword-gaps',
-        priority: gap.priority,
-        riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
-        blockedReason: gate.blockedReason,
-      })).id;
+  let recommendationId;
+  if (existing) {
+    // Re-approving (or re-checking) a gap whose recommendation is already
+    // open must re-sync its block state to what the gates just found —
+    // otherwise a row created while, say, newContentTargets was unconfigured
+    // stays frozen on that stale reason forever, even after the config gets
+    // fixed, since nothing else ever revisits a content-gap-derived row (see
+    // recommendation-coordinator.js's refreshBlockedRecommendations for the
+    // periodic counterpart that revisits these without requiring a
+    // re-approval to trigger it).
+    recommendationId = existing.id;
+    await refreshRecommendationBlockState(existing.id, {
+      blockedReason: gate.blockedReason,
+      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
+    });
+  } else {
+    recommendationId = (await insertRecommendation(siteId, {
+      page,
+      recommendationType: eligibility.generatorId,
+      issue: `Keyword gap: ${gap.topic}`,
+      reason,
+      params,
+      findingId: eligibility.findingId,
+      detectingAgent: 'analyst-keyword-gaps',
+      priority: gap.priority,
+      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
+      blockedReason: gate.blockedReason,
+    })).id;
+  }
 
   // A blocked recommendation must not be drafted: generateDraft would hit the
   // same missing prerequisite and throw, and the catch below would record a

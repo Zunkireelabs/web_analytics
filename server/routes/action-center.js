@@ -340,35 +340,20 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       };
     }
 
-    // The gate. Structural + provenance only (no network call — see
-    // design-drift.js's isTemplateVerified), so this is safe on the hot path
-    // that every manual click, MCP tool call, execution-engine item and
-    // unattended auto-remediation attempt already funnels through. Placing it
-    // HERE rather than at each of those four call sites is deliberate: one
-    // choke point, no way to route around it.
-    //
-    // 'no-concept' action types (meta-title, schema, canonical, sitemap,
-    // robots-fix, ...) return ok:true and are unaffected — they have no CSS
-    // component that can drift, so there is nothing to verify and nothing to
-    // block. Only the five keys in COMPONENT_TEMPLATE_KEY are gated.
+    // Informational only, deliberately NOT a gate. Design Context (verified
+    // template / v2 profile) shapes what gets generated below when it's
+    // available; when it isn't (new site, context still queued, a stale
+    // background rescan) the generator's own zero-config fallback renders
+    // instead — see marker-merge.js/newpage-render.js. A missing or
+    // not-yet-derived Design Context must never stop an unrelated draft from
+    // shipping: that hard-422 used to block every faq/expand-content/
+    // internal-links/qa-content/net-new-page draft on a site any time the
+    // analysis job failed, which is exactly the stuck-Action-Center failure
+    // mode this replaces. 'no-concept' action types (meta-title, schema,
+    // canonical, sitemap, robots-fix, ...) were never affected either way.
     const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
     if (!verification.ok) {
-      // When the resolver has just QUEUED a re-derivation, say so instead of
-      // repeating isTemplateVerified's generic "never been verified" text and
-      // telling the operator to go run the Design Agent by hand. The state is
-      // self-healing now; a message implying manual work is both wrong and
-      // the exact instinct that produced the stuck templates in the first
-      // place.
-      const queued = templateResult?.reason === 'derivation-queued';
-      const message = queued
-        ? `${templateResult.detail} Retry this draft once it completes.`
-        : `${verification.detail} Run the Design Agent for this site to verify its "${verification.actionType}" template before ${generatorId} drafts can be generated.`;
-      throw httpError(422, message, {
-        reason: queued ? 'design-derivation-queued' : 'design-unverified',
-        actionType: verification.actionType,
-        componentKey: verification.componentKey,
-        verificationReason: queued ? 'derivation-queued' : verification.reason,
-      });
+      console.warn(`[action-center] ${generatorId} has no verified Design Context yet (${verification.reason}) — generating with the default fallback template.`);
     }
   }
 

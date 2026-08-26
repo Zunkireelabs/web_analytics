@@ -1,5 +1,6 @@
-import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob } from '../store/execution-jobs.js';
-import { createDesignAgentHandler } from './openhands-handler.js';
+import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob, reclaimStaleExecutingJobs } from '../store/execution-jobs.js';
+import { createLiveDesignAnalysisHandler } from './live-analysis-handler.js';
+import { createNativeCapabilityRepairHandler } from './native-repair-handler.js';
 import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
@@ -7,6 +8,16 @@ import { persistDerivedComponentTemplates, persistDesignProfile } from '../imple
 import { isDesignAgentQuietHours } from '../lib/design-agent-window.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+
+// How often the poll loop also checks for stale-'executing' jobs (see
+// execution-jobs.js's reclaimStaleExecutingJobs), separate from
+// pollIntervalMs — reclaiming is a cheap, mostly-no-op indexed UPDATE, but
+// there is no reason to run it on every 5s job-claim tick. Every worker
+// instance runs this independently and harmlessly: the UPDATE's own WHERE
+// clause is the only guard needed, so redundant reclaim attempts across N
+// replicas just race for the same rows (any that lose the race — see its
+// SET status='queued' — no-op safely).
+const DEFAULT_RECLAIM_INTERVAL_MS = 5 * 60 * 1000;
 
 // Safety-net default for processOneJob below: if a caller ever invokes it
 // (or createWorker) without an explicit handler, jobs fail loudly instead of
@@ -208,13 +219,30 @@ export async function processOneJob({
 // whatever job it claimed) has fully settled, no matter how long that took.
 // `onPoll(result)` is optional, mainly for tests to observe each cycle
 // without polling worker internals.
-export function createWorker({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, handler, onPoll, siteId = null } = {}) {
+export function createWorker({
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, reclaimIntervalMs = DEFAULT_RECLAIM_INTERVAL_MS,
+  handler, onPoll, onReclaim, siteId = null, reclaim = reclaimStaleExecutingJobs,
+} = {}) {
   let timer = null;
   let started = false;
   let stopped = false;
   let currentPoll = null;
+  let lastReclaimAt = 0; // 0 so the very first tick always reclaims — a fresh worker starting up is exactly when a predecessor's stranded job most needs picking up
+
+  async function maybeReclaim() {
+    if (Date.now() - lastReclaimAt < reclaimIntervalMs) return;
+    lastReclaimAt = Date.now();
+    try {
+      const reclaimed = await reclaim();
+      if (reclaimed.length) console.warn(`[design-agent-worker] reclaimed ${reclaimed.length} stale 'executing' job(s) back to 'queued': ${reclaimed.map((j) => `#${j.id}`).join(', ')}`);
+      if (onReclaim) onReclaim(reclaimed);
+    } catch (err) {
+      console.error('[design-agent-worker] stale-job reclaim failed:', err.message);
+    }
+  }
 
   async function pollLoop() {
+    await maybeReclaim();
     currentPoll = processOneJob({ handler, siteId })
       .then((result) => { if (onPoll) onPoll(result); })
       .catch((err) => console.error('[design-agent-worker] poll error:', err.message))
@@ -257,9 +285,30 @@ function installShutdownHandlers(worker) {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// The 'design_generate' queue carries two genuinely different kinds of job:
+// 'design-profile'/'component-templates' (read-only site ANALYSIS — live
+// site + Claude) and 'capability-repair' (a real EDIT to a tenant repo,
+// server/agents/lib/template-capability-repair.js). As of the native-repair
+// migration (2026-08-26), BOTH run without Docker/OpenHands —
+// capability-repair via native-repair-handler.js's tool-use loop
+// (server/design-agent/native-repair/), same job shape (job.params.payload)
+// the old OpenHands dispatcher already expected. code-self-repair.js's
+// default handler was migrated the same way (see that file). openhands-
+// handler.js and design_task.py are left in place, but unreferenced by any
+// active path, until both migrations are verified on staging — see
+// project memory / the plan this was built from for the deletion step.
+export function createDispatchingHandler(options = {}) {
+  const liveAnalysisHandler = createLiveDesignAnalysisHandler(options);
+  const capabilityRepairHandler = createNativeCapabilityRepairHandler(options);
+  return async function dispatchingHandler(job) {
+    if (job.params?.mode === 'capability-repair') return capabilityRepairHandler(job);
+    return liveAnalysisHandler(job);
+  };
+}
+
 function main() {
   const pollIntervalMs = Number(process.env.DESIGN_AGENT_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
-  const worker = createWorker({ pollIntervalMs, handler: createDesignAgentHandler() });
+  const worker = createWorker({ pollIntervalMs, handler: createDispatchingHandler() });
   console.log(`[design-agent-worker] starting — polling every ${pollIntervalMs}ms for kind='design_generate' queued jobs`);
   installShutdownHandlers(worker);
   worker.start();

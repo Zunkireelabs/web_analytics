@@ -6,8 +6,9 @@ import {
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
-  contentWrapperAvailability, filterTemplateToLiveClasses,
+  contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
 } from './design-drift.js';
+import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
 const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
 
@@ -218,7 +219,7 @@ describe('contentWrapperAvailability — a looser rule for the one type with a r
   // real blog-outline recommendations on site 1 while the apply path had a
   // perfectly good fallback ready to use.
   const PROFILE = {
-    version: 1, styling: 'tailwind',
+    version: DESIGN_PROFILE_VERSION, styling: 'tailwind',
     typography: { body: 'text-gray-600', heading: { item: 'text-lg font-medium' } },
     layout: { container: 'max-w-3xl' }, components: {},
     derivedAt: '2026-08-01T00:00:00.000Z', derivedBy: 'design-agent',
@@ -247,7 +248,7 @@ describe('contentWrapperAvailability — a looser rule for the one type with a r
     const v = componentTemplateVerification(site, componentTemplateActionTypeFor('blog-outline'));
     assert.equal(v.ok, false);
     assert.equal(v.reason, 'design-language-not-derived');
-    assert.match(v.detail, /Design Agent has been queued/);
+    assert.match(v.detail, /analysis of the live site has been queued/);
     assert.doesNotMatch(v.detail, /No component template is configured/,
       'must not show the old misleading message — a human was never asked to configure one');
   });
@@ -326,7 +327,7 @@ describe('resolveOrCreateComponentTemplate', () => {
   // of this rather than separately derived markup, so most of what this
   // function does is decide whether the site has design knowledge yet.
   const PROFILE = {
-    version: 1,
+    version: DESIGN_PROFILE_VERSION,
     styling: 'tailwind',
     typography: { heading: { item: 'text-lg font-medium' }, body: 'text-gray-600', link: 'text-blue-600' },
     layout: { container: 'max-w-3xl mx-auto', prose: 'prose' },
@@ -845,5 +846,59 @@ describe('verifyTemplateAgainstLiveSite', () => {
     const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'unreachable');
+  });
+});
+
+describe('withDesignContext — the shared design-intelligence layer\'s system-prompt grounding', () => {
+  const USABLE_PROFILE = {
+    version: DESIGN_PROFILE_VERSION,
+    styling: 'tailwind',
+    typography: { body: 'text-base', heading: { item: 'text-2xl font-bold' } },
+    layout: { container: 'max-w-7xl mx-auto' },
+    pageTypePatterns: { homepage: { sectionOrder: ['header', 'hero', 'footer'], notes: 'short, punchy hero copy' } },
+    evidence: { notes: 'Voice is direct and informal.' },
+  };
+  const siteWith = (profile) => ({ id: 1, url_file_map: { siteRoot: { designProfile: profile } } });
+
+  test('a generatorId outside the website-facing set is left completely untouched — never even fetches the site', async () => {
+    let touched = false;
+    const out = await withDesignContext('SYSTEM', 'meta-title', 1, { fetchSite: async () => { touched = true; return siteWith(USABLE_PROFILE); } });
+    assert.equal(out, 'SYSTEM');
+    assert.equal(touched, false);
+  });
+
+  test('no generatorId or no siteId is a no-op', async () => {
+    assert.equal(await withDesignContext('SYSTEM', null, 1), 'SYSTEM');
+    assert.equal(await withDesignContext('SYSTEM', 'faq', null), 'SYSTEM');
+  });
+
+  test('a website-facing generatorId with no usable profile yet is unchanged — never blocks generation', async () => {
+    const out = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => ({ id: 1, url_file_map: {} }) });
+    assert.equal(out, 'SYSTEM');
+  });
+
+  test('a site-fetch failure fails open, unchanged, never throws', async () => {
+    const out = await withDesignContext('SYSTEM', 'faq', 1, { fetchSite: async () => { throw new Error('db down'); } });
+    assert.equal(out, 'SYSTEM');
+  });
+
+  test('a usable profile appends real design/voice grounding for a website-facing generator', async () => {
+    const out = await withDesignContext('SYSTEM', 'translation', 1, { fetchSite: async () => siteWith(USABLE_PROFILE) });
+    assert.match(out, /^SYSTEM/);
+    assert.match(out, /tailwind/);
+    assert.match(out, /short, punchy hero copy/);
+    assert.match(out, /Voice is direct and informal\./);
+  });
+
+  test('every action type frontend.js/backend.js actually route as visible content is covered', () => {
+    for (const id of ['faq', 'qa-content', 'expand-content', 'internal-links', 'direct-answer', 'alt-text', 'broken-link-fix', 'redirect-fix', 'translation', 'blog-outline', 'landing-page', 'cookie-policy', 'privacy-policy', 'terms-of-service']) {
+      assert.ok(DESIGN_CONTEXT_GENERATOR_IDS.has(id), `${id} should get design/voice grounding`);
+    }
+  });
+
+  test('purely technical action types are excluded', () => {
+    for (const id of ['meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'security-headers', 'open-graph', 'html-lang', 'viewport', 'llms-txt', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair']) {
+      assert.ok(!DESIGN_CONTEXT_GENERATOR_IDS.has(id), `${id} should NOT get design/voice grounding`);
+    }
   });
 });

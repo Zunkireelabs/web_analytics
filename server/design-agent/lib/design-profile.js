@@ -30,7 +30,14 @@
 // component-template task already enforced. The profile carries no client
 // content, only presentation vocabulary.
 
-export const DESIGN_PROFILE_VERSION = 1;
+// v2: the profile is now derived by live-site analysis (server/design-agent/
+// live-analysis/) instead of an OpenHands/Docker repo read — see that
+// module's schema.js for the additive fields (pages, pageTypePatterns,
+// navigation, evidence) v2 carries on top of these same flat vocabulary
+// fields. The version bump exists so an old, still-stored v1 profile is
+// never treated as usable without being re-derived — isProfileUsable below
+// enforces it via validateDesignProfile's version check.
+export const DESIGN_PROFILE_VERSION = 2;
 
 // Joins class fragments, dropping empties, so a profile that legitimately has
 // no value for a slot produces clean markup instead of stray whitespace or

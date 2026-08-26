@@ -486,7 +486,7 @@ export function contentWrapperAvailability(site) {
   return {
     ok: false,
     reason: 'design-language-not-derived',
-    detail: "This site's design language hasn't been derived yet — the Design Agent has been queued to learn it from the repository. No action needed; this will unblock automatically once that finishes.",
+    detail: "This site's Design Context hasn't been derived yet — analysis of the live site has been queued. No action needed; this generator's default fallback template renders in the meantime.",
     componentKey,
     actionType: 'content-wrapper',
   };
@@ -583,6 +583,58 @@ export function getDesignProfile(site) {
 
 export function siteHasUsableDesignProfile(site) {
   return isProfileUsable(getDesignProfile(site));
+}
+
+// Generators whose output is real, visible page content — the set every
+// website-facing draft is drawn from, as opposed to purely technical output
+// (meta-title, schema, canonical, sitemap, robots-fix, security-headers,
+// html-lang, viewport, open-graph, llms-txt, analytics-install,
+// duplicate-id-fix, breadcrumbs, schema-repair) that has no rendered visual
+// footprint and so has no use for a design/voice grounding. This is the
+// authoritative set backend.js/frontend.js's `handles` arrays split into
+// visible vs. invisible; kept here (not re-derived from COMPONENT_TEMPLATE_KEY,
+// which is narrower — only the 5 types with a literal HTML wrapper) because
+// withDesignContext below grounds the LLM PROSE, not a template substitution,
+// so it applies to every visible-content generator, not just the projectable
+// ones.
+export const DESIGN_CONTEXT_GENERATOR_IDS = new Set([
+  'faq', 'qa-content', 'expand-content', 'internal-links', 'direct-answer',
+  'alt-text', 'broken-link-fix', 'redirect-fix', 'translation',
+  'blog-outline', 'landing-page', 'cookie-policy', 'privacy-policy', 'terms-of-service',
+]);
+
+// The shared design-intelligence layer's RETRIEVE half — mirrors
+// agent-memory.js's withAgentMemory exactly (same signature shape, same
+// "append a grounding block to the system prompt, fail open on any error"
+// contract), so every website-facing generator gets real site design/voice
+// grounding for free just by passing its own generatorId + siteId to
+// server/llm.js's callLLM, the same way it already gets agent_fix_memory
+// lessons. Never blocks or throws: a site with no usable profile yet (or
+// any lookup failure) returns `system` completely unchanged, so a
+// generator's output is byte-for-byte the same as before this existed until
+// a real Design Context has been derived.
+export async function withDesignContext(system, generatorId, siteId, { fetchSite = getSiteById } = {}) {
+  if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return system;
+
+  let site;
+  try {
+    site = await fetchSite(siteId);
+  } catch (err) {
+    console.warn(`[design-drift] could not load site ${siteId} for design context, continuing without it: ${err.message}`);
+    return system;
+  }
+  const profile = getDesignProfile(site);
+  if (!isProfileUsable(profile)) return system;
+
+  const patterns = profile.pageTypePatterns || {};
+  const patternNotes = Object.entries(patterns)
+    .map(([type, p]) => `- ${type}: sections in order ${JSON.stringify(p.sectionOrder || [])}${p.notes ? ` — ${p.notes}` : ''}`)
+    .join('\n');
+
+  return `${system}\n\nThis site's real design and voice, derived from its own live pages — write to match it, not a generic style:\n`
+    + `- Styling: ${profile.styling || 'unknown'}${profile.framework ? ` (${profile.framework})` : ''}\n`
+    + (patternNotes ? `- Observed page-type patterns:\n${patternNotes}\n` : '')
+    + (profile.evidence?.notes ? `- ${profile.evidence.notes}\n` : '');
 }
 
 // Re-exported for discoverability alongside the rest of this module's

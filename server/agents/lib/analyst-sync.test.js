@@ -25,6 +25,7 @@ mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
     findOpenRecommendation: async () => openRecommendation,
     insertRecommendation: async (siteId, rec) => { inserted.push({ siteId, ...rec }); return { id: inserted.length }; },
+    refreshRecommendationBlockState: async () => null,
   },
 });
 

@@ -24,7 +24,7 @@ import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
-import { syncFromGrounded } from './agents/lib/recommendation-coordinator.js';
+import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
@@ -40,7 +40,7 @@ import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
-import { siteHasUsableDesignProfile, sitePageUrl } from './implementers/lib/design-drift.js';
+import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
 import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_JOB_KEY } from './store/execution-jobs.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
@@ -859,6 +859,64 @@ export async function runTemplateCapabilityRepairForAllSites() {
   return results;
 }
 
+// Daily counterpart to runTemplateCapabilityRepairForAllSites above — runs
+// right after it so it sees the SAME morning's freshly-healed config
+// (autoHealNewContentTarget/autoHealFileMapping already ran, any
+// architectural gap already got its capability-repair job dispatched).
+// Re-validates every open, currently-blocked recommendation against that
+// live state and writes back whatever changed: a block whose root cause got
+// fixed clears (the recommendation re-enters the normal risk-tier/shipping
+// flow the same morning), one that regressed re-blocks. Excludes
+// content-gap-derived rows on purpose — those get their own slower weekly
+// pass (see refreshContentGapRecommendationsForAllSites) so a topic
+// approved last week isn't re-validated every single day for no reason.
+// Never touches anything already shipped/merged/closed: refreshBlockedRecommendations
+// only ever reads/writes status = 'open' rows.
+export async function refreshBlockedRecommendationsForAllSites() {
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const result = await refreshBlockedRecommendations(site.id, { excludeDetectingAgent: 'analyst-keyword-gaps' });
+      if (result.checked) {
+        console.log(`[job] blocked-recommendation refresh site ${site.id} "${site.name}": ${result.checked} checked, ${result.updated} unblocked/updated.`);
+      }
+      results.push({ siteId: site.id, ...result });
+    } catch (err) {
+      console.error(`[job] blocked-recommendation refresh failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
+// Weekly counterpart, scoped to exactly the rows the daily pass above
+// excludes: recommendations created by createActionCenterRecommendationForGap
+// (analyst-seo-mapping.js) — blog-outline, landing-page, comparison-page,
+// gap-based faq. These are never re-detected by any daily agent (content-gap
+// approval is a one-time human/MCP action, not part of the grounded
+// detection pass), so without this they'd stay frozen on whatever
+// blocked_reason they had at approval time forever. Weekly matches the cadence
+// content itself is meant to be revisited on, mirroring the existing
+// weekly design-context rescan pattern in cron.js.
+export async function refreshContentGapRecommendationsForAllSites() {
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const result = await refreshBlockedRecommendations(site.id, { onlyDetectingAgent: 'analyst-keyword-gaps' });
+      if (result.checked) {
+        console.log(`[job] content-gap recommendation refresh site ${site.id} "${site.name}": ${result.checked} checked, ${result.updated} unblocked/updated.`);
+      }
+      results.push({ siteId: site.id, ...result });
+    } catch (err) {
+      console.error(`[job] content-gap recommendation refresh failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
 export async function runAutoRemediationForAllSites() {
   const sites = (await listSites()).filter(isShippable);
   const results = [];
@@ -989,6 +1047,63 @@ export async function queueDesignAgentDerivationsForAllSites({
     if (await queueForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
+  return { queued };
+}
+
+// Design Context (design-agent/live-analysis/) is a durable asset, not
+// derived fresh per draft — see live-analysis-handler.js's own comment.
+// This is what keeps it current: once a week, every site whose profile is
+// older than staleAfterMs gets a fresh live-site analysis queued, so a real
+// redesign is picked up automatically instead of drafts silently following
+// a design the site abandoned. Deliberately a SEPARATE function from
+// queueDesignAgentDerivationForSite above rather than one function with a
+// branch — that one's whole contract is "only ever queues a FIRST
+// derivation" (hasUsableProfile a site already has short-circuits it), and
+// conflating "never analyzed" with "analyzed a week ago" would blur two
+// different situations (a broken site vs. a routine refresh) behind one
+// piece of logic.
+const DESIGN_PROFILE_RESCAN_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+export async function queueDesignProfileRescanForSite(site, {
+  hasUsableProfile = siteHasUsableDesignProfile,
+  getProfile = getDesignProfile,
+  findQueuedProfileJob = getQueuedComponentTemplateJob,
+  enqueueProfileJob = createDesignProfileJob,
+  resolvePageUrl = sitePageUrl,
+  now = () => Date.now(),
+  staleAfterMs = DESIGN_PROFILE_RESCAN_STALE_AFTER_MS,
+} = {}) {
+  if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  // A site with no usable profile yet is queueDesignAgentDerivationForSite's
+  // job (the reactive first-derivation path also covers it) — this function
+  // only ever refreshes an EXISTING profile.
+  if (!hasUsableProfile(site)) return false;
+
+  const profile = getProfile(site);
+  const derivedAt = profile?.derivedAt ? Date.parse(profile.derivedAt) : NaN;
+  if (Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
+
+  try {
+    const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+    if (pending) return false;
+    await enqueueProfileJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
+    return true;
+  } catch (err) {
+    console.error(`[job] could not queue design-profile rescan for site ${site.id}:`, err.message);
+    return false;
+  }
+}
+
+export async function queueDesignProfileRescanForAllSites({
+  listAllSites = listSites,
+  queueForSite = queueDesignProfileRescanForSite,
+} = {}) {
+  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
+  let queued = 0;
+  for (const site of sites) {
+    if (await queueForSite(site)) queued++;
+  }
+  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for sites with a stale profile`);
   return { queued };
 }
 

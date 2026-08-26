@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { withAgentMemory } from './agent-memory.js';
+import { withDesignContext } from './implementers/lib/design-drift.js';
 
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
@@ -71,6 +72,12 @@ export const MODEL_DEFAULTS = {
 // passing its own id, with no separate opt-in per generator.
 export async function callLLM(system, user, { model, maxTokens = 500, tier = 'daily', generatorId, siteId } = {}) {
   system = await withAgentMemory(system, generatorId, siteId);
+  // Shared design-intelligence layer (server/implementers/lib/design-drift.js) —
+  // real site design/voice grounding for every website-facing generator, the
+  // same automatic-by-generatorId shape as withAgentMemory just above. A
+  // no-op for generatorIds outside DESIGN_CONTEXT_GENERATOR_IDS (purely
+  // technical output) and for any site without a usable Design Context yet.
+  system = await withDesignContext(system, generatorId, siteId);
   const provider = pickProvider();
   const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
   const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];

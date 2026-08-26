@@ -7,7 +7,7 @@ import { query } from '../../db.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { problemSignatureFor } from './learned-repair.js';
 import { checkoutRepoTarball } from '../../design-agent/repo-checkout.js';
-import { createCodeSelfRepairHandler } from '../../design-agent/openhands-handler.js';
+import { createNativeCodeSelfRepairHandler } from '../../design-agent/native-repair-handler.js';
 import {
   getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch,
 } from '../../github/client.js';
@@ -244,12 +244,14 @@ export async function applyKnownFix(lessonRow, {
 }
 
 // The UNKNOWN-ISSUE path (spec §4): no usable lesson exists, so a real
-// OpenHands sandbox investigates the platform repo itself. codeSelfRepairHandlerFn
-// defaults to the real Docker+LLM handler (createCodeSelfRepairHandler()) —
-// tests inject a fake one, same convention as openhands-handler.test.js's
-// scriptPath stubs, just one layer up.
+// agent investigates the platform repo itself. codeSelfRepairHandlerFn
+// defaults to the native (no Docker/OpenHands) handler
+// (createNativeCodeSelfRepairHandler(), server/design-agent/
+// native-repair-handler.js — a tool-use loop against a plain checkout,
+// independently re-validated via node --check/--test, same safety
+// contract the OpenHands path had) — tests inject a fake one.
 export async function investigateAndRepair({ generatorId, reasonKey, errorMessage, occurrenceDays, testFileHint }, {
-  codeSelfRepairHandlerFn = createCodeSelfRepairHandler(),
+  codeSelfRepairHandlerFn = createNativeCodeSelfRepairHandler(),
   openPlatformRepairPrFn = openPlatformRepairPr,
 } = {}) {
   let handlerResult;

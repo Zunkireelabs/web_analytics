@@ -68,14 +68,20 @@ function publicFailure(failure) {
 // "usable" (verified template, or a projectable design profile) and
 // duplicating it here would be the exact kind of second state this spec asks
 // to avoid.
+// NOTE: this status is purely informational — see recommendation-gates.js and
+// action-center.js's generateDraft, neither of which block on it any more. A
+// site with no Design Context yet, or one whose last analysis run failed,
+// still drafts and ships normally using the generator's own zero-config
+// fallback; this is only ever surfaced so a human CAN look, never something
+// that requires them to.
 export function deriveDesignAgentStatus({ succeeded, recentJobs = [] } = {}) {
   if (succeeded) {
-    return { state: DESIGN_AGENT_STATE.SUCCEEDED, detail: 'Design Agent setup completed successfully.' };
+    return { state: DESIGN_AGENT_STATE.SUCCEEDED, detail: 'Design context is up to date.' };
   }
 
   const [latest, ...rest] = recentJobs;
   if (!latest) {
-    return { state: DESIGN_AGENT_STATE.NEVER_ATTEMPTED, detail: 'Design Agent setup has not been attempted yet.' };
+    return { state: DESIGN_AGENT_STATE.NEVER_ATTEMPTED, detail: 'Design context has not been derived yet — drafts use the default template until it is.' };
   }
 
   if (latest.status === 'queued' || latest.status === 'executing') {
@@ -84,8 +90,8 @@ export function deriveDesignAgentStatus({ succeeded, recentJobs = [] } = {}) {
       state: running ? DESIGN_AGENT_STATE.RUNNING : DESIGN_AGENT_STATE.QUEUED,
       jobId: latest.id,
       detail: running
-        ? 'Design Agent setup is currently running.'
-        : 'Design Agent setup is queued and will run shortly.',
+        ? 'Design context analysis is currently running.'
+        : 'Design context analysis is queued and will run shortly.',
     };
   }
 
@@ -100,13 +106,16 @@ export function deriveDesignAgentStatus({ succeeded, recentJobs = [] } = {}) {
       attemptCount,
       repeated,
       failure,
-      // Never claims it "will unblock automatically" — that claim is only
-      // ever true when a fresh attempt is actually queued/running, which is
-      // a DIFFERENT state (QUEUED/RUNNING) this branch is not in.
+      // Deliberately no "blocked" / "needs intervention" language — a failed
+      // analysis run never stops drafts from generating, so there is nothing
+      // for a human to unblock. It's surfaced only as a diagnostic: this site
+      // is currently drafting against the default fallback, not its real
+      // design, until a run succeeds (retried automatically on the next
+      // weekly rescan and any on-demand queue).
       detail: repeated
-        ? `Design Agent setup has failed ${attemptCount} times in a row (most recently job #${latest.id}` +
-          `${failure?.errorCode ? `, ${failure.errorCode}` : ''}). This needs attention — it will not resolve itself without intervention.`
-        : `Design Agent setup failed (job #${latest.id}). See the latest attempt for details.`,
+        ? `Design context analysis has failed ${attemptCount} times in a row (most recently job #${latest.id}` +
+          `${failure?.errorCode ? `, ${failure.errorCode}` : ''}). Drafts continue to use the default fallback template in the meantime.`
+        : `Design context analysis failed (job #${latest.id}) — drafts continue to use the default fallback template. It will retry automatically.`,
     };
   }
 
@@ -120,7 +129,7 @@ export function deriveDesignAgentStatus({ succeeded, recentJobs = [] } = {}) {
   // usable exists and nothing is in flight — the honest next step is the
   // same as if it had never run, and the next resolveOrCreateComponentTemplate
   // call will queue a fresh one exactly as it would for a first attempt.
-  return { state: DESIGN_AGENT_STATE.NEVER_ATTEMPTED, detail: 'Design Agent setup has not produced a usable result yet.' };
+  return { state: DESIGN_AGENT_STATE.NEVER_ATTEMPTED, detail: 'Design context analysis has not produced a usable result yet — drafts use the default template until it does.' };
 }
 
 // The I/O-performing wrapper. Scoped to ONE site's own job history — every

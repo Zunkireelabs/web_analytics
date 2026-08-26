@@ -188,6 +188,47 @@ export async function claimNextDesignAgentJob(siteId = null) {
   }
 }
 
+// The worst-case time a design_generate job can legitimately stay
+// 'executing' inside ONE live worker process: 3 attempts (worker.js's own
+// runWithRetry default maxAttempts) x the per-attempt task timeout
+// (openhands-handler.js's DESIGN_AGENT_TASK_TIMEOUT_MS, default 10 minutes),
+// plus its own short inter-attempt backoff. A job still 'executing' well
+// past this can only mean the worker PROCESS that claimed it is gone — died,
+// OOM-killed, container crashed — not that it is still working; nothing
+// inside that process's own timeout/retry machinery ever fires if the
+// process itself no longer exists to run it. Generous multiplier (4x, not
+// 3x) so a merely slow-but-alive attempt (e.g. a large repo scan near the
+// timeout) is never mistaken for a dead one.
+const STALE_EXECUTING_MS = Number(process.env.DESIGN_AGENT_TASK_TIMEOUT_MS || 10 * 60 * 1000) * 4;
+
+// Self-healing counterpart to claimNextDesignAgentJob: a job's own worker
+// process crashing mid-run (rather than calling finishExecutionJob or being
+// stopped gracefully via worker.js's stop(), which never leaves a claimed
+// job stranded) leaves it stuck at status='executing' forever — no code
+// path ever revisits it, since claimNextDesignAgentJob only ever looks at
+// status='queued'. Real incident: this is exactly what makes a design_generate
+// job outlive the container that was running it, permanently masquerading
+// as "in progress" (design-agent-status.js reports RUNNING) to every gate
+// that reads it, even after a fresh worker container is deployed and empty.
+//
+// Resets it back to 'queued' (never straight to 'failed' — the run itself
+// may well have been fine, only the process hosting it died) so the NEXT
+// claim, by this worker or any other, gets a genuine, fresh attempt. Scoped
+// to kind='design_generate' only — the one kind this table's workers ever
+// execute (see claimNextDesignAgentJob's own WHERE clause).
+export async function reclaimStaleExecutingJobs({ olderThanMs = STALE_EXECUTING_MS } = {}) {
+  const { rows } = await query(
+    `UPDATE execution_jobs
+       SET status = 'queued', started_at = null,
+           logs = logs || $2::jsonb
+     WHERE kind = 'design_generate' AND status = 'executing'
+       AND started_at < now() - ($1::text || ' milliseconds')::interval
+     RETURNING id, site_id`,
+    [olderThanMs, JSON.stringify([{ at: new Date().toISOString(), message: `Reclaimed: stuck in 'executing' past the ${Math.round(olderThanMs / 60000)}-minute stale threshold — its worker process is presumed dead. Reset to 'queued' for a fresh attempt.` }])]
+  );
+  return rows;
+}
+
 export async function addJobRecommendation(executionJobId, recommendationId) {
   const { rows } = await query(
     `INSERT INTO execution_job_recommendations (execution_job_id, recommendation_id)
