@@ -1,7 +1,8 @@
-import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
+import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, listOpenBlockedRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
+import { createRecommendationGates } from './recommendation-gates.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recheckLink } from './technical-seo-analysis.js';
 import { getSiteById } from '../../store/read.js';
@@ -198,6 +199,59 @@ export async function syncFromGrounded(siteId, grounded) {
   if (grounded.droppedRecommendations?.length) {
     await markRecommendationsUnfixable(siteId, grounded.droppedRecommendations);
   }
+}
+
+// Re-validates every open, currently-BLOCKED recommendation against live
+// gate state — the same checks recommendation-gates.js runs when a finding
+// is first detected — and writes back whatever changed. This is the periodic
+// counterpart to syncFromGrounded's own inline refresh (lines above): that
+// one only re-syncs a row's block state when its detecting agent re-emits
+// the same finding on today's run, which most recommendation types do every
+// day but content-gap-derived ones (blog-outline, landing-page,
+// comparison-page, gap-based faq — anything created by
+// createActionCenterRecommendationForGap in analyst-seo-mapping.js) never
+// do: that agent isn't part of the daily grounded detection pass at all, so
+// nothing ever revisited their block state after creation, even after the
+// underlying config (a url_file_map entry, a verified template) got fixed.
+//
+// Read-modify-write on rows that already exist — never inserts, never closes,
+// never touches anything with status != 'open' (excluded by
+// listOpenBlockedRecommendations at the query level). A row this pass
+// couldn't verify this run (a transient API error — gates.evaluate throws,
+// caught below) is left exactly as it was rather than guessed at; it gets
+// another chance on the next run.
+//
+// `onlyDetectingAgent`/`excludeDetectingAgent` split this into the two
+// callers job.js wires up: the daily pass excludes 'analyst-keyword-gaps'
+// rows (content gaps get their own slower weekly cadence — see
+// refreshContentGapRecommendationsForAllSites), the weekly pass includes only
+// them.
+export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent, excludeDetectingAgent } = {}) {
+  const site = await getSiteById(siteId);
+  if (!site?.repo_owner || !site?.repo_name) return { checked: 0, updated: 0 };
+
+  const rows = await listOpenBlockedRecommendations(siteId, { onlyDetectingAgent, excludeDetectingAgent });
+  if (!rows.length) return { checked: 0, updated: 0 };
+
+  // One gates instance for the whole pass — same reasoning as
+  // syncAnalystInsightsToActionCenter's own comment: one repo-tree read and
+  // one soft-404 fingerprint for every row checked, not one per row.
+  const gates = createRecommendationGates(siteId, site);
+  let updated = 0;
+  for (const rec of rows) {
+    const gate = await gates.evaluate(rec.recommendation_type, rec.params || {}).catch(() => null);
+    if (!gate) continue; // could not verify this run — leave the row untouched
+    // gate.drop (page proven gone) is deliberately not acted on here: closing
+    // a recommendation is a lifecycle decision this refresh isn't scoped to
+    // make — markRecommendationsUnfixable/closeStaleRecommendations already
+    // own that for the recommendation types capable of producing a drop.
+    const result = await refreshRecommendationBlockState(rec.id, {
+      blockedReason: gate.blockedReason,
+      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(rec.recommendation_type),
+    });
+    if (result) updated++;
+  }
+  return { checked: rows.length, updated };
 }
 
 // Manual "re-check now" action on a single open recommendation — the

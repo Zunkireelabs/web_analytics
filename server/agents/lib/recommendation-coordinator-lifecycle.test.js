@@ -17,6 +17,7 @@ mock.module(resolve('../../store/recommendations.js'), {
     insertRecommendation: async (siteId, rec) => { inserted.push(rec); return { id: inserted.length }; },
     mergeIntoRecommendation: async (id, patch) => { merged.push({ id, ...patch }); },
     refreshRecommendationBlockState: async (id, patch) => { refreshed.push({ id, ...patch }); },
+    listOpenBlockedRecommendations: async () => [],
     closeStaleRecommendations: async (siteId, keys, checked) => { closedStaleArgs = { siteId, keys, checked }; return 0; },
     markRecommendationsUnfixable: async (siteId, dropped) => { markedUnfixable = { siteId, dropped }; return dropped.length; },
     listOpenRecommendations: async () => [],
@@ -27,6 +28,7 @@ mock.module(resolve('../../store/recommendations.js'), {
 mock.module(resolve('../../store/drafts.js'), { namedExports: { getDraftedFindingIds: async () => new Set() } });
 mock.module(resolve('./command-center.js'), { namedExports: { categoryByAgentId: async () => new Map() } });
 mock.module(resolve('../runner.js'), { namedExports: { runAgent: async () => { throw new Error('must not be reached by syncFromGrounded'); } } });
+mock.module(resolve('./recommendation-gates.js'), { namedExports: { createRecommendationGates: () => { throw new Error('must not be reached by syncFromGrounded'); } } });
 
 const { syncFromGrounded } = await import('./recommendation-coordinator.js');
 

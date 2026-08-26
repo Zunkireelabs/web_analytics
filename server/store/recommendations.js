@@ -168,6 +168,25 @@ export async function refreshRecommendationBlockState(id, { blockedReason, riskT
   return rows[0] || null; // null = already correct, nothing written
 }
 
+// Every currently-open, currently-blocked row, optionally scoped to who
+// detected it. Used by recommendation-coordinator.js's
+// refreshBlockedRecommendations to periodically re-validate blockers against
+// live state — the daily pass excludes 'analyst-keyword-gaps' rows (content
+// gaps get their own slower weekly pass; see job.js), the weekly pass
+// includes only them. Never touches status, so a row this misses one run
+// (transient API error) is simply re-checked next time, and a row that isn't
+// open at all is invisible to it by construction.
+export async function listOpenBlockedRecommendations(siteId, { onlyDetectingAgent, excludeDetectingAgent } = {}) {
+  const { rows } = await query(
+    `SELECT id, recommendation_type, params, detecting_agents FROM recommendations
+     WHERE site_id = $1 AND status = 'open' AND blocked_reason IS NOT NULL
+       AND ($2::text IS NULL OR $2 = ANY(detecting_agents))
+       AND ($3::text IS NULL OR NOT ($3 = ANY(detecting_agents)))`,
+    [siteId, onlyDetectingAgent || null, excludeDetectingAgent || null]
+  );
+  return rows;
+}
+
 export async function listOpenRecommendations(siteId) {
   const { rows } = await query(
     `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' ORDER BY
