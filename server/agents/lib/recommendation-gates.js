@@ -9,6 +9,7 @@ import { baseBranch } from '../../implementers/lib/github-ops.js';
 import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib/discover-file-mapping.js';
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
+import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
 
 // The gates that decide whether a candidate recommendation is real, and
 // whether it may enter the unattended chain.
@@ -50,6 +51,7 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     fetchFile = getFileContent,
     healFn = autoHealFileMapping,
     healContentTargetFn = autoHealNewContentTarget,
+    healAdapterFn = healPaginationAdapter,
     discoverRoutes = discoverPaginationRoutes,
     fetchFingerprint = fetchSoftNotFoundFingerprint,
     checkSoftNotFound = isSoftNotFound,
@@ -174,6 +176,27 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     const healed = await healContentTargetFn(site, actionType, { fetchTree: cachedFetchTree })
       .catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a content target for "${actionType}": ${err.message}`);
+        return null;
+      });
+    if (healed) site = healed;
+  };
+
+  // Once per (route family, actionType) for this whole pass — repairing the
+  // data-array-content adapter for a route family (e.g. /locations/*)
+  // unblocks every sibling page this pass evaluates, not just the one that
+  // happened to trigger the attempt. See pagination-adapter-discovery.js for
+  // why this is safe to attempt automatically (real evidence, dry-run
+  // validated before anything is persisted) despite url-file-map.js's own
+  // "adapter routing is never auto-detected" rule for the general case.
+  const adapterHealAttempted = new Set();
+  const healPaginationRouteAdapter = async (route, actionType, pageUrl) => {
+    if (!site?.repo_owner || !site?.repo_name) return;
+    const key = `${route.routePrefix}::${actionType}`;
+    if (adapterHealAttempted.has(key)) return;
+    adapterHealAttempted.add(key);
+    const healed = await healAdapterFn(site, route, actionType, pageUrl, { fetchFile: cachedFetchFile, log })
+      .catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not auto-configure a data-array-content adapter for ${route.routePrefix}/* (${actionType}): ${err.message}`);
         return null;
       });
     if (healed) site = healed;
@@ -310,7 +333,15 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
         if (await paginationHeadTagAutoHandled(site, generated, generatorId, { fetchFile: cachedFetchFile, fetchTree: cachedFetchTree })) {
           return { drop: 'auto-computed-by-layout', blockedReason: null };
         }
-        mappingBlockedReason = paginationBlockedReason(generated, generatorId);
+        // Try to self-heal the missing route BEFORE reporting it blocked —
+        // same "classify, heal, re-check" shape as healUnmappedPage below,
+        // one layer deeper (a data-array adapter route, not a plain file).
+        if (!isPageMapped(site, page, generatorId)) {
+          await healPaginationRouteAdapter(generated, generatorId, page);
+        }
+        if (!isPageMapped(site, page, generatorId)) {
+          mappingBlockedReason = paginationBlockedReason(generated, generatorId);
+        }
       } else {
         await healUnmappedPage(page, generatorId);
         if (!isPageMapped(site, page, generatorId)) {
