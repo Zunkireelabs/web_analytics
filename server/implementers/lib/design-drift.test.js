@@ -247,7 +247,7 @@ describe('contentWrapperAvailability — a looser rule for the one type with a r
     const v = componentTemplateVerification(site, componentTemplateActionTypeFor('blog-outline'));
     assert.equal(v.ok, false);
     assert.equal(v.reason, 'design-language-not-derived');
-    assert.match(v.detail, /Design Agent has been queued/);
+    assert.match(v.detail, /analysis of the live site has been queued/);
     assert.doesNotMatch(v.detail, /No component template is configured/,
       'must not show the old misleading message — a human was never asked to configure one');
   });

@@ -184,8 +184,8 @@ describe('classifyBlockedKind — the text-pattern -> UI-branch mapping', () => 
     assert.equal(classifyBlockedKind(reason), 'site-fact');
   });
 
-  test('a design-language-not-yet-derived message reads as awaiting-derivation — nothing to do', () => {
-    assert.equal(classifyBlockedKind("This site's design language hasn't been derived yet — the Design Agent has been queued to learn it from the repository."), 'awaiting-derivation');
+  test('a design-context-not-yet-derived message reads as awaiting-derivation — nothing to do', () => {
+    assert.equal(classifyBlockedKind("This site's Design Context hasn't been derived yet — analysis of the live site has been queued. No action needed; this generator's default fallback template renders in the meantime."), 'awaiting-derivation');
   });
 
   test('an unverified-template message also reads as awaiting-derivation', () => {
@@ -199,27 +199,30 @@ describe('classifyBlockedKind — the text-pattern -> UI-branch mapping', () => 
   // implementers/lib/design-agent-status.js (2026-08-24) — a job actively
   // executing is exactly as much "nothing to click, already in progress" as
   // one still queued.
-  test('a "currently running" Design Agent status also reads as awaiting-derivation', () => {
-    assert.equal(classifyBlockedKind('Design Agent setup is currently running.'), 'awaiting-derivation');
+  test('a "currently running" Design Context status also reads as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design context analysis is currently running.'), 'awaiting-derivation');
   });
 
-  test('a queued Design Agent status reads as awaiting-derivation', () => {
-    assert.equal(classifyBlockedKind('Design Agent setup is queued and will run shortly.'), 'awaiting-derivation');
+  test('a queued Design Context status reads as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design context analysis is queued and will run shortly.'), 'awaiting-derivation');
   });
 
-  // A FAILED attempt must never read as "nothing to do, wait" — falling
-  // through to our-config ("Blocked — setup needed" in the UI) is the
-  // correct, honest bucket: something genuinely needs attention now.
-  test('a failed Design Agent status does NOT read as awaiting-derivation', () => {
-    assert.equal(classifyBlockedKind('Design Agent setup failed (job #628). See the latest attempt for details.'), 'our-config');
+  // A failed attempt still reads as our-config for the recommendation's own
+  // classification bucket, but — unlike before — that classification no
+  // longer implies anything is BLOCKED: a failed analysis run never stops a
+  // draft from generating (see design-agent-status.js), it only means this
+  // recommendation is currently drafting against the default fallback
+  // template instead of the site's real design.
+  test('a failed Design Context status does NOT read as awaiting-derivation', () => {
+    assert.equal(classifyBlockedKind('Design context analysis failed (job #628) — drafts continue to use the default fallback template. It will retry automatically.'), 'our-config');
   });
 
-  test('a repeated-failure Design Agent status does NOT read as awaiting-derivation either', () => {
-    assert.equal(classifyBlockedKind('Design Agent setup has failed 2 times in a row (most recently job #630, AGENT_SANDBOX_UNAVAILABLE). This needs attention — it will not resolve itself without intervention.'), 'our-config');
+  test('a repeated-failure Design Context status does NOT read as awaiting-derivation either', () => {
+    assert.equal(classifyBlockedKind('Design context analysis has failed 2 times in a row (most recently job #630, AGENT_SANDBOX_UNAVAILABLE). Drafts continue to use the default fallback template in the meantime.'), 'our-config');
   });
 
-  test('a never-attempted Design Agent status does NOT falsely read as "already in progress"', () => {
-    assert.equal(classifyBlockedKind('Design Agent setup has not been attempted yet.'), 'our-config');
+  test('a never-attempted Design Context status does NOT falsely read as "already in progress"', () => {
+    assert.equal(classifyBlockedKind('Design context has not been derived yet — drafts use the default template until it is.'), 'our-config');
   });
 
   test('null blockedReason has no kind at all', () => {

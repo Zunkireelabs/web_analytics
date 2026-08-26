@@ -22,7 +22,7 @@ describe('deriveDesignAgentStatus — pure state derivation, no I/O', () => {
   test('never_attempted: succeeded is false and no job has ever run', () => {
     const status = deriveDesignAgentStatus({ succeeded: false, recentJobs: [] });
     assert.equal(status.state, DESIGN_AGENT_STATE.NEVER_ATTEMPTED);
-    assert.match(status.detail, /has not been attempted yet/i);
+    assert.match(status.detail, /has not been derived yet/i);
   });
 
   test('queued: the latest job has not started executing yet', () => {
@@ -43,7 +43,7 @@ describe('deriveDesignAgentStatus — pure state derivation, no I/O', () => {
   test('succeeded: the caller\'s own "is there a usable result right now" check wins over any job history', () => {
     const status = deriveDesignAgentStatus({ succeeded: true, recentJobs: [{ id: 1, status: 'failed' }] });
     assert.equal(status.state, DESIGN_AGENT_STATE.SUCCEEDED);
-    assert.match(status.detail, /completed successfully/i);
+    assert.match(status.detail, /up to date/i);
   });
 
   test('failed: a single failed attempt, not yet "repeated"', () => {
@@ -72,7 +72,8 @@ describe('deriveDesignAgentStatus — pure state derivation, no I/O', () => {
     assert.equal(status.attemptCount, 2);
     assert.equal(status.repeated, true);
     assert.match(status.detail, /2 times in a row/i);
-    assert.match(status.detail, /needs attention/i);
+    assert.match(status.detail, /default fallback template/i);
+    assert.doesNotMatch(status.detail, /needs attention|will not resolve itself/i, 'a failed analysis run never blocks drafting, so it must not read as something a human must fix');
   });
 
   test('successful retry after failure: a fresh SUCCEEDED result outranks an old failure streak entirely', () => {

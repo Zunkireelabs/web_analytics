@@ -486,7 +486,7 @@ export function contentWrapperAvailability(site) {
   return {
     ok: false,
     reason: 'design-language-not-derived',
-    detail: "This site's design language hasn't been derived yet — the Design Agent has been queued to learn it from the repository. No action needed; this will unblock automatically once that finishes.",
+    detail: "This site's Design Context hasn't been derived yet — analysis of the live site has been queued. No action needed; this generator's default fallback template renders in the meantime.",
     componentKey,
     actionType: 'content-wrapper',
   };
