@@ -81,22 +81,30 @@ services:
       - "traefik.http.services.analytics-mcp-prod.loadbalancer.server.port=3003"
 
   # Design Agent worker (server/design-agent/worker.js) — polls
-  # execution_jobs for kind='design_generate' and runs each one via
-  # design_task.py (real repo checkout + OpenHands). No public endpoint
-  # (a background poller, not an HTTP service) — no Traefik labels, no
-  # exposed port. Runs on THIS same host/compose deployment rather than a
-  # separate VPS, same as analytics-mcp above: shares this app's own .env
-  # (DATABASE_URL, GITHUB_PAT, OPENAI_API_KEY) and the same Neon database
-  # via execution_jobs/sites, no dedicated DB of its own (unlike
-  # data-analyst-agent's docker-compose.yml, which does have one).
+  # execution_jobs for kind='design_generate'. As of the 2026-08-26 rewrite,
+  # 'design-profile'/'component-templates' (read-only site ANALYSIS) modes
+  # run via server/design-agent/live-analysis/ — Playwright loads the real
+  # live site + one Claude call, no Docker/OpenHands involved. Only
+  # 'capability-repair' (a real repo EDIT — server/agents/lib/
+  # template-capability-repair.js) still runs via design_task.py + OpenHands,
+  # see worker.js's createDispatchingHandler. No public endpoint (a
+  # background poller, not an HTTP service) — no Traefik labels, no exposed
+  # port. Runs on THIS same host/compose deployment rather than a separate
+  # VPS, same as analytics-mcp above: shares this app's own .env
+  # (DATABASE_URL, GITHUB_PAT, OPENAI_API_KEY/ANTHROPIC_API_KEY) and the same
+  # Neon database via execution_jobs/sites, no dedicated DB of its own
+  # (unlike data-analyst-agent's docker-compose.yml, which does have one).
   #
-  # /var/run/docker.sock is mounted so this container can ask the HOST's
-  # own Docker daemon to start a SIBLING container per job
+  # /var/run/docker.sock is still mounted for 'capability-repair' jobs, which
+  # ask the HOST's own Docker daemon to start a SIBLING container
   # (ghcr.io/openhands/agent-server — see design_task.py's DockerWorkspace)
   # — this is Docker-outside-of-Docker, not Docker-in-Docker: this
   # container has no dockerd of its own, it drives the host's. That socket
   # is effectively host-root-equivalent access, scoped here to exactly the
-  # one container that legitimately needs it.
+  # one container that legitimately needs it. Safe to remove only once
+  # capability-repair/code-self-repair are also migrated off Docker — not
+  # done yet (0 of these jobs have ever run in prod; see
+  # project_design-agent-live-rewrite.md).
   design-agent-worker:
     container_name: design-agent-worker-prod
     build:

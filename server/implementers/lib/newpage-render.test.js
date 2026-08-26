@@ -4,6 +4,7 @@ import {
   renderCompliancePageBody, renderLandingPageBody, renderBlogOutlineBody,
   renderDirectAnswerBody, renderTranslationBody,
 } from './newpage-render.js';
+import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
 describe('renderCompliancePageBody', () => {
   const content = {
@@ -222,7 +223,7 @@ describe('layout front matter on net-new pages', () => {
 // design language, and that a site WITHOUT one is byte-for-byte unchanged.
 describe('net-new pages consume the site design profile', () => {
   const PROFILE = {
-    version: 1,
+    version: DESIGN_PROFILE_VERSION,
     styling: 'tailwind',
     typography: { heading: { item: 'text-lg font-medium', section: 'text-2xl' }, body: 'text-gray-600', link: 'text-blue-600' },
     layout: { container: 'max-w-3xl mx-auto', prose: 'prose' },

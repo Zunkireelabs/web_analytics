@@ -1,5 +1,6 @@
 import { claimNextDesignAgentJob, appendJobLog, finishExecutionJob, reclaimStaleExecutingJobs } from '../store/execution-jobs.js';
-import { createDesignAgentHandler } from './openhands-handler.js';
+import { createLiveDesignAnalysisHandler } from './live-analysis-handler.js';
+import { createNativeCapabilityRepairHandler } from './native-repair-handler.js';
 import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
@@ -284,9 +285,30 @@ function installShutdownHandlers(worker) {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// The 'design_generate' queue carries two genuinely different kinds of job:
+// 'design-profile'/'component-templates' (read-only site ANALYSIS — live
+// site + Claude) and 'capability-repair' (a real EDIT to a tenant repo,
+// server/agents/lib/template-capability-repair.js). As of the native-repair
+// migration (2026-08-26), BOTH run without Docker/OpenHands —
+// capability-repair via native-repair-handler.js's tool-use loop
+// (server/design-agent/native-repair/), same job shape (job.params.payload)
+// the old OpenHands dispatcher already expected. code-self-repair.js's
+// default handler was migrated the same way (see that file). openhands-
+// handler.js and design_task.py are left in place, but unreferenced by any
+// active path, until both migrations are verified on staging — see
+// project memory / the plan this was built from for the deletion step.
+export function createDispatchingHandler(options = {}) {
+  const liveAnalysisHandler = createLiveDesignAnalysisHandler(options);
+  const capabilityRepairHandler = createNativeCapabilityRepairHandler(options);
+  return async function dispatchingHandler(job) {
+    if (job.params?.mode === 'capability-repair') return capabilityRepairHandler(job);
+    return liveAnalysisHandler(job);
+  };
+}
+
 function main() {
   const pollIntervalMs = Number(process.env.DESIGN_AGENT_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
-  const worker = createWorker({ pollIntervalMs, handler: createDesignAgentHandler() });
+  const worker = createWorker({ pollIntervalMs, handler: createDispatchingHandler() });
   console.log(`[design-agent-worker] starting — polling every ${pollIntervalMs}ms for kind='design_generate' queued jobs`);
   installShutdownHandlers(worker);
   worker.start();

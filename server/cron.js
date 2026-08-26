@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, runTemplateCapabilityRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -41,6 +41,23 @@ export function startCron() {
         console.log(`[cron] template-capability repair run finished — ${prsOpened} PR(s) opened across ${results.length} site(s)`);
       } catch (err) {
         console.error('[cron] template-capability repair run error:', err.message);
+      }
+
+      // Daily blocked-recommendation refresh, right after template-capability
+      // repair above so it sees that same run's freshly-healed config. This
+      // is the "did anything we already flagged get fixed?" check: it
+      // re-validates every open, still-blocked recommendation (excluding
+      // content-gap ones — see the weekly pass below) against live gate
+      // state and clears/updates blocked_reason so a resolved blocker
+      // re-enters the shipping run immediately below rather than sitting
+      // stale until its detecting agent happens to re-run.
+      console.log(`[cron] blocked-recommendation refresh started ${new Date().toISOString()}`);
+      try {
+        const results = await refreshBlockedRecommendationsForAllSites();
+        const updated = results.reduce((n, r) => n + (r.updated || 0), 0);
+        console.log(`[cron] blocked-recommendation refresh finished — ${updated} recommendation(s) updated across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] blocked-recommendation refresh error:', err.message);
       }
 
       // Shipping runs in the SAME morning pass, immediately after detection,
@@ -367,6 +384,65 @@ export function startCron() {
       }
     }, { timezone: tz });
     console.log(`[cron] proactive design-agent queue scheduled "${designAgentQueue}" (${tz})`);
+  }
+
+  // Weekly Design Context refresh — a live-site analysis is a durable asset
+  // (see live-analysis-handler.js), not something re-derived per draft, so
+  // this is the one place a real site redesign gets picked up: once a week,
+  // every site whose profile is older than 7 days gets a fresh analysis
+  // queued. Deliberately its OWN cron entry rather than folded into the
+  // proactive queue above — that one only ever handles a site's FIRST
+  // derivation (queueDesignAgentDerivationForSite short-circuits once a
+  // usable profile exists), so a weekly cadence here is what keeps an
+  // already-derived profile from going stale forever. Scheduled the same
+  // morning-before-detection slot as the queue above (30 minutes ahead of
+  // it) so a rescanned site's fresh profile is what the day's drafts use,
+  // not last week's — a rescan is a single fast browser + one LLM call now
+  // (no Docker/OpenHands container), so it comfortably finishes in that
+  // window. Weekly, not daily: a site's design doesn't change often enough
+  // to justify a live crawl of it every single morning.
+  const designProfileRescan = process.env.DESIGN_AGENT_RESCAN_CRON_SCHEDULE || '30 5 * * 1'; // 05:30 every Monday
+  if (!cron.validate(designProfileRescan)) {
+    console.error(`[cron] invalid DESIGN_AGENT_RESCAN_CRON_SCHEDULE "${designProfileRescan}" — weekly design-context rescan NOT scheduled.`);
+  } else {
+    cron.schedule(designProfileRescan, async () => {
+      try {
+        const { queued } = await queueDesignProfileRescanForAllSites();
+        console.log(`[cron] weekly design-context rescan finished — ${queued} site(s) queued`);
+      } catch (err) {
+        console.error('[cron] weekly design-context rescan error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] weekly design-context rescan scheduled "${designProfileRescan}" (${tz})`);
+  }
+
+  // Weekly content-gap recommendation refresh — the content-gap counterpart
+  // to the daily blocked-recommendation refresh above. A blog-outline/
+  // landing-page/comparison-page/gap-based-faq recommendation is created
+  // once, at the moment a human (or the MCP tool) approves that keyword gap
+  // (analyst-seo-mapping.js's createActionCenterRecommendationForGap) —
+  // that agent never re-runs as part of the daily grounded detection pass,
+  // so nothing else ever revisits its block state afterward. Deliberately
+  // separate from, and slower than, the daily pass: content doesn't change
+  // config often enough to justify checking it every morning, and this is
+  // also explicitly NOT automatic content generation/drafting — it only
+  // re-validates and clears/updates blocked_reason on rows that already
+  // exist, the same "investigate the live gate state, never guess" contract
+  // refreshBlockedRecommendations uses everywhere else.
+  const contentGapRefresh = process.env.CONTENT_GAP_REFRESH_CRON_SCHEDULE || '0 5 * * 1'; // 05:00 every Monday
+  if (!cron.validate(contentGapRefresh)) {
+    console.error(`[cron] invalid CONTENT_GAP_REFRESH_CRON_SCHEDULE "${contentGapRefresh}" — weekly content-gap refresh NOT scheduled.`);
+  } else {
+    cron.schedule(contentGapRefresh, async () => {
+      try {
+        const results = await refreshContentGapRecommendationsForAllSites();
+        const updated = results.reduce((n, r) => n + (r.updated || 0), 0);
+        console.log(`[cron] weekly content-gap refresh finished — ${updated} recommendation(s) updated across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] weekly content-gap refresh error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] weekly content-gap refresh scheduled "${contentGapRefresh}" (${tz})`);
   }
 
   // Stale audit-run reaper — independent safety net alongside the same

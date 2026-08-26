@@ -53,6 +53,19 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
+# `playwright` (package.json dependency) only installs the npm driver —
+# the actual Chromium binary AND the system shared libraries it needs to
+# launch (libnss3, libatk, libasound2, ...) are a separate download this
+# base image doesn't have by default. Without this, capture.js's
+# `chromium.launch()` (server/design-agent/live-analysis/capture.js — the
+# live-site design analysis that replaced the OpenHands/Docker repo-read
+# path) fails at runtime with a missing-browser error on the very first
+# job, since python:3.12-slim-bookworm ships none of this. `--with-deps`
+# installs both the browser and its apt dependencies in one step; scoped
+# to chromium only (the one browser capture.js launches) to keep the image
+# smaller than the default "every browser" install.
+RUN npx playwright install --with-deps chromium
+
 # Python deps into a dedicated venv (Debian's system Python is externally
 # managed too — pip refuses a bare `pip install` outside one). requirements.txt
 # is a full `pip freeze` lockfile (every transitive dependency pinned), not

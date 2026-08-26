@@ -4,6 +4,8 @@ import { findSchemaIssues } from './schema-structure-guard.js';
 import { findEmptySections } from './empty-section-guard.js';
 import { checkPositioning } from './positioning-guard.js';
 import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
+import { checkDesignConsistency } from './design-consistency-gate.js';
+import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
 // evaluate at all — every other generator (meta-title, schema, faq's Q&A
@@ -66,10 +68,18 @@ const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-poli
 // existing caller that doesn't pass one (there are none left after this
 // change, but a future one could be) simply skips it, same as a site with
 // no verified capabilities does.
+// Same "only where it can mean something" discipline as
+// POSITIONING_CHECKED_GENERATOR_IDS above — checkDesignConsistency only
+// fires for generators whose content is real, visible page content
+// (design-drift.js's DESIGN_CONTEXT_GENERATOR_IDS, the same set that gets
+// design/voice grounding on the way in via server/llm.js's callLLM). A
+// purely technical generator's output (JSON-LD, meta values, a redirect
+// rule) has no design surface to be inconsistent with.
 export async function runQualityGate(content, generatorId, siteId) {
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
+  const needsDesignConsistencyCheck = DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId);
   const issues = [
     ...(isNonLlmContent ? [] : findScaffoldingIssues(content, generatorId)),
     ...(isNonLlmContent ? [] : findDuplicateParagraphs(content)),
@@ -77,6 +87,7 @@ export async function runQualityGate(content, generatorId, siteId) {
     ...findEmptySections(content),
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
     ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),
+    ...(needsDesignConsistencyCheck ? checkDesignConsistency(content).issues : []),
   ];
   return { clean: issues.length === 0, issues };
 }
