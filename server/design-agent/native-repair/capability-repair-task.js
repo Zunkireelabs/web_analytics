@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { snapshotFiles, diffSnapshots, runSandboxCommand, resolveScopedPath, listSandboxFiles } from './sandbox.js';
+import { checkLandmarkOrderPreserved, detectLandmarkLabels } from './landmark-order.js';
 
 // Same prompt content as design_task.py's build_capability_repair_task —
 // same grounding rule (only real evidence the payload supplies, never
@@ -30,6 +31,26 @@ export function buildCapabilityRepairPrompt(payload) {
     `The real current content of ${templatePath}:\n---\n${templateSource}\n---\n`,
     `The real current content of ${dataFilePath}:\n---\n${dataFileSource}\n---\n`,
   ];
+
+  // Explicit structural anchoring — added after a real production incident
+  // (zunkireelabs-web's location-service.njk) where this job, given only the
+  // raw file and a free-form "add a rendering slot" instruction, spliced a
+  // whole new block of sections ABOVE the page's existing Hero section. The
+  // build still passed (this job's only prior check), but every page using
+  // that template rendered visibly wrong. Naming the site's own existing
+  // section order here, plus a hard placement rule, is the fix on the
+  // prompt side; validateCapabilityRepair below is the independent backstop
+  // that doesn't depend on the model actually following this instruction.
+  const landmarks = detectLandmarkLabels(templateSource);
+  if (landmarks.length) {
+    lines.push(
+      `This template already has these sections, in this exact top-to-bottom order: ${landmarks.map((l) => `"${l}"`).join(' -> ')}.\n`
+      + `Your new rendering slot must be placed AFTER all of these existing sections — never inserted before, between, or in a way that `
+      + `moves any of them. Do not reorder or remove anything that is already there; only append your new slot at the end of the `
+      + 'existing section flow (or nest it inside whichever existing section is the correct semantic home for it, without moving that '
+      + 'section itself). Placing new content before an existing section like a Hero or Header is a critical layout bug, not a stylistic choice.\n',
+    );
+  }
 
   if (conventionExamples.length) {
     lines.push('This site already expresses AI-managed content elsewhere using this exact convention — match it precisely, do not invent a different shape:\n');
@@ -99,6 +120,21 @@ export async function validateCapabilityRepair(sandbox, { templatePath, dataFile
   const unexpected = changed.filter((c) => !allowed.has(c.path));
   if (unexpected.length) {
     return { ok: false, output: `Agent touched file(s) outside the intended scope: ${unexpected.map((c) => c.path).join(', ')}` };
+  }
+
+  // Structural backstop for the zunkireelabs-web location-service.njk
+  // incident: a syntactically valid, build-passing edit that nonetheless
+  // spliced new sections above the page's existing Hero section. Checked
+  // independently of whether the prompt's own placement instruction (see
+  // buildCapabilityRepairPrompt) was followed — this doesn't trust the
+  // model, it re-derives the answer from the actual before/after template
+  // text, same discipline as the file-scope check just above.
+  const templateEdit = templatePath ? changed.find((c) => c.path === templatePath) : null;
+  if (templateEdit) {
+    const landmarkCheck = checkLandmarkOrderPreserved(before[templatePath], templateEdit.newContent);
+    if (!landmarkCheck.ok) {
+      return { ok: false, output: `Rejected: this edit would break the page's layout order. ${landmarkCheck.reason}` };
+    }
   }
 
   const dataEdit = changed.find((c) => c.path === dataFilePath);
