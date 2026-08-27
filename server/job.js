@@ -1181,5 +1181,28 @@ export async function runStartupCatchup() {
       await noteGoogleAuthOutcome(false, err);
     }
   }
+
+  // Also reconcile any recommendation left blocked by config that got fixed
+  // while this process was down. Every deploy restarts the process — without
+  // this, a config fix (connect-repo, a manual url_file_map edit, the very
+  // code fix this deploy is shipping) sits invisible until the next 07:00
+  // local cron tick instead of unblocking the moment the fix is actually
+  // running. Real incident (2026-08-27): a deploy that fixed a Design Agent
+  // build failure left ~250 already-resolvable recommendations sitting
+  // blocked for hours because nothing re-evaluated them until the next
+  // scheduled pass. Both the daily and weekly-content-gap passes (see their
+  // own split below) — pure re-evaluation against live gate state, no PR
+  // side effects, safe to run on every restart including a crash-loop.
+  try {
+    const [daily, weekly] = await Promise.all([
+      refreshBlockedRecommendationsForAllSites(),
+      refreshContentGapRecommendationsForAllSites(),
+    ]);
+    const updated = [...daily, ...weekly].reduce((n, r) => n + (r.updated || 0), 0);
+    if (updated) console.log(`[catchup] blocked-recommendation reconciliation: ${updated} recommendation(s) unblocked/updated.`);
+  } catch (err) {
+    console.error('[catchup] blocked-recommendation reconciliation error:', err.message);
+  }
+
   console.log('[catchup] done.');
 }
