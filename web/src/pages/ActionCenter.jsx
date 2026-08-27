@@ -821,9 +821,12 @@ export default function ActionCenter() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-xs font-black text-slate-800 leading-snug truncate">{titleFor(item)}</span>
-                              {/* A blocked recommendation can't be drafted at all (the server 422s),
-                                  so it must not wear the "Safe — auto-eligible" badge that promises
-                                  the opposite. The reason itself is stated in the detail panel. */}
+                              {/* Most blocked_kinds mean the server really does refuse the draft,
+                                  so this must not wear the "Safe — auto-eligible" badge that
+                                  promises the opposite ('design-degraded' is the one exception —
+                                  see blockedMetaFor/the action-button logic below — but even it
+                                  still isn't risk-tier 'safe', so this exclusion is harmless for
+                                  it too). The reason itself is stated in the detail panel. */}
                               {item.blockedReason ? (() => {
                                 const meta = blockedMetaFor(item);
                                 const BlockedIcon = meta.icon;
@@ -1091,7 +1094,14 @@ export default function ActionCenter() {
                         {generatingId === selectedRecommendation.id ? 'Drafting…' : 'Preview Draft Only'}
                       </button>
                     )}
-                    {selectedRecommendation.blockedReason ? (() => {
+                    {/* 'design-degraded' is deliberately excluded here: unlike
+                        every other blocked_kind, it's a failed Design Context
+                        run, which never stops drafting (action-center.js's
+                        generateDraft falls back to the generator's zero-config
+                        template) — swapping out the real button for a
+                        disabled pill would contradict the banner above, which
+                        already says "not blocked." */}
+                    {selectedRecommendation.blockedReason && selectedRecommendation.blockedKind !== 'design-degraded' ? (() => {
                       const meta = blockedMetaFor(selectedRecommendation);
                       const BlockedIcon = meta.icon;
                       const blue = meta.className === 'blue';
