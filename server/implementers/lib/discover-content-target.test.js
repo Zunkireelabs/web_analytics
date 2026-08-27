@@ -29,6 +29,13 @@ const { findContentDirectories, autoHealNewContentTarget } = await import('./dis
 const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map: {} };
 const treeOf = (...files) => async () => ({ files, truncated: false });
 
+// Every file "has real page front matter" by default — neutralizes the
+// real-page-evidence narrowing step for tests that are about a DIFFERENT
+// axis of autoHealNewContentTarget (file-count, naming hints) so those tests
+// keep testing exactly one thing. Tests for the evidence step itself supply
+// their own fetchFile.
+const pageFetchFile = async () => ({ content: '---\nlayout: base.njk\n---\ncontent' });
+
 beforeEach(() => { savedConfig = null; recordedRepairs = []; });
 
 describe('findContentDirectories — the never-guess evidence bar', () => {
@@ -88,6 +95,7 @@ describe('autoHealNewContentTarget', () => {
         'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
         'src/docs/x.md', 'src/docs/y.md', 'src/docs/z.md',
       ),
+      fetchFile: pageFetchFile,
     });
     assert.equal(healed, null);
     assert.equal(savedConfig, null);
@@ -100,6 +108,7 @@ describe('autoHealNewContentTarget', () => {
         'src/blog/a.md', 'src/blog/b.md', 'src/blog/c.md',
         'src/docs/x.md', 'src/docs/y.md', 'src/docs/z.md',
       ),
+      fetchFile: pageFetchFile,
     });
     assert.ok(healed);
     assert.deepEqual(savedConfig.urlFileMap.newContentTargets['blog-outline'], { dir: 'src/blog', extension: '.md' });
@@ -130,6 +139,187 @@ describe('autoHealNewContentTarget', () => {
     });
     assert.equal(healed, null);
     assert.equal(fetched, false);
+  });
+
+  // Real incident (2026-08-27): a site's real 10 "plausible" candidates
+  // included .brain/.brain/session-logs (an agent's own internal notes) and
+  // docs/docs/seo-aeo-implementation (repo documentation) alongside real
+  // page directories — findContentDirectories' file-count bar alone cannot
+  // tell these apart. These tests cover the two new, generic evidence tiers
+  // that narrow it down using real repo content, not a directory-name guess.
+  describe('autoHealNewContentTarget — real-page-evidence narrowing', () => {
+    test('a dot-prefixed directory never qualifies, regardless of file count', async () => {
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          '.brain/a.md', '.brain/b.md', '.brain/c.md', '.brain/d.md',
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.ok(healed, 'the only real candidate left after excluding .brain must still heal');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('a markdown directory with no page front matter is excluded as real notes, not content', async () => {
+      const fetchFile = async (_s, path) => (
+        path.startsWith('docs/') ? { content: 'Just a plain internal note, no front matter at all.' } : pageFetchFile()
+      );
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          'docs/notes-a.md', 'docs/notes-b.md', 'docs/notes-c.md',
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+        ),
+        fetchFile,
+      });
+      assert.ok(healed);
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('a component/template extension is never subjected to the front-matter check', async () => {
+      // .njk is unambiguous page-rendering evidence by construction — the
+      // front-matter step must never fetch or exclude it.
+      let fetchCalls = 0;
+      const healed = await autoHealNewContentTarget(site, 'blog-outline', {
+        fetchTree: treeOf('src/pages/a.njk', 'src/pages/b.njk', 'src/pages/c.njk'),
+        fetchFile: async () => { fetchCalls++; return { content: '' }; },
+      });
+      assert.ok(healed);
+      assert.equal(fetchCalls, 0, 'a single already-unambiguous candidate is never sampled at all');
+    });
+
+    test('remains genuinely ambiguous — and stays blocked — when two directories BOTH carry real page front matter', async () => {
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/pages/resources/a.md', 'src/pages/resources/b.md', 'src/pages/resources/c.md',
+          'src/pages/services/x.md', 'src/pages/services/y.md', 'src/pages/services/z.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.equal(healed, null, 'two real, equally-valid candidates must never be guessed between');
+      assert.equal(savedConfig, null);
+      assert.equal(recordedRepairs[0]?.outcome, 'ambiguous');
+    });
+
+    test('a fetch failure sampling one candidate is treated as unverifiable, not as evidence either way', async () => {
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          'docs/a.md', 'docs/b.md', 'docs/c.md',
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+        ),
+        fetchFile: async (_s, path) => { if (path.startsWith('docs/')) throw new Error('network error'); return pageFetchFile(); },
+      });
+      assert.ok(healed, 'the unreachable candidate is dropped, not guessed at — the remaining real one still heals');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+  });
+
+  // Deeper investigation added to resolve the real (2026-08-27) "10 -> 6
+  // candidates, still no unique winner for direct-answer" gap: two more
+  // generic evidence tiers, applied to every client/framework this app
+  // supports, never hardcoded to one site's repo shape.
+  describe('autoHealNewContentTarget — existing-route and build-config evidence', () => {
+    test('narrows using a real existing route whose URL matches the actionType convention', async () => {
+      const siteWithRoute = {
+        ...site,
+        url_file_map: { pages: { '/faq/example': { file: 'src/answers/example.md' } } },
+      };
+      const healed = await autoHealNewContentTarget(siteWithRoute, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.ok(healed, 'a real live /faq/ route pointing into src/answers is real routing evidence');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('narrows using a pattern route whose match regex names the actionType convention', async () => {
+      const siteWithPattern = {
+        ...site,
+        url_file_map: { patterns: [{ match: '^/answers/[^/]+$', file: 'src/answers/$1.md' }] },
+      };
+      const healed = await autoHealNewContentTarget(siteWithPattern, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.ok(healed);
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('an unrelated existing route never narrows anything — real evidence only', async () => {
+      const siteWithUnrelatedRoute = {
+        ...site,
+        url_file_map: { pages: { '/about': { file: 'src/pages/about.md' } } },
+      };
+      const healed = await autoHealNewContentTarget(siteWithUnrelatedRoute, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      // Falls through to the directory-name hint ("answers"), which still
+      // resolves it — this test only proves the unrelated route contributed
+      // nothing, not that the whole thing stays blocked.
+      assert.ok(healed);
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('narrows using an Eleventy build-config collection declared over one candidate directory', async () => {
+      const fetchFile = async (_s, path) => {
+        if (path === '.eleventy.js') {
+          return {
+            content: `
+              module.exports = function (eleventyConfig) {
+                eleventyConfig.addCollection('faq', (collectionApi) =>
+                  collectionApi.getFilteredByGlob(['src/qa-pages/*.md']));
+              };
+            `,
+          };
+        }
+        return pageFetchFile();
+      };
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          '.eleventy.js',
+          'src/qa-pages/a.md', 'src/qa-pages/b.md', 'src/qa-pages/c.md',
+          'src/pages/x.md', 'src/pages/y.md', 'src/pages/z.md',
+        ),
+        fetchFile,
+      });
+      assert.ok(healed, 'an Eleventy collection literally named "faq" over src/qa-pages is real framework evidence, even though the directory name itself gives no hint');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/qa-pages', extension: '.md' });
+    });
+
+    test('a build config with no matching collection name never narrows anything', async () => {
+      const fetchFile = async (_s, path) => {
+        if (path === '.eleventy.js') {
+          return {
+            content: `
+              module.exports = function (eleventyConfig) {
+                eleventyConfig.addCollection('products', (collectionApi) =>
+                  collectionApi.getFilteredByGlob(['src/products/*.md']));
+              };
+            `,
+          };
+        }
+        return pageFetchFile();
+      };
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          '.eleventy.js',
+          'src/pages/resources/a.md', 'src/pages/resources/b.md', 'src/pages/resources/c.md',
+          'src/pages/services/x.md', 'src/pages/services/y.md', 'src/pages/services/z.md',
+        ),
+        fetchFile,
+      });
+      assert.equal(healed, null, 'an unrelated collection name must never be treated as evidence for this actionType');
+      assert.equal(recordedRepairs[0]?.outcome, 'ambiguous');
+    });
   });
 
   test('preserves existing newContentTargets/pages config rather than replacing the whole blob', async () => {

@@ -80,7 +80,7 @@ mock.module(resolve('../agents/lib/template-capability-repair.js'), {
     classifyCapabilityGap: () => gapResult,
     buildTemplatePatch: (source) => `${source}\n<!-- patched -->`,
     deriveAdapterConfig: (existing, { generatorId, fieldName }) => ({ ...existing, fields: { [fieldName]: fieldName } }),
-    GENERATOR_VALUE_KEYS: { 'expand-content': 'expandedContent' },
+    getGeneratorValueKey: (generatorId) => ({ 'expand-content': 'expandedContent' }[generatorId] ?? null),
     // Real implementations (pure, no I/O) — findConventionExamples (this
     // script's own architectural-gap evidence gathering) and the live
     // capability-repair execution path call these for real against the

@@ -700,3 +700,50 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
 
   return { ok: false, error: `No merge strategy for action type "${actionType}".` };
 }
+
+// Minimal, non-real content sufficient to reach each actionType's OWN
+// values-object construction inside buildMergeValues above — never written
+// anywhere, never treated as real content, exists only so
+// deriveMergeValueKey (below) can ask the real merge-strategy switch what
+// field name it uses for a generatorId, instead of maintaining a second,
+// hand-copied list that inevitably drifts out of sync with this one (the
+// real incident: 25 of 28 registered generatorIds — including "schema" on
+// /compare/* routes — were simply missing from that list, so template
+// capability repair refused to derive an otherwise-derivable adapter field
+// purely because nobody had remembered to add an entry for them).
+// actionTypes absent from this table (meta-title, analytics-install, and
+// every non-marker-merge generator) are deliberately not probed: they either
+// return more than one field (meta-title) or a provider-dependent field
+// (analytics-install), so there is no single value key to derive — callers
+// must treat that as "cannot safely derive," never guess one.
+const PROBE_CONTENT_BY_ACTION_TYPE = {
+  faq: { items: [{ question: 'q', answer: 'a' }] },
+  schema: { jsonLd: { '@type': 'Thing' } },
+  breadcrumbs: { jsonLd: { '@type': 'BreadcrumbList' } },
+  'internal-links': { suggestions: [{ url: '/x', anchorText: 'x' }] },
+  canonical: { canonicalUrl: 'https://example.invalid/x' },
+  'open-graph': { ogTitle: 'x' },
+  'expand-content': { sections: [{ heading: 'h', body: 'b' }] },
+  'qa-content': { items: [{ question: 'q', answer: 'a' }] },
+};
+
+// The single field name buildMergeValues uses for `actionType`'s rendered
+// value — derived by actually running the real merge switch above against
+// minimal probe content, not a second, independently-maintained mapping.
+// Returns null when `actionType` has no single-field shape to derive from
+// (multi-field, provider-dependent, or not a marker-merge action type at
+// all) — callers must treat null as "cannot safely derive," never fall back
+// to a guess.
+const mergeValueKeyCache = new Map();
+export function deriveMergeValueKey(actionType) {
+  if (mergeValueKeyCache.has(actionType)) return mergeValueKeyCache.get(actionType);
+  const probe = PROBE_CONTENT_BY_ACTION_TYPE[actionType];
+  let key = null;
+  if (probe) {
+    const result = buildMergeValues(actionType, probe, 'visible', {}, null);
+    const keys = result.ok ? Object.keys(result.values) : [];
+    if (keys.length === 1) key = keys[0];
+  }
+  mergeValueKeyCache.set(actionType, key);
+  return key;
+}

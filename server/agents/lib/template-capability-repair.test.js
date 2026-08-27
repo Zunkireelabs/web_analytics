@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAiManagedSlots, findSlotForGenerator, adaptSlotBlock, classifyCapabilityGap,
-  buildTemplatePatch, deriveAdapterConfig, GENERATOR_VALUE_KEYS,
+  buildTemplatePatch, deriveAdapterConfig, getGeneratorValueKey,
 } from './template-capability-repair.js';
 
 // Fixtures are verbatim excerpts (trimmed) of the real templates on
@@ -181,7 +181,7 @@ describe('deriveAdapterConfig', () => {
       fields: { title: 'title', metaDescription: 'description' },
     };
     const derived = deriveAdapterConfig(existingMetaTitleAdapter, {
-      generatorId: 'expand-content', valueKey: GENERATOR_VALUE_KEYS['expand-content'], fieldName: 'expandedContent',
+      generatorId: 'expand-content', valueKey: getGeneratorValueKey('expand-content'), fieldName: 'expandedContent',
     });
     assert.deepEqual(derived, {
       id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js',
@@ -194,10 +194,24 @@ describe('deriveAdapterConfig', () => {
   });
 });
 
-describe('GENERATOR_VALUE_KEYS', () => {
-  test('matches marker-merge.js buildMergeValues real return keys', () => {
-    assert.equal(GENERATOR_VALUE_KEYS['expand-content'], 'expandedContent');
-    assert.equal(GENERATOR_VALUE_KEYS['qa-content'], 'qaContent');
-    assert.equal(GENERATOR_VALUE_KEYS['internal-links'], 'links');
+describe('getGeneratorValueKey', () => {
+  test('derives the real single-field value key straight from marker-merge.js buildMergeValues', () => {
+    assert.equal(getGeneratorValueKey('expand-content'), 'expandedContent');
+    assert.equal(getGeneratorValueKey('qa-content'), 'qaContent');
+    assert.equal(getGeneratorValueKey('internal-links'), 'links');
+    // Previously blocked purely because nobody had hand-added these entries —
+    // the real incident this generalizes the fix for (schema on /compare/*).
+    assert.equal(getGeneratorValueKey('schema'), 'schema');
+    assert.equal(getGeneratorValueKey('faq'), 'faq');
+    assert.equal(getGeneratorValueKey('breadcrumbs'), 'breadcrumbSchema');
+    assert.equal(getGeneratorValueKey('canonical'), 'canonical');
+    assert.equal(getGeneratorValueKey('open-graph'), 'openGraph');
+  });
+
+  test('returns null for multi-field/provider-dependent/non-marker-merge action types rather than guessing', () => {
+    assert.equal(getGeneratorValueKey('meta-title'), null);
+    assert.equal(getGeneratorValueKey('analytics-install'), null);
+    assert.equal(getGeneratorValueKey('direct-answer'), null);
+    assert.equal(getGeneratorValueKey('blog-outline'), null);
   });
 });

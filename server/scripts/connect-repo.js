@@ -5,6 +5,7 @@ import { getSiteById } from '../store/read.js';
 import { auditSite } from './audit-url-file-map.js';
 import { shouldAutoEnableOnConnect } from '../routes/clients.js';
 import { queueDesignAgentDerivationForSite } from '../job.js';
+import { refreshBlockedRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
 // A synthetic req so recordAuditEvent's resolveActor(req) records this as a
@@ -152,6 +153,27 @@ async function main() {
       await auditSite(siteId);
     } catch (err) {
       console.warn(`Config check failed to run: ${err.message} — run \`npm run audit-url-file-map -- --site-id ${siteId}\` manually before relying on this site's drafts.`);
+    }
+
+    // Re-evaluate any recommendation this site already had sitting blocked
+    // BEFORE this connect/reconfigure — the repo/url_file_map write above is
+    // exactly the kind of fix refreshBlockedRecommendations exists to detect,
+    // and without this it would otherwise sit stale until the next daily
+    // (07:00 local) / weekly cron tick. Both passes (see job.js's own split)
+    // so a resolved gap of either kind clears immediately rather than
+    // waiting on its own cadence. Best-effort, same reasoning as the audit
+    // above: a failure here must not undo the repo config write.
+    console.log('Re-checking previously blocked recommendations against the updated config...');
+    try {
+      const [daily, weekly] = await Promise.all([
+        refreshBlockedRecommendations(siteId, { excludeDetectingAgent: 'analyst-keyword-gaps' }),
+        refreshBlockedRecommendations(siteId, { onlyDetectingAgent: 'analyst-keyword-gaps' }),
+      ]);
+      const updated = (daily.updated || 0) + (weekly.updated || 0);
+      const checked = (daily.checked || 0) + (weekly.checked || 0);
+      console.log(`Reconciled ${checked} blocked recommendation(s), ${updated} unblocked/updated.`);
+    } catch (err) {
+      console.warn(`Reconciliation failed to run: ${err.message} — the daily/weekly cron will pick this up instead.`);
     }
   } else {
     console.log('Still missing repo_owner/repo_name — Apply Change will 400 until both are set.');

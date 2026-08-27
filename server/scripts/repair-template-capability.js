@@ -40,7 +40,7 @@ import {
   getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic, openPullRequest, defaultBranchName,
 } from '../github/client.js';
 import {
-  classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, GENERATOR_VALUE_KEYS, parseAiManagedSlots,
+  classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, getGeneratorValueKey, parseAiManagedSlots,
   findSlotForGenerator, fieldNameFromExpr,
 } from '../agents/lib/template-capability-repair.js';
 import { isOnboardingAnalysisPending } from '../implementers/lib/onboarding-readiness.js';
@@ -445,7 +445,7 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
   for (const group of groups) {
     const pattern = group.patternIdx != null ? site.url_file_map.patterns[group.patternIdx] : null;
     const existingAdapterEntry = pattern?.adapters ? Object.values(pattern.adapters)[0] : null;
-    const valueKey = GENERATOR_VALUE_KEYS[group.generatorId];
+    const valueKey = getGeneratorValueKey(group.generatorId);
 
     // A page whose FILE already resolves (via url_file_map.pages, a
     // naming-convention match resolveFile derives on its own, or PASS 0's
