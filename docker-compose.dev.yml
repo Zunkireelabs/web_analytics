@@ -76,8 +76,8 @@ services:
       - "traefik.http.services.analytics-mcp-stage.loadbalancer.server.port=3003"
 
   # Design Agent worker, staging — see docker-compose.yml's design-agent-worker
-  # service for the full explanation (Docker-outside-of-Docker, no public
-  # endpoint, shares this deployment's own .env).
+  # service for the full explanation (no public endpoint, shares this
+  # deployment's own .env, no Docker socket needed as of 2026-08-27).
   design-agent-worker:
     container_name: design-agent-worker-stage
     build:
@@ -90,16 +90,6 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-      # See docker-compose.yml's design-agent-worker service for the full
-      # explanation — enables the same-network fallback in design_task.py.
-      - DESIGN_AGENT_SANDBOX_NETWORK=hosting
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    extra_hosts:
-      # See docker-compose.yml's design-agent-worker service for the full
-      # explanation (DockerWorkspace's sibling containers publish ports on
-      # the true Docker host's namespace, not this container's loopback).
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
       interval: 30s

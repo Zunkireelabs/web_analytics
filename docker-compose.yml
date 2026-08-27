@@ -82,29 +82,25 @@ services:
 
   # Design Agent worker (server/design-agent/worker.js) — polls
   # execution_jobs for kind='design_generate'. As of the 2026-08-26 rewrite,
-  # 'design-profile'/'component-templates' (read-only site ANALYSIS) modes
-  # run via server/design-agent/live-analysis/ — Playwright loads the real
-  # live site + one Claude call, no Docker/OpenHands involved. Only
+  # every job mode runs Docker-free: 'design-profile'/'component-templates'
+  # (read-only site ANALYSIS) run via server/design-agent/live-analysis/ —
+  # Playwright loads the real live site + one Claude call — and
   # 'capability-repair' (a real repo EDIT — server/agents/lib/
-  # template-capability-repair.js) still runs via design_task.py + OpenHands,
-  # see worker.js's createDispatchingHandler. No public endpoint (a
-  # background poller, not an HTTP service) — no Traefik labels, no exposed
-  # port. Runs on THIS same host/compose deployment rather than a separate
-  # VPS, same as analytics-mcp above: shares this app's own .env
-  # (DATABASE_URL, GITHUB_PAT, OPENAI_API_KEY/ANTHROPIC_API_KEY) and the same
-  # Neon database via execution_jobs/sites, no dedicated DB of its own
-  # (unlike data-analyst-agent's docker-compose.yml, which does have one).
+  # template-capability-repair.js) runs via a native, no-container tool-use
+  # loop (server/design-agent/native-repair/) — see worker.js's
+  # createDispatchingHandler. No public endpoint (a background poller, not
+  # an HTTP service) — no Traefik labels, no exposed port. Runs on THIS same
+  # host/compose deployment rather than a separate VPS, same as
+  # analytics-mcp above: shares this app's own .env (DATABASE_URL,
+  # GITHUB_PAT, OPENAI_API_KEY/ANTHROPIC_API_KEY) and the same Neon database
+  # via execution_jobs/sites, no dedicated DB of its own (unlike
+  # data-analyst-agent's docker-compose.yml, which does have one).
   #
-  # /var/run/docker.sock is still mounted for 'capability-repair' jobs, which
-  # ask the HOST's own Docker daemon to start a SIBLING container
-  # (ghcr.io/openhands/agent-server — see design_task.py's DockerWorkspace)
-  # — this is Docker-outside-of-Docker, not Docker-in-Docker: this
-  # container has no dockerd of its own, it drives the host's. That socket
-  # is effectively host-root-equivalent access, scoped here to exactly the
-  # one container that legitimately needs it. Safe to remove only once
-  # capability-repair/code-self-repair are also migrated off Docker — not
-  # done yet (0 of these jobs have ever run in prod; see
-  # project_design-agent-live-rewrite.md).
+  # No /var/run/docker.sock mount and no extra_hosts host-gateway entry —
+  # the OpenHands/Docker-outside-of-Docker path (a sibling
+  # ghcr.io/openhands/agent-server container per job) this used to need that
+  # for was removed 2026-08-27, confirmed unreferenced by any live job
+  # dispatch (see server/design-agent/Dockerfile's own header comment).
   design-agent-worker:
     container_name: design-agent-worker-prod
     build:
@@ -117,24 +113,6 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-      # Enables design_task.py's same-network fallback (see
-      # DESIGN_AGENT_SANDBOX_NETWORK's docstring) for when the
-      # host.docker.internal path below is blocked by something on the host
-      # itself (e.g. a firewall) even though the sandbox container is
-      # healthy — must match the `networks:` entry below, since that is
-      # what makes the sibling container reachable by IP on this network at
-      # all.
-      - DESIGN_AGENT_SANDBOX_NETWORK=hosting
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    extra_hosts:
-      # design_task.py's DockerWorkspace spawns sibling containers via this
-      # socket and needs to reach their published ports; its own
-      # 127.0.0.1 is a different network namespace from where `docker run
-      # -p` actually publishes them (the true Docker host's), so it reaches
-      # them via this host-gateway alias instead — see
-      # DESIGN_AGENT_SANDBOX_HOST in design_task.py.
-      - "host.docker.internal:host-gateway"
     healthcheck:
       # No HTTP endpoint to poll (this is a background poller, not a web
       # service) — liveness is just "is the poll-loop process still

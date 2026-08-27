@@ -2,7 +2,6 @@ import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
 import { recordFixOutcome } from '../../agent-memory.js';
-import { DESIGN_AGENT_GENERATOR_ID } from '../../design-agent/openhands-handler.js';
 import { FRONTEND_ACTION_TYPES } from '../frontend.js';
 import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, getLatestDesignAgentJob, getDesignAgentJobById, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
 import { getSiteById } from '../../store/read.js';
@@ -10,6 +9,15 @@ import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
   isProfileUsable, isProjectable,
 } from '../../design-agent/lib/design-profile.js';
+
+// The generatorId every componentTemplate-derivation lesson (see
+// recordRejectedTemplateLesson below) is filed under in agent_fix_memory —
+// previously defined in the now-removed openhands-handler.js (the
+// Docker/OpenHands capability-repair path, replaced 2026-08-26 by
+// native-repair-handler.js), but this constant itself was never
+// OpenHands-specific, just co-located with it — moved here, its one real
+// consumer, rather than into a shared file for a single string.
+const DESIGN_AGENT_GENERATOR_ID = 'design-agent-component-templates';
 
 // componentTemplates (marker-merge.js) are a one-time, hand-captured
 // snapshot of a site's REAL design — real Tailwind classes copied out of the
@@ -492,9 +500,8 @@ export function contentWrapperAvailability(site) {
   };
 }
 
-// LEARN side of the loop this module's RETRIEVE half
-// (openhands-handler.js's createComponentTemplateHandler) already reads
-// from. Single source of truth for what a rejected-template lesson looks
+// LEARN side of the loop this module's RETRIEVE half (resolveOrCreateComponentTemplate
+// below) already reads from. Single source of truth for what a rejected-template lesson looks
 // like — called from resolveOrCreateComponentTemplate below, the sole
 // path (autonomous, no human step) that can produce a componentTemplate in
 // production, so there is exactly one write path into agent_fix_memory for
@@ -641,8 +648,7 @@ export async function withDesignContext(system, generatorId, siteId, { fetchSite
 // Design Agent readiness logic — the real implementation lives in
 // onboarding-readiness.js, a deliberately leaf-level module (see its own
 // comment) so callers that only need this one check don't pull in this
-// file's much heavier import graph (audit-log, agent-memory,
-// openhands-handler, ...).
+// file's much heavier import graph (audit-log, agent-memory, ...).
 export { isOnboardingAnalysisPending } from './onboarding-readiness.js';
 
 // Validates and saves a freshly-derived profile, then projects EVERY
@@ -710,9 +716,9 @@ export async function persistDerivedComponentTemplates(site, componentTemplates,
     }
 
     // Stamped verified-by-design-agent at the moment of derivation: this
-    // template was just read out of the site's REAL repo by an OpenHands
-    // session (openhands-handler.js), which is exactly the grounding the gate
-    // in generateDraft is asking for. `jobId` is the evidence trail — null for
+    // template was just read out of the site's REAL repo by a live-site
+    // analysis session (live-analysis-handler.js), which is exactly the
+    // grounding the gate in generateDraft is asking for. `jobId` is the evidence trail — null for
     // the inline (non-job) path, which is fine; the stamp's value is
     // `verifiedBy`, and `verifiedRef` is supporting detail.
     accepted.push({
