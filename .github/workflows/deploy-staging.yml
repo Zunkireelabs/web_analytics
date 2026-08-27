@@ -315,7 +315,22 @@ jobs:
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             DAAENVEOF
 
-            docker compose -f docker-compose.dev.yml build
+            # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
+            # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
+            # layers reported CACHED across multiple independent deploy
+            # attempts spanning 30+ minutes, even though package-lock.json's
+            # content had genuinely changed on disk (git-level verified —
+            # the VPS's checkout was confirmed at the exact commit carrying
+            # the fix). BuildKit's COPY caching is supposed to be content-
+            # hashed, so a stale hit like that shouldn't be possible; rather
+            # than chase a persisted daemon-cache bug on this host with no
+            # SSH access to inspect it live, force this one image to always
+            # rebuild the dependency-install layer from scratch. The other
+            # two images don't have this problem (nothing in their build
+            # fails from a stale npm ci) and keep normal caching so most
+            # deploys stay fast.
+            docker compose -f docker-compose.dev.yml build --no-cache design-agent-worker
+            docker compose -f docker-compose.dev.yml build analytics analytics-mcp
             docker compose -f data-analyst-agent/docker-compose.dev.yml build
 
             echo "Applying database migrations..."
