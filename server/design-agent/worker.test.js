@@ -1,15 +1,9 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { pool, query } from '../db.js';
 import { createDesignAgentJob, createComponentTemplateJob } from '../store/execution-jobs.js';
 import { processOneJob, createWorker } from './worker.js';
 import { createMockHandler } from './test-support/mock-handler.js';
-import { createDesignAgentHandler } from './openhands-handler.js';
-
-const here = path.dirname(fileURLToPath(import.meta.url));
-const testSupportDir = path.join(here, 'test-support');
 
 // Integration coverage against the real DB (Postgres FOR UPDATE SKIP LOCKED
 // semantics can't be meaningfully faked with a mock pool) — mirrors the
@@ -177,7 +171,7 @@ describe('processOneJob — single-job lifecycle', () => {
     });
   });
 
-  test('default handler (no OpenHands yet) fails the job with a clear "not implemented" message', async () => {
+  test('default handler (none wired up) fails the job with a clear "not implemented" message', async () => {
     const siteId = await makeSite();
     const jobIdRef = { current: null };
     await retryUnlessStolen(jobIdRef, async () => {
@@ -249,9 +243,9 @@ describe('concurrency — two workers racing the same queue', () => {
 
     // A job an external process claimed (see the comment above) may still be
     // mid-flight the instant this test's own two drains go empty — that
-    // process is running the REAL handler (createDesignAgentHandler(), a
-    // repo checkout + model call), not this test's instant mock, so it can
-    // still be legitimately 'executing' for a while yet. Poll instead of a
+    // process is running the REAL dispatching handler (a live-site fetch +
+    // model call), not this test's instant mock, so it can still be
+    // legitimately 'executing' for a while yet. Poll instead of a
     // single instant read, so only a job that never reaches a terminal state
     // at all counts as stuck.
     let stuck = [];
@@ -442,51 +436,14 @@ describe('createWorker — polling lifecycle', () => {
   });
 });
 
-describe('componentTemplates job — full real-DB lifecycle through the dispatching handler', () => {
-  test('createComponentTemplateJob -> claim -> dispatch -> completed, with params and result round-tripping through Postgres JSONB', async () => {
-    const siteId = await makeSite();
-    const jobIdRef = { current: null };
-    await retryUnlessStolen(jobIdRef, async () => {
-      const job = await createComponentTemplateJob(siteId, ['faq', 'expand-content'], { requestedBy: null, pageUrl: 'https://example.com/faq' });
-      jobIdRef.current = job.id;
-      assert.equal(job.kind, 'design_generate');
-      assert.equal(job.status, 'queued');
-      assert.equal(job.recommendation_id, null);
-      assert.deepEqual(job.params, { mode: 'component-templates', componentKeys: ['faq', 'expand-content'], pageUrl: 'https://example.com/faq' });
-
-      const handler = createDesignAgentHandler({
-        pythonBin: process.execPath,
-        scriptPath: path.join(testSupportDir, 'fake-design-task-component-templates.js'),
-        dockerBin: path.join(testSupportDir, 'fake-docker.js'),
-        getSiteByIdFn: async (id) => { assert.equal(id, siteId); return { id: siteId, repo_owner: 'acme', repo_name: 'site' }; },
-        checkoutRepoTarballFn: async () => {}, // no real GitHub call in this suite
-      });
-      const outcome = await processOneJob({ handler, siteId });
-      assert.ok(outcome, 'job was claimed by somebody else before this test\'s own call — see retryUnlessStolen');
-      assert.equal(outcome.jobId, job.id);
-      assert.equal(outcome.status, 'completed');
-
-      const { rows } = await query('SELECT status, params, result FROM execution_jobs WHERE id = $1', [job.id]);
-      assert.equal(rows[0].status, 'completed');
-      assert.deepEqual(rows[0].params, { mode: 'component-templates', componentKeys: ['faq', 'expand-content'], pageUrl: 'https://example.com/faq' });
-      assert.deepEqual(Object.keys(rows[0].result.componentTemplates).sort(), ['expand-content', 'faq']);
-
-      // The point of the whole job: the derived templates are now VERIFIED on
-      // the site row, not just sitting on execution_jobs.result where nothing
-      // reads them. This is the step that was missing entirely — the queued
-      // re-derivation ran, succeeded, and left the site exactly as blocked as
-      // before, so an unverified template could never heal on its own.
-      const { rows: siteRows } = await query('SELECT url_file_map FROM sites WHERE id = $1', [siteId]);
-      const saved = siteRows[0].url_file_map?.siteRoot?.componentTemplates || {};
-      assert.deepEqual(Object.keys(saved).sort(), ['expandContent', 'faq'], 'stored under componentTemplates KEYS, not action types');
-      for (const key of ['faq', 'expandContent']) {
-        assert.equal(saved[key].verifiedBy, 'design-agent');
-        assert.ok(saved[key].verifiedAt, `${key} carries a verification timestamp`);
-        assert.equal(saved[key].verifiedRef, String(job.id), `${key} points back at the job that derived it`);
-      }
-    });
-  });
-
+// The full real-DB lifecycle for a componentTemplates job through the real
+// dispatching handler (createComponentTemplateJob -> claim -> dispatch ->
+// completed, with the derived templates verified on the site row) is
+// covered against the actual production path in live-analysis-handler.test.js
+// — componentTemplates jobs run through live-analysis-handler.js's
+// 'component-templates' mode, not the removed OpenHands handler this
+// describe block used to construct directly.
+describe('componentTemplates job — placeholder-contract validation on the write path', () => {
   test('a derived template that violates its placeholder contract fails the job instead of being saved', async () => {
     const siteId = await makeSite();
 
