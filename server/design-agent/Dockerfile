@@ -64,7 +64,19 @@ RUN npm ci --omit=dev
 # installs both the browser and its apt dependencies in one step; scoped
 # to chromium only (the one browser capture.js launches) to keep the image
 # smaller than the default "every browser" install.
-RUN npx playwright install --with-deps chromium
+#
+# Invoked via `node .../cli.js` rather than `npx playwright` on purpose:
+# `playwright` and the devDependency `@playwright/test` both declare a bin
+# literally named `playwright`, and npm always resolves that name conflict
+# in favor of `@playwright/test`'s cli.js — confirmed by inspecting
+# node_modules/.bin after a full `npm ci`. The `npm ci --omit=dev` above
+# strips `@playwright/test` out, and nothing takes over the `playwright`
+# bin symlink for the remaining `playwright` package — it's simply absent,
+# so `npx playwright` has no local binary to run and fails with
+# "playwright: not found" (confirmed by reproducing `npm ci --omit=dev`
+# outside Docker with this repo's real lockfile). Calling the package's own
+# cli.js file directly sidesteps bin-symlink resolution entirely.
+RUN node node_modules/playwright/cli.js install --with-deps chromium
 
 # Python deps into a dedicated venv (Debian's system Python is externally
 # managed too — pip refuses a bare `pip install` outside one). requirements.txt
