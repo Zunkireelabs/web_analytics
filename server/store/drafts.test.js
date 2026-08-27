@@ -168,4 +168,21 @@ describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
     assert.ok(q);
     assert.deepEqual(q.params[2], ['faq', 'qa-content']);
   });
+
+  // Regression for the actual production incident (zunkireelabs.com's index
+  // page): drafts #113 (qa-content) and #114 (faq) were both approved within
+  // ~90s of each other in the same daily batch, but neither reached
+  // status='implemented' until the batch PR merged ~2.5h later. A query
+  // gated on status='implemented' can never see an in-flight sibling at
+  // decision time, however same-page/same-cap-pool it is — this asserts the
+  // query no longer filters on that status at all, only on render_mode plus
+  // the two "this draft's visible publish was actually undone" cases.
+  test('hasImplementedVisibleFaqForPage does not require status=implemented — an in-flight sibling still counts', async () => {
+    await hasImplementedVisibleFaqForPage(1, 'https://example.com/x');
+    const q = issued.find((q) => q.sql.startsWith('SELECT 1 FROM drafts'));
+    assert.ok(q);
+    assert.doesNotMatch(q.sql, /status = 'implemented'/);
+    assert.match(q.sql, /status <> 'abandoned'/);
+    assert.match(q.sql, /rolled_back_at IS NULL/);
+  });
 });
