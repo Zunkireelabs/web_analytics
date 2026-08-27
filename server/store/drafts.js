@@ -376,11 +376,29 @@ export async function distinctVisibleFaqDraftPages(siteId) {
 // all. The drafts table is the one place both mechanisms' history is
 // visible, so this is checked before either one decides to publish a new
 // visible FAQ for the same page.
+//
+// Deliberately NOT `status = 'implemented'` — two sibling drafts from the
+// SAME daily batch (e.g. a 'qa-content' and a 'faq' draft both targeting the
+// same page) each get their render-mode decision at apply/branch-push time,
+// well before either reaches 'implemented' (that only happens once the whole
+// batch PR merges to stage, often hours later). A prior version of this
+// query only matched 'implemented' rows, so at decision time neither sibling
+// could see the other yet, and both independently concluded "no visible FAQ
+// exists" — this is exactly how zunkireelabs.com's index page ended up with
+// two visible Q&A blocks in the same PR (drafts #113 qa-content + #114 faq,
+// both approved ~90s apart, both 'implemented' only ~2.5h later at merge).
+// `render_mode` is only ever set once a real branch has been pushed for the
+// draft (see countVisibleFaqDrafts above), so `render_mode = 'visible'`
+// alone is already proof this draft has committed to publishing visible
+// content for this page — status can be anything from 'branch_pushed'
+// onward. Only exclude drafts whose visible publish was later undone:
+// abandoned outright, or rolled back after going live.
 export async function hasImplementedVisibleFaqForPage(siteId, page) {
   if (!page) return false;
   const { rows } = await query(
     `SELECT 1 FROM drafts
-     WHERE site_id = $1 AND action_type = ANY($3::text[]) AND render_mode = 'visible' AND status = 'implemented'
+     WHERE site_id = $1 AND action_type = ANY($3::text[]) AND render_mode = 'visible'
+       AND status <> 'abandoned' AND rolled_back_at IS NULL
        AND (content->>'page' = $2 OR input->>'page' = $2)
      LIMIT 1`,
     [siteId, page, VISIBLE_FAQ_ACTION_TYPES]
