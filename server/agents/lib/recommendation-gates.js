@@ -173,7 +173,7 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     if (!site?.repo_owner || !site?.repo_name) return;
     if (contentTargetHealAttempted.has(actionType)) return;
     contentTargetHealAttempted.add(actionType);
-    const healed = await healContentTargetFn(site, actionType, { fetchTree: cachedFetchTree })
+    const healed = await healContentTargetFn(site, actionType, { fetchTree: cachedFetchTree, fetchFile: cachedFetchFile })
       .catch((err) => {
         log.warn(`[recommendation-gates] site ${siteId}: could not auto-discover a content target for "${actionType}": ${err.message}`);
         return null;
