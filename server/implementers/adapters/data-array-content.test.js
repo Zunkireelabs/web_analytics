@@ -158,6 +158,59 @@ describe('data-array-content computeChange — fields config (meta-title scalar 
   });
 });
 
+// Regression for the production incident (zunkireelabs.com's index page
+// shipped a second, visually mismatched Q&A block): this adapter's
+// scalarValuesFromDraft used to call marker-merge's buildMergeValues with
+// only (actionType, content, mode, componentTemplates) — silently dropping
+// the site's designProfile, the 5th argument buildMergeValues uses to
+// project the site's REAL accordion/component markup when no explicit
+// componentTemplates entry is configured. Losing that argument meant any
+// site relying on the profile projection (rather than an explicit
+// componentTemplates entry) got marker-merge.js's generic DEFAULT_* markup
+// instead — a real, silent design mismatch with no gate catching it.
+describe('data-array-content computeScalarFieldChange — designProfile plumbing', () => {
+  const usableProfile = {
+    version: 2,
+    typography: { body: 'text-base text-gray-700', heading: { item: 'text-2xl font-semibold' } },
+    layout: { container: 'container-custom' },
+    components: {}, // no captured accordion — qa-content's projector doesn't need one
+  };
+  const tenantWithFieldsQa = (designProfile) => ({
+    id: 1,
+    url_file_map: {
+      siteRoot: { designProfile },
+      patterns: [
+        { match: '^/locations/([^/]+)$', adapters: { 'qa-content': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', fields: { qaContent: 'qaHtml' } } } },
+      ],
+    },
+  });
+
+  test('a designProfile on the site is actually used to render — not silently dropped in favor of the generic default', async () => {
+    const r = await computeChange(tenantWithFieldsQa(usableProfile), {
+      action_type: 'qa-content',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'qaContent');
+    assert.ok(written, 'expected the qaContent field to be written');
+    // The profile's own typography class must appear in the rendered HTML —
+    // proof the projection ran — and the hardcoded generic wrapper class
+    // marker-merge.js's DEFAULT_QA_TEMPLATE uses must NOT appear.
+    assert.match(written.after, /text-2xl font-semibold/);
+    assert.doesNotMatch(written.after, /class=\\"qa-content\\"/);
+  });
+
+  test('with no designProfile at all, still falls back to the generic default rather than crashing', async () => {
+    const r = await computeChange(tenantWithFieldsQa(null), {
+      action_type: 'qa-content',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'qaContent');
+    assert.match(written.after, /class=\\"qa-content\\"/);
+  });
+});
+
 // nestedField — location × service pages (e.g. /locations/kathmandu/aeo-seo/),
 // where the real content lives at services.<serviceId> on the location
 // object: a plain KEYED object, not another id-matched array entry. Real

@@ -150,7 +150,7 @@ export async function isDataReady(site, page, config, fetchFile = getFileContent
 // marker-splice into) gets byte-identical rendered HTML written into its
 // own data-array entry instead, using the site's own captured
 // componentTemplates for visual parity, not a second, divergent renderer.
-function scalarValuesFromDraft(actionType, content, componentTemplates) {
+function scalarValuesFromDraft(actionType, content, componentTemplates, designProfile) {
   if (actionType === 'meta-title') {
     if (!content?.selectedTitle) {
       return { ok: false, error: 'No title has been selected for this draft yet — pick one of the title proposals first.' };
@@ -159,7 +159,7 @@ function scalarValuesFromDraft(actionType, content, componentTemplates) {
     if (content.metaDescription) values.metaDescription = content.metaDescription;
     return { ok: true, values };
   }
-  return buildMergeValues(actionType, content || {}, 'visible', componentTemplates);
+  return buildMergeValues(actionType, content || {}, 'visible', componentTemplates, designProfile);
 }
 
 // Writes a draft's rendered value(s) into an existing object's own plain
@@ -174,7 +174,8 @@ function scalarValuesFromDraft(actionType, content, componentTemplates) {
 async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, config) {
   const page = draft.content?.page || draft.input?.page;
   const componentTemplates = site?.url_file_map?.siteRoot?.componentTemplates || {};
-  const valuesResult = scalarValuesFromDraft(draft.action_type, draft.content, componentTemplates);
+  const designProfile = site?.url_file_map?.siteRoot?.designProfile || null;
+  const valuesResult = scalarValuesFromDraft(draft.action_type, draft.content, componentTemplates, designProfile);
   if (!valuesResult.ok) {
     return { ok: false, reason: 'draft-not-ready', error: valuesResult.error };
   }
