@@ -12,6 +12,10 @@ const comparisonsFixture = readFileSync(join(HERE, 'lib', '__fixtures__', 'compa
 const fetchLocations = async () => ({ content: locationsFixture });
 const fetchComparisons = async () => ({ content: comparisonsFixture });
 
+// Stub for the schemaField insert-path's live-page duplicate check — a page
+// with no existing live schema of any type, so inserting is always allowed.
+const analyzeNoExistingSchema = async () => ({ ok: true, analysis: { schemaTypes: [] } });
+
 // Three different tenants, three different configs, same adapter code —
 // this is the whole point of the generic refactor.
 const tenantA = {
@@ -417,7 +421,7 @@ describe('data-array-content computeChange — schemaField (JSON-LD object write
     const r = await computeChange(tenantAWithSchema, {
       action_type: 'schema',
       content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
-    }, fetchLocations);
+    }, fetchLocations, undefined, analyzeNoExistingSchema);
     assert.equal(r.ok, true);
     assert.equal(r.filePath, 'src/_data/locations.js');
     assert.match(r.newContent, /reviewSchema:\s*\{/);
@@ -431,7 +435,7 @@ describe('data-array-content computeChange — schemaField (JSON-LD object write
     const first = await computeChange(tenantAWithSchema, {
       action_type: 'schema',
       content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
-    }, fetchLocations);
+    }, fetchLocations, undefined, analyzeNoExistingSchema);
     const fetchAfterFirst = async () => ({ content: first.newContent });
     const updatedJsonLd = { ...jsonLd, headline: 'Updated headline' };
     const second = await computeChange(tenantAWithSchema, {
@@ -479,13 +483,33 @@ describe('data-array-content computeChange — schemaField (JSON-LD object write
     const r = await computeChange(tenantAWithSchema, {
       action_type: 'schema',
       content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
-    }, fetchLocations);
+    }, fetchLocations, undefined, analyzeNoExistingSchema);
     assert.equal(r.ok, true);
     const reparsed = await computeChange(tenantAWithSchema, {
       action_type: 'schema',
       content: { page: 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/', jsonLd, placeholderFields: [] },
-    }, async () => ({ content: r.newContent }));
+    }, async () => ({ content: r.newContent }), undefined, analyzeNoExistingSchema);
     assert.equal(reparsed.ok, true);
+  });
+
+  test('refuses to insert a NEW schema field when the live page already renders this @type (would create a duplicate)', async () => {
+    const analyzeHasArticle = async () => ({ ok: true, analysis: { schemaTypes: ['Article'] } });
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
+    }, fetchLocations, undefined, analyzeHasArticle);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'would-duplicate-schema');
+    assert.match(r.error, /already has real "Article" schema/);
+  });
+
+  test('a failed live-page fetch does not block the insert — only a confirmed existing type refuses', async () => {
+    const analyzeFailed = async () => ({ ok: false, error: 'timeout' });
+    const r = await computeChange(tenantAWithSchema, {
+      action_type: 'schema',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/web-development/', jsonLd, placeholderFields: [] },
+    }, fetchLocations, undefined, analyzeFailed);
+    assert.equal(r.ok, true);
   });
 });
 

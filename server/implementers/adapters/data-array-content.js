@@ -1,4 +1,5 @@
 import { getFileContent } from '../../github/client.js';
+import { analyzePageUrl } from '../../agents/lib/page-content.js';
 import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter } from '../lib/url-file-map.js';
 import { buildMergeValues } from '../lib/marker-merge.js';
@@ -243,7 +244,7 @@ async function computeScalarFieldChange(site, draft, fetchFile, beforeRef, confi
 // buildMergeValues enforces for the marker-merge schema path applies here
 // too: a draft with any unresolved placeholder field refuses, not just a
 // missing jsonLd outright.
-async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config) {
+async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage = analyzePageUrl) {
   const page = draft.content?.page || draft.input?.page;
   if (!draft.content?.jsonLd) {
     return { ok: false, reason: 'draft-not-ready', error: 'This schema draft has no JSON-LD to apply.' };
@@ -276,6 +277,28 @@ async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, confi
 
   const fieldName = config.schemaField;
   const existingRange = findObjectFieldRange(file.content, objRange, fieldName, format);
+
+  // Only a brand-new schemaField can create a NEW duplicate — splicing an
+  // existing one just rewrites the same field this adapter already owns.
+  // Re-check the real live page (not just this data file) for the type
+  // we're about to insert: the type this entry needs may already be
+  // rendered by the page's own template (e.g. a pagination template's
+  // shared schema block), and this adapter has no other way to see that —
+  // it only ever reads config.dataFile, never the rendered page. Same
+  // guard/error shape as generators/schema.js's draft-time check; this is
+  // the apply-time counterpart, for drafts created before that check
+  // existed or against a page that changed since the draft was made.
+  if (!existingRange) {
+    const draftType = draft.content.jsonLd['@type'];
+    const fetched = await analyzePage(page);
+    if (fetched.ok && draftType && fetched.analysis.schemaTypes.includes(draftType)) {
+      return {
+        ok: false, reason: 'would-duplicate-schema',
+        error: `This page already has real "${draftType}" schema — inserting another via ${fieldName} would duplicate it, not fix a gap.`,
+      };
+    }
+  }
+
   const before = existingRange ? file.content.slice(existingRange.start, existingRange.end + 1) : '(none)';
   const newContent = existingRange
     ? spliceObjectField(file.content, objRange, fieldName, draft.content.jsonLd, format)
@@ -294,10 +317,10 @@ async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, confi
 
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
-export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
+export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site), analyzePage = analyzePageUrl) {
   const page = draft.content?.page || draft.input?.page;
   const config = resolveAdapter(site, page, draft.action_type);
-  if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config);
+  if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
   const flatArray = config?.shape === 'flat-array';
   if (!config?.dataFile || (!flatArray && !config?.itemsField)) {
