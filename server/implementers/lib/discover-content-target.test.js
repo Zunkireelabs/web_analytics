@@ -213,6 +213,115 @@ describe('autoHealNewContentTarget', () => {
     });
   });
 
+  // Deeper investigation added to resolve the real (2026-08-27) "10 -> 6
+  // candidates, still no unique winner for direct-answer" gap: two more
+  // generic evidence tiers, applied to every client/framework this app
+  // supports, never hardcoded to one site's repo shape.
+  describe('autoHealNewContentTarget — existing-route and build-config evidence', () => {
+    test('narrows using a real existing route whose URL matches the actionType convention', async () => {
+      const siteWithRoute = {
+        ...site,
+        url_file_map: { pages: { '/faq/example': { file: 'src/answers/example.md' } } },
+      };
+      const healed = await autoHealNewContentTarget(siteWithRoute, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.ok(healed, 'a real live /faq/ route pointing into src/answers is real routing evidence');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('narrows using a pattern route whose match regex names the actionType convention', async () => {
+      const siteWithPattern = {
+        ...site,
+        url_file_map: { patterns: [{ match: '^/answers/[^/]+$', file: 'src/answers/$1.md' }] },
+      };
+      const healed = await autoHealNewContentTarget(siteWithPattern, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      assert.ok(healed);
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('an unrelated existing route never narrows anything — real evidence only', async () => {
+      const siteWithUnrelatedRoute = {
+        ...site,
+        url_file_map: { pages: { '/about': { file: 'src/pages/about.md' } } },
+      };
+      const healed = await autoHealNewContentTarget(siteWithUnrelatedRoute, 'direct-answer', {
+        fetchTree: treeOf(
+          'src/answers/x.md', 'src/answers/y.md', 'src/answers/z.md',
+          'src/pages/a.md', 'src/pages/b.md', 'src/pages/c.md',
+        ),
+        fetchFile: pageFetchFile,
+      });
+      // Falls through to the directory-name hint ("answers"), which still
+      // resolves it — this test only proves the unrelated route contributed
+      // nothing, not that the whole thing stays blocked.
+      assert.ok(healed);
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/answers', extension: '.md' });
+    });
+
+    test('narrows using an Eleventy build-config collection declared over one candidate directory', async () => {
+      const fetchFile = async (_s, path) => {
+        if (path === '.eleventy.js') {
+          return {
+            content: `
+              module.exports = function (eleventyConfig) {
+                eleventyConfig.addCollection('faq', (collectionApi) =>
+                  collectionApi.getFilteredByGlob(['src/qa-pages/*.md']));
+              };
+            `,
+          };
+        }
+        return pageFetchFile();
+      };
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          '.eleventy.js',
+          'src/qa-pages/a.md', 'src/qa-pages/b.md', 'src/qa-pages/c.md',
+          'src/pages/x.md', 'src/pages/y.md', 'src/pages/z.md',
+        ),
+        fetchFile,
+      });
+      assert.ok(healed, 'an Eleventy collection literally named "faq" over src/qa-pages is real framework evidence, even though the directory name itself gives no hint');
+      assert.deepEqual(savedConfig.urlFileMap.newContentTargets['direct-answer'], { dir: 'src/qa-pages', extension: '.md' });
+    });
+
+    test('a build config with no matching collection name never narrows anything', async () => {
+      const fetchFile = async (_s, path) => {
+        if (path === '.eleventy.js') {
+          return {
+            content: `
+              module.exports = function (eleventyConfig) {
+                eleventyConfig.addCollection('products', (collectionApi) =>
+                  collectionApi.getFilteredByGlob(['src/products/*.md']));
+              };
+            `,
+          };
+        }
+        return pageFetchFile();
+      };
+      const healed = await autoHealNewContentTarget(site, 'direct-answer', {
+        fetchTree: treeOf(
+          '.eleventy.js',
+          'src/pages/resources/a.md', 'src/pages/resources/b.md', 'src/pages/resources/c.md',
+          'src/pages/services/x.md', 'src/pages/services/y.md', 'src/pages/services/z.md',
+        ),
+        fetchFile,
+      });
+      assert.equal(healed, null, 'an unrelated collection name must never be treated as evidence for this actionType');
+      assert.equal(recordedRepairs[0]?.outcome, 'ambiguous');
+    });
+  });
+
   test('preserves existing newContentTargets/pages config rather than replacing the whole blob', async () => {
     const withExisting = {
       ...site,

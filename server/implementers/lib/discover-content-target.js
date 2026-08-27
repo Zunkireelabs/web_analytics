@@ -4,6 +4,12 @@ import { resolveNewContentTarget } from './url-file-map.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordCapabilityRepair } from '../../store/capability-repairs.js';
 
+// Files where an Eleventy site's own build config can declare a named
+// collection — real routing evidence, not a guess, when a site actually
+// uses one. Framework convention, not this repo's own invention: these are
+// the only file names Eleventy itself will load config from.
+const ELEVENTY_CONFIG_FILES = ['.eleventy.js', 'eleventy.config.js', 'eleventy.config.mjs', 'eleventy.config.cjs'];
+
 // Same template-extension set discover-file-mapping.js uses for per-page
 // mapping — one convention, not two, for "which files could plausibly be
 // authored content."
@@ -100,6 +106,69 @@ async function narrowByRealPageEvidence(site, candidates, repoFiles, { fetchFile
   return out;
 }
 
+// Existing-route evidence: when the site already has a REAL, already-live
+// page whose own URL matches the actionType's content-kind convention (e.g.
+// an existing /faq/some-question/ page) and whose url_file_map entry points
+// at a file inside one of the candidate directories, that is stronger
+// evidence than the directory's own name — it's a route the site itself
+// already chose and is serving, not an assumption from how a directory
+// happens to be named. Drawn from the SAME url_file_map every other
+// implementer already treats as this site's one source of truth for real
+// routing (see url-file-map.js), so it works identically for every
+// framework this app supports, not just Eleventy. Only ever narrows to
+// directories with real route evidence; never invents one with none.
+function narrowByRoutedUrlEvidence(candidates, actionType, urlFileMap) {
+  const hint = DIR_NAME_HINTS[actionType];
+  if (!hint) return candidates;
+  const routedDirs = new Set();
+  for (const [url, entry] of Object.entries(urlFileMap?.pages || {})) {
+    if (entry?.file && hint.test(url)) routedDirs.add(parentDir(entry.file));
+  }
+  for (const pattern of urlFileMap?.patterns || []) {
+    if (pattern?.file && pattern.match && hint.test(pattern.match)) routedDirs.add(parentDir(pattern.file));
+  }
+  if (!routedDirs.size) return candidates;
+  const narrowed = candidates.filter((c) => routedDirs.has(c.dir));
+  return narrowed.length ? narrowed : candidates;
+}
+
+// Framework build-config evidence: an Eleventy site can declare a named
+// collection directly in its own build config (`addCollection('faq', ...)`
+// built from a real glob) — when that declared name matches the
+// actionType's own content-kind convention AND the glob it's built from
+// resolves to exactly one candidate directory, the framework itself is
+// telling us this directory serves that named kind of content. Real,
+// already-shipped configuration, never a guess — and this is Eleventy's own
+// documented convention, not anything specific to one client's repo, so it
+// applies to any Eleventy site this app onboards. Sites using a different
+// framework (no matching config file present) fall straight through
+// unchanged — this step is additive evidence, never a requirement.
+const COLLECTION_DECL_RE = /addCollection\(\s*['"]([\w-]+)['"][\s\S]{0,400}?getFilteredByGlob\(\s*(\[[^\]]*\]|['"][^'"]*['"])/g;
+async function narrowByBuildConfigCollection(site, candidates, actionType, repoFiles, { fetchFile, branch }) {
+  const hint = DIR_NAME_HINTS[actionType];
+  if (!hint) return candidates;
+  const configFile = repoFiles.find((f) => ELEVENTY_CONFIG_FILES.includes(f));
+  if (!configFile) return candidates;
+  let file;
+  try { file = await fetchFile(site, configFile, branch); } catch { return candidates; }
+  if (!file?.content) return candidates;
+
+  const matchedDirs = new Set();
+  let m;
+  COLLECTION_DECL_RE.lastIndex = 0;
+  while ((m = COLLECTION_DECL_RE.exec(file.content))) {
+    const [, name, globLiteral] = m;
+    if (!hint.test(`/${name}/`)) continue;
+    for (const glob of [...globLiteral.matchAll(/['"]([^'"]+)['"]/g)].map((g) => g[1])) {
+      const dir = glob.split('/*')[0].replace(/^\.\//, '').replace(/\/$/, '');
+      if (candidates.some((c) => c.dir === dir)) matchedDirs.add(dir);
+    }
+  }
+  if (!matchedDirs.size) return candidates;
+  const narrowed = candidates.filter((c) => matchedDirs.has(c.dir));
+  return narrowed.length ? narrowed : candidates;
+}
+
 // Groups the repo's real files by directory, and reports every directory
 // that has a real, unambiguous claim to being "where new content of this
 // kind should go" — never a framework-convention guess. A directory
@@ -151,11 +220,28 @@ export async function autoHealNewContentTarget(site, actionType, { fetchTree = g
     if (narrowed.length) qualifying = narrowed;
   }
 
+  // Existing-route evidence next — a real, already-live URL the site itself
+  // serves outranks a directory-name convention, since it's proof of intent
+  // rather than an inference from naming. Runs before the build-config and
+  // directory-name checks below for the same reason real-page-evidence runs
+  // before all of them: stronger evidence first.
+  if (qualifying.length > 1) {
+    qualifying = narrowByRoutedUrlEvidence(qualifying, actionType, site.url_file_map);
+  }
+
+  // Framework build-config evidence: does the site's OWN build config
+  // (e.g. an Eleventy addCollection) already declare which directory feeds
+  // a named collection matching this actionType's content kind.
+  if (qualifying.length > 1) {
+    qualifying = await narrowByBuildConfigCollection(site, qualifying, actionType, tree.files, { fetchFile, branch });
+  }
+
   // Narrow by the actionType's own directory-name convention ONLY when there
-  // is more than one real candidate to choose between — a repo with exactly
-  // one qualifying content directory already has unambiguous evidence and
-  // must not be second-guessed by a naming heuristic that could, in
-  // principle, be wrong (e.g. a legitimately-named "src/content" directory).
+  // is still more than one real candidate to choose between — a repo with
+  // exactly one qualifying content directory already has unambiguous
+  // evidence and must not be second-guessed by a naming heuristic that
+  // could, in principle, be wrong (e.g. a legitimately-named "src/content"
+  // directory). Weakest of the four signals; tried last.
   const hint = DIR_NAME_HINTS[actionType];
   if (qualifying.length > 1 && hint) {
     const narrowed = qualifying.filter((q) => hint.test(`/${q.dir}/`));

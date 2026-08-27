@@ -12,6 +12,8 @@
 // apart on real evidence (does a slot exist? does a sibling route's own
 // template already have one for this exact generator?), never a guess.
 //
+import { deriveMergeValueKey } from '../../implementers/lib/marker-merge.js';
+
 // Every AI-managed insertion point this codebase writes into already follows
 // one fixed, self-documenting shape — see location.njk/location-service.njk
 // on zunkireelabs-web for real examples this was derived from:
@@ -182,14 +184,19 @@ export function deriveAdapterConfig(existingAdapterConfig, { generatorId, valueK
   return { id, format, dataFile, idField, ...(nestedField ? { nestedField } : {}), fields: { [valueKey]: fieldName } };
 }
 
-// The value key buildMergeValues (marker-merge.js) returns for each
+// The value key buildMergeValues (marker-merge.js) returns for a
 // generatorId's rendered-HTML-single-field action types — the SAME key
 // deriveAdapterConfig's `fields` mapping must use on its left-hand side.
-// Deliberately a closed, explicit list mirroring marker-merge.js's real
-// switch, not a guessed transform of generatorId — 'internal-links' really
-// does return `links`, not `internalLinks`.
-export const GENERATOR_VALUE_KEYS = {
-  'expand-content': 'expandedContent',
-  'qa-content': 'qaContent',
-  'internal-links': 'links',
-};
+// Delegates straight to marker-merge.js's own deriveMergeValueKey, which
+// answers this by actually running buildMergeValues rather than a
+// hand-maintained mirror of it: a second list here previously covered only
+// 3 of 28 registered generatorIds ('expand-content', 'qa-content',
+// 'internal-links'), so any other generatorId with a perfectly derivable
+// adapter (e.g. 'schema' on a /compare/* route whose sibling adapters
+// already exist) was refused purely because nobody had added an entry for
+// it — a bug class, not a missing-data one. This function generalizes the
+// fix for every current and future generatorId, for every client, without
+// hardcoding any one of them here.
+export function getGeneratorValueKey(generatorId) {
+  return deriveMergeValueKey(generatorId);
+}
