@@ -28,6 +28,14 @@ export function classifyBlockedKind(blockedReason) {
   // without this, an in-flight job read as 'our-config' ("Blocked — setup
   // needed"), which is not what a live run is.
   if (/queued|currently running|hasn't been derived|has never been verified/i.test(blockedReason)) return 'awaiting-derivation';
+  // A failed Design Context analysis (implementers/lib/design-agent-status.js's
+  // FAILED state) never stops drafting — the message itself says drafts fall
+  // back to the default template and retry automatically — so it must not
+  // wear 'our-config''s "Blocked — setup needed" framing, which promises the
+  // opposite. Kept distinct from 'awaiting-derivation' (migration 128) rather
+  // than merged into it: a repeated failure is still worth a human being able
+  // to see, unlike routine queued/running progress.
+  if (/drafts (continue|use) .*fallback template|will retry automatically/i.test(blockedReason)) return 'design-degraded';
   return 'our-config';
 }
 

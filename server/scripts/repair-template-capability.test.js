@@ -32,6 +32,7 @@ let recs;
 let gapResult; // what the mocked classifyCapabilityGap returns
 let updateSiteRepoConfigCalls;
 let githubCalls; // { createBranch, commitFilesAtomic, openPullRequest } call logs
+let existingPrsForBranch; // what listOpenPullRequestsForBranch returns — [] unless a test sets otherwise
 
 const realDb = await import(resolve('../db.js'));
 mock.module(resolve('../db.js'), {
@@ -70,6 +71,7 @@ mock.module(resolve('../github/client.js'), {
     createBranch: async (...a) => { githubCalls.createBranch.push(a); },
     commitFilesAtomic: async (...a) => { githubCalls.commitFilesAtomic.push(a); },
     openPullRequest: async (...a) => { githubCalls.openPullRequest.push(a); return { url: 'https://github.com/acme/site/pull/1', number: 1 }; },
+    listOpenPullRequestsForBranch: async (...a) => { githubCalls.listOpenPullRequestsForBranch.push(a); return existingPrsForBranch; },
     defaultBranchName: () => 'main',
   },
 });
@@ -199,7 +201,8 @@ beforeEach(() => {
   site = siteFixture();
   recs = [blockedRec()];
   updateSiteRepoConfigCalls = [];
-  githubCalls = { createBranch: [], commitFilesAtomic: [], openPullRequest: [] };
+  githubCalls = { createBranch: [], commitFilesAtomic: [], openPullRequest: [], listOpenPullRequestsForBranch: [] };
+  existingPrsForBranch = [];
   gapResult = { classification: 'safe-capability-gap', siblingLabel: 'src/_includes/layouts/other.njk', siblingSlot: { fieldExpr: 'item.expandedContent', raw: 'slot' }, anchorEnd: 5 };
   capabilityRepairJobResult = null;
   capabilityRepairCalls = [];
@@ -221,6 +224,25 @@ describe('repairTemplateCapabilitiesForSite — orchestration (classification lo
     assert.equal(githubCalls.openPullRequest.length, 1);
     assert.equal(report.prsCreated.length, 1);
     assert.equal(report.prsCreated[0].url, 'https://github.com/acme/site/pull/1');
+  });
+
+  // The branch this opens onto is date-scoped, not per-run — a second
+  // capability-repair fix landing the same calendar day must commit onto
+  // the SAME branch as an earlier one and reuse ITS already-open PR,
+  // never call openPullRequest a second time (GitHub 422s "a pull request
+  // already exists for ..." on that, which would previously crash the
+  // whole run AFTER the new commit had already landed, before this
+  // function ever reached its own url_file_map DB write below).
+  test('reuses an already-open PR for today\'s branch instead of opening a second one', async () => {
+    existingPrsForBranch = [{ number: 7, html_url: 'https://github.com/acme/site/pull/7' }];
+    const report = await repairTemplateCapabilitiesForSite(1);
+    assert.equal(githubCalls.createBranch.length, 1, 'createBranch is still called — it no-ops on "already exists"');
+    assert.equal(githubCalls.commitFilesAtomic.length, 1, 'the new fix still gets committed onto the existing branch');
+    assert.equal(githubCalls.openPullRequest.length, 0, 'never opens a second PR for the same branch');
+    assert.equal(report.prsCreated.length, 1);
+    assert.equal(report.prsCreated[0].url, 'https://github.com/acme/site/pull/7');
+    assert.equal(report.prsCreated[0].number, 7);
+    assert.equal(report.prsCreated[0].reused, true);
   });
 
   test('dry-run classifies and reports, but never touches any GitHub write endpoint', async () => {

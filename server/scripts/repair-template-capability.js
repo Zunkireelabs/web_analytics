@@ -38,6 +38,7 @@ import { getSiteById } from '../store/read.js';
 import { updateSiteRepoConfig } from '../db.js';
 import {
   getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic, openPullRequest, defaultBranchName,
+  listOpenPullRequestsForBranch,
 } from '../github/client.js';
 import {
   classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, getGeneratorValueKey, parseAiManagedSlots,
@@ -745,12 +746,24 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
         'Add AI-managed content slot(s), derived from an existing sibling route\n\nOpened by the Action Center\'s template capability repair — never auto-merged.');
       const gapSummaries = [...pendingTemplateEdits.values()].flatMap((e) => e.appliedGaps)
         .map((g) => `- \`${g.generatorId}\` on pattern \`${site.url_file_map.patterns[g.patternIdx].match}\` (${g.pages.size} page(s))`).join('\n');
-      const pr = await openPullRequest(site, {
-        branch: branchName,
-        title: 'Add AI-managed content slot(s) for previously-blocked recommendations',
-        body: `Automatically derived — either from an existing sibling route's own established AI-managed-slot pattern in this repo, or (where no sibling existed) by a Design Agent job that inspected this repo, added the smallest new field + rendering slot, and validated it against this repo's own real build before this PR was ever opened. No fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n**This PR does not merge itself** — check this PR's own CI status before merging. Once merged, the corresponding recommendations become draftable in the Action Center.`,
-      });
-      report.prsCreated.push({ url: pr.url, number: pr.number, files: files.map((f) => f.path) });
+      // Same branch is reused for every capability-repair fix opened THIS
+      // CALENDAR DAY (branchName is date-scoped, not per-run) — a second run
+      // on the same day commits its own additional fix(es) onto whatever is
+      // already there. GitHub 422s "a PR already exists for this head" on a
+      // second openPullRequest for the same branch, so check for one first
+      // and reuse it — same pattern github-ops.js's openPrForBranch/
+      // openRollbackPr and install-rendering-workflow.js already use for
+      // exactly this "many things can land on today's one shared branch"
+      // shape, which this script had simply never adopted.
+      const existingPrs = await listOpenPullRequestsForBranch(site, branchName);
+      const pr = existingPrs.length
+        ? { url: existingPrs[0].html_url, number: existingPrs[0].number }
+        : await openPullRequest(site, {
+          branch: branchName,
+          title: 'Add AI-managed content slot(s) for previously-blocked recommendations',
+          body: `Automatically derived — either from an existing sibling route's own established AI-managed-slot pattern in this repo, or (where no sibling existed) by a Design Agent job that inspected this repo, added the smallest new field + rendering slot, and validated it against this repo's own real build before this PR was ever opened. No fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n**This PR does not merge itself** — check this PR's own CI status before merging. Once merged, the corresponding recommendations become draftable in the Action Center.`,
+        });
+      report.prsCreated.push({ url: pr.url, number: pr.number, files: files.map((f) => f.path), reused: existingPrs.length > 0 });
       report.filesChanged.push(...files.map((f) => f.path));
     } else {
       console.log('[dry-run] Would open a PR with:', [...pendingTemplateEdits.keys()]);

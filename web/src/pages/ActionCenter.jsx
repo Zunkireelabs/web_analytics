@@ -143,6 +143,10 @@ const BLOCKED_KIND_META = {
     icon: Clock, badge: 'Being set up automatically', heading: 'Nothing to do — this will unblock on its own',
     className: 'blue',
   },
+  'design-degraded': {
+    icon: Clock, badge: 'Drafting with default look', heading: 'Not blocked — using the fallback template for now',
+    className: 'blue',
+  },
   'site-fact': {
     icon: Layers, badge: "Can't be drafted here", heading: 'How this page is built',
     className: 'amber',
