@@ -207,18 +207,19 @@ describe('classifyBlockedKind — the text-pattern -> UI-branch mapping', () => 
     assert.equal(classifyBlockedKind('Design context analysis is queued and will run shortly.'), 'awaiting-derivation');
   });
 
-  // A failed attempt still reads as our-config for the recommendation's own
-  // classification bucket, but — unlike before — that classification no
-  // longer implies anything is BLOCKED: a failed analysis run never stops a
-  // draft from generating (see design-agent-status.js), it only means this
-  // recommendation is currently drafting against the default fallback
-  // template instead of the site's real design.
-  test('a failed Design Context status does NOT read as awaiting-derivation', () => {
-    assert.equal(classifyBlockedKind('Design context analysis failed (job #628) — drafts continue to use the default fallback template. It will retry automatically.'), 'our-config');
+  // A failed attempt reads as its own 'design-degraded' bucket (migration
+  // 128), not 'our-config' and not 'awaiting-derivation': a failed analysis
+  // run never stops a draft from generating (see design-agent-status.js), it
+  // only means this recommendation is currently drafting against the default
+  // fallback template instead of the site's real design — worth a human
+  // being able to see, unlike routine queued/running progress, but never
+  // "Blocked — setup needed," which is what 'our-config' would have shown.
+  test('a failed Design Context status reads as design-degraded, not blocked', () => {
+    assert.equal(classifyBlockedKind('Design context analysis failed (job #628) — drafts continue to use the default fallback template. It will retry automatically.'), 'design-degraded');
   });
 
-  test('a repeated-failure Design Context status does NOT read as awaiting-derivation either', () => {
-    assert.equal(classifyBlockedKind('Design context analysis has failed 2 times in a row (most recently job #630, AGENT_SANDBOX_UNAVAILABLE). Drafts continue to use the default fallback template in the meantime.'), 'our-config');
+  test('a repeated-failure Design Context status also reads as design-degraded, not blocked', () => {
+    assert.equal(classifyBlockedKind('Design context analysis has failed 2 times in a row (most recently job #630, AGENT_SANDBOX_UNAVAILABLE). Drafts continue to use the default fallback template in the meantime.'), 'design-degraded');
   });
 
   test('a never-attempted Design Context status does NOT falsely read as "already in progress"', () => {
