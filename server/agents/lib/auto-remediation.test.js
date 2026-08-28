@@ -295,6 +295,50 @@ describe('auto-remediation — daily budget', () => {
   });
 });
 
+// Categories come from recommendation-taxonomy.js's classify() — the same
+// grouping the Action Center UI shows (e.g. "Meta Titles", "Broken Links",
+// "Blog Opportunities"). Without a per-category cap, a category with sheer
+// volume (e.g. 139 open GEO Signals items) would consume the entire day's
+// budget and a category with only 1-3 open items would never ship at all.
+describe('auto-remediation — category-diverse selection', () => {
+  beforeEach(reset);
+
+  test('no single category takes more than 5 of the day\'s budget while other categories still have candidates', async () => {
+    site.auto_remediation_daily_limit = 8;
+    recommendations = [
+      // detectingAgents matters here — 'opportunity' (rec()'s default) hits
+      // recommendation-taxonomy.js's source-level wildcard and collapses
+      // everything into one category regardless of type, so each generator
+      // here is paired with the real agent that actually detects it.
+      ...Array.from({ length: 10 }, (_, i) => rec(i + 1, { type: 'meta-title', detectingAgents: ['content-gap'] })), // -> "Meta Titles"
+      rec(11, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }), // -> "Broken Links"
+      rec(12, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }),
+      rec(13, { type: 'faq', detectingAgents: ['content-gap'] }), // -> "FAQ Opportunities"
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 8, 'the full 8-item budget is used even though one category alone had 10 candidates');
+    const metaTitleShipped = calls.generated.filter((f) => ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10'].includes(f));
+    assert.equal(metaTitleShipped.length, 5, 'Meta Titles is capped at 5 even though 3 budget slots remained');
+    assert.deepEqual(calls.generated.filter((f) => f === 'f11' || f === 'f12'), ['f11', 'f12'], 'both Broken Links candidates ship — the smaller category is not crowded out');
+    assert.ok(calls.generated.includes('f13'), 'the single Blog Opportunities candidate ships too');
+  });
+
+  test('budget left over after every category\'s 5-item cap is topped up from the next-highest-priority leftovers', async () => {
+    site.auto_remediation_daily_limit = 8;
+    recommendations = [
+      ...Array.from({ length: 10 }, (_, i) => rec(i + 1, { type: 'meta-title', detectingAgents: ['content-gap'] })),
+      rec(11, { type: 'broken-link-fix', detectingAgents: ['technical-seo'] }),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 8, 'only one other category exists, so the top-up pass fills the rest of the budget from the capped category');
+    assert.ok(calls.generated.includes('f11'), 'the other category still ships');
+  });
+});
+
 describe('auto-remediation — circuit breaker', () => {
   beforeEach(reset);
 
