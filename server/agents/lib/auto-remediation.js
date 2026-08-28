@@ -3,6 +3,7 @@ import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsB
 import { getSiteById } from '../../store/read.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
+import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
@@ -228,7 +229,37 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return tierDiff !== 0 ? tierDiff : rankScore(b) - rankScore(a);
   });
 
-  const budgeted = ranked.slice(0, remaining);
+  // Category-diverse selection: without this, a category with sheer volume
+  // (e.g. 139 GEO Signals) fills the whole day's budget and a category with
+  // only 1-3 open items (Blog Opportunities, FAQ Opportunities) never gets a
+  // look-in. Take at most PER_CATEGORY_DAILY_CAP items per Action Center
+  // category first — still priority-ordered within and across categories
+  // since `ranked` already is — then fill any budget left over with the
+  // next-highest-priority items regardless of category. A category with
+  // fewer than PER_CATEGORY_DAILY_CAP eligible items just contributes what it
+  // has; the shortfall is absorbed by the top-up pass rather than left
+  // unused. Categories come from the same recommendation-taxonomy.js the
+  // Action Center UI itself groups by, so this can't drift from what the
+  // dashboard shows as "5 per topic".
+  const PER_CATEGORY_DAILY_CAP = 5;
+  const perCategoryCount = new Map();
+  const picked = [];
+  const leftover = [];
+  for (const rec of ranked) {
+    const { category } = classifyForActionCenterCategory({ source: rec.detecting_agents?.[0], generatorId: rec.recommendation_type });
+    const count = perCategoryCount.get(category) || 0;
+    if (count < PER_CATEGORY_DAILY_CAP && picked.length < remaining) {
+      picked.push(rec);
+      perCategoryCount.set(category, count + 1);
+    } else {
+      leftover.push(rec);
+    }
+  }
+  for (const rec of leftover) {
+    if (picked.length >= remaining) break;
+    picked.push(rec);
+  }
+  const budgeted = picked;
   // Never silently truncate: a run that ships 30 of 41 open issues must say
   // so, or the Action Center looks like it simply found fewer problems.
   if (budgeted.length < candidates.length) {
