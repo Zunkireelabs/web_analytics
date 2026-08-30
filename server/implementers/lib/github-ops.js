@@ -1,4 +1,8 @@
-import { getBranchSha, createBranch, commitFilesAtomic, openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent } from '../../github/client.js';
+import {
+  getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef,
+  openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent,
+  beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
+} from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
 import { validateRenderingBatch } from './rendering-gate.js';
 
@@ -133,6 +137,54 @@ async function needsFamilyWriteMarker(site, files, target) {
   return false;
 }
 
+// Deferred-push registry (Action Center same-day batching) — see
+// beginBatchPush/endBatchPush below. Keyed by branch name (already
+// per-site-per-day unique, see batchBranchName). While a branch has an
+// entry here, pushDraftBranch chains its commit onto `headSha` instead of
+// moving the branch ref immediately; endBatchPush moves it once, for
+// everything queued since beginBatchPush.
+const activeBatches = new Map(); // branchName -> { headSha: string|null, count: number }
+
+// Call once before looping through a batch run (routes/action-center.js's
+// executeSafeFixes, auto-remediation.js's per-run loop) so every
+// pushDraftBranch call for this branch during the run creates its commit
+// WITHOUT moving the branch ref — GitHub (and therefore Vercel's per-push
+// preview build) only sees the branch move once, at endBatchPush, instead
+// of once per successfully shipped recommendation. A run that ships up to
+// 60 items used to trigger up to 60 separate preview builds on the SAME
+// PR; this collapses that to one. Also opens the matching file-read overlay
+// (github/client.js) so a later item in the same run sees an earlier item's
+// write immediately, instead of the stale pre-batch content the real
+// (not-yet-moved) branch ref would otherwise return.
+//
+// Idempotent: a re-entrant call for a branch already batching is a no-op,
+// so a nested/accidental double-call can't clobber an in-progress chain.
+export function beginBatchPush(site, branchName) {
+  if (!activeBatches.has(branchName)) {
+    activeBatches.set(branchName, { headSha: null, count: 0 });
+    beginFileOverlay(site, branchName);
+  }
+}
+
+// Pushes every commit accumulated since beginBatchPush as ONE ref update —
+// the one real "push" for the whole run — and always clears the batch
+// state (ref-chain AND file overlay) afterward, even on failure, so a
+// failed run doesn't leave pushDraftBranch silently deferring forever.
+// Returns { ok: true, pushed: 0 } when there was nothing to push (e.g.
+// every item in the run failed before it could commit).
+export async function endBatchPush(site, branchName) {
+  const state = activeBatches.get(branchName);
+  activeBatches.delete(branchName);
+  endFileOverlay(site, branchName);
+  if (!state || state.headSha == null) return { ok: true, pushed: 0 };
+  try {
+    await updateRef(site, branchName, state.headSha);
+    return { ok: true, pushed: state.count };
+  } catch (err) {
+    return persistedFailure('github-ops.endBatchPush', err, 'This batch of changes could not be pushed to GitHub right now — our team has been notified.');
+  }
+}
+
 // Two real, independently-triggered steps — deliberately NOT bundled. Staff
 // needs a real manual checkpoint between "a branch with the real change
 // exists" and "a PR is open for someone to review and merge," so they
@@ -156,9 +208,10 @@ export async function pushDraftBranch(site, draft, files, target) {
 
   const { branchName, exists } = target;
   try {
+    let freshBranchSha = null;
     if (!exists) {
-      const baseSha = await getBranchSha(site, baseBranch(site));
-      await createBranch(site, branchName, baseSha);
+      freshBranchSha = await getBranchSha(site, baseBranch(site));
+      await createBranch(site, branchName, freshBranchSha);
     }
 
     // One atomic commit for all of this draft's files (Git Data API:
@@ -169,10 +222,21 @@ export async function pushDraftBranch(site, draft, files, target) {
     // sequential getFileSha+putFile-per-file loop, which had exactly that
     // gap for multi-file draft types (llms-txt+robots.txt, broken-link-fix).
     const marker = (await needsFamilyWriteMarker(site, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
-    await commitFilesAtomic(
-      site, branchName, files,
-      `Action Center: apply ${draft.action_type} draft #${draft.id}${marker}`
-    );
+    const message = `Action Center: apply ${draft.action_type} draft #${draft.id}${marker}`;
+
+    const batch = activeBatches.get(branchName);
+    if (batch) {
+      // Deferred mode: chain this commit off the last one queued so far
+      // this run (or the branch's real current tip/just-created sha, for
+      // the first commit of the run) — but don't move the ref. endBatchPush
+      // does that once, for the whole run.
+      if (batch.headSha == null) batch.headSha = freshBranchSha ?? await getBranchSha(site, branchName);
+      batch.headSha = await createCommitObject(site, batch.headSha, files, message);
+      batch.count += 1;
+      recordFileOverlayWrites(site, branchName, files);
+    } else {
+      await commitFilesAtomic(site, branchName, files, message);
+    }
 
     return { ok: true, branchName };
   } catch (err) {
