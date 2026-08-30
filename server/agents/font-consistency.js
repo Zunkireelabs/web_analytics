@@ -50,16 +50,14 @@ export async function run({ siteId, capture = captureFontSamples, fetchSite = ge
     };
   }
 
-  let pages;
-  try {
-    pages = await capture(homepageUrl);
-  } catch (err) {
-    return {
-      meta, status: 'error', facts: null, narrative: null,
-      message: `Live capture failed: ${err.message}`,
-      generatedAt: new Date().toISOString(),
-    };
-  }
+  // Deliberately not caught here — a live-capture failure (browser launch,
+  // navigation timeout, etc.) propagates to runner.js's own try/catch,
+  // which already routes it through safeMessage before persisting/emitting
+  // anything customer-facing. Catching it here to build a custom error
+  // string would mean interpolating err.message directly into
+  // customer-facing text, the exact raw-exception-leak pattern
+  // server/lib/errors.js exists to prevent (see its own header comment).
+  const pages = await capture(homepageUrl);
   if (!pages?.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,

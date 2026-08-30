@@ -28,14 +28,20 @@ describe('font-consistency agent', () => {
     assert.equal(result.status, 'insufficient-data');
   });
 
-  test('error status when the live capture itself fails', async () => {
-    const result = await run({
-      siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
-      capture: async () => { throw new Error('browser launch failed'); },
-    });
-    assert.equal(result.status, 'error');
-    assert.match(result.message, /browser launch failed/i);
+  test('a live capture failure propagates rather than being caught into a custom error object', async () => {
+    // Deliberately not caught inside run() — see font-consistency.js's own
+    // comment: runner.js's existing try/catch already routes any thrown
+    // error through safeMessage before it reaches anything customer-facing,
+    // so building a second, ad-hoc error string here would risk leaking the
+    // raw exception message instead.
+    await assert.rejects(
+      () => run({
+        siteId: 1,
+        fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+        capture: async () => { throw new Error('browser launch failed'); },
+      }),
+      /browser launch failed/,
+    );
   });
 
   test('ok, no findings when every page is consistent', async () => {
