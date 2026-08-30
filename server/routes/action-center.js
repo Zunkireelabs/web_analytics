@@ -25,7 +25,7 @@ import { validateRendering, checkClientBuildStatus } from '../implementers/lib/r
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES,
+  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
@@ -979,7 +979,11 @@ export const SAFE_FIX_BATCH_LIMIT = 30;
 // doesn't stop the rest; the job's final branch/PR reflect whatever the
 // last successful item produced (they all share the same batch branch/PR).
 export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
-  const recs = await listOpenSafeRecommendations(siteId, limit);
+  const [recs, site, pendingDraftFilePaths] = await Promise.all([
+    listOpenSafeRecommendations(siteId, limit),
+    getSiteById(siteId),
+    getPendingDraftFilePaths(siteId),
+  ]);
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
   if (recs.length === 0) {
     return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
@@ -990,6 +994,18 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   let shipped = 0;
   let failed = 0;
   for (const rec of recs) {
+    // Same file-level guard as auto-remediation.js's autonomous path (see
+    // getPendingDraftFilePaths' comment, store/drafts.js): skip a
+    // recommendation targeting a file that already has an earlier draft
+    // sitting on a still-open, unmerged Action Center PR, rather than
+    // silently regenerating and clobbering/reverting it.
+    if (pendingDraftFilePaths.has(resolveFile(site, rec.page))) {
+      const jobRec = await addJobRecommendation(job.id, rec.id);
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: 'This page already has a pending draft on an unmerged PR — resolve that PR before shipping another change to it.' });
+      await appendJobLog(job.id, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") skipped: already has a pending draft on an unmerged PR.`);
+      failed++;
+      continue;
+    }
     const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id });
     if (result.ok) { shipped++; lastSuccess = result.draft; } else failed++;
   }

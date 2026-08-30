@@ -13,6 +13,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let recommendations;
 let draftedFindingIds;
+let pendingDraftFilePaths;
 let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
@@ -35,6 +36,7 @@ function reset() {
   onboardingPending = false; // matches every existing test's assumption: analysis already done, repair may proceed
   recommendations = [];
   draftedFindingIds = new Set();
+  pendingDraftFilePaths = new Set();
   spentToday = 0;
   recentDraftTypes = new Set();
   calls.generated = [];
@@ -54,10 +56,10 @@ function reset() {
 let generateAttempts;
 reset();
 
-function rec(id, { riskTier = 'safe', type = 'meta-title', detectingAgents = ['opportunity'] } = {}) {
+function rec(id, { riskTier = 'safe', type = 'meta-title', detectingAgents = ['opportunity'], page = `/p${id}` } = {}) {
   return {
     id, risk_tier: riskTier, recommendation_type: type, params: { page: `/p${id}` }, finding_ids: [`f${id}`],
-    detecting_agents: detectingAgents,
+    detecting_agents: detectingAgents, page,
   };
 }
 
@@ -70,6 +72,7 @@ mock.module(resolve('../../store/recommendations.js'), {
 mock.module(resolve('../../store/drafts.js'), {
   namedExports: {
     getDraftedFindingIds: async () => draftedFindingIds,
+    getPendingDraftFilePaths: async () => pendingDraftFilePaths,
     countDraftsBySourceToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => ({ id: draftId }),
@@ -223,6 +226,32 @@ describe('auto-remediation — chain shape', () => {
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.shipped, 1);
     assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  // File-level sibling to the finding_id dedup above: a DIFFERENT finding
+  // targeting a file that already has an earlier draft sitting on a
+  // still-open, unmerged PR must also be skipped — otherwise a second day's
+  // unattended run silently regenerates that file from stale content
+  // (confirmed live: a page's title flip-flopped across two unmerged PRs,
+  // and a duplicate FAQ schema landed on top of a still-pending one).
+  test('a recommendation whose resolved file already has a pending draft on an open PR is skipped', async () => {
+    site.url_file_map = { pages: { '/p1': { file: 'src/pages/p1.njk' }, '/p2': { file: 'src/pages/p2.njk' } } };
+    recommendations = [rec(1), rec(2)];
+    pendingDraftFilePaths = new Set(['src/pages/p1.njk']);
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  test('a recommendation whose page has no resolvable file is unaffected by the pending-file guard', async () => {
+    // No url_file_map configured — resolveFile(site, '/p1') returns null,
+    // same as a page this site never mapped at all. Must not be treated as
+    // colliding with anything.
+    recommendations = [rec(1)];
+    pendingDraftFilePaths = new Set(['src/pages/p1.njk']);
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.generated, ['f1']);
   });
 
   // Prompt 7 audit, section 9: `source` is overwritten with the shipping

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 let issued;
 
 let implementedFindingIdsRows = [];
+let pendingDraftFilePathsRows = [];
 let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
 let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
 
@@ -15,6 +16,9 @@ function fakeQuery(text, params = []) {
   }
   if (sql.startsWith('SELECT DISTINCT d.finding_id')) {
     return { rows: implementedFindingIdsRows };
+  }
+  if (sql.startsWith('SELECT DISTINCT target_file_path FROM drafts')) {
+    return { rows: pendingDraftFilePathsRows };
   }
   if (sql.startsWith('SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = ANY')) {
     return { rows: [{ n: 0 }] };
@@ -47,10 +51,10 @@ mock.module(resolve('../db.js'), {
 const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
-  createDraft,
+  createDraft, getPendingDraftFilePaths,
 } = await import('./drafts.js');
 
-beforeEach(() => { issued = []; implementedFindingIdsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
+beforeEach(() => { issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
 
 // Prompt 7 audit / migration 118: the app-level getDraftByFindingId-then-
 // insert check in generateDraft() has a real concurrent window (LLM
@@ -104,6 +108,36 @@ describe('getImplementedFindingIds — verification-aware', () => {
     implementedFindingIdsRows = [{ finding_id: 'security-headers:hsts' }, { finding_id: 'content-gap:/pricing:Missing FAQ' }];
     const result = await getImplementedFindingIds(7);
     assert.deepEqual(result, new Set(['security-headers:hsts', 'content-gap:/pricing:Missing FAQ']));
+  });
+});
+
+// The file-level sibling to getDraftedFindingIds: a second day's Action
+// Center batch must not regenerate a file that already has an earlier
+// finding's draft sitting on a still-open, unmerged PR (batchBranchName,
+// github-ops.js, forks a fresh branch every day regardless of whether
+// yesterday's PR merged — confirmed live as a title flip-flopping across two
+// unmerged PRs and a duplicate FAQ schema block).
+describe('getPendingDraftFilePaths', () => {
+  test('query is scoped to pr_opened/pr_state=open, non-null target_file_path, not rolled back', async () => {
+    await getPendingDraftFilePaths(7);
+    const q = issued.find((q) => q.sql.startsWith('SELECT DISTINCT target_file_path FROM drafts'));
+    assert.ok(q, 'expected the pending-draft-file-paths query to run');
+    assert.match(q.sql, /target_file_path IS NOT NULL/);
+    assert.match(q.sql, /status = 'pr_opened'/);
+    assert.match(q.sql, /pr_state = 'open'/);
+    assert.match(q.sql, /rolled_back_at IS NULL/);
+    assert.equal(q.params[0], 7);
+  });
+
+  test('returns a Set of the distinct file paths the query returns', async () => {
+    pendingDraftFilePathsRows = [{ target_file_path: 'src/pages/index.njk' }, { target_file_path: 'src/blog/state-of-ai-nepal-2026.md' }];
+    const result = await getPendingDraftFilePaths(7);
+    assert.deepEqual(result, new Set(['src/pages/index.njk', 'src/blog/state-of-ai-nepal-2026.md']));
+  });
+
+  test('an empty result set is an empty Set, not undefined/null', async () => {
+    const result = await getPendingDraftFilePaths(7);
+    assert.deepEqual(result, new Set());
   });
 });
 

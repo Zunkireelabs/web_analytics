@@ -1,6 +1,7 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
+import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
+import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
@@ -141,9 +142,10 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' };
   }
 
-  const [rows, draftedFindingIds, spentToday, learnedMap] = await Promise.all([
+  const [rows, draftedFindingIds, pendingDraftFilePaths, spentToday, learnedMap] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
+    getPendingDraftFilePaths(siteId),
     countDraftsBySourceToday(siteId, SOURCE, site.timezone || 'UTC'),
     // Phase 5: real outcome history for this site, read once per run. A
     // generator whose recent real attempts have repeatedly failed or been
@@ -169,8 +171,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // classifyRecommendation is the SAME function Phase 4's decision layer and
   // the Assistant use — this loop's own eligibility and "what would the
   // Assistant tell you is safe" can never quietly disagree with each other.
+  //
+  // The pendingDraftFilePaths check is the file-level sibling to the
+  // finding_id check above: it stops THIS run from drafting a DIFFERENT
+  // finding against a file that already has an earlier finding's draft
+  // sitting on a still-open, unmerged Action Center PR (see
+  // getPendingDraftFilePaths' own comment — batchBranchName forks a fresh
+  // branch every day regardless of whether yesterday's PR merged, so without
+  // this a second day's run silently regenerates the same file from stale
+  // content and clobbers/reverts the first day's still-pending draft).
   const eligible = rows.filter((r) => classifyRecommendation(r, learnedMap).decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE
-    && r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
+    && r.finding_ids.every((fid) => !draftedFindingIds.has(fid))
+    && !pendingDraftFilePaths.has(resolveFile(site, r.page)));
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
   // can't consume budget slots it isn't due for. Only the unattended path
