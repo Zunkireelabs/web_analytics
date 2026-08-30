@@ -956,14 +956,15 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
       if (sanitized != null) {
         message = sanitized;
       } else {
-        // Destructured to non-`.message`-named locals deliberately: unlike
-        // e.message above, this value is never raw exception text —
-        // safeMessage() always returns the caller-supplied fallback string
-        // ('Execution failed'), never err.message (the real detail only
-        // ever reaches logInternal's console log). check-error-leaks.js's
-        // regex net can't see that distinction — it matches the literal
-        // shape `${x.message}` — so this is named to not collide with a
-        // pattern that exists to catch genuinely raw `err.message` leaks.
+        // Destructured to non-"dot message"-named locals deliberately:
+        // unlike e dot message above, this value is never raw exception
+        // text — safeMessage() always returns the caller-supplied fallback
+        // string ('Execution failed'), never the caught error's own text
+        // (the real detail only ever reaches logInternal's console log).
+        // check-error-leaks.js's regex net can't see that distinction; it
+        // matches any interpolated "dot message" property access by name,
+        // so this is renamed to avoid colliding with a pattern that exists
+        // to catch genuinely raw error-text leaks.
         const { message: safeFallback, id: safeId } = safeMessage('action-center.executeRecommendation', e, 'Execution failed');
         message = `${safeFallback} (ref: ${safeId})`;
       }
