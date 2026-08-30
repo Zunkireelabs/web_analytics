@@ -947,13 +947,17 @@ export async function runAutoRemediationForAllSites() {
 // machine that sleeps, and this app is in fact hosted on one — a missed 13:00
 // fire would otherwise mean a whole day with no PR and nothing to notice it.
 //
-// "Already ran today" is measured the same way auto-remediation measures its
-// own budget — drafts it created today in the SITE's timezone — rather than a
-// new state column, so the guard can never disagree with the thing it guards.
-// A site that legitimately had zero candidates at 13:00 re-checks cheaply each
-// hour, which is the same trade the narrative guard already makes, and is
-// useful rather than wasteful: a recommendation detected later in the day
-// still ships the same day, onto the same batch branch/PR.
+// "Budget remaining today" is measured the same way auto-remediation measures
+// its own daily budget — drafts it created today in the SITE's timezone,
+// compared against sites.auto_remediation_daily_limit — rather than a new
+// state column, so the guard can never disagree with the thing it guards (see
+// isShipCatchupOwed). This also catches a run that shipped something but
+// stopped short of the budget (the circuit breaker tripping mid-run is the
+// common case), not just a run that shipped nothing at all. A site with
+// budget left re-checks cheaply each hour, which is the same trade the
+// narrative guard already makes, and is useful rather than wasteful: a
+// recommendation detected later in the day still ships the same day, onto the
+// same batch branch/PR.
 export async function runAutoRemediationCatchupForAllSites(tz) {
   const sites = (await listSites()).filter(isShippable);
   let globalRemaining = await globalRemainingSeed();

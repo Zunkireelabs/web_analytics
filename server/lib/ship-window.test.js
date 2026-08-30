@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { isShippable, hourInTimezone, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL } from './ship-window.js';
 
-const withRepo = { id: 1, repo_owner: 'acme', repo_name: 'site-a', timezone: 'Asia/Kolkata' };
+const withRepo = { id: 1, repo_owner: 'acme', repo_name: 'site-a', timezone: 'Asia/Kolkata', auto_remediation_daily_limit: 30 };
 const noRepo = { id: 2, repo_owner: null, repo_name: null, timezone: 'Asia/Kolkata' };
 
 // A fixed instant, so these assertions don't drift with the wall clock.
@@ -39,8 +39,24 @@ describe('isShipCatchupOwed', () => {
     assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 0, now: WITHIN_CATCHUP_WINDOW_IST }), true);
   });
 
-  test('owes nothing when the scheduled run already produced work today', () => {
-    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 4, now: WITHIN_CATCHUP_WINDOW_IST }), false);
+  // 2026-08-30 fix: a run that shipped SOMETHING but stopped short of the
+  // daily budget (the circuit breaker tripping mid-run, most commonly) used
+  // to be indistinguishable from a fully-used day — the remaining budgeted
+  // items just sat there unattempted until tomorrow. Budget remaining, not
+  // "shipped nothing", is the real question.
+  test('still owes a run when the site shipped something today but has budget left', () => {
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 4, now: WITHIN_CATCHUP_WINDOW_IST }), true);
+  });
+
+  test('owes nothing once the site\'s daily budget is fully used', () => {
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 30, now: WITHIN_CATCHUP_WINDOW_IST }), false);
+    assert.equal(isShipCatchupOwed({ site: withRepo, alreadyShippedToday: 35, now: WITHIN_CATCHUP_WINDOW_IST }), false, 'over budget (limit lowered mid-day) must not re-open the window either');
+  });
+
+  test('defaults an unset daily limit to 60, matching auto-remediation\'s own default', () => {
+    const noLimit = { ...withRepo, auto_remediation_daily_limit: undefined };
+    assert.equal(isShipCatchupOwed({ site: noLimit, alreadyShippedToday: 45, now: WITHIN_CATCHUP_WINDOW_IST }), true);
+    assert.equal(isShipCatchupOwed({ site: noLimit, alreadyShippedToday: 60, now: WITHIN_CATCHUP_WINDOW_IST }), false);
   });
 
   test('never owes a run to a site with no repository', () => {
