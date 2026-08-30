@@ -40,6 +40,26 @@ const SAFE_GENERATOR_IDS = new Set([
   // recommendation open for a human, same "exact-match auto-patch, else
   // fall back to manual" rule confirmed for alt-text below.
   'schema-repair',
+  // Added alongside content-integrity.js/font-consistency.js (the
+  // detectors) — every one of its five fix shapes (malformed-table,
+  // raw-text-table, faq-schema-mismatch, duplicate-faq, font-size-override)
+  // is a pure deterministic transform of content already, verifiably on the
+  // page (never invented table data, a guessed FAQ answer, or a judgment
+  // about which CSS class/rule is "correct" — see generators/content-
+  // integrity-repair.js's own refuse-rather-than-guess conditions), and the
+  // actual file patch (implementers/lib/content-integrity-inject.js) has
+  // the exact same exact-match-or-refuse shape as schema-repair above: a
+  // changed/removed anchor since detection means the draft is refused at
+  // apply time, not force-applied. The duplicate-faq shape specifically is
+  // only ever offered when detection found substantial (>=80%) real
+  // question-text overlap between two FAQ sections — two genuinely
+  // different FAQ sections on one page are flagged for visibility but never
+  // reach this generator at all. font-size-override is only ever offered
+  // when the outlier element carries its OWN inline font-size override — an
+  // outlier caused by a shared CSS class/stylesheet rule (which would
+  // affect every other element using that class) never gets a
+  // recommendedAction — see content-integrity.js/font-consistency.js.
+  'content-integrity-repair',
   // Re-confirmed with the user 2026-08-07: moved from implicitly-manual
   // (no SAFE_GENERATOR_IDS entry) now that implementers/lib/alt-text-inject.js
   // gives it the same exact-match-or-refuse auto-patch as schema-repair

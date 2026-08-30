@@ -50,13 +50,21 @@ function totalWords(sections) {
 // asks the model to flesh out thin sections with more real prose using only
 // facts already established, never inventing new ones.
 async function expandSections(sections, topic) {
+  const currentWords = totalWords(sections);
+  // A vague "add more detail" instruction reliably lands just under the
+  // threshold (LLMs undershoot an unstated target) — state the exact
+  // shortfall and total so the model has a concrete number to hit.
+  const shortfall = MIN_TOTAL_WORDS - currentWords;
   const system = 'You are expanding a draft blog post that is too short to be a complete, publication-ready article. ' +
     'Rewrite it so every section has substantive, complete prose paragraphs (not notes or bullet fragments) — expand ' +
     'thin sections with more real detail and explanation, using ONLY facts already present in the given draft, never ' +
-    'inventing a new fact, statistic, or offering. Respond with ONLY a JSON array matching the input shape: ' +
-    '[{"heading": "...", "body": "..."}].';
-  const user = `Topic: ${topic}\n\nCurrent draft (${totalWords(sections)} words total):\n${JSON.stringify(sections)}`;
-  const expanded = await callLLMForJson(system, user, { maxTokens: 2000 }).catch(() => null);
+    `inventing a new fact, statistic, or offering. The current draft is ${currentWords} words and MUST grow to at ` +
+    `least ${MIN_TOTAL_WORDS} words total (add at least ${shortfall} more words) — treat this as a hard minimum, not ` +
+    'a rough target, and overshoot slightly rather than land short. Respond with ONLY a JSON array matching the ' +
+    'input shape: [{"heading": "...", "body": "..."}].';
+  const user = `Topic: ${topic}\n\nCurrent draft (${currentWords} words total, needs ${shortfall}+ more words to reach ` +
+    `${MIN_TOTAL_WORDS}):\n${JSON.stringify(sections)}`;
+  const expanded = await callLLMForJson(system, user, { maxTokens: 2600 }).catch(() => null);
   if (!Array.isArray(expanded) || !expanded.length) return sections;
   return expanded.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 }

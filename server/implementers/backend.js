@@ -16,6 +16,7 @@ import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
 import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
+import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
 import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, removeArrayItemByField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
@@ -24,7 +25,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -909,6 +910,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'content-integrity-repair') return pushContentIntegrityBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
@@ -958,6 +960,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
     if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
+    if (draft.action_type === 'content-integrity-repair') return previewLiveContentIntegrity(site, draft);
     if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
@@ -987,6 +990,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
+  if (draft.action_type === 'content-integrity-repair') return computeContentIntegrityMerge(site, draft, beforeRef);
   if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
