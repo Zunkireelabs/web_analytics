@@ -201,8 +201,9 @@ export async function generate({ siteId, params }) {
 
   let sections;
   try {
-    sections = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
-    if (!Array.isArray(sections)) throw new Error('not an array');
+    sections = await callLLMForJson(system, user, {
+      maxTokens: 900, generatorId: meta.id, siteId, validate: Array.isArray,
+    });
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
   }

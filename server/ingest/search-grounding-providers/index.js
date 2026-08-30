@@ -40,8 +40,28 @@ export function groundingProviderConfigured() {
 
 // Callers must treat groundingProviderConfigured() as the gate for whether
 // to call this at all, same discipline as google-cse.js's own searchSources.
+//
+// Tries every *configured* provider in list order, not just the first —
+// getConfiguredGroundingProvider() alone made the registry a single point of
+// failure: serpapi is listed first (see comment above) specifically because
+// google-cse can pass configured() while still being broken, but the same
+// reasoning means serpapi itself can pass configured() (SERPAPI_KEY present)
+// while failing every real call — quota exhausted (250 searches/month, free
+// tier) or a provider-side outage. Both adapters already document that "errors
+// here propagate as-is so a caller can fall back gracefully" — this is that
+// fallback actually being implemented, instead of every call failing closed
+// the moment the first-priority provider's quota runs out.
 export async function searchGroundedSources(query, num = 3) {
-  const provider = getConfiguredGroundingProvider();
-  if (!provider) throw new Error('No search-grounding provider is configured.');
-  return provider.searchSources(query, num);
+  const candidates = PROVIDERS.filter((p) => p.configured());
+  if (!candidates.length) throw new Error('No search-grounding provider is configured.');
+
+  let lastErr;
+  for (const provider of candidates) {
+    try {
+      return await provider.searchSources(query, num);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
