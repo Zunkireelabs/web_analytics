@@ -586,7 +586,7 @@ function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
 // site's. A projection is the site's own typography, spacing and component
 // conventions. DEFAULT_* now only applies to a site with no design knowledge
 // at all.
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null) {
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
   const templateFor = (actionType_, configured, fallback) =>
@@ -606,9 +606,18 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
     const visible = renderFaqHtml(content.items, templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE));
-    const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
+    // suppressSchema: the page already carries an FAQPage schema from the
+    // OTHER FAQ/Q&A slot (qa-content) — see backend.js's hasExistingFaqSchema
+    // check. 'faq' and 'qa-content' are independent marker fields, so
+    // marker-merge's splice never overwrites one with the other; without
+    // this, a page can end up with two separate FAQPage JSON-LD blocks.
+    const schema = (!suppressSchema && content.schemaJsonLd) ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
     if (mode === 'schema-only') {
-      if (!schema) return { ok: false, error: 'This FAQ draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      if (!schema) {
+        return { ok: false, error: suppressSchema
+          ? 'This page already has an FAQPage schema from another FAQ/Q&A draft — nothing left to publish in schema-only mode.'
+          : 'This FAQ draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      }
       return { ok: true, values: { faq: schema } };
     }
     return { ok: true, values: { faq: schema ? `${visible}\n${schema}` : visible } };
@@ -679,9 +688,15 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'qa-content') {
     if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
     const visible = renderQaHtml(content.items, templateFor('qa-content', componentTemplates.qaContent, DEFAULT_QA_TEMPLATE));
-    const schema = content.schemaJsonLd ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
+    // suppressSchema: mirror of 'faq' above — avoids a second FAQPage schema
+    // when the 'faq' slot already published one for this same page.
+    const schema = (!suppressSchema && content.schemaJsonLd) ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;
     if (mode === 'schema-only') {
-      if (!schema) return { ok: false, error: 'This Q&A draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      if (!schema) {
+        return { ok: false, error: suppressSchema
+          ? 'This page already has an FAQPage schema from another FAQ/Q&A draft — nothing left to publish in schema-only mode.'
+          : 'This Q&A draft has no schema/JSON-LD data to publish in schema-only mode.' };
+      }
       return { ok: true, values: { qaContent: schema } };
     }
     return { ok: true, values: { qaContent: schema ? `${visible}\n${schema}` : visible } };
