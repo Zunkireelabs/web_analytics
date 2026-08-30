@@ -288,6 +288,66 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(html, /<p>More context after the list\.<\/p>/, 'text after the list must survive as its own paragraph, not get silently dropped');
   });
 
+  // Regression for the production incident (zunkireelabs.com/locations/
+  // kathmandu/, PR #64 on zunkireelabs-web): generators/expand-content.js's
+  // comparison-content focus asks the LLM for "a comparison table
+  // structure" and reliably gets back GFM pipe-table syntax. Before this
+  // fix, none of markdownToHtml's branches recognized a table row, so the
+  // whole table (including its `|---|---|` separator) shipped as one long
+  // <p> of literal pipes and dashes straight to a live page.
+  test('expand-content renders a GFM pipe-table as a real <table>, never leaking literal pipes/dashes as visible text', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Comparison Table',
+        body: '| Feature | Zunkiree Labs | Generic AI Provider |\n'
+          + '|---------|---------------|----------------------|\n'
+          + '| Location | Kathmandu, Nepal | Global (various locations) |\n'
+          + '| Competitive Rates | Yes | Varies, often higher |',
+      }],
+    });
+    assert.equal(result.ok, true);
+    const html = result.values.expandedContent;
+    assert.doesNotMatch(html, /\|-{2,}/, 'a raw separator row must never leak as visible text');
+    assert.doesNotMatch(html, /<p>[^<]*\|/, 'a raw pipe-delimited row must never leak inside a paragraph');
+    assert.match(html, /<table><thead><tr><th>Feature<\/th><th>Zunkiree Labs<\/th><th>Generic AI Provider<\/th><\/tr><\/thead>/);
+    assert.match(html, /<tbody>.*<tr><td>Location<\/td><td>Kathmandu, Nepal<\/td><td>Global \(various locations\)<\/td><\/tr>/s);
+    assert.match(html, /<tr><td>Competitive Rates<\/td><td>Yes<\/td><td>Varies, often higher<\/td><\/tr><\/tbody><\/table>/);
+  });
+
+  test('expand-content keeps prose before and after a table as separate paragraphs, table never nested inside a <p>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Comparison',
+        body: 'Here is how we compare.\n| A | B |\n|---|---|\n| 1 | 2 |\nThat concludes the comparison.',
+      }],
+    });
+    assert.equal(result.ok, true);
+    const html = result.values.expandedContent;
+    assert.doesNotMatch(html, /<p>[^<]*<table>/, 'a <table> must never be nested inside a <p>');
+    assert.match(html, /<p>Here is how we compare\.<\/p>/);
+    assert.match(html, /<table>.*<\/table>/s);
+    assert.match(html, /<p>That concludes the comparison\.<\/p>/);
+  });
+
+  // Regression for the production incident (zunkireelabs.com/locations/, PR
+  // #64 on zunkireelabs-web): expand-content's comparison-content prompt
+  // doesn't dictate a format, so the LLM sometimes writes literal HTML
+  // instead of GFM markdown. Escaped like any other body text, that real
+  // <table> markup shipped as visible `&lt;table class=...&gt;` text on a
+  // live page.
+  test('expand-content passes a body that already opens with real HTML through verbatim, never escaped', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Comparison Table',
+        body: "<table class='table-auto w-full'> <thead> <tr> <th class='px-4 py-2'>Feature</th><th class='px-4 py-2'>Zunkiree Labs</th> </tr> </thead> <tbody> <tr> <td class='border px-4 py-2'>Headquarters</td><td class='border px-4 py-2'>Kathmandu, Nepal</td> </tr> </tbody> </table>",
+      }],
+    });
+    assert.equal(result.ok, true);
+    const html = result.values.expandedContent;
+    assert.doesNotMatch(html, /&lt;table/, 'real HTML must never come out HTML-entity-escaped');
+    assert.match(html, /<table class='table-auto w-full'>/);
+    assert.match(html, /<td class='border px-4 py-2'>Kathmandu, Nepal<\/td>/);
+  });
 
   test('qa-content falls back to a native <details>/<summary> with a real <h3> question — no site-specific CSS required to look correct', () => {
     const result = buildMergeValues('qa-content', {
