@@ -18,6 +18,23 @@ mock.module(resolve('../agents/lib/page-content.js'), {
     hasSufficientGroundingContent: () => false,
   },
 });
+// Every test below either throws before reaching an LLM call, or supplies
+// real backing data that lets faq.js draft verbatim with none — so this
+// never needs to run for real. Mocked (not just left unmocked and unused)
+// specifically to keep the real `openai` package (llm.js's import of it)
+// out of this process: node:test's --experimental-test-module-mocks loader
+// has a real bug where, once mock.module() has installed its hook, later
+// loading `openai` (-> formdata-node -> web-streams-polyfill) breaks that
+// package's conditional-exports resolution ("does not provide an export
+// named 'ReadableStream'") — reproducible with no code from this repo
+// involved at all. Mocking llm.js here means the real `openai` module is
+// simply never imported in this test process, sidestepping the bug rather
+// than working around it.
+mock.module(resolve('../llm.js'), {
+  namedExports: {
+    callLLMForJson: async () => { throw new Error('callLLMForJson should not be called by these tests'); },
+  },
+});
 
 const { generate, meta } = await import('./faq.js');
 

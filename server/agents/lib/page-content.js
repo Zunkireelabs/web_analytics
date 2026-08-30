@@ -179,6 +179,11 @@ export function analyzePage(html, pageUrl) {
   let hasAuthorSchema = false;
   let hasFreshnessSchema = false;
   let hasReviewSchema = false;
+  // Highest mainEntity.length seen across FAQPage blocks (usually just one)
+  // — real question count the schema itself claims, compared below against
+  // questionElements (the real visible accordion count) so a schema/visible
+  // mismatch is a genuine detected fact, not a guess.
+  let faqMainEntityCount = 0;
   // Duplicate-schema and invalid-JSON-LD are real, technical issues a
   // generator now DOES auto-fix, exact-match-or-refuse only — see
   // generators/schema-repair.js + implementers/lib/schema-repair-inject.js.
@@ -217,7 +222,11 @@ export function analyzePage(html, pageUrl) {
       for (const block of blocks) {
         const types = [].concat(block['@type'] || []).flat();
         types.forEach((t) => { if (t) { schemaTypes.add(t); schemaTypeCounts.set(t, (schemaTypeCounts.get(t) || 0) + 1); tagTypes.push(t); } });
-        if (types.includes('FAQPage')) hasFaqSchema = true;
+        if (types.includes('FAQPage')) {
+          hasFaqSchema = true;
+          const entities = [].concat(block.mainEntity || []).flat();
+          faqMainEntityCount = Math.max(faqMainEntityCount, entities.length);
+        }
         if (types.includes('Review') || types.includes('AggregateRating')) hasReviewSchema = true;
         const rating = block.aggregateRating;
         if (rating && typeof rating === 'object') {
@@ -247,6 +256,122 @@ export function analyzePage(html, pageUrl) {
   });
   const hasFaqAccordion = questionElements.length >= 2;
   const hasFaqHeading = /faq|frequently asked questions/i.test(headingText) || hasFaqMarkup || hasFaqAccordion;
+
+  // Real, exact answer text for one question element — tried in order of
+  // reliability, never a guess: aria-controls/id (the accordion's own
+  // programmatic link between trigger and panel) first, then the two markup
+  // shapes where the DOM structure itself encodes the pairing
+  // (<details><summary>/<dt><dd>), and only as a last resort the immediate
+  // next sibling — accepted only when it's unambiguous (exactly one
+  // text-bearing sibling before the next question). Returns null (never a
+  // best-effort guess) when no rule confidently applies, so a caller can
+  // refuse to auto-fix rather than invent an answer.
+  function extractAnswerFor(el) {
+    const $el = $(el);
+    const controls = $el.attr('aria-controls');
+    if (controls) {
+      const panel = $(`#${controls}`);
+      const text = panel.text().trim();
+      if (text) return text;
+    }
+    if (el.tagName === 'summary') {
+      const parent = $el.parent('details');
+      if (parent.length) {
+        const clone = parent.clone();
+        clone.children('summary').remove();
+        const text = clone.text().trim();
+        if (text) return text;
+      }
+    }
+    if (el.tagName === 'dt') {
+      const next = $el.next('dd');
+      const text = next.text().trim();
+      if (text) return text;
+    }
+    // Unambiguous next-sibling fallback: exactly one sibling between this
+    // question and the next question-like element, with real text.
+    const siblings = $el.nextUntil($('button, summary, dt, [role="button"]').filter((__, q) => {
+      const t = $(q).text().trim();
+      return t.length > 0 && t.length < 200 && t.endsWith('?');
+    }));
+    if (siblings.length === 1) {
+      const text = siblings.first().text().trim();
+      if (text) return text;
+    }
+    return null;
+  }
+
+  const faqVisibleItems = questionElements.get().map((el) => ({
+    question: $(el).text().trim(),
+    answer: extractAnswerFor(el),
+  }));
+  const faqVisibleQuestionCount = faqVisibleItems.length;
+  const faqExtractionComplete = faqVisibleItems.length > 0 && faqVisibleItems.every((i) => i.answer);
+
+  // The exact raw <script type="application/ld+json"> text carrying the
+  // FAQPage type, and whether that whole tag is dedicated to FAQPage alone
+  // (no other @type mixed into the same block/@graph) — a repair generator
+  // can only safely replace the WHOLE tag's text with a corrected FAQPage
+  // block when nothing else in that tag would be lost by doing so.
+  const faqSchemaBlock = schemaScriptBlocks.find((b) => b.types.includes('FAQPage')) || null;
+  const faqSchemaRaw = faqSchemaBlock ? faqSchemaBlock.raw : null;
+  const faqSchemaSimple = !!faqSchemaBlock && faqSchemaBlock.types.length === 1 && faqSchemaBlock.types[0] === 'FAQPage';
+
+  // Real question count the FAQPage schema claims (faqMainEntityCount, from
+  // the JSON-LD loop above) vs. the real number of visible accordion
+  // questions on the page — a mismatch means the schema and what a visitor
+  // actually sees have drifted apart (a stale schema after a content edit,
+  // or a schema block copy-pasted from a different page). Only checked when
+  // both signals are actually present, never inferred from just one side.
+  const faqCountMismatch = hasFaqSchema && faqMainEntityCount > 0 && hasFaqAccordion
+    && faqMainEntityCount !== faqVisibleQuestionCount;
+
+  // Distinct FAQ-marked containers (id/class containing "faq") that each
+  // independently qualify as a real accordion (2+ visible questions), kept
+  // WITH their real question text (not just a count) so a caller can tell a
+  // genuine duplicate (two containers sharing the same questions, verbatim)
+  // from two legitimately different FAQ sections on the same page (e.g. a
+  // product FAQ and a shipping FAQ) — only the former is safe to
+  // auto-remove; the latter must never be deleted on a co-presence guess.
+  const faqContainers = $('[id*="faq" i], [class*="faq" i]').toArray()
+    .map((el) => {
+      const $el = $(el);
+      const qs = $el.find('button, summary, dt, [role="button"]').filter((__, q) => {
+        const t = $(q).text().trim();
+        return t.length > 0 && t.length < 200 && t.endsWith('?');
+      }).map((__, q) => $(q).text().trim()).get();
+      return { el, questions: qs, html: $.html(el) };
+    })
+    .filter((c) => c.questions.length >= 2)
+    // Drop a container nested inside another qualifying container — its
+    // questions are already counted by its ancestor, so it must never be
+    // treated as a second, separate section.
+    .filter((c, i, all) => !all.some((other, j) => j !== i && $(other.el).find(c.el).length > 0));
+  const normalizedQuestionSet = (qs) => new Set(qs.map((q) => q.toLowerCase().replace(/\s+/g, ' ').trim()));
+  let duplicateFaqPair = null;
+  for (let i = 0; i < faqContainers.length && !duplicateFaqPair; i++) {
+    for (let j = i + 1; j < faqContainers.length; j++) {
+      const a = normalizedQuestionSet(faqContainers[i].questions);
+      const b = normalizedQuestionSet(faqContainers[j].questions);
+      const overlap = [...a].filter((q) => b.has(q)).length;
+      // Same real question text carries the same relative weight duplicate
+      // detection uses elsewhere in this codebase: a strong majority
+      // overlap (not merely "any overlap"), and by count — the second
+      // container's own html is what a repair generator removes, keeping
+      // the first (same "first is real, later is the duplicate" convention
+      // as schema-repair.js's duplicate-schema removal).
+      if (overlap / Math.max(a.size, b.size) >= 0.8) {
+        duplicateFaqPair = { keep: faqContainers[i], remove: faqContainers[j] };
+      }
+    }
+  }
+  const duplicateVisibleFaqSections = faqContainers.length >= 2;
+  // Non-null only when detection is confident enough to safely auto-remove
+  // (real, near-identical question overlap) — a page with two legitimately
+  // different FAQ sections still reports duplicateVisibleFaqSections=true
+  // for visibility, but duplicateFaqRemovalHtml stays null so nothing gets
+  // auto-deleted on a co-presence guess alone.
+  const duplicateFaqRemovalHtml = duplicateFaqPair ? duplicateFaqPair.remove.html : null;
 
   // Byline/date markup outside JSON-LD — same non-schema fallback signals
   // the audit tool's authorExpertise.js/freshnessSignals.js check.
@@ -359,6 +484,153 @@ export function analyzePage(html, pageUrl) {
 
   const hasComparisonTable = $('table').filter((_, el) => /\bvs\.?\b|\bversus\b|\bcomparison\b/i.test($(el).text())).length > 0;
   const hasComparisonHeading = /\bvs\.?\b|\bversus\b|\bcompar(e|ison)\b/i.test(headingText);
+
+  // Real per-row grid width, accounting for colspan AND rowspan — a naive
+  // per-row <td>/<th> count would false-positive on countless well-formed
+  // tables (a rowspan cell legitimately makes later rows have fewer real
+  // <td> tags; a colspan cell legitimately makes a row's tag count lower
+  // than its actual occupied width). This walks rows in real document
+  // order, tracking which columns are still "occupied" by an earlier row's
+  // rowspan, so the returned width is the table's REAL rendered column
+  // count for that row, not just a tag count.
+  function cellSpan(attrVal) {
+    const n = parseInt(attrVal, 10);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }
+  function computeGridWidths(rowEls) {
+    const occupancy = new Map(); // col -> rows of rowspan remaining after this row
+    return rowEls.map((row) => {
+      const cells = $(row).children('td, th').toArray();
+      let col = 0;
+      const newlyOccupied = [];
+      for (const cell of cells) {
+        while (occupancy.has(col)) col++;
+        const colspan = cellSpan($(cell).attr('colspan'));
+        const rowspan = cellSpan($(cell).attr('rowspan'));
+        if (rowspan > 1) newlyOccupied.push([col, rowspan - 1]);
+        col += colspan;
+      }
+      const maxOccupiedCol = occupancy.size ? Math.max(...occupancy.keys()) + 1 : 0;
+      const width = Math.max(col, maxOccupiedCol);
+      for (const [c, remaining] of [...occupancy.entries()]) {
+        if (remaining - 1 <= 0) occupancy.delete(c); else occupancy.set(c, remaining - 1);
+      }
+      for (const [c, remaining] of newlyOccupied) occupancy.set(c, remaining);
+      return width;
+    });
+  }
+
+  // Real, low-false-positive markup breakage. Three shapes, checked in this
+  // order per table (only the first that applies is reported — the more
+  // structurally obvious defect takes priority over a subtler one on the
+  // same table):
+  //   'no-rows'          — a <table> shell with no rows at all.
+  //   'empty-row'        — a row with zero cells while sibling rows have real cells.
+  //   'column-mismatch'  — a real, colspan/rowspan-aware row width that
+  //                        doesn't match the table's header/first-row
+  //                        width — a genuine structural misalignment, not a
+  //                        naive tag-count difference. tfoot rows and any
+  //                        single full-span cell (a common, legitimate
+  //                        "Total"/section-divider row) are excluded from
+  //                        this comparison. Detection-only: unlike the two
+  //                        reasons above, there's no safe removal fix for a
+  //                        row that's genuinely misaligned real data — see
+  //                        content-integrity-repair.js, which only ever
+  //                        offers a fix for 'no-rows'/'empty-row'.
+  // anchorHtml carries the FULL real markup of the element a repair would
+  // remove (not truncated) — content-integrity-repair.js patches by finding
+  // this exact string byte-for-byte in the site's real source, same
+  // exact-match-or-refuse discipline as alt-text.js's originalTag above; a
+  // truncated snippet couldn't serve as a real removal anchor. `snippet` is
+  // kept separately, short, for narrative/evidence display only.
+  const malformedTables = [];
+  $('table').each((_, table) => {
+    const $table = $(table);
+    const rows = $table.find('tr').toArray();
+    const tableHtml = $.html(table) || '';
+    if (rows.length === 0) {
+      malformedTables.push({ reason: 'no-rows', anchorHtml: tableHtml, snippet: tableHtml.slice(0, 200) });
+      return;
+    }
+    const cellCounts = rows.map((r) => $(r).find('td, th').length);
+    const emptyRow = rows.find((r, i) => cellCounts[i] === 0 && cellCounts.some((c) => c > 0));
+    if (emptyRow) {
+      const rowHtml = $.html(emptyRow) || '';
+      malformedTables.push({ reason: 'empty-row', anchorHtml: rowHtml, snippet: tableHtml.slice(0, 200) });
+      return;
+    }
+    if (rows.length < 2) return; // nothing to compare a single row against
+    const widths = computeGridWidths(rows);
+    const headerWidth = widths[0];
+    const tfootRows = new Set($table.find('tfoot tr').toArray());
+    const mismatchIndex = rows.findIndex((r, i) => {
+      if (i === 0 || tfootRows.has(r)) return false;
+      if ($(r).children('td, th').length <= 1) return false; // single full-span row (e.g. a "Total" row) — legitimate
+      return widths[i] !== headerWidth;
+    });
+    if (mismatchIndex !== -1) {
+      const rowHtml = $.html(rows[mismatchIndex]) || '';
+      malformedTables.push({
+        reason: 'column-mismatch', anchorHtml: rowHtml, snippet: tableHtml.slice(0, 200),
+        expectedColumns: headerWidth, actualColumns: widths[mismatchIndex],
+      });
+    }
+  });
+  const malformedTableCount = malformedTables.length;
+  // The subset a repair generator can safely act on today — a genuinely
+  // misaligned data row has no safe automatic fix (removing it would delete
+  // real data, and there's no source to pull a missing cell's value from),
+  // so 'column-mismatch' is real, reported, and intentionally excluded here.
+  const removableMalformedTables = malformedTables.filter((t) => t.reason === 'no-rows' || t.reason === 'empty-row');
+
+  // Comparison/tabular content shipped as raw text instead of real <table>
+  // markup — the exact shape of the bug already fixed in generators/
+  // expand-content.js for NEW drafts (see f40fa76-era commits), checked here
+  // against pages that may have shipped that broken output before the fix,
+  // or hand-authored content with the same pattern: several consecutive
+  // lines each containing 2+ "|" delimiters (a markdown table pasted as
+  // plain text, never parsed into real table markup) inside a real content
+  // block, not inside <table>/<pre>/<code> where it would be legitimate.
+  // A pipe-delimited line's real cell values — strips a leading/trailing
+  // empty cell from a line that opens/closes with "|" (the common markdown
+  // convention), never invents a cell that wasn't literally there.
+  function parsePipeRow(line) {
+    const cells = line.split('|').map((c) => c.trim());
+    if (cells.length && cells[0] === '') cells.shift();
+    if (cells.length && cells[cells.length - 1] === '') cells.pop();
+    return cells;
+  }
+  const isSeparatorRow = (cells) => cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+
+  const rawTextTableBlocks = [];
+  $('p, div, li').each((_, el) => {
+    const $el = $(el);
+    if ($el.find('table, pre, code').length > 0 || $el.closest('table, pre, code').length > 0) return;
+    // Skip non-leaf containers — a parent div's text is a superset of its
+    // child p/div/li's text, so without this a single real raw-text block
+    // would be counted once per ancestor wrapping it.
+    if ($el.find('p, div, li').length > 0) return;
+    const rawText = $el.text();
+    const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
+    const pipeLines = lines.filter((l) => (l.match(/\|/g) || []).length >= 2);
+    if (pipeLines.length < 3) return;
+    const dataRows = pipeLines.filter((l) => !isSeparatorRow(parsePipeRow(l))).map(parsePipeRow);
+    // "Clean" (safe to deterministically rebuild as a real <table>) only
+    // when EVERY line in the block is table-shaped (no prose mixed in) and
+    // every real row has the same column count — anything less regular is
+    // still detected and reported, just not auto-rebuildable without
+    // guessing at structure.
+    const clean = pipeLines.length === lines.length && dataRows.length >= 2
+      && dataRows.every((r) => r.length === dataRows[0].length && r.length >= 2);
+    rawTextTableBlocks.push({
+      anchorHtml: $.html(el) || '',
+      snippet: pipeLines.slice(0, 3).join(' / ').slice(0, 200),
+      clean,
+      rows: clean ? dataRows : null,
+      tag: el.tagName || 'div',
+    });
+  });
+  const rawTextTableCount = rawTextTableBlocks.length;
 
   // Real resolved target, not just tag presence — a canonical tag can exist
   // and still be wrong (e.g. accidentally pointing at a different domain,
@@ -491,6 +763,21 @@ export function analyzePage(html, pageUrl) {
     externalCitationLinks, // transient, like internalLinks — real hrefs for technical-seo-analysis.js's crawlExternalCitations
     inlineStyleCount, // technical-seo.js: elements with a style="" attribute
     htmlByteSize, // technical-seo.js: fetched (decompressed) HTML size in bytes
+    // content-integrity.js / content-integrity-repair.js
+    malformedTableCount,
+    malformedTables, // transient — real {reason, anchorHtml, snippet}[]; anchorHtml is the exact removal anchor
+    removableMalformedTables, // transient — subset of malformedTables whose reason has a safe auto-fix (no-rows/empty-row only)
+    rawTextTableCount,
+    rawTextTableBlocks, // transient — real {anchorHtml, snippet, clean, rows, tag}[]; rows only set when clean
+    faqMainEntityCount,
+    faqVisibleQuestionCount,
+    faqVisibleItems, // transient — real [{question, answer}], answer null when not confidently extractable
+    faqExtractionComplete, // true only when every visible question got a real, non-guessed answer
+    faqSchemaRaw, // transient — exact raw <script> text of the FAQPage block, for an exact-match schema rewrite
+    faqSchemaSimple, // true only when that script tag carries FAQPage alone (safe to replace whole-tag)
+    faqCountMismatch,
+    duplicateVisibleFaqSections,
+    duplicateFaqRemovalHtml, // transient — exact html of the confirmed-duplicate (later) FAQ container, null unless overlap is confident
   };
 }
 
@@ -788,6 +1075,7 @@ const GENERATOR_EFFORT = {
   'broken-link-fix': 'Low', 'redirect-fix': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
+  'content-integrity-repair': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 

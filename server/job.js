@@ -63,7 +63,7 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_J
 // DAILY_AGENT_IDS automatically unless it's added to THROTTLED_AGENT_IDS
 // below or given its own WEEKLY_ONLY_AGENT_ID-style exclusion — pick the
 // cadence deliberately, don't leave it to default.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'font-consistency']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -508,6 +508,15 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 // Backlinks API cost negligible.
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
+
+// Font Consistency — a real Playwright browser launch + page-type-diverse
+// capture per site (see font-consistency-capture.js), materially heavier
+// than every other checked-often agent's cheap static fetch; a site's real
+// typography doesn't meaningfully drift week to week either, so monthly
+// matches both the underlying signal and keeps the browser-launch cost
+// negligible, same reasoning as competitor-intelligence/authority above.
+export const runFontConsistencyIfDue = (site) => runAgentIfDue(site, 'font-consistency');
+export const runFontConsistencyIfDueForAllSites = () => runAgentIfDueForAllSites('font-consistency');
 
 // AI Recommendation — real AI prompt probes have a real per-call cost that
 // multiplies with every additional configured provider (see
