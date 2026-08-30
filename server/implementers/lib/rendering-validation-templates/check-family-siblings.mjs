@@ -169,6 +169,19 @@ function readIfExists(path) {
   try { return readFileSync(path, 'utf8'); } catch { return null; }
 }
 
+// Content-hashed build asset filenames (Vite's default `[name]-[hash].ext`,
+// same convention webpack/Rollup/esbuild all use) are embedded via
+// <script src>/<link href> on EVERY page, and the hash is derived from the
+// whole bundle — e.g. Tailwind's JIT scan of every template in the repo —
+// so it changes on almost any real content edit anywhere in the site, not
+// just on the page being linked to. That is a build-tool artifact, not
+// page content: normalize it away before the byte comparison so the gate
+// isn't tripped sitewide by an unrelated CSS/JS bundle hash on every build.
+export function normalizeBuildAssetHashes(html) {
+  if (html == null) return html;
+  return html.replace(/((?:src|href)=["'])([^"']*?)-[A-Za-z0-9_]{6,}\.(css|js|mjs)(["'])/g, '$1$2-HASH.$3$4');
+}
+
 // The gate itself: for one route, which of its record URLs differ between
 // the two real builds. `null` file content (missing on one side) counts as
 // changed — a page that appeared or disappeared is exactly the kind of
@@ -177,8 +190,8 @@ export function compareFamilyBuilds(repoDir, route, baseOutputDir, headOutputDir
   const ids = recordIdsForRoute(repoDir, route);
   const changed = [];
   for (const id of ids) {
-    const baseContent = readIfExists(outputPathFor(baseOutputDir, route.routePrefix, id));
-    const headContent = readIfExists(outputPathFor(headOutputDir, route.routePrefix, id));
+    const baseContent = normalizeBuildAssetHashes(readIfExists(outputPathFor(baseOutputDir, route.routePrefix, id)));
+    const headContent = normalizeBuildAssetHashes(readIfExists(outputPathFor(headOutputDir, route.routePrefix, id)));
     if (baseContent !== headContent) changed.push(`${route.routePrefix}/${id}/`);
   }
   return { routePrefix: route.routePrefix, dataFile: route.dataFile, totalUrls: ids.length, changedUrls: changed };

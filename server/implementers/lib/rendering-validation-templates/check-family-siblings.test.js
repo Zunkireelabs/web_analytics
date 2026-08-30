@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   parsePaginationFrontMatter, discoverPaginationRoutes, recordIdsForRoute, compareFamilyBuilds,
-  commitMessagesInRange, FAMILY_WRITE_MARKER,
+  commitMessagesInRange, FAMILY_WRITE_MARKER, normalizeBuildAssetHashes,
 } from './check-family-siblings.mjs';
 
 // The real front matter from zunkireelabs-web's glossary-terms.njk — same
@@ -106,6 +106,26 @@ describe('recordIdsForRoute', () => {
   });
 });
 
+describe('normalizeBuildAssetHashes', () => {
+  test('strips a Vite-style content hash from script/link tags', () => {
+    const html = '<script type="module" crossorigin src="/assets/main-CUFX_6OC.js"></script>\n'
+      + '<link rel="stylesheet" crossorigin href="/assets/main-CTap5ap_.css">';
+    const normalized = normalizeBuildAssetHashes(html);
+    assert.match(normalized, /src="\/assets\/main-HASH\.js"/);
+    assert.match(normalized, /href="\/assets\/main-HASH\.css"/);
+  });
+
+  test('two builds with only a different bundle hash normalize to the same string', () => {
+    const a = '<link rel="stylesheet" href="/assets/main-CTap5ap_.css">';
+    const b = '<link rel="stylesheet" href="/assets/main-DuUiLYSD.css">';
+    assert.equal(normalizeBuildAssetHashes(a), normalizeBuildAssetHashes(b));
+  });
+
+  test('passes null through untouched', () => {
+    assert.equal(normalizeBuildAssetHashes(null), null);
+  });
+});
+
 describe('compareFamilyBuilds — the actual sibling-non-leakage gate', () => {
   function writeRendered(outputDir, routePrefix, id, html) {
     const full = join(outputDir, ...routePrefix.split('/').filter(Boolean), id, 'index.html');
@@ -145,6 +165,23 @@ describe('compareFamilyBuilds — the actual sibling-non-leakage gate', () => {
 
     const result = compareFamilyBuilds(dir, route, base, head);
     assert.equal(result.changedUrls.length, 3, 'all three siblings changed — this is the leakage the gate exists to catch');
+  });
+
+  test('a sitewide bundle-hash change alone (unrelated CSS/JS rebuild) is not leakage', () => {
+    mkdirSync(join(dir, 'src/_data'), { recursive: true });
+    writeFileSync(join(dir, 'src/_data/glossary.js'), GLOSSARY_DATA);
+    const route = { routePrefix: '/glossary', dataFile: 'src/_data/glossary.js', idField: 'id' };
+
+    const base = join(dir, 'base'), head = join(dir, 'head');
+    for (const id of ['multi-tenant-saas', 'zero-shot-learning', 'rag']) {
+      writeRendered(base, '/glossary', id, `<html>${id}<script src="/assets/main-CUFX_6OC.js"></script></html>`);
+      // Tailwind's JIT scan of an unrelated page changed the shared bundle's
+      // content hash — every page's <script src> differs, page content does not.
+      writeRendered(head, '/glossary', id, `<html>${id}<script src="/assets/main-D1X5Ps2s.js"></script></html>`);
+    }
+
+    const result = compareFamilyBuilds(dir, route, base, head);
+    assert.deepEqual(result.changedUrls, []);
   });
 
   test('a page present on one side and missing on the other counts as changed', () => {
