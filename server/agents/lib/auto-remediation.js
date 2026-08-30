@@ -13,12 +13,21 @@ const SOURCE = 'auto-remediation';
 
 // How many consecutive failures trip the breaker for the rest of this site's
 // run. Consecutive rather than cumulative on purpose: an occasional failure
-// mixed in with successes is normal (one bad page among many), whereas three
+// mixed in with successes is normal (one bad page among many), whereas five
 // in a row is the signature of something systemic — a revoked GitHub token, a
 // url_file_map that stopped resolving, a repo whose default branch moved.
-// Without this, one such fault burns the entire daily budget on 30 identical
+// Without this, one such fault burns the entire daily budget on 60 identical
 // failures and buries the real cause in noise.
-const CONSECUTIVE_FAILURE_LIMIT = 3;
+//
+// Raised from 3 to 5 (2026-08-30): known non-systemic, per-item failures
+// (see isRefusal below — a stale exact-match anchor, or a genuinely missing
+// per-page url_file_map/marker entry) are now classified as refusals rather
+// than failures and no longer feed this counter at all, so 3 was only ever
+// being tripped by real config gaps, not by a systemic fault. 5 keeps a
+// slightly wider margin against the failure modes this breaker actually
+// exists for, now that those two known-recurring items are already
+// diverted to isRefusal.
+const CONSECUTIVE_FAILURE_LIMIT = 5;
 
 // The refusal counterpart, and deliberately much looser.
 //
@@ -482,6 +491,46 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   if (!submitted) throw new Error('Draft was not in a submittable state');
 
   const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null });
-  if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
+  if (!approved.branch_name) {
+    const message = approved.apply_error || 'Approved but no branch was pushed';
+    const err = new Error(message);
+    // implementer.apply()'s {ok:false, reason, error} (types.js) never
+    // survives past this point — approveAndPublishDraftUnattended's !ok
+    // path (action-center.js) only persists the message to drafts.apply_error,
+    // then re-fetches the draft from the DB before returning, so `reason` is
+    // gone by the time it gets here. Recognized by message shape instead
+    // (same compatibility-path reasoning as the 4xx heuristic below) rather
+    // than plumbing a new column through for it.
+    //
+    // Both patterns below are known-recurring, non-systemic, per-ITEM
+    // conditions — not evidence of the "revoked token / moved branch" class
+    // of systemic fault CONSECUTIVE_FAILURE_LIMIT exists to catch — so they
+    // must not feed that counter. Confirmed live on site 1: 2 schema-repair
+    // items and 3 analytics-install/qa-content items failed identically on
+    // every run since Aug 25-26, each time contributing to (and some days
+    // tripping) the circuit breaker and halting the rest of that day's
+    // budgeted work.
+    if (/anchor\(s\) no longer found verbatim|anchor\(s\) appear more than once/.test(message)) {
+      // exact-match-patch.js's describePatchFailure: the page's live source
+      // no longer contains the exact text detection captured. That is the
+      // same "found live evidence the recommendation's premise is no longer
+      // true" signal the err.stale handling below already closes for —
+      // reached via implementer.apply() instead of the generator, but the
+      // conclusion is identical: re-detection, not eternal retry, is what
+      // resolves this.
+      err.refusal = true;
+      err.stale = true;
+      err.reason = 'source-anchor-not-found';
+    } else if (/^No url_file_map entry matches|^No markers configured for/.test(message)) {
+      // url-file-map.js's 'no-file-mapping'/'no-insertion-marker': a page or
+      // marker this site's operator hasn't onboarded yet (see
+      // action-center-onboarding skill). Real and worth surfacing — left
+      // open, NOT closed as stale — but it is a known per-item config gap,
+      // not a systemic fault, so it must not trip the breaker either.
+      err.refusal = true;
+      err.reason = 'no-file-mapping';
+    }
+    throw err;
+  }
   return approved;
 }

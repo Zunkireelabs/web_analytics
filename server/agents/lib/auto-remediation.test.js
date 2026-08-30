@@ -21,6 +21,8 @@ const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingO
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
+let applyFailureMessageOn; // (recommendationType) => string | null — simulates approveAndPublishDraftUnattended stopping short with no branch_name and this apply_error message
+let lastGeneratorId; // set by the generateDraft mock, read by the approveAndPublishDraftUnattended mock just below it — same single-item-at-a-time sequencing shipDraftForRecommendation itself relies on
 // (attemptNumber) => Error | null — full control over what generateDraft
 // throws, for the cases where the shape of the error is what's under test
 // (an explicit `refusal` flag on a 5xx, an unflagged 5xx) rather than merely
@@ -47,6 +49,7 @@ function reset() {
   failOn = () => false;
   refuseOn = () => false;
   staleOn = () => false;
+  applyFailureMessageOn = () => null;
   generateError = () => null;
   generateAttempts = 0;
   approveOpensPr = false;
@@ -106,6 +109,7 @@ mock.module(resolve('../../implementers/lib/onboarding-readiness.js'), {
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
     generateDraft: async (siteId, { generatorId, findingId, findingOrigin }) => {
+      lastGeneratorId = generatorId;
       calls.findingOrigins.push(findingOrigin);
       const custom = generateError(++generateAttempts);
       if (custom) throw custom;
@@ -124,6 +128,8 @@ mock.module(resolve('../../routes/action-center.js'), {
     },
     approveAndPublishDraftUnattended: async (siteId, draftId) => {
       calls.approved.push(draftId);
+      const applyErrorMessage = applyFailureMessageOn(lastGeneratorId);
+      if (applyErrorMessage) return { id: draftId, apply_error: applyErrorMessage };
       // approveAndPublishDraft ends in markDraftPrOpened whenever the resolved
       // implementer exposes mergeToStage — which every real one does — so in
       // production it usually returns with the PR ALREADY open. `approveOpensPr`
@@ -371,20 +377,20 @@ describe('auto-remediation — category-diverse selection', () => {
 describe('auto-remediation — circuit breaker', () => {
   beforeEach(reset);
 
-  test('three consecutive failures stop the run early, leaving the rest untouched and open', async () => {
+  test('five consecutive failures stop the run early, leaving the rest untouched and open', async () => {
     recommendations = [
       rec(1, { type: 'bad' }), rec(2, { type: 'bad' }), rec(3, { type: 'bad' }),
-      rec(4), rec(5), rec(6),
+      rec(4, { type: 'bad' }), rec(5, { type: 'bad' }), rec(6), rec(7),
     ];
     failOn = (type) => type === 'bad';
 
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.equal(result.failed, 3);
+    assert.equal(result.failed, 5);
     assert.equal(result.shipped, 0);
     assert.equal(result.stoppedReason, 'circuit-breaker');
-    assert.equal(result.attempted, 3, 'must not keep trying past the breaker');
-    assert.equal(calls.generated.length, 0, 'none of the three succeeded');
+    assert.equal(result.attempted, 5, 'must not keep trying past the breaker');
+    assert.equal(calls.generated.length, 0, 'none of the five succeeded');
   });
 
   test('a success resets the streak, so scattered failures do not trip the breaker', async () => {
@@ -473,11 +479,11 @@ describe('principled refusals vs systemic faults', () => {
     assert.equal(result.attempted, 5);
   });
 
-  test('three REAL faults in a row still trip the breaker', async () => {
+  test('five REAL faults in a row still trip the breaker', async () => {
     failOn = (type) => type === 'schema';
     recommendations = [
       rec(1, { type: 'schema' }), rec(2, { type: 'schema' }), rec(3, { type: 'schema' }),
-      rec(4), rec(5),
+      rec(4, { type: 'schema' }), rec(5, { type: 'schema' }), rec(6), rec(7),
     ];
 
     const result = await autoRemediateSafeRecommendations(1);
@@ -528,6 +534,66 @@ describe('principled refusals vs systemic faults', () => {
     await autoRemediateSafeRecommendations(1);
 
     assert.deepEqual(calls.closed, [], 'a refusal that says nothing about the recommendation being resolved must leave it open');
+  });
+});
+
+// Regression coverage for the 2026-08-30 fix: implementer.apply() failures
+// that reach shipDraftForRecommendation only as a plain apply_error MESSAGE
+// (approveAndPublishDraftUnattended's !ok path never persists {reason} — see
+// auto-remediation.js's own comment on this) were, until this fix, always
+// counted as genuine failures. Two known-recurring, non-systemic per-item
+// conditions — a stale exact-match anchor, and a page/marker never onboarded
+// into url_file_map — repeatedly tripped the circuit breaker on site 1 and
+// halted otherwise-healthy runs with budget left unused.
+describe('shipDraftForRecommendation apply-failure classification', () => {
+  beforeEach(reset);
+
+  test('a stale exact-match anchor (schema-repair/alt-text source drift) refuses and closes, and does not trip the breaker', async () => {
+    applyFailureMessageOn = (type) => type === 'schema-repair'
+      ? '1 anchor(s) no longer found verbatim in src/pages/about.njk — the source may have changed since this draft was generated. Regenerate the draft, or edit src/pages/about.njk manually.'
+      : null;
+    recommendations = [
+      rec(1, { type: 'schema-repair' }), rec(2, { type: 'schema-repair' }), rec(3, { type: 'schema-repair' }),
+      rec(4, { type: 'schema-repair' }), rec(5, { type: 'schema-repair' }), rec(6),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'a stale anchor is a known per-item condition, not a systemic fault');
+    assert.equal(result.refused, 5);
+    assert.equal(result.shipped, 1, 'the healthy item after the five stale ones still ships');
+    assert.deepEqual(calls.closed, [1, 2, 3, 4, 5], 'each stale-anchor recommendation is closed so it is not retried forever');
+  });
+
+  test('a never-onboarded page/marker (no-file-mapping / no markers configured) refuses but stays open', async () => {
+    applyFailureMessageOn = (type) => type === 'analytics-install'
+      ? 'No markers configured for "https://zunkireelabs.com/" — add e.g. {"analyticsScriptGa4":"ANALYTICSSCRIPTGA4"} to url_file_map.defaults.placements["analytics-install"].markers.'
+      : null;
+    recommendations = [
+      rec(1, { type: 'analytics-install' }), rec(2, { type: 'analytics-install' }), rec(3, { type: 'analytics-install' }),
+      rec(4, { type: 'analytics-install' }), rec(5, { type: 'analytics-install' }), rec(6),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'a missing per-page config entry is a known onboarding gap, not a systemic fault');
+    assert.equal(result.refused, 5);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.closed, [], 'unlike a stale anchor, the underlying issue is still real — never close it silently');
+  });
+
+  test('an apply failure with no recognized message shape is still a genuine failure and trips the breaker', async () => {
+    applyFailureMessageOn = (type) => type === 'qa-content' ? 'upstream GitHub API returned 503' : null;
+    recommendations = [
+      rec(1, { type: 'qa-content' }), rec(2, { type: 'qa-content' }), rec(3, { type: 'qa-content' }),
+      rec(4, { type: 'qa-content' }), rec(5, { type: 'qa-content' }), rec(6),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, 'circuit-breaker', 'an unrecognized apply failure must still be treated as a possible systemic fault');
+    assert.equal(result.refused, 0);
+    assert.equal(result.attempted, 5);
   });
 });
 
@@ -674,13 +740,13 @@ describe('autoRemediateSafeRecommendations — refusal vs failure classification
 
   test('a genuine 5xx with no refusal flag still trips the breaker', async () => {
     // The other direction: an unflagged server error is exactly what the
-    // breaker is for, and must keep tripping at three.
+    // breaker is for, and must keep tripping at CONSECUTIVE_FAILURE_LIMIT.
     generateError = () => Object.assign(new Error('upstream exploded'), { status: 500 });
-    recommendations = [1, 2, 3, 4, 5].map((i) => rec(i));
+    recommendations = [1, 2, 3, 4, 5, 6, 7].map((i) => rec(i));
 
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.stoppedReason, 'circuit-breaker');
-    assert.equal(result.attempted, 3);
+    assert.equal(result.attempted, 5);
   });
 
   test('a long run of honest refusals stops the run, but not as a fault', async () => {

@@ -45,18 +45,31 @@ export function hourInTimezone(timezone, now = new Date()) {
 }
 
 // The catch-up guard's whole decision. Work is owed when this site's own ship
-// hour has passed and the scheduled run produced nothing today.
+// hour has passed and the scheduled run has budget left unused today.
 //
-// "Produced nothing" is measured as drafts auto-remediation created today in
+// Originally gated on `alreadyShippedToday > 0` alone — "the morning run
+// shipped nothing" — which missed the more common real case: the morning run
+// shipped SOMETHING but stopped well short of the daily budget (the
+// consecutive-failure circuit breaker tripping mid-run, or a transient error
+// aborting the pass early) and the remaining budgeted items just sat there
+// unattempted until tomorrow. Comparing against the site's own daily limit
+// instead catches both shapes with one check, and still skips a site that
+// already used its whole budget, which a bare `alreadyShippedToday > 0` check
+// coincidentally also did for the (usual) case of one shipped item meeting a
+// small limit — but not for the common case of a large limit with plenty left.
+//
+// "Shipped so far" is measured as drafts auto-remediation created today in
 // the SITE's timezone — the same measure auto-remediation uses for its own
 // daily budget — rather than a new state column, so the guard can never
 // disagree with the thing it is guarding. A site that legitimately had zero
-// candidates re-checks cheaply each hour, the same trade the existing daily
-// narrative guard already makes, and a recommendation detected later in the
-// day still ships the same day onto the same batch branch/PR.
+// candidates (or is already at its limit) re-checks cheaply each hour, the
+// same trade the existing daily narrative guard already makes, and a
+// recommendation detected later in the day still ships the same day onto the
+// same batch branch/PR.
 export function isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone = 'UTC', now = new Date() }) {
   if (!isShippable(site)) return false;
-  if (alreadyShippedToday > 0) return false;
+  const dailyLimit = site.auto_remediation_daily_limit ?? 60;
+  if (alreadyShippedToday >= dailyLimit) return false;
   const hour = hourInTimezone(site.timezone || fallbackTimezone, now);
   return hour >= SHIP_HOUR_LOCAL && hour < SHIP_CATCHUP_END_HOUR_LOCAL;
 }

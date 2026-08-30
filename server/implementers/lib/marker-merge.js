@@ -513,7 +513,58 @@ function markdownInline(text) {
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
 }
 
+// A GFM-style pipe-table row: at least one `|` with real content around it
+// (excludes a stray line that merely contains a literal "|" in prose).
+const TABLE_ROW_RE = /^\s*\|?.*\|.*\|?\s*$/;
+// The required separator row directly under a table's header, e.g.
+// `|---|:--:|--:|` — this is what actually distinguishes a real table from
+// prose that happens to contain pipe characters.
+const TABLE_SEPARATOR_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+// Splits one pipe-delimited row into trimmed cells, dropping the empty
+// leading/trailing entries a row's optional outer `|` produces.
+function splitTableRow(line) {
+  const cells = line.trim().split('|').map((c) => c.trim());
+  if (cells.length && cells[0] === '') cells.shift();
+  if (cells.length && cells[cells.length - 1] === '') cells.pop();
+  return cells;
+}
+
+// generators/expand-content.js's SYSTEM_COMPARISON focus explicitly asks the
+// LLM for "a comparison table structure", and it reliably answers with GFM
+// pipe-table syntax in the body's free-form prose — this function's only
+// caller runs on exactly that kind of text. Without this, a table's `|`/`-`
+// syntax matched none of the bullet/paragraph branches below, so it fell
+// through to the plain-paragraph case and shipped as one long line of
+// literal pipes and dashes straight to a live page (confirmed live:
+// zunkireelabs.com/locations/kathmandu/, PR #64 on zunkireelabs-web).
+function markdownTable(lines, startIndex) {
+  const header = splitTableRow(lines[startIndex]);
+  const rows = [];
+  let i = startIndex + 2; // skip the header row and its separator row
+  while (i < lines.length && TABLE_ROW_RE.test(lines[i]) && !TABLE_SEPARATOR_RE.test(lines[i])) {
+    rows.push(splitTableRow(lines[i]));
+    i++;
+  }
+  const th = header.map((c) => `<th>${markdownInline(c)}</th>`).join('');
+  const body = rows.map((r) => `<tr>${r.map((c) => `<td>${markdownInline(c)}</td>`).join('')}</tr>`).join('');
+  return { html: `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`, nextIndex: i };
+}
+
+// generators/expand-content.js's SYSTEM_COMPARISON prompt asks for "a
+// comparison table structure" without dictating a format, so the model's
+// answer isn't consistently GFM markdown (handled by the table parser
+// below) — it sometimes writes the table as literal HTML instead. Passed
+// through the escape-everything path below, that real markup got neutered
+// into visible `&lt;table class=...&gt;` text on a live page (confirmed:
+// zunkireelabs.com/locations/, PR #64 on zunkireelabs-web). This is trusted
+// content from this platform's own generation pipeline, not untrusted user
+// input, so a body that already opens with a real HTML block tag is used
+// verbatim instead of being escaped and reparsed as prose.
+const HTML_BLOCK_RE = /^\s*<(table|div|section|ul|ol)\b/i;
+
 function markdownToHtml(text) {
+  if (HTML_BLOCK_RE.test(text)) return text.trim();
   const escaped = escapeHtml(text);
   const parts = [];
   let listItems = [];
@@ -530,9 +581,17 @@ function markdownToHtml(text) {
       listItems = [];
     }
   };
-  for (const line of escaped.split('\n')) {
+  const lines = escaped.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const bullet = /^-\s+(.*)$/.exec(line);
-    if (bullet) {
+    if (TABLE_ROW_RE.test(line) && TABLE_SEPARATOR_RE.test(lines[i + 1] || '')) {
+      flushText();
+      flushList();
+      const { html, nextIndex } = markdownTable(lines, i);
+      parts.push(html);
+      i = nextIndex - 1; // for-loop's own i++ advances past the last consumed row
+    } else if (bullet) {
       flushText();
       listItems.push(bullet[1]);
     } else {
@@ -545,12 +604,48 @@ function markdownToHtml(text) {
   return parts.join('\n');
 }
 
+// column key ("zunkiree_labs", "serviceArea") -> a real header label
+// ("Zunkiree Labs", "Service Area"), for a comparison table whose columns
+// are whatever keys the model chose (see renderComparisonTable below).
+function toTitleCase(key) {
+  return key
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// generators/expand-content.js's comparison-content focus can attach a
+// structured "table" alongside a section's body — an array of plain
+// {column: value} rows, every row sharing the first row's key set (its
+// generation-time sanitizer, sanitizeTable, already enforces this shape and
+// caps its size — this only re-derives columns from row[0] defensively).
+// Rendered with OUR OWN escaped markup, never whatever HTML/CSS a model
+// might invent for the same data (that's exactly the class of bug
+// markdownToHtml's HTML_BLOCK_RE passthrough exists to contain elsewhere,
+// not extend here) — column labels are Title Cased from the row keys so
+// "zunkiree_labs" reads as "Zunkiree Labs" rather than leaking the raw
+// field name. Returns '' (not a stray empty <table>) for anything
+// malformed, so a caller can always safely concatenate this after body
+// prose.
+function renderComparisonTable(table) {
+  if (!Array.isArray(table) || !table.length) return '';
+  const columns = Object.keys(table[0]);
+  if (!columns.length) return '';
+  const th = columns.map((c) => `<th>${escapeHtml(toTitleCase(c))}</th>`).join('');
+  const body = table.map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(String(row?.[c] ?? ''))}</td>`).join('')}</tr>`).join('');
+  return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 // Each section is a real, LLM-grounded heading+body pair (generators/
 // expand-content.js). Heading stays plain-escaped (never expected to carry
 // markdown); body runs through markdownToHtml since it's free-form prose.
+// An optional structured table (see renderComparisonTable) renders as a
+// sibling block right after the body — never nested inside body's own <p>,
+// same "block content is never trapped in a <p>" rule markdownToHtml's own
+// list/table handling already follows.
 function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
   const rows = sections.map((s) => fillTemplate(template.row, {
-    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body),
+    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body) + renderComparisonTable(s.table),
   }));
   return renderFromTemplate(template, rows);
 }

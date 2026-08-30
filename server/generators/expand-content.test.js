@@ -1,6 +1,6 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta } from './expand-content.js';
+import { generate, meta, sanitizeTable } from './expand-content.js';
 import { runQualityGate } from './lib/quality-gate.js';
 import { query, pool } from '../db.js';
 
@@ -13,6 +13,69 @@ describe('expand-content generator', () => {
 
   test('meta.id matches the generatorId agents wire into recommendedAction', () => {
     assert.equal(meta.id, 'expand-content');
+  });
+});
+
+// SYSTEM_COMPARISON's optional structured "table" field — the shape a real
+// production draft (site 1, /locations/bhaktapur/) invented unprompted
+// before the schema described it explicitly, and the ONLY of the three
+// shapes the model has produced for this (the others: GFM markdown, raw
+// HTML) that marker-merge.js's renderComparisonTable can safely render with
+// the site's own styling rather than trusting model-authored markup.
+describe('expand-content generator — sanitizeTable', () => {
+  test('keeps a well-formed table unchanged', () => {
+    const table = [
+      { feature: 'Custom AI Solutions', competitor: 'No', zunkiree_labs: 'Yes' },
+      { feature: 'Local Market Specialization', competitor: 'Limited', zunkiree_labs: 'Yes' },
+    ];
+    assert.deepEqual(sanitizeTable(table), table);
+  });
+
+  test('drops a single-row "table" — not really a comparison', () => {
+    assert.equal(sanitizeTable([{ feature: 'Only one thing' }]), undefined);
+  });
+
+  test('drops non-array, empty array, and non-object rows', () => {
+    assert.equal(sanitizeTable(undefined), undefined);
+    assert.equal(sanitizeTable(null), undefined);
+    assert.equal(sanitizeTable('not an array'), undefined);
+    assert.equal(sanitizeTable([]), undefined);
+  });
+
+  test('every row is forced onto the FIRST row\'s column set, in the same order', () => {
+    const table = [
+      { feature: 'A', us: 'Yes' },
+      { feature: 'B', us: 'No', extraKeyIgnored: 'x' },
+    ];
+    const result = sanitizeTable(table);
+    assert.deepEqual(Object.keys(result[0]), ['feature', 'us']);
+    assert.deepEqual(Object.keys(result[1]), ['feature', 'us']);
+  });
+
+  test('drops the whole table if any row is missing a required column or has a non-string/number value', () => {
+    const table = [
+      { feature: 'A', us: 'Yes' },
+      { feature: 'B' }, // missing "us"
+    ];
+    assert.equal(sanitizeTable(table), undefined);
+  });
+
+  test('caps rows, columns, and cell length rather than shipping something pathological', () => {
+    const bigRow = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`col${i}`, 'x']));
+    const table = Array.from({ length: 30 }, () => bigRow);
+    const result = sanitizeTable(table);
+    assert.ok(result.length <= 12, 'rows must be capped');
+    assert.ok(Object.keys(result[0]).length <= 6, 'columns must be capped');
+
+    const longCell = [{ a: 'x'.repeat(500), b: 'y' }, { a: 'z', b: 'w' }];
+    const capped = sanitizeTable(longCell);
+    assert.ok(capped[0].a.length <= 200, 'a single cell must be capped');
+  });
+
+  test('coerces a numeric cell value to a string rather than rejecting it', () => {
+    const table = [{ feature: 'Price', us: 42 }, { feature: 'Speed', us: 10 }];
+    const result = sanitizeTable(table);
+    assert.equal(result[0].us, '42');
   });
 });
 

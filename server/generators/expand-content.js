@@ -38,10 +38,55 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
 // being published right now — same convention schema.js's DATE_FIELD_RE
 // auto-fill already uses for the same field.
 
+// `table` is an OPTIONAL structured array of plain {column: value} rows,
+// every row using the SAME set of keys in the SAME order (the first row's
+// keys decide the columns) — never markdown or HTML for the table itself.
+// This exists because a freeform "draft the table as text" instruction
+// produced three different, inconsistent shapes: GFM pipe-table markdown, a
+// raw HTML <table> string, and (once) this exact structured shape invented
+// unprompted. Only the last is safe to render at all — the other two are
+// either arbitrary syntax marker-merge.js has to parse out of the free-form
+// body, or arbitrary CSS the model invented that has nothing to do with the
+// site's real design. Making it an explicit field means marker-merge.js's
+// renderComparisonTable can build the table with the site's OWN styling
+// (or a plain zero-CSS default), the same way every other structured
+// content type here already works — never trusting model-authored markup.
 const SYSTEM_COMPARISON = 'You are a content strategist. Given a page\'s real body text and target query, draft a comparison/alternatives section. ' +
-  'Include a comparison table structure or "X vs Y" style content grounded in the page topic. ' +
-  'Do NOT invent specific competitor names or features not in the page text — use placeholders with guidance. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
+  'Write 1-2 grounded lead-in sentences for "body", and — only if there are at least 2 real, meaningfully different points of comparison grounded ' +
+  'in the page text — also include a "table" field: an array of plain objects, one per comparison row, every object using the exact same keys in the ' +
+  'same order (e.g. [{"feature": "...", "zunkiree_labs": "...", "alternative": "..."}, ...]). Every table VALUE must be a short plain string, never markdown or HTML. ' +
+  'Do NOT invent specific competitor names or features not in the page text — use placeholders with guidance, and omit "table" entirely rather than fabricate rows. ' +
+  'Respond with ONLY a JSON array: [{"heading": "...", "body": "...", "table": [...]}, ...] ("table" may be omitted per item)';
+
+// Caps and validates the optional structured "table" field SYSTEM_COMPARISON
+// asks for above: an array of plain objects, every value a short string,
+// every row sharing the first row's key set. Anything else (missing, wrong
+// shape, a single row that isn't really a comparison, oversized) is dropped
+// entirely rather than partially patched — a malformed table would either
+// crash or mislead marker-merge.js's renderComparisonTable, and this
+// section's grounded "body" prose still ships fine either way.
+const MAX_TABLE_ROWS = 12;
+const MAX_TABLE_COLUMNS = 6;
+const MAX_TABLE_CELL_LENGTH = 200;
+
+export function sanitizeTable(table) {
+  if (!Array.isArray(table) || !table.length) return undefined;
+  const first = table[0];
+  if (!first || typeof first !== 'object' || Array.isArray(first)) return undefined;
+  const columns = Object.keys(first).slice(0, MAX_TABLE_COLUMNS);
+  if (!columns.length) return undefined;
+  const rows = table.slice(0, MAX_TABLE_ROWS).map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+    const out = {};
+    for (const col of columns) {
+      const value = row[col];
+      if (typeof value !== 'string' && typeof value !== 'number') return null;
+      out[col] = String(value).slice(0, MAX_TABLE_CELL_LENGTH);
+    }
+    return out;
+  }).filter(Boolean);
+  return rows.length >= 2 ? rows : undefined; // a "table" of one row isn't a comparison
+}
 
 // Used when real search results are available for the external-citations focus
 // (see CITATION_SEARCH_ENABLED below) — grounded in an actual candidate list
@@ -161,7 +206,10 @@ export async function generate({ siteId, params }) {
   } catch {
     throw Object.assign(new Error('Content expansion failed: model did not return valid JSON'), { status: 400, userFacing: true });
   }
-  sections = sections.filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string').slice(0, 4);
+  sections = sections
+    .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
+    .slice(0, 4)
+    .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
 
   const content = { page, sections, focus: focus || 'general' };
   const focusLabel = focus ? ` (${focus})` : '';
