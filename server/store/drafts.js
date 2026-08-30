@@ -706,6 +706,30 @@ export async function getDraftedFindingIds(siteId) {
   return new Set(rows.map((r) => r.finding_id));
 }
 
+// The file-level sibling to getDraftedFindingIds above: that function stops
+// the SAME finding_id from being redrafted, but says nothing about a
+// DIFFERENT finding targeting the same physical file while an earlier
+// finding's draft for that file still has an open, unmerged PR sitting on a
+// still-open Action Center batch branch (github-ops.js's batchBranchName is
+// strictly day-keyed and never chains off a prior day's branch — a real,
+// documented tradeoff, not a bug). Without this, a second day's batch
+// independently regenerates the same file from stale content, producing
+// wasted/conflicting drafts (confirmed live: a page's title flipped back and
+// forth across two days' unmerged PRs, and a second FAQ schema block landed
+// on top of a first still-pending one). Scoped to status = 'pr_opened' AND
+// pr_state = 'open' specifically — a draft that's still 'draft'/'edited'
+// (not yet pushed) has nothing on GitHub to collide with yet, and pr_state
+// flips away from 'open' the moment its PR merges or closes (see
+// markDraftPrOpened/recordPrState below), freeing the file up automatically
+// with no separate cleanup needed.
+export async function getPendingDraftFilePaths(siteId) {
+  const { rows } = await query(
+    "SELECT DISTINCT target_file_path FROM drafts WHERE site_id = $1 AND target_file_path IS NOT NULL AND status = 'pr_opened' AND pr_state = 'open' AND rolled_back_at IS NULL",
+    [siteId]
+  );
+  return new Set(rows.map((r) => r.target_file_path));
+}
+
 // Marks a draft as rolled back without touching its real status column —
 // unlike markDraftAbandoned, this must work on 'implemented'/'merged_to_stage'
 // drafts too (that's exactly when rollback is available), and 'implemented'

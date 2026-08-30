@@ -356,6 +356,24 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.qaContent, /<script type="application\/ld\+json">.*"@type":"FAQPage"/);
   });
 
+  test('qa-content suppressSchema omits the JSON-LD, avoiding a second FAQPage schema when faq already published one', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }], schemaJsonLd,
+    }, 'visible', {}, null, { suppressSchema: true });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.qaContent, /application\/ld\+json/);
+  });
+
+  test('qa-content suppressSchema in schema-only mode fails honestly instead of publishing nothing silently', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('qa-content', {
+      items: [{ question: 'What is this?', answer: 'A real answer.' }], schemaJsonLd,
+    }, 'schema-only', {}, null, { suppressSchema: true });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /already has an FAQPage schema/);
+  });
+
   test('internal-links falls back to a bare, unstyled <ul> when the site has no configured template', () => {
     const result = buildMergeValues('internal-links', {
       suggestions: [{ targetUrl: '/products/search/', anchorText: 'Zunkiree Search' }],
@@ -474,6 +492,21 @@ describe('buildMergeValues — faq (per-site template, not one tenant\'s markup 
   test('fails honestly with no items', () => {
     const result = buildMergeValues('faq', { items: [] });
     assert.equal(result.ok, false);
+  });
+
+  test('suppressSchema omits the JSON-LD but keeps the visible block, avoiding a second FAQPage schema when qa-content already published one', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('faq', { items, schemaJsonLd }, 'visible', {}, null, { suppressSchema: true });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /application\/ld\+json/);
+    assert.match(result.values.faq, /<dl class="faq">/);
+  });
+
+  test('suppressSchema in schema-only mode fails honestly instead of publishing nothing silently', () => {
+    const schemaJsonLd = { '@type': 'FAQPage' };
+    const result = buildMergeValues('faq', { items, schemaJsonLd }, 'schema-only', {}, null, { suppressSchema: true });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /already has an FAQPage schema/);
   });
 });
 

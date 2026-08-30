@@ -7,7 +7,7 @@ import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './li
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
-import { inspectRenderMode, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
+import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
 import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
@@ -808,7 +808,16 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     }
   }
 
-  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile);
+  // 'faq' and 'qa-content' each independently carry their own FAQPage
+  // JSON-LD and land in DIFFERENT marker fields (see marker-merge.js), so
+  // mode alone (decided above) isn't enough to prevent two separate FAQPage
+  // schemas landing on the same page — the mode check downgrades this slot
+  // to schema-only when the OTHER slot already went visible, but each slot
+  // still emits its OWN schema regardless of mode. Re-scanning the same
+  // file.content already fetched above (known engineering issue: validate a
+  // schema type doesn't already exist before inserting one).
+  const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile, { suppressSchema });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Resolves any marker in markerMap that isn't already in the live file —
