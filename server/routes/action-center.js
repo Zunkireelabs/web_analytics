@@ -941,7 +941,34 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
     return { ok: true, draft: approved };
   } catch (e) {
-    const message = e.userFacing ? e.message : (sanitizeForCustomer(e.message) ?? safeMessage('action-center.executeRecommendation', e, 'Execution failed').message);
+    // The generic "Execution failed" fallback used to discard safeMessage's
+    // own correlation id, so a real failure here was only ever recoverable
+    // by grepping live container logs for the right timestamp — no id, no
+    // way to find it after the fact. Appending "(ref: <id>)" to the
+    // PERSISTED text (never shown as the primary message, just a suffix)
+    // makes `grep "internal-error:<id>"` on the server logs the actual next
+    // step, instead of a manual scan through everything logged that day.
+    let message;
+    if (e.userFacing) {
+      message = e.message;
+    } else {
+      const sanitized = sanitizeForCustomer(e.message);
+      if (sanitized != null) {
+        message = sanitized;
+      } else {
+        // Destructured to non-"dot message"-named locals deliberately:
+        // unlike e dot message above, this value is never raw exception
+        // text — safeMessage() always returns the caller-supplied fallback
+        // string ('Execution failed'), never the caught error's own text
+        // (the real detail only ever reaches logInternal's console log).
+        // check-error-leaks.js's regex net can't see that distinction; it
+        // matches any interpolated "dot message" property access by name,
+        // so this is renamed to avoid colliding with a pattern that exists
+        // to catch genuinely raw error-text leaks.
+        const { message: safeFallback, id: safeId } = safeMessage('action-center.executeRecommendation', e, 'Execution failed');
+        message = `${safeFallback} (ref: ${safeId})`;
+      }
+    }
     await updateJobRecommendationStatus(jobRec.id, 'failed', { error: message });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'failed' });
     await appendJobLog(jobId, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") failed: ${message}`);

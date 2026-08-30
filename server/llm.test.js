@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJson, isRetryable } from './llm.js';
+import { extractJson, isRetryable, callLLMForJson } from './llm.js';
 
 // Regression coverage for a real, recurring report: multiple generators
 // (schema, faq, expand-content, meta-title, ...) failed with "model did not
@@ -35,6 +35,60 @@ describe('extractJson', () => {
 
   test('returns null for truncated/incomplete JSON rather than throwing', () => {
     assert.equal(extractJson('{"a": 1, "b": [1, 2'), null);
+  });
+});
+
+// Regression coverage: expand-content.js used to parse fine but reject a
+// well-formed-JSON-but-wrong-shape response (an object where an array was
+// required) with a single unconditional throw — skipping the same
+// corrective-nudge retry a genuinely unparseable response already got.
+// `validate` extends that retry to shape failures too.
+describe('callLLMForJson — validate option', () => {
+  test('retries once with a corrective nudge when parsed JSON fails validate(), then accepts a valid retry', async () => {
+    const original = globalThis.fetch;
+    const originalProvider = process.env.REPORT_PROVIDER;
+    const originalKey = process.env.ANTHROPIC_API_KEY;
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      const text = calls === 1 ? '{"not": "an array"}' : '[{"heading": "h", "body": "b"}]';
+      const body = { id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const result = await callLLMForJson('system', 'user', { validate: Array.isArray });
+      assert.equal(calls, 2);
+      assert.deepEqual(result, [{ heading: 'h', body: 'b' }]);
+    } finally {
+      globalThis.fetch = original;
+      if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
+      else process.env.REPORT_PROVIDER = originalProvider;
+      if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalKey;
+    }
+  });
+
+  test('throws after 2 attempts if validate() never passes', async () => {
+    const original = globalThis.fetch;
+    const originalProvider = process.env.REPORT_PROVIDER;
+    const originalKey = process.env.ANTHROPIC_API_KEY;
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    globalThis.fetch = async () => {
+      const body = { id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text: '{"not": "an array"}' }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      await assert.rejects(() => callLLMForJson('system', 'user', { validate: Array.isArray }), /did not return valid JSON/);
+    } finally {
+      globalThis.fetch = original;
+      if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
+      else process.env.REPORT_PROVIDER = originalProvider;
+      if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalKey;
+    }
   });
 });
 

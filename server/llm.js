@@ -133,16 +133,24 @@ export function extractJson(raw) {
 // recurring failure across multiple generators (schema/faq/expand-content/
 // meta-title/...), not a one-off — one retry with a sharper, explicit
 // correction appended to the prompt before giving up honestly.
+//
+// `validate` (optional) extends the same one-retry treatment to a parsed
+// response with the wrong *shape* (e.g. an object where an array was
+// required) — without it, a caller that parses fine but fails a shape check
+// downstream never gets the corrective-nudge retry at all, only the raw
+// "not valid JSON" one. Defaults to accept-anything so existing callers are
+// unaffected.
 export async function callLLMForJson(system, user, options = {}) {
-  const raw = await callLLM(system, user, options);
+  const { validate = () => true, ...llmOptions } = options;
+  const raw = await callLLM(system, user, llmOptions);
   const parsed = extractJson(raw);
-  if (parsed !== null) return parsed;
+  if (parsed !== null && validate(parsed)) return parsed;
 
-  console.warn('[llm] first response was not valid JSON, retrying once with a corrective nudge…');
+  console.warn('[llm] first response was not valid JSON (or failed shape validation), retrying once with a corrective nudge…');
   const retryUser = `${user}\n\nYour previous response was not valid JSON. Respond with ONLY the raw JSON — no markdown code fences, no explanation, no text before or after it.`;
-  const retryRaw = await callLLM(system, retryUser, options);
+  const retryRaw = await callLLM(system, retryUser, llmOptions);
   const retryParsed = extractJson(retryRaw);
-  if (retryParsed !== null) return retryParsed;
+  if (retryParsed !== null && validate(retryParsed)) return retryParsed;
 
   throw Object.assign(new Error('Model did not return valid JSON after 2 attempts.'), { status: 400 });
 }

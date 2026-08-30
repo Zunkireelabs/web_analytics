@@ -27,6 +27,14 @@ const DEFAULT_WINDOW_DAYS = 90;
 // below) rather than shipped as a draft — matches this repo's "regenerate
 // until complete, never publish a stub" rule for net-new content.
 const MIN_TOTAL_WORDS = 800;
+// A single expand pass reliably lands close to but still under
+// MIN_TOTAL_WORDS on some runs (LLMs undershoot an unstated-feeling target
+// even when a hard number is given) — e.g. a real run that landed at 740/800
+// and was rejected outright despite being 92% of the way there. Bounded at 2
+// (not unbounded) for the same reason callLLMForJson's own JSON retry is
+// bounded at 2: each attempt recomputes the real shortfall against the
+// latest sections, so a second pass targets "60 more words", not "260 more".
+const MAX_EXPAND_ATTEMPTS = 2;
 // Trimmed, not the whole page — grounding context for a prompt, same reason
 // and size as qa-content.js's/direct-answer.js's own bodyText slice.
 const GROUNDING_EXCERPT_CHARS = 3000;
@@ -125,9 +133,10 @@ export async function generate({ siteId, params }) {
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 
   // Treat a too-short draft as a generation failure, not a shippable
-  // shorter article: one bounded expand attempt, then reject outright
-  // rather than let a thin/stub page reach a PR — see MIN_TOTAL_WORDS.
-  if (totalWords(sections) < MIN_TOTAL_WORDS) {
+  // shorter article: up to MAX_EXPAND_ATTEMPTS bounded expand passes, each
+  // targeting the real remaining shortfall, then reject outright rather than
+  // let a thin/stub page reach a PR — see MIN_TOTAL_WORDS.
+  for (let attempt = 0; attempt < MAX_EXPAND_ATTEMPTS && totalWords(sections) < MIN_TOTAL_WORDS; attempt++) {
     sections = await expandSections(sections, topic);
   }
   if (totalWords(sections) < MIN_TOTAL_WORDS) {
