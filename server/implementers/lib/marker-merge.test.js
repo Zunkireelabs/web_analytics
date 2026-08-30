@@ -349,6 +349,56 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(html, /<td class='border px-4 py-2'>Kathmandu, Nepal<\/td>/);
   });
 
+  // generators/expand-content.js's structured "table" field (added
+  // alongside the markdown/HTML fallbacks above): rendered with OUR OWN
+  // markup, never model-authored classes, and column labels are derived
+  // from the row keys rather than a fixed schema — this data's real column
+  // names ("zunkiree_labs", "competitor") are exactly what generators/
+  // expand-content.test.js's real production example produced unprompted.
+  test('expand-content renders a structured "table" field as a real <table>, columns Title Cased from the row keys', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Service Comparison Table',
+        body: 'Below is a comparison table outlining the key differences.',
+        table: [
+          { feature: 'Custom AI Solutions', competitor: 'No', zunkiree_labs: 'Yes' },
+          { feature: 'Local Market Specialization', competitor: 'Limited', zunkiree_labs: 'Yes (eSewa and Khalti integration)' },
+        ],
+      }],
+    });
+    assert.equal(result.ok, true);
+    const html = result.values.expandedContent;
+    assert.match(html, /<p>Below is a comparison table outlining the key differences\.<\/p>/);
+    assert.match(html, /<table><thead><tr><th>Feature<\/th><th>Competitor<\/th><th>Zunkiree Labs<\/th><\/tr><\/thead>/);
+    assert.match(html, /<tr><td>Custom AI Solutions<\/td><td>No<\/td><td>Yes<\/td><\/tr>/);
+    assert.match(html, /<td>Yes \(eSewa and Khalti integration\)<\/td><\/tr><\/tbody><\/table>/);
+    assert.doesNotMatch(html, /<p>[^<]*<table>/, 'the table must never be nested inside the body <p>');
+  });
+
+  test('expand-content escapes structured table cell values, never trusts them as HTML', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Comparison',
+        body: 'See below.',
+        table: [
+          { feature: '<script>alert(1)</script>', us: 'Yes' },
+          { feature: 'Normal', us: 'No' },
+        ],
+      }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.expandedContent, /<script>/);
+    assert.match(result.values.expandedContent, /&lt;script&gt;/);
+  });
+
+  test('expand-content with no table field renders body alone, no stray empty <table>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Plain', body: 'Just prose, no table here.' }],
+    });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.expandedContent, /<table>/);
+  });
+
   test('qa-content falls back to a native <details>/<summary> with a real <h3> question — no site-specific CSS required to look correct', () => {
     const result = buildMergeValues('qa-content', {
       items: [{ question: 'What is this?', answer: 'A real answer.' }],

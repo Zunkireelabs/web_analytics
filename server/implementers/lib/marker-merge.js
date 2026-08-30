@@ -604,12 +604,48 @@ function markdownToHtml(text) {
   return parts.join('\n');
 }
 
+// column key ("zunkiree_labs", "serviceArea") -> a real header label
+// ("Zunkiree Labs", "Service Area"), for a comparison table whose columns
+// are whatever keys the model chose (see renderComparisonTable below).
+function toTitleCase(key) {
+  return key
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// generators/expand-content.js's comparison-content focus can attach a
+// structured "table" alongside a section's body — an array of plain
+// {column: value} rows, every row sharing the first row's key set (its
+// generation-time sanitizer, sanitizeTable, already enforces this shape and
+// caps its size — this only re-derives columns from row[0] defensively).
+// Rendered with OUR OWN escaped markup, never whatever HTML/CSS a model
+// might invent for the same data (that's exactly the class of bug
+// markdownToHtml's HTML_BLOCK_RE passthrough exists to contain elsewhere,
+// not extend here) — column labels are Title Cased from the row keys so
+// "zunkiree_labs" reads as "Zunkiree Labs" rather than leaking the raw
+// field name. Returns '' (not a stray empty <table>) for anything
+// malformed, so a caller can always safely concatenate this after body
+// prose.
+function renderComparisonTable(table) {
+  if (!Array.isArray(table) || !table.length) return '';
+  const columns = Object.keys(table[0]);
+  if (!columns.length) return '';
+  const th = columns.map((c) => `<th>${escapeHtml(toTitleCase(c))}</th>`).join('');
+  const body = table.map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(String(row?.[c] ?? ''))}</td>`).join('')}</tr>`).join('');
+  return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 // Each section is a real, LLM-grounded heading+body pair (generators/
 // expand-content.js). Heading stays plain-escaped (never expected to carry
 // markdown); body runs through markdownToHtml since it's free-form prose.
+// An optional structured table (see renderComparisonTable) renders as a
+// sibling block right after the body — never nested inside body's own <p>,
+// same "block content is never trapped in a <p>" rule markdownToHtml's own
+// list/table handling already follows.
 function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
   const rows = sections.map((s) => fillTemplate(template.row, {
-    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body),
+    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body) + renderComparisonTable(s.table),
   }));
   return renderFromTemplate(template, rows);
 }
