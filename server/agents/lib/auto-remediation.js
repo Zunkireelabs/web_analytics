@@ -1,8 +1,9 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType } from '../../store/drafts.js';
+import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType, markDraftAbandoned } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
-import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, openDraftPr } from '../../routes/action-center.js';
+import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr } from '../../routes/action-center.js';
+import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
@@ -125,8 +126,8 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
 //   3. Risk tier — only 'safe' generators, which now also excludes anything
 //      the design-verification gate blocked (those are demoted to 'manual').
 //
-// It ends at an OPEN PULL REQUEST and never merges — see the openDraftPr call
-// below for why that boundary is deliberate rather than incidental.
+// It ends at an OPEN PULL REQUEST and never merges — see finalizeBatchPr's
+// call below for why that boundary is deliberate rather than incidental.
 // globalRemaining: an optional platform-wide ceiling on top of this site's
 // own budget (server/job.js's AUTO_REMEDIATION_GLOBAL_DAILY_CEILING) — see
 // that file for how it's tracked across sequential per-site calls in one
@@ -297,6 +298,23 @@ export async function autoRemediateSafeRecommendations(siteId, {
   let stoppedReason = null;
   let attempted = 0;
 
+  // Batch the git push the same way routes/action-center.js's
+  // executeSafeFixes does: every item below ships with deferPr, so its
+  // commit is created but the branch ref doesn't move and no PR opens per
+  // item — see github-ops.js's beginBatchPush. With a 60-item daily budget,
+  // this collapses what used to be up to 60 separate pushes (each its own
+  // Vercel preview build) into one, at the end of this run. Only begun when
+  // there's actually something to attempt, and ALWAYS finalized below when
+  // begun (even if every attempt fails and `pending` ends up empty) —
+  // beginBatchPush's state is only ever cleared by a matching finalize
+  // call, so skipping that call on an empty-but-begun run would leave it
+  // dangling for the rest of this process's life, silently deferring any
+  // later single-click push to this same branch that never gets flushed.
+  const branchName = batchBranchName(site);
+  const batching = budgeted.length > 0;
+  if (batching) beginBatchPush(site, branchName);
+  const pending = []; // { rec, draft }
+
   for (const rec of budgeted) {
     if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
       stoppedReason = 'circuit-breaker';
@@ -330,43 +348,29 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // PR instead of only unblocking tomorrow's. See design-drift.js's
         // DESIGN_AGENT_WAIT_MS.
         waitForDesignAgent: true,
+        deferPr: true,
       });
 
-      // Ensure the chain ends at an OPEN PR, and STOP. This loop deliberately
-      // never merges and never calls markDraftImplemented: a human reviewing and
-      // merging on GitHub is the intended final gate, and the existing PR-status
-      // poller (cron.js's ':20 past the hour' runPrStatusPollForAllSites) flips
-      // the draft to 'implemented' once that merge actually happens.
+      // deferPr means approved.pr_number is never set here (see
+      // approveAndPublishDraft's own comment on deferPr) — this item's PR
+      // opens once, for the whole batch, in the finalize step after this
+      // loop, not per item. Queue it rather than calling openDraftPr now
+      // (which would 422: the branch hasn't actually been pushed yet).
       //
-      // Only when approveAndPublishDraft did NOT already open it. That function
-      // ends in markDraftPrOpened whenever the implementer exposes mergeToStage,
-      // which every real one does — so for the normal path the PR exists before
-      // this line is reached. Calling openDraftPr anyway made it throw "Draft
-      // not found, or has no pushed branch yet" (it requires status
-      // 'branch_pushed', and the draft is already 'pr_opened'), which was caught
-      // below and counted the item as FAILED even though its PR was open and
-      // correct.
+      // The circuit breaker/refusal counters below still reset on THIS
+      // commit succeeding, same as before deferPr existed — a real commit
+      // landing locally is genuine evidence the pipeline is healthy for
+      // this item, independent of whether the batch's one shared push
+      // later succeeds or fails (that's a systemic outcome affecting every
+      // pending item equally, not a signal about any one of them).
+      pending.push({ rec, draft: approved });
       //
-      // That was not a cosmetic miscount. Three consecutive successes tripped
-      // the circuit breaker and halted the rest of the day's run — so with the
-      // real 30-item budget the loop would have stopped after 3 shipped items
-      // every single day, reporting them all as failures. Caught on the first
-      // real end-to-end run: draft 698 opened PR #47 and was recorded as a
-      // failure.
+      // shipped++ and recordOutcome('shipped', ...) now happen after this
+      // loop, once the batch's PR is actually confirmed open (see the
+      // finalize step below) — counting an item as shipped before its PR
+      // exists would overstate what landed, same reasoning the old
+      // per-item openDraftPr comment here used to describe.
       //
-      // A genuine failure here is still different in kind from one above: the
-      // branch is pushed and the work is real, it just isn't proposed yet.
-      // Counting that as shipped would overstate what landed, so it stays a
-      // failure — and the draft is left at 'branch_pushed', where the manual
-      // "Open PR" button can finish it without regenerating anything.
-      if (!approved.pr_number) await openDraftPr(siteId, approved.id);
-
-
-      shipped++;
-      // Phase 5: best-effort, never awaited into the failure path — a
-      // logging problem must not turn a real shipped fix into a reported
-      // failure. recordOutcome already swallows its own errors internally.
-      recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
       // Both streaks reset: a success is evidence against a systemic fault AND
       // against "this site has nothing it can honestly ship", so neither
       // counter should carry across it.
@@ -450,6 +454,41 @@ export async function autoRemediateSafeRecommendations(siteId, {
       console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }
   }
+
+  // One real push + one PR open for the whole run (see beginBatchPush
+  // above), instead of one of each per item. Every `pending` item's commit
+  // already landed locally; this either confirms all of them together as
+  // genuinely shipped, or — on failure — reverts every one of them so
+  // nothing is silently counted as shipped work that never reached GitHub.
+  // Called unconditionally whenever batching was begun (see `batching`
+  // above), not just when `pending.length > 0` — finalizeBatchPr's own
+  // endBatchPush call is what clears beginBatchPush's state, and skipping
+  // it on a fully-failed/fully-refused run would leave that state stuck.
+  if (batching) {
+    const finalization = await finalizeBatchPr(site, branchName, pending.map((p) => p.draft.id));
+    if (!finalization.ok) {
+      if (pending.length > 0) {
+        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+      }
+      await Promise.all(pending.map(async ({ rec, draft }) => {
+        failed++;
+        recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: finalization.error }).catch(() => {});
+        await markDraftAbandoned(siteId, draft.id, `Batch push/PR failed: ${finalization.error}`, null).catch((abandonErr) => {
+          console.error(`[auto-remediation] could not abandon draft ${draft.id} after batch push/PR failure:`, abandonErr.message);
+        });
+      }));
+    } else if (pending.length > 0) {
+      for (const { rec, draft } of pending) {
+        shipped++;
+        // Phase 5: best-effort, never awaited into the failure path — a
+        // logging problem must not turn a real shipped fix into a reported
+        // failure. recordOutcome already swallows its own errors internally.
+        recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: draft.id }).catch(() => {});
+      }
+      console.log(`[auto-remediation] site ${siteId}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s)).`);
+    }
+  }
+
   return {
     attempted, shipped, failed, refused,
     skipped: candidates.length - attempted,
@@ -478,7 +517,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false }) {
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false }) {
   const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
@@ -490,7 +529,7 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   const submitted = await submitDraftForApproval(siteId, draft.id);
   if (!submitted) throw new Error('Draft was not in a submittable state');
 
-  const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null });
+  const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
   if (!approved.branch_name) {
     const message = approved.apply_error || 'Approved but no branch was pushed';
     const err = new Error(message);

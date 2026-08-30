@@ -81,6 +81,16 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     ['title', content.title || content.topic],
     ['description', content.metaDescription],
     ['date', new Date().toISOString().slice(0, 10)],
+    // Optional — only present when blog-outline.js's Pexels search
+    // (generators/lib/pexels-client.js) found a match; omitted otherwise via
+    // frontMatter()'s existing null/empty skip, same as every other field
+    // here. A remote URL in front matter, not a binary committed to the
+    // repo — the client's blog template is responsible for rendering it.
+    ['image', content.featuredImage?.url],
+    ['image_alt', content.featuredImage?.alt],
+    ['image_credit', content.featuredImage?.photographer
+      ? `Photo by ${content.featuredImage.photographer} on Pexels`
+      : null],
   ], site);
   const parts = [];
   for (const s of content.sections || []) {

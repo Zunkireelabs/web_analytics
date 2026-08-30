@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -371,6 +371,28 @@ export function startCron() {
       }
     }, { timezone: 'UTC' });
     console.log(`[cron] analyst -> Action Center sync scheduled "${analystSync}" (UTC)`);
+  }
+
+  // Growth Opportunities -> Action Center sync, weekly. Growth Opportunities
+  // is a read-time view over the trailing 30 days of gsc_query_page (see
+  // growth-opportunities.js) — it has no nightly cadence of its own the way
+  // the Analyst's insights do, so unlike the daily sync above this runs once
+  // a week, same 00:00 UTC slot but Monday-only, still 1.5h ahead of the
+  // 01:30 UTC (07:00 Asia/Kolkata) morning run so the week's first batch of
+  // opportunity-derived recommendations is already sitting in Action Center
+  // before that run opens the day's PRs.
+  const growthOppsSync = process.env.GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE || '0 0 * * 1';
+  if (!cron.validate(growthOppsSync)) {
+    console.error(`[cron] invalid GROWTH_OPPORTUNITIES_SYNC_CRON_SCHEDULE "${growthOppsSync}" — growth opportunities sync NOT scheduled.`);
+  } else {
+    cron.schedule(growthOppsSync, async () => {
+      try {
+        await runGrowthOpportunitiesSyncForAllSites();
+      } catch (err) {
+        console.error('[cron] growth opportunities sync error:', err.message);
+      }
+    }, { timezone: 'UTC' });
+    console.log(`[cron] growth opportunities -> Action Center sync scheduled "${growthOppsSync}" (UTC)`);
   }
 
   // Proactive Design Agent trigger — one hour ahead of the 07:00 detect+ship

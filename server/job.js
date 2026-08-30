@@ -29,7 +29,7 @@ import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
-import { syncAnalystInsightsToActionCenter } from './agents/lib/analyst-seo-mapping.js';
+import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter } from './agents/lib/analyst-seo-mapping.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
@@ -785,6 +785,38 @@ export async function runAnalystSyncForAllSites() {
     }
   }
   if (totals.created) console.log(`[job] analyst sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// Website-wide Growth Opportunities (Analyst page, growth-opportunities.js)
+// -> Action Center, weekly. Growth Opportunities is a read-time view over
+// gsc_query_page (no cadence of its own — every call reflects the latest 30
+// days), so this runs weekly rather than nightly: frequent enough to keep
+// picking up newly-eligible opportunities as rankings move, without
+// re-scoring the same mostly-unchanged month of GSC data every night the way
+// the nightly analyst sync above does for genuinely new per-night insights.
+//
+// Same "recommendations only, never drafts" and best-effort-per-site
+// discipline as runAnalystSyncForAllSites.
+export async function runGrowthOpportunitiesSyncForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, created: 0, skipped: 0, ineligible: 0 };
+
+  for (const site of sites) {
+    try {
+      const result = await syncGrowthOpportunitiesToActionCenter(site.id, { site });
+      totals.sites++;
+      totals.created += result.created;
+      totals.skipped += result.skipped;
+      totals.ineligible += result.ineligible;
+      if (result.created) {
+        console.log(`[job] growth opportunities sync: site ${site.id} "${site.name}" created ${result.created} recommendation(s).`);
+      }
+    } catch (err) {
+      console.error(`[job] growth opportunities sync failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  if (totals.created) console.log(`[job] growth opportunities sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
   return totals;
 }
 

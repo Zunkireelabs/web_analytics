@@ -2,6 +2,7 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
+import { searchImage } from './lib/pexels-client.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -146,6 +147,11 @@ export async function generate({ siteId, params }) {
     );
   }
 
+  // Best-effort, same reasoning as the homepage-grounding fetch above: a
+  // failed/disabled/no-result image search must never block an otherwise
+  // complete blog draft — see lib/pexels-client.js's searchImage.
+  const featuredImage = await searchImage(parsed.title || topic);
+
   const content = {
     topic,
     title: parsed.title || '',
@@ -153,6 +159,7 @@ export async function generate({ siteId, params }) {
     sections,
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    ...(featuredImage ? { featuredImage } : {}),
   };
   return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))` };
 }

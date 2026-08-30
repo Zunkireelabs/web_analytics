@@ -4,6 +4,7 @@ import {
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
 } from '../../store/data-analyst.js';
 import { listPageInventory } from '../../store/page-inventory.js';
+import { buildGrowthOpportunities } from './growth-opportunities.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js';
 import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
@@ -617,6 +618,62 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
       confidence: action.confidence,
+    });
+    created++;
+  }
+  return { created, skipped, ineligible, dropped, blocked };
+}
+
+// Website-wide Growth Opportunities -> Action Center, the weekly counterpart
+// to syncAnalystInsightsToActionCenter above (same idempotency, same gates
+// instance reused across the whole pass). Creates recommendations only,
+// never drafts, for the same reason: an unattended pass must feed the
+// existing risk-tier/auto-remediation gate, not bypass it with drafts
+// nothing has to review first.
+//
+// content-gap opportunities are skipped here (opportunityDraftEligibility
+// itself returns null for them, via OPPORTUNITY_GENERATORS above) — that
+// type already has its own human-reviewed approval path
+// (createActionCenterRecommendationForGap via the gaps PUT route), and
+// running it here too would silently short-circuit that review step.
+export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {}) {
+  const resolvedSite = site || await getSiteById(siteId);
+  if (!resolvedSite) return { created: 0, skipped: 0, ineligible: 0, dropped: 0, blocked: 0 };
+
+  const { opportunities } = await buildGrowthOpportunities(siteId);
+
+  let created = 0;
+  let skipped = 0;
+  let ineligible = 0;
+  let dropped = 0;
+  let blocked = 0;
+
+  const gates = createRecommendationGates(siteId, resolvedSite);
+
+  for (const opp of opportunities || []) {
+    const action = opportunityDraftEligibility(resolvedSite, opp);
+    if (!action) { ineligible++; continue; }
+
+    const page = recommendationPageKey({ generatorId: action.generatorId, params: action.params });
+    const existing = await findOpenRecommendation(siteId, page, action.generatorId);
+    if (existing) { skipped++; continue; }
+
+    const gate = await gates.evaluate(action.generatorId, action.params)
+      .catch(() => ({ drop: null, blockedReason: null }));
+    if (gate.drop) { dropped++; continue; }
+    if (gate.blockedReason) blocked++;
+
+    await insertRecommendation(siteId, {
+      page,
+      recommendationType: action.generatorId,
+      issue: opp.query ? `Growth opportunity (${opp.type}): "${opp.query}"` : `Growth opportunity (${opp.type}) on ${opp.page}`,
+      reason: opp.reason,
+      params: action.params,
+      findingId: action.findingId,
+      detectingAgent: 'growth-opportunities',
+      priority: opp.severity || 'medium',
+      riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
+      blockedReason: gate.blockedReason,
     });
     created++;
   }

@@ -126,6 +126,13 @@ jobs:
             # flag too. Without it, Milestones simply omits this section.
             GROWTH_PLAN_NARRATIVE_ENABLED=true
 
+            # ── Blog featured images (opt-in, Pexels search, free tier) ──
+            # Same double-gate reasoning as AI_RECOMMENDATION_ENABLED above —
+            # the key alone must not silently turn image-fetching on. Without
+            # this flag, blog-outline.js simply omits a featured image.
+            PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY }}
+            BLOG_IMAGES_ENABLED=true
+
             # ── Agentic Orchestration (opt-in, smarter agent-selection loop) ──
             # Same double-gate pattern — without this, Copilot/Action Center
             # refresh fall back to their fixed-agent-list behavior, not a
