@@ -109,10 +109,55 @@ export async function createBranch(site, branchName, fromSha) {
   throw new Error(`createBranch failed (${res.status}): ${body}`);
 }
 
+// Batch write-overlay (Action Center same-day batching, see github-ops.js's
+// beginBatchPush/endBatchPush). While a batch is active for (site, branch),
+// every commit created for it is chained locally WITHOUT moving the real
+// branch ref until the whole batch finishes — one push instead of one per
+// recommendation. But dozens of implementers read "what's currently on this
+// branch" via getFileContent/getFileSha (marker-merge splices, the
+// family-write-marker check) to decide how to merge the NEXT change in. Left
+// alone, every read after the batch's first commit would see stale,
+// pre-batch content — since the real ref hasn't moved — silently producing
+// wrong merges, not just a missing feature. This overlay is what keeps those
+// reads accurate: a write recorded here is what a same-branch read sees,
+// even though GitHub itself hasn't been told about it yet.
+const fileOverlays = new Map(); // key: `${site.id}:${branch}` -> Map<path, {content, sha}|null>
+
+function overlayKey(site, branch) {
+  return `${site.id}:${branch}`;
+}
+
+export function beginFileOverlay(site, branch) {
+  fileOverlays.set(overlayKey(site, branch), new Map());
+}
+
+export function endFileOverlay(site, branch) {
+  fileOverlays.delete(overlayKey(site, branch));
+}
+
+function getFileOverlay(site, branch) {
+  return fileOverlays.get(overlayKey(site, branch)) || null;
+}
+
+// Records what a just-created (not-yet-pushed) batch commit actually wrote,
+// so a later read on the same branch sees it. `sha: null` is deliberate —
+// files here are always written via the tree API's inline `content` (see
+// createCommitObject below), which never needs a blob sha to build the NEXT
+// tree on top of it; only putFile's create-vs-update check reads
+// getFileSha's return, and putFile is never used against an actively-
+// batching branch (confirmed: no call site in server/implementers/).
+export function recordFileOverlayWrites(site, branch, files) {
+  const overlay = getFileOverlay(site, branch);
+  if (!overlay) return;
+  for (const f of files) overlay.set(f.path, { content: f.content, sha: null });
+}
+
 // Current blob SHA of a file on a given ref, or null if it doesn't exist yet
 // (a brand-new file, e.g. a new landing page) — putFile needs this to decide
 // create vs. update.
 export async function getFileSha(site, path, ref) {
+  const overlay = getFileOverlay(site, ref);
+  if (overlay?.has(path)) return overlay.get(path)?.sha ?? null;
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/contents/${path}?ref=${encodeURIComponent(ref)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`getFileSha failed (${res.status}): ${await res.text()}`);
@@ -126,6 +171,8 @@ export async function getFileSha(site, path, ref) {
 // real marker comments and confirm they're really there before writing
 // anything. Returns null if the file doesn't exist on this ref.
 export async function getFileContent(site, path, ref) {
+  const overlay = getFileOverlay(site, ref);
+  if (overlay?.has(path)) return overlay.get(path);
   const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/contents/${path}?ref=${encodeURIComponent(ref)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`getFileContent failed (${res.status}): ${await res.text()}`);
@@ -183,29 +230,49 @@ export async function mergeBranchFromBase(site, branch, base) {
 // entries take `content` directly (GitHub creates the blob for you) — no
 // per-file SHA lookup needed first, unlike putFile, since a tree diff
 // against `base_tree` handles create vs. update either way.
-export async function commitFilesAtomic(site, branch, files, message) {
-  const refSha = await getBranchSha(site, branch);
-
-  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${refSha}`);
-  if (!commitRes.ok) throw new Error(`commitFilesAtomic (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
+// Creates a commit object on top of `parentSha`'s tree — WITHOUT moving any
+// branch ref. Split out of commitFilesAtomic (below) specifically for
+// Action Center batching: github-ops.js's deferred mode chains several of
+// these locally (each one's parent is the previous one's sha, not yet
+// pointed to by any ref) and only moves the ref once, at the end, via
+// updateRef — so GitHub (and therefore Vercel's per-push preview build)
+// only sees the branch move once per batch, not once per commit.
+export async function createCommitObject(site, parentSha, files, message) {
+  const commitRes = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/git/commits/${parentSha}`);
+  if (!commitRes.ok) throw new Error(`createCommitObject (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
   const baseTree = (await commitRes.json()).tree.sha;
 
   const treeRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/trees`, {
     base_tree: baseTree,
     tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
   });
-  if (!treeRes.ok) throw new Error(`commitFilesAtomic (create tree) failed (${treeRes.status}): ${await treeRes.text()}`);
+  if (!treeRes.ok) throw new Error(`createCommitObject (create tree) failed (${treeRes.status}): ${await treeRes.text()}`);
   const newTree = (await treeRes.json()).sha;
 
   const newCommitRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/commits`, {
-    message, tree: newTree, parents: [refSha],
+    message, tree: newTree, parents: [parentSha],
   });
-  if (!newCommitRes.ok) throw new Error(`commitFilesAtomic (create commit) failed (${newCommitRes.status}): ${await newCommitRes.text()}`);
-  const newCommitSha = (await newCommitRes.json()).sha;
+  if (!newCommitRes.ok) throw new Error(`createCommitObject (create commit) failed (${newCommitRes.status}): ${await newCommitRes.text()}`);
+  return (await newCommitRes.json()).sha;
+}
 
-  const updateRefRes = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, { sha: newCommitSha });
-  if (!updateRefRes.ok) throw new Error(`commitFilesAtomic (update ref) failed (${updateRefRes.status}): ${await updateRefRes.text()}`);
+// Moves `branch`'s ref to point at `sha` — the actual "push" GitHub (and
+// Vercel's GitHub integration) sees as a new event. Split out so a caller
+// batching several createCommitObject calls can do this exactly once, for
+// the whole batch, instead of once per commit.
+export async function updateRef(site, branch, sha) {
+  const res = await githubRequest(site, 'PATCH', `/repos/${repoPath(site)}/git/refs/heads/${branch}`, { sha });
+  if (!res.ok) throw new Error(`updateRef failed (${res.status}): ${await res.text()}`);
+}
 
+// Atomically writes N files to `branch` as one commit AND pushes it
+// immediately (tree -> commit -> ref update) — the original, single-call
+// shape every non-batching caller (rollback, platform self-repair scripts,
+// a human's single-click "ship this one" draft) still uses unchanged.
+export async function commitFilesAtomic(site, branch, files, message) {
+  const refSha = await getBranchSha(site, branch);
+  const newCommitSha = await createCommitObject(site, refSha, files, message);
+  await updateRef(site, branch, newCommitSha);
   return { sha: newCommitSha };
 }
 

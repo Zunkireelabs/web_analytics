@@ -17,7 +17,8 @@ let pendingDraftFilePaths;
 let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
-const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [] };
+const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
+let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
@@ -46,6 +47,9 @@ function reset() {
   calls.prsOpened = [];
   calls.closed = [];
   calls.findingOrigins = [];
+  calls.batchFinalizeCalls = [];
+  calls.abandoned = [];
+  finalizeBatchFails = false;
   failOn = () => false;
   refuseOn = () => false;
   staleOn = () => false;
@@ -80,6 +84,7 @@ mock.module(resolve('../../store/drafts.js'), {
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => ({ id: draftId }),
     updateDraft: async () => null,
+    markDraftAbandoned: async (siteId, draftId, reason) => { calls.abandoned.push({ draftId, reason }); },
   },
 });
 const realRead = await import(resolve('../../store/read.js'));
@@ -143,6 +148,21 @@ mock.module(resolve('../../routes/action-center.js'), {
       return { id: draftId, pr_number: 1 };
     },
     autoSelectMetaTitle: () => null,
+    // Batching now opens ONE PR per run (not one per item — see
+    // github-ops.js's beginBatchPush) via finalizeBatchPr, called once
+    // after the loop with every draft id that made it to 'branch_pushed'.
+    // Mocked to succeed by default and record every id it was asked to
+    // finalize into `calls.prsOpened`, same array/semantics the old
+    // per-item openDraftPr mock above used, so existing assertions ("every
+    // shipped draft reaches an open PR") still hold under the new
+    // one-call-per-batch shape. `finalizeBatchFails` lets a test simulate
+    // the batch's one shared push/PR failing instead.
+    finalizeBatchPr: async (site, branchName, draftIds) => {
+      calls.batchFinalizeCalls.push({ branchName, draftIds });
+      if (finalizeBatchFails) return { ok: false, error: 'simulated batch push/PR failure' };
+      calls.prsOpened.push(...draftIds);
+      return { ok: true, pushed: draftIds.length, prNumber: 1, prUrl: 'https://github.com/acme/site/pull/1' };
+    },
   },
 });
 
@@ -411,42 +431,50 @@ describe('auto-remediation — circuit breaker', () => {
 
 
 // Regression guard for a bug found on the first real end-to-end run, where
-// draft 698 opened PR #47 on zunkireelabs-web and was recorded as a FAILURE.
+// draft 698 opened PR #47 on zunkireelabs-web and was recorded as a FAILURE:
+// approveAndPublishDraft used to open the PR per item, and this loop's own
+// "did it open the PR yet?" check threw when it had already been opened —
+// counting a fully successful item as failed, and tripping the circuit
+// breaker after 3 such successes.
 //
-// approveAndPublishDraft ends in markDraftPrOpened for every real implementer,
-// so the PR is normally already open by the time this loop's own openDraftPr
-// call is reached. That call requires status 'branch_pushed' and the draft is
-// 'pr_opened', so it threw, and the catch counted a fully successful item as
-// failed. Three consecutive successes then tripped the circuit breaker — with
-// the real 30-item budget the loop would have halted after 3 shipped items
-// every day while reporting them all as failures.
-describe('when approveAndPublishDraft already opened the PR (the normal path)', () => {
-  beforeEach(() => { reset(); approveOpensPr = true; });
+// Batching removed the per-item branch that bug lived in entirely: every
+// item now ships with deferPr (approveAndPublishDraft never opens a PR per
+// item at all — see its own comment on deferPr), and exactly ONE PR opens
+// for the whole run via finalizeBatchPr, once, after the loop. `approveOpensPr`
+// is gone as a meaningful toggle for this reason — nothing this loop does
+// depends any more on whether approveAndPublishDraftUnattended's mock
+// happens to include a pr_number.
+describe('batched PR opening', () => {
+  beforeEach(reset);
 
-  test('does not try to open the PR a second time', async () => {
-    recommendations = [rec(1)];
-    const result = await autoRemediateSafeRecommendations(1);
-
-    assert.deepEqual(calls.prsOpened, [], 'the PR already exists — opening it again throws');
-    assert.equal(result.shipped, 1);
-    assert.equal(result.failed, 0);
-  });
-
-  test('three successes in a row do NOT trip the circuit breaker', async () => {
+  test('opens exactly ONE PR for the whole batch, not one per item', async () => {
     recommendations = [rec(1), rec(2), rec(3), rec(4)];
     const result = await autoRemediateSafeRecommendations(1);
 
+    assert.equal(calls.batchFinalizeCalls.length, 1, 'finalizeBatchPr is called exactly once for the whole run');
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-f1', 'd-f2', 'd-f3', 'd-f4']);
+    assert.deepEqual(calls.prsOpened, ['d-f1', 'd-f2', 'd-f3', 'd-f4'], 'every shipped draft still reaches an open PR');
     assert.equal(result.shipped, 4, 'every item ships');
+    assert.equal(result.failed, 0);
     assert.equal(result.stoppedReason, null, 'the breaker must not fire on successes');
   });
 
-  test('still opens the PR when approve stopped at a pushed branch', async () => {
-    approveOpensPr = false;
-    recommendations = [rec(1)];
+  test('a run with nothing to ship never calls finalizeBatchPr at all', async () => {
+    recommendations = [];
+    await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 0);
+  });
+
+  test('when the batch push/PR itself fails, every pending item reverts to failed and gets abandoned', async () => {
+    finalizeBatchFails = true;
+    recommendations = [rec(1), rec(2)];
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.deepEqual(calls.prsOpened, ['d-f1'], 'this path still needs the explicit open');
-    assert.equal(result.shipped, 1);
+    assert.equal(result.shipped, 0, 'nothing actually reached GitHub');
+    assert.equal(result.failed, 2);
+    assert.deepEqual(calls.prsOpened, [], 'no PR was opened');
+    assert.deepEqual(calls.abandoned.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'], 'both drafts are abandoned so they are re-attempted on a future run, not silently stuck at branch_pushed');
   });
 });
 

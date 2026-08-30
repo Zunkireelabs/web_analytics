@@ -35,7 +35,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest } from '../github/client.js';
-import { baseBranch, openRollbackPr } from '../implementers/lib/github-ops.js';
+import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { getUserById } from '../store/users.js';
@@ -657,7 +657,7 @@ router.post('/action-center/drafts/:id/request-revision', async (req, res, next)
 // this call itself failed with. Only a pre-approval rejection (bad
 // implementer resolution, a failed preview, or an uncertain render mode)
 // throws.
-export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode } = {}) {
+export async function approveAndPublishDraft(siteId, draftId, { userId, renderMode, deferPr = false } = {}) {
   const draft = await getDraft(siteId, draftId);
   if (!draft || draft.status !== 'submitted_for_approval') {
     throw httpError(404, 'Draft not found, or not submitted for approval');
@@ -821,7 +821,17 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   }
   const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles });
 
-  if (typeof implementer.mergeToStage !== 'function') return branchPushedDraft;
+  // deferPr: this draft is part of a batch run (github-ops.js's
+  // beginBatchPush is already active for its branch) — its commit was
+  // created but the branch ref deliberately hasn't moved yet, so GitHub
+  // would 422 a PR-open attempt right now ("No commits between X and Y").
+  // The caller (executeSafeFixes/auto-remediation's loop) opens exactly ONE
+  // PR for the whole batch, once, via finalizeBatchPr below, after the
+  // batch's one real push lands. Leaves the draft at 'branch_pushed' — the
+  // same intermediate state the "Open PR" button already recovers from
+  // manually (openDraftPr), so this is not a new draft state, just a new,
+  // deliberate way to reach it.
+  if (deferPr || typeof implementer.mergeToStage !== 'function') return branchPushedDraft;
 
   const prResult = await implementer.mergeToStage(site, branchPushedDraft);
   if (!prResult.ok) {
@@ -899,7 +909,7 @@ export function autoSelectMetaTitle(generatorId, content) {
   return { ...content, selectedTitle: content.titles[0] };
 }
 
-async function shipRecommendation(siteId, rec, { userId, jobId }) {
+async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false }) {
   const jobRec = await addJobRecommendation(jobId, rec.id);
   try {
     const draft = await generateDraft(siteId, {
@@ -935,8 +945,20 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     if (!submitted) throw new Error('Draft was not in a submittable state');
     await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
 
-    const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId });
+    const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId, deferPr });
     if (!approved.branch_name) throw new Error(approved.apply_error || 'Approved but no branch was pushed');
+
+    if (deferPr) {
+      // PR isn't open yet — this draft is left at 'branch_pushed', part of
+      // a shared batch the caller finalizes ONCE after the whole run (see
+      // finalizeBatchPr below) instead of every item opening its own PR
+      // here. Job-rec status stays at 'submitted' (the closest existing
+      // value — no 'branch_pushed' status exists for this column) and
+      // recommendation execution_status is left unset until finalize
+      // confirms a real PR, rather than marking either 'shipped' early.
+      return { ok: true, draft: approved, pendingPr: true, jobRecId: jobRec.id };
+    }
+
     await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
     return { ok: true, draft: approved };
@@ -973,6 +995,43 @@ async function shipRecommendation(siteId, rec, { userId, jobId }) {
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'failed' });
     await appendJobLog(jobId, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") failed: ${message}`);
     return { ok: false, error: message };
+  }
+}
+
+// Finalizes a batch run's worth of drafts left at 'branch_pushed' by
+// shipRecommendation's deferPr mode: pushes every commit accumulated since
+// the caller's own beginBatchPush as ONE ref update (github-ops.js's
+// endBatchPush — the one real GitHub push, and therefore the one Vercel
+// preview build, for the whole run), then opens exactly ONE PR for the
+// batch (reusing openDraftPr, the same "finish a branch_pushed draft"
+// path the manual retry button already uses) and marks every OTHER draft
+// in the batch 'pr_opened' with that same PR — instead of each draft
+// pushing and opening its own PR immediately.
+//
+// `draftIds` must all share the SAME batch branch (guaranteed by the
+// caller's own beginBatchPush(branchName) call). On failure, nothing here
+// updates any draft/recommendation row — the caller (which knows its own
+// job-rec/execution-state bookkeeping shape) is responsible for reverting
+// every id in `draftIds` to a real failure state, exactly the same
+// strand-and-hide concern approveAndPublishDraftUnattended's own doc
+// comment describes: a 'branch_pushed' draft nobody ever finalizes would
+// otherwise permanently hide its recommendation from future runs.
+export async function finalizeBatchPr(site, branchName, draftIds) {
+  const pushResult = await endBatchPush(site, branchName);
+  if (!pushResult.ok) return { ok: false, error: pushResult.error };
+  if (pushResult.pushed === 0 || draftIds.length === 0) {
+    return { ok: true, pushed: 0, prNumber: null, prUrl: null };
+  }
+  try {
+    const first = await openDraftPr(site.id, draftIds[0]);
+    const prNumber = first.pr_number;
+    const prUrl = first.pr_url;
+    for (const id of draftIds.slice(1)) {
+      await markDraftPrOpened(site.id, id, { prNumber, prUrl, rollbackSnapshot: null });
+    }
+    return { ok: true, pushed: pushResult.pushed, prNumber, prUrl };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 }
 
@@ -1017,9 +1076,19 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   }
   await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution.`);
 
+  // Batch the git push: every item below runs with deferPr, so its commit
+  // is created but the branch ref doesn't move and no PR opens per item —
+  // see github-ops.js's beginBatchPush for why (up to SAFE_FIX_BATCH_LIMIT
+  // items used to mean up to that many separate pushes, each its own
+  // Vercel preview build, on the same PR). finalizeBatchPr below does the
+  // one real push + one PR open, once, after the loop.
+  const branchName = batchBranchName(site);
+  beginBatchPush(site, branchName);
+
   let lastSuccess = null;
   let shipped = 0;
   let failed = 0;
+  const pending = []; // { draftId, jobRecId, recId }
   for (const rec of recs) {
     // Same file-level guard as auto-remediation.js's autonomous path (see
     // getPendingDraftFilePaths' comment, store/drafts.js): skip a
@@ -1033,13 +1102,46 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
       failed++;
       continue;
     }
-    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id });
-    if (result.ok) { shipped++; lastSuccess = result.draft; } else failed++;
+    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true });
+    if (result.ok) {
+      shipped++;
+      lastSuccess = result.draft;
+      if (result.pendingPr) pending.push({ draftId: result.draft.id, jobRecId: result.jobRecId, recId: rec.id });
+    } else {
+      failed++;
+    }
+  }
+
+  const finalization = await finalizeBatchPr(site, branchName, pending.map((p) => p.draftId));
+  if (!finalization.ok) {
+    // Nothing in `pending` actually reached a real PR — revert every one of
+    // them from the optimistic 'submitted' job-rec status to a real
+    // failure, so this isn't silently reported as shipped work that never
+    // landed (the same strand-and-hide risk finalizeBatchPr's own comment
+    // describes).
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+    await Promise.all(pending.map(async (p) => {
+      await updateJobRecommendationStatus(p.jobRecId, 'failed', { error: finalization.error });
+      await setRecommendationExecutionState(p.recId, { executionJobId: job.id, executionStatus: 'failed' });
+      await markDraftAbandoned(siteId, p.draftId, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
+        console.error(`[action-center] could not abandon draft ${p.draftId} after batch push/PR failure:`, err.message);
+      });
+    }));
+    shipped -= pending.length;
+    failed += pending.length;
+  } else if (pending.length > 0) {
+    await Promise.all(pending.map(async (p) => {
+      await updateJobRecommendationStatus(p.jobRecId, 'approved', { draftId: p.draftId });
+      await setRecommendationExecutionState(p.recId, { executionJobId: job.id, executionStatus: 'shipped' });
+    }));
+    await appendJobLog(job.id, `Batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s)).`);
   }
 
   const finishedJob = await finishExecutionJob(job.id, {
     status: shipped > 0 ? 'completed' : 'failed',
-    branchName: lastSuccess?.branch_name, prNumber: lastSuccess?.pr_number, prUrl: lastSuccess?.pr_url,
+    branchName: finalization.ok ? branchName : lastSuccess?.branch_name,
+    prNumber: finalization.prNumber ?? lastSuccess?.pr_number,
+    prUrl: finalization.prUrl ?? lastSuccess?.pr_url,
   });
   return { job: finishedJob, shipped, failed };
 }
