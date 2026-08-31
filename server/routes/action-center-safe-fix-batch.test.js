@@ -10,8 +10,8 @@ import router, { SAFE_FIX_BATCH_LIMIT } from './action-center.js';
 const paths = router.stack.filter((l) => l.route).map((l) => l.route.path);
 
 describe('Execute Safe Fixes — batch limit', () => {
-  test('one manual run ships up to 30 recommendations', () => {
-    assert.equal(SAFE_FIX_BATCH_LIMIT, 30);
+  test('one manual run ships up to 60 recommendations', () => {
+    assert.equal(SAFE_FIX_BATCH_LIMIT, 60);
   });
 
   test('the limit is exported, so the UI can label the button with the real cap', () => {
