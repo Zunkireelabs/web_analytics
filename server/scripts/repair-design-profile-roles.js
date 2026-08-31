@@ -45,7 +45,9 @@ import {
   correctLinkTypography,
 } from '../design-agent/live-analysis/profile-extract.js';
 import { projectAllComponentTemplates, isProfileUsable } from '../design-agent/lib/design-profile.js';
-import { verifyTemplateAgainstLiveSite, COMPONENT_TEMPLATE_KEY, sitePageUrl } from '../implementers/lib/design-drift.js';
+import {
+  verifyTemplateAgainstLiveSite, COMPONENT_TEMPLATE_KEY, sitePageUrl, verifyProfileRoles,
+} from '../implementers/lib/design-drift.js';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -103,6 +105,21 @@ async function repairSite(site) {
     return false;
   }
 
+  // Independent second opinion, run BEFORE any correction: verifyProfileRoles
+  // (design-drift.js) never looks at correctBodyTypography/
+  // correctHeadingTypography/correctLinkTypography's own reasoning — it only
+  // checks whether the CURRENTLY STORED typography fields were ever observed
+  // playing that role in this same profile's own section evidence. Reported
+  // here, always, dry run or not: this is what tells a human "this site
+  // really did ship the eyebrow-as-body-copy defect" using a mechanism
+  // completely separate from the one about to correct it.
+  const before = verifyProfileRoles(profile);
+  if (!before.ok) {
+    console.log(`  role check (before correction): ✗ ${before.field} — ${before.error}`);
+  } else {
+    console.log('  role check (before correction): ✓ no confirmed role mismatch.');
+  }
+
   const changes = [];
   const note = (slot, was, now) => {
     if (JSON.stringify(was) === JSON.stringify(now)) return;
@@ -136,6 +153,18 @@ async function repairSite(site) {
     console.log('  repaired profile would be unusable — left untouched; this site needs a real re-derivation.');
     return false;
   }
+
+  // Same independent check, re-run on the CORRECTED typography. If this still
+  // fails, correctBodyTypography/correctHeadingTypography/correctLinkTypography
+  // did not fully resolve what the role evidence disagrees with, and this site
+  // needs a human to look rather than being trusted on this script's say-so —
+  // reported, but this script still writes what it corrected either way; a
+  // remaining mismatch here is exactly what a future design-review screen
+  // (design-integrity-gate proposal, change 03) would surface for sign-off.
+  const after = verifyProfileRoles(repaired);
+  console.log(after.ok
+    ? '  role check (after correction): ✓ no confirmed role mismatch.'
+    : `  role check (after correction): ✗ ${after.field} — ${after.error} (still needs a real re-derivation)`);
 
   // Re-project and re-verify against THIS site's own live pages. A template
   // that cannot be verified is left OUT rather than written unverified: an
