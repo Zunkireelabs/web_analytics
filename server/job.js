@@ -29,7 +29,7 @@ import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
-import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter } from './agents/lib/analyst-seo-mapping.js';
+import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter, refreshPendingKeywordGapObservations, qualifyAndShipContentGaps } from './agents/lib/analyst-seo-mapping.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
@@ -817,6 +817,63 @@ export async function runGrowthOpportunitiesSyncForAllSites() {
     }
   }
   if (totals.created) console.log(`[job] growth opportunities sync complete — ${totals.created} recommendation(s) across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// Content-gap autonomous shipping, weekly discovery half — runs alongside
+// growthOppsSync in the same Monday cron slot (server/cron.js). Records this
+// week's real-GSC evidence for every still-pending keyword_gaps row and
+// refreshes lazy classification, so qualifyAndShipContentGaps below always
+// sees fresh data. This is discovery bookkeeping only — it never ships
+// anything and never touches sites.keyword_gap_ship_cycle_last_done.
+export async function runKeywordGapDiscoveryRefreshForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, gaps: 0, observed: 0, classified: 0 };
+  for (const site of sites) {
+    try {
+      const result = await refreshPendingKeywordGapObservations(site.id);
+      totals.sites++;
+      totals.gaps += result.gaps;
+      totals.observed += result.observed;
+      totals.classified += result.classified;
+    } catch (err) {
+      console.error(`[job] keyword-gap discovery refresh failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  if (totals.observed) console.log(`[job] keyword-gap discovery refresh complete — ${totals.observed} observation(s) recorded across ${totals.sites} site(s).`);
+  return totals;
+}
+
+// Content-gap autonomous shipping, biweekly ship half. Deliberately NOT a
+// second cron schedule (no `*/14` day-of-month entry — that drifts against a
+// site's own cycle rather than counting 14 real days since this SITE last
+// shipped): called every Monday alongside the weekly discovery refresh
+// above, but a per-site marker column (sites.keyword_gap_ship_cycle_last_done,
+// migration 129) makes it a no-op except on the Monday that's actually due,
+// same "marker column read/written directly" idempotency shape as
+// runWeeklyIfDue above.
+const KEYWORD_GAP_SHIP_CYCLE_DAYS = 14;
+export async function runKeywordGapShipCycleIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, shipped: 0 };
+  for (const site of sites) {
+    try {
+      const { rows } = await query('SELECT keyword_gap_ship_cycle_last_done FROM sites WHERE id = $1', [site.id]);
+      const lastDone = rows[0]?.keyword_gap_ship_cycle_last_done ? new Date(rows[0].keyword_gap_ship_cycle_last_done) : null;
+      const dueMs = KEYWORD_GAP_SHIP_CYCLE_DAYS * 24 * 60 * 60 * 1000;
+      if (lastDone && Date.now() - lastDone.getTime() < dueMs) continue;
+
+      const result = await qualifyAndShipContentGaps(site.id, site);
+      await query('UPDATE sites SET keyword_gap_ship_cycle_last_done = now() WHERE id = $1', [site.id]);
+      totals.sites++;
+      totals.shipped += result.shipped;
+      if (result.shipped) {
+        console.log(`[job] keyword-gap ship cycle: site ${site.id} "${site.name}" shipped ${result.shipped} of ${result.candidates} qualified gap(s).`);
+      }
+    } catch (err) {
+      console.error(`[job] keyword-gap ship cycle failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
   return totals;
 }
 

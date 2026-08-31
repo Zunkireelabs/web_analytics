@@ -2,6 +2,7 @@ import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js'
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
+  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus,
 } from '../../store/data-analyst.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
@@ -678,6 +679,131 @@ export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {
     created++;
   }
   return { created, skipped, ineligible, dropped, blocked };
+}
+
+// Content-gap autonomous shipping, weekly half: for every still-pending gap,
+// (1) records this week's real-GSC evidence snapshot (migration 129's
+// evidence_snapshots), and (2) runs the same lazy classification
+// createActionCenterRecommendationForGap already does on first approval —
+// pulled forward here so a gap's product_relevance/search_intent/
+// existing_page_match are already fresh by the time the biweekly
+// qualifyAndShipContentGaps pass looks at it, instead of being computed for
+// the first time mid-qualification. Never throws per-gap — one gap's
+// classification failure must not stop the rest of the site's pending queue
+// from getting this week's observation recorded.
+export async function refreshPendingKeywordGapObservations(siteId) {
+  const gaps = await getKeywordGaps(siteId, 'pending_review');
+  let observed = 0;
+  let classified = 0;
+
+  for (const gap of gaps) {
+    try {
+      const relatedQueries = await getRelatedQueriesForTopic(siteId, gap.topic);
+      const impressions = relatedQueries.reduce((sum, q) => sum + (Number(q.impressions) || 0), 0);
+      const bestPosition = relatedQueries.reduce((best, q) => {
+        const p = Number(q.avg_position);
+        return Number.isFinite(p) && (best == null || p < best) ? p : best;
+      }, null);
+      await appendKeywordGapEvidenceSnapshot(siteId, gap.id, {
+        observed_at: new Date().toISOString(), impressions, position: bestPosition, source: 'gsc-related-queries',
+      });
+      observed++;
+    } catch (e) {
+      console.warn(`[analyst-seo-mapping] weekly evidence snapshot failed for gap ${gap.id}: ${e.message}`);
+    }
+
+    const needsClassification = gap.search_intent == null || gap.product_relevance == null || gap.existing_page_match == null;
+    if (!needsClassification) continue;
+    try {
+      const [classification, existingPageMatch] = await Promise.all([
+        gap.search_intent == null || gap.product_relevance == null ? classifyGapRelevance(siteId, gap).catch(() => null) : null,
+        gap.existing_page_match == null ? findExistingPageMatch(siteId, gap).catch(() => null) : null,
+      ]);
+      if (classification || existingPageMatch) {
+        await setGapClassification(siteId, gap.id, {
+          searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance, existingPageMatch,
+        });
+        classified++;
+      }
+    } catch (e) {
+      console.warn(`[analyst-seo-mapping] weekly classification refresh failed for gap ${gap.id}: ${e.message}`);
+    }
+  }
+  return { sites: 1, gaps: gaps.length, observed, classified };
+}
+
+// Content-gap autonomous shipping, biweekly half — the missing autonomous
+// path referenced in syncGrowthOpportunitiesToActionCenter's own comment
+// ("content-gap opportunities are skipped here... has its own human-reviewed
+// approval path"). This function IS that approval path, run unattended
+// instead of by a human clicking the gaps UI, but gated far more
+// conservatively than a same-day sync: a gap only qualifies once it has
+// survived at least one full week of continued real demand
+// (observation_count >= 2 — see refreshPendingKeywordGapObservations above),
+// is relevant to a REAL, human-verified Zunkiree product capability
+// ('direct' or 'supporting' — 'unrelated' never auto-qualifies, regardless
+// of which product it might be for; this generalizes to every product in
+// product_capabilities, not just one), and shows non-decreasing real
+// impressions across its two most recent weekly snapshots (a one-off spike
+// followed by a drop does not qualify) — the same "two most recent rows =
+// one trend" read capability_visibility_snapshots already uses.
+//
+// Deliberately calls createActionCenterRecommendationForGap UNCHANGED for
+// every qualifying gap — the exact function the human-approval PUT route
+// (server/routes/keywords.js) calls, so generator selection
+// (gapDraftEligibility: faq / landing-page / blog-outline / blocked
+// comparison-page), gate-checking, and draft generation are byte-for-byte
+// identical to today's manual path. This function only ever decides WHETHER
+// a gap ships, never WHAT it ships as or HOW — and never touches any other
+// recommendation type's approval/risk-tier behavior.
+//
+// dryRun: true runs the entire selection and returns each candidate's
+// evidence/generator choice without calling createActionCenterRecommendationForGap
+// or writing status='accepted' — genuinely read-only, for a real dry-run
+// against production data before the cron entry is enabled.
+export function hasStableOrGrowingDemand(gap) {
+  const snapshots = Array.isArray(gap.evidence_snapshots) ? gap.evidence_snapshots : [];
+  if (snapshots.length < 2) return false;
+  const [prior, latest] = snapshots.slice(-2);
+  const priorImpressions = Number(prior?.impressions) || 0;
+  const latestImpressions = Number(latest?.impressions) || 0;
+  // A gap with genuinely zero GSC signal both times (a true white-space
+  // topic with no near-miss queries at all) still qualifies on relevance and
+  // recurrence alone — it never had "demand" to decline in the first place.
+  if (priorImpressions === 0 && latestImpressions === 0) return true;
+  return latestImpressions >= priorImpressions;
+}
+
+export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false } = {}) {
+  const resolvedSite = site || await getSiteById(siteId);
+  const gaps = await getKeywordGaps(siteId, 'pending_review');
+
+  const candidates = gaps.filter((gap) =>
+    (gap.observation_count || 1) >= 2 &&
+    ['direct', 'supporting'].includes(gap.product_relevance) &&
+    hasStableOrGrowingDemand(gap)
+  );
+
+  const results = [];
+  for (const gap of candidates) {
+    const eligibility = gapDraftEligibility(gap);
+    if (!eligibility) { results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'no-draft-eligibility' }); continue; }
+
+    if (dryRun) {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, dryRun: true });
+      continue;
+    }
+
+    // Same order as the human-approval PUT route (server/routes/keywords.js):
+    // persist the status change first, then hand the FRESH row (not the
+    // pre-fetch snapshot) to createActionCenterRecommendationForGap, so it
+    // never operates on stale field values.
+    const updated = await updateKeywordGapStatus(siteId, gap.id, 'approved');
+    const outcome = await createActionCenterRecommendationForGap(siteId, updated || gap);
+    results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, ...outcome });
+  }
+
+  return { siteId: resolvedSite?.id ?? siteId, pending: gaps.length, candidates: candidates.length, shipped: results.filter((r) => r.qualified && !dryRun).length, dryRun, results };
 }
 
 function analystReason(insight, predicted) {

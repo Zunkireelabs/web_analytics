@@ -94,11 +94,25 @@ export async function saveKeywordClusters(siteId, clusters) {
 // the default) from the external keyword-research pass ('claude_research')
 // — see GAP_STATUS_TO_DB's sibling comment above and migration
 // 082_keyword_gaps_source.sql.
+//
+// Upsert-on-resight for still-pending topics (migration 129's partial unique
+// index on (site_id, topic) WHERE status='pending_review'): a topic the
+// weekly discovery pass finds again bumps observation_count and last_seen_at
+// on the SAME row rather than creating a duplicate, so
+// qualifyAndShipContentGaps (analyst-seo-mapping.js) can require 2+
+// observations before a gap is even eligible to ship. A gap a human already
+// accepted/dismissed falls outside the partial index, so a resighting there
+// inserts a fresh row exactly as before — re-approval/re-dismissal behavior
+// is unchanged.
 export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis') {
   for (const g of gaps) {
     await query(
       `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
-       VALUES ($1, $2, $3, $4, 'pending_review', $5)`,
+       VALUES ($1, $2, $3, $4, 'pending_review', $5)
+       ON CONFLICT (site_id, topic) WHERE status = 'pending_review' DO UPDATE SET
+         last_seen_at = now(),
+         observation_count = keyword_gaps.observation_count + 1,
+         reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason)`,
       [siteId, g.topic, g.reason || null, g.priority || 'medium', source]
     );
   }
@@ -123,13 +137,30 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
-    `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match, created_at
+    `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
+            first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at
        FROM keyword_gaps
       WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
       ORDER BY created_at DESC`,
     [siteId, status ? GAP_STATUS_TO_DB[status] : null]
   );
   return rows.map((r) => ({ ...r, status: GAP_STATUS_FROM_DB[r.status] }));
+}
+
+// Records one weekly discovery pass's real-GSC evidence for a still-pending
+// gap (migration 129) — appended by the weekly refresh pass
+// (analyst-seo-mapping.js's refreshPendingKeywordGapObservations), not by
+// saveKeywordGaps itself, since evidence is a Node-side GSC lookup
+// (getRelatedQueriesForTopic) rather than something Python's clustering pass
+// carries. qualifyAndShipContentGaps reads the last two entries to judge
+// whether demand is stable/growing before a gap is ever eligible to ship.
+export async function appendKeywordGapEvidenceSnapshot(siteId, gapId, snapshot) {
+  await query(
+    `UPDATE keyword_gaps
+        SET evidence_snapshots = evidence_snapshots || $3::jsonb
+      WHERE site_id = $1 AND id = $2 AND status = 'pending_review'`,
+    [siteId, gapId, JSON.stringify([snapshot])]
+  );
 }
 
 export async function updateKeywordGapStatus(siteId, gapId, status) {
