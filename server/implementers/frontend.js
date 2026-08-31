@@ -1,5 +1,5 @@
 import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
-import { deriveNewContentContract } from './lib/newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
@@ -30,7 +30,16 @@ export const FRONTEND_ACTION_TYPES = new Set(meta.handles);
 // (design/template resolution + render) at generation time, BEFORE a draft
 // ever reaches Action Center for review, is what lets approval become a
 // pure "push the already-prepared bytes" action instead of recomputing.
-export async function resolveTargetAndBody(site, draft) {
+// `repoDeps` is the seam for the repo reads the net-new-content branches do
+// (newcontent-contract.js's getRepoTree/getFileContent, and its `cache`).
+// Production never passes it — the defaults are the real GitHub client and the
+// module-level contract cache. It exists because the layout a new page ends up
+// declaring is decided by what is really in the repo, and a regression test
+// for "this directory's posts declare no layout, so neither does ours" has to
+// be able to state what is in the directory. Without it the only coverage
+// possible was "no config -> no-file-mapping", which is precisely the branch
+// where the bug could not happen.
+export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   // Generation-time-prepared fast path: generateDraft (action-center.js)
   // already computed and rendering-gate-validated this exact output before
   // the draft was ever created, using the SAME resolveTargetAndBody this
@@ -60,7 +69,19 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["landing-page"] configured — add e.g. {"dir":"src/pages","extension":".njk"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'landing-page', title);
-    const layout = resolveNewContentLayout(site, 'landing-page');
+    // Same sibling-derived contract as blog-outline/direct-answer below, for
+    // the same reason: a landing page written into src/pages inherits whatever
+    // that directory's real pages do about layout, and a config-derived
+    // `layout: base.njk` on a directory whose pages declare none (or declare a
+    // different one) drops the new page out of its template exactly the way it
+    // did on zunkireelabs.com's blog. resolveNewContentLayout stays as the
+    // fallback for a directory with no readable siblings. No fieldNames: this
+    // renderer emits nothing but layout/permalink/title/description, none of
+    // which is aliased per site.
+    const contract = await deriveNewContentContract(site, {
+      ...resolveNewContentTargetConfig(site, 'landing-page'),
+    }, repoDeps);
+    const layout = contract.unknown ? resolveNewContentLayout(site, 'landing-page') : contract.layout;
     return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 
@@ -77,7 +98,7 @@ export async function resolveTargetAndBody(site, draft) {
     // readable siblings. See newcontent-contract.js for why.
     const contract = await deriveNewContentContract(site, {
       ...resolveNewContentTargetConfig(site, 'blog-outline'),
-    });
+    }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
     return {
       ok: true,
@@ -99,7 +120,7 @@ export async function resolveTargetAndBody(site, draft) {
     // a layout that is wrong for one is wrong for the other.
     const contract = await deriveNewContentContract(site, {
       ...resolveNewContentTargetConfig(site, 'direct-answer'),
-    });
+    }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
     return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
@@ -116,8 +137,15 @@ export async function resolveTargetAndBody(site, draft) {
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
     // No permalink (see above), but a translated page is still a brand-new
-    // file that needs the site's real chrome around it.
-    const layout = resolveNewContentLayout(site, 'translation');
+    // file that needs the site's real chrome around it — and unlike every
+    // other type here, this one already knows the exact file it must look
+    // like. A translation is the SAME page in another language, so its
+    // authority is that source page's own front matter, not a majority vote
+    // over a directory that holds pages built on several different layouts
+    // (see deriveContractFromSourceFile). resolveNewContentLayout stays as the
+    // fallback for a source file that couldn't be read.
+    const contract = await deriveContractFromSourceFile(site, sourcePath, {}, repoDeps);
+    const layout = contract.unknown ? resolveNewContentLayout(site, 'translation') : contract.layout;
     return { ok: true, filePath, body: renderTranslationBody(content, site, { layout }), contentFormat: 'markdown' };
   }
 
@@ -140,12 +168,25 @@ export async function resolveTargetAndBody(site, draft) {
     // Overwriting a real, already-linked page — preserve its own
     // layout/permalink front matter (see extractPreservedFrontMatter) so
     // this doesn't silently orphan the live URL.
-    const existing = existingFile ? await getFileContent(site, existingFile, baseBranch(site)) : null;
+    const readFile = repoDeps.getFileContent || getFileContent;
+    const existing = existingFile ? await readFile(site, existingFile, baseBranch(site)) : null;
     const preserved = extractPreservedFrontMatter(existing?.content);
     // Only for the genuinely-new-file case — an existing page's own preserved
     // permalink always wins inside the renderer.
     const permalink = existingFile ? null : resolveNewContentUrl(site, actionType, title);
-    const layout = resolveNewContentLayout(site, actionType);
+    // Only the genuinely-new-file case derives a contract. Overwriting a real
+    // page is already answered by that page's own preserved front matter
+    // (which wins inside the renderer regardless), so sampling its neighbours
+    // would spend a repo tree plus eight file reads on an answer nothing uses.
+    // For a NEW compliance page the directory's siblings are the authority,
+    // same as every other net-new type — a `layout: base.njk` emitted into a
+    // src/pages whose pages declare none overrides the directory's real one.
+    const contract = existingFile
+      ? null
+      : await deriveNewContentContract(site, { ...resolveNewContentTargetConfig(site, actionType) }, repoDeps);
+    const layout = contract && !contract.unknown
+      ? contract.layout
+      : resolveNewContentLayout(site, actionType);
     return { ok: true, filePath, body: renderCompliancePageBody(content, preserved, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 

@@ -1,8 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveNewContentContract, frontMatterKeys } from './newcontent-contract.js';
+import { deriveNewContentContract, deriveContractFromSourceFile, frontMatterKeys, makeContractCache } from './newcontent-contract.js';
 
-const SITE = { id: 1, default_branch: 'main' };
+// Shaped like a real site row: the branch column is `repo_default_branch`.
+// There is no `default_branch` column, and the module used to read that name —
+// see the refFor() comment in newcontent-contract.js.
+const SITE = { id: 1, repo_owner: 'Zunkireelabs', repo_name: 'zunkireelabs-web', repo_default_branch: 'main' };
 
 // Modelled on zunkireelabs-web/src/blog exactly as it really is: a directory
 // data file supplies the layout, so no post declares one, and the hero image
@@ -42,9 +45,14 @@ const REAL_BLOG_DIR = {
   'src/blog/index.njk': '---\nlayout: base.njk\n---\n',
 };
 
-function depsFor(files, { treeError = null, readError = null } = {}) {
+function depsFor(files, { treeError = null, readError = null, counts = null, cache = null } = {}) {
   return {
-    getRepoTree: async () => {
+    // `cache: null` by default so one test's fixture repo can never answer
+    // another test's question through the module-level shared cache. Tests
+    // that are ABOUT the cache pass their own.
+    cache,
+    getRepoTree: async (_site, ref) => {
+      if (counts) { counts.tree = (counts.tree || 0) + 1; counts.refs = [...(counts.refs || []), ref]; }
       if (treeError) throw new Error(treeError);
       return { files: Object.keys(files), truncated: false };
     },
@@ -52,7 +60,8 @@ function depsFor(files, { treeError = null, readError = null } = {}) {
     // or null when the file isn't on this ref. Returning a bare string here is
     // what let the module ship calling .match() on the envelope object — the
     // mock was the only thing that made it look like it worked.
-    getFileContent: async (_site, path) => {
+    getFileContent: async (_site, path, ref) => {
+      if (counts) { counts.reads = (counts.reads || 0) + 1; counts.readRefs = [...(counts.readRefs || []), ref]; }
       if (readError) throw new Error(readError);
       return files[path] === undefined ? null : { content: files[path], sha: 'sha-fake' };
     },
@@ -164,5 +173,149 @@ describe('deriveNewContentContract — nothing readable means nothing claimed', 
     );
     assert.equal(contract.layout, null);
     assert.equal(contract.sampled, 2);
+  });
+});
+
+describe('deriveNewContentContract — the branch it actually reads', () => {
+  test('reads the site\'s repo_default_branch, not an undefined `default_branch`', async () => {
+    // The whole module was inert in production because it read a column that
+    // does not exist: the branch came out `undefined`, GitHub was asked for
+    // /git/ref/heads/undefined, that 404'd, and the catch reported "unknown"
+    // so every caller quietly kept the config-derived layout.
+    const counts = {};
+    await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, depsFor(REAL_BLOG_DIR, { counts }));
+    assert.deepEqual(counts.refs, ['main']);
+    assert.ok(counts.readRefs.length > 0);
+    for (const ref of counts.readRefs) assert.equal(ref, 'main');
+  });
+
+  test('a site with no repo_default_branch falls back to main, never undefined', async () => {
+    const counts = {};
+    await deriveNewContentContract(
+      { id: 2, repo_owner: 'o', repo_name: 'r' },
+      { dir: 'src/blog', extension: '.md' },
+      depsFor(REAL_BLOG_DIR, { counts }),
+    );
+    assert.deepEqual(counts.refs, ['main']);
+  });
+});
+
+describe('deriveContractFromSourceFile — what a translation must look like', () => {
+  // A real src/pages: not every page is built on the same layout, which is why
+  // a translation reads its own source page instead of voting over the folder.
+  const PAGES = {
+    'src/pages/about.njk': '---\nlayout: page.njk\npermalink: /about/\ntitle: "About"\n---\n',
+    'src/pages/home.njk': '---\nlayout: home.njk\ntitle: "Home"\n---\n',
+    'src/pages/careers.njk': '---\nlayout: home.njk\ntitle: "Careers"\n---\n',
+  };
+
+  test('takes the layout from the exact page being translated', async () => {
+    const contract = await deriveContractFromSourceFile(SITE, 'src/pages/about.njk', {}, depsFor(PAGES));
+    assert.equal(contract.unknown, false);
+    assert.equal(contract.layout, 'page.njk');
+    assert.equal(contract.sampled, 1);
+  });
+
+  test('does not inherit the majority layout of the source page\'s neighbours', async () => {
+    // home.njk is what most files in src/pages declare; about.es.njk must not
+    // get it just because about.njk is outnumbered.
+    const contract = await deriveContractFromSourceFile(SITE, 'src/pages/about.njk', {}, depsFor(PAGES));
+    assert.notEqual(contract.layout, 'home.njk');
+  });
+
+  test('a source page that declares no layout means the translation declares none either', async () => {
+    const files = { 'src/blog/post.md': '---\ntitle: "Post"\nfeaturedImage: /a.jpg\n---\n' };
+    const contract = await deriveContractFromSourceFile(SITE, 'src/blog/post.md', {}, depsFor(files));
+    assert.equal(contract.unknown, false);
+    assert.equal(contract.layout, null);
+    assert.equal(contract.fieldNames.featuredImage, 'featuredImage');
+  });
+
+  test('an unreadable source page is unknown, so the caller keeps its config default', async () => {
+    assert.equal((await deriveContractFromSourceFile(SITE, 'src/pages/gone.njk', {}, depsFor(PAGES))).unknown, true);
+    assert.equal((await deriveContractFromSourceFile(SITE, 'x.njk', {}, depsFor(PAGES, { readError: 'HTTP 403' }))).unknown, true);
+    assert.equal((await deriveContractFromSourceFile(SITE, null, {}, depsFor(PAGES))).unknown, true);
+  });
+
+  test('never fetches a repo tree — it already knows the one path that matters', async () => {
+    const counts = {};
+    await deriveContractFromSourceFile(SITE, 'src/pages/about.njk', {}, depsFor(PAGES, { counts }));
+    assert.equal(counts.tree, undefined);
+    assert.equal(counts.reads, 1);
+  });
+});
+
+describe('contract caching — one repo tree per batch run, not one per draft', () => {
+  test('60 drafts against the same directory cost one tree fetch, not 60', async () => {
+    const counts = {};
+    const deps = depsFor(REAL_BLOG_DIR, { counts, cache: makeContractCache() });
+    for (let i = 0; i < 60; i++) {
+      const contract = await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, deps);
+      assert.equal(contract.layout, null, 'every draft gets the same real answer');
+    }
+    assert.equal(counts.tree, 1);
+    assert.equal(counts.reads, 2, 'only the two representative siblings, once');
+  });
+
+  test('a different site never gets another site\'s answer', async () => {
+    // The cross-tenant case: same id space, different repo. A cache keyed
+    // loosely enough to collide here would hand one client another client's
+    // layout, in a PR against their real repo.
+    const cache = makeContractCache();
+    const other = { id: 1, repo_owner: 'someone-else', repo_name: 'other-site', repo_default_branch: 'main' };
+    const mine = await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, depsFor(REAL_BLOG_DIR, { cache }));
+    const theirs = await deriveNewContentContract(other, { dir: 'src/blog', extension: '.md' }, depsFor({
+      'src/blog/post.md': '---\nlayout: article.njk\ntitle: "Post"\n---\n',
+    }, { cache }));
+    assert.equal(mine.layout, null);
+    assert.equal(theirs.layout, 'article.njk');
+  });
+
+  test('directory, extension, branch and source file are all part of the key', async () => {
+    const cache = makeContractCache();
+    const files = {
+      'src/blog/post.md': '---\ntitle: "Post"\n---\n',
+      'src/pages/about.njk': '---\nlayout: page.njk\ntitle: "About"\n---\n',
+    };
+    const deps = depsFor(files, { cache });
+    assert.equal((await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, deps)).layout, null);
+    assert.equal((await deriveNewContentContract(SITE, { dir: 'src/pages', extension: '.njk' }, deps)).layout, 'page.njk');
+    assert.equal((await deriveNewContentContract({ ...SITE, repo_default_branch: 'stage' }, { dir: 'src/pages', extension: '.njk' }, deps)).layout, 'page.njk');
+    // The single-file path shares the cache object but not the key space.
+    assert.equal((await deriveContractFromSourceFile(SITE, 'src/pages/about.njk', {}, deps)).sampled, 1);
+  });
+
+  test('a transient repo failure is not cached — the next draft gets a real answer', async () => {
+    // Pinning a 403 for the whole TTL would silently downgrade every remaining
+    // draft in the run to the config-derived layout, which is the original bug.
+    const cache = makeContractCache();
+    const failed = await deriveNewContentContract(
+      SITE, { dir: 'src/blog', extension: '.md' }, depsFor(REAL_BLOG_DIR, { cache, treeError: 'HTTP 403' }),
+    );
+    assert.equal(failed.unknown, true);
+    const retried = await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, depsFor(REAL_BLOG_DIR, { cache }));
+    assert.equal(retried.unknown, false);
+    assert.equal(retried.sampled, 2);
+  });
+
+  test('an entry expires, so a later run can never be served the previous run\'s repo', async () => {
+    const cache = makeContractCache({ ttlMs: 1000 });
+    const counts = {};
+    const at = (now) => ({ ...depsFor(REAL_BLOG_DIR, { counts, cache }), now });
+    await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, at(0));
+    await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, at(999));
+    assert.equal(counts.tree, 1, 'still inside the same run');
+    await deriveNewContentContract(SITE, { dir: 'src/blog', extension: '.md' }, at(1000));
+    assert.equal(counts.tree, 2, 'expired — re-derived against the repo as it is now');
+  });
+
+  test('the cache is bounded and evicts oldest-first', async () => {
+    const cache = makeContractCache({ max: 2 });
+    const files = {
+      'a/x.md': '---\ntitle: "A"\n---\n', 'b/x.md': '---\ntitle: "B"\n---\n', 'c/x.md': '---\ntitle: "C"\n---\n',
+    };
+    const deps = depsFor(files, { cache });
+    for (const dir of ['a', 'b', 'c']) await deriveNewContentContract(SITE, { dir, extension: '.md' }, deps);
+    assert.equal(cache.size(), 2);
   });
 });

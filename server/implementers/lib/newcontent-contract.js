@@ -39,7 +39,7 @@
 // existing config-derived behavior. Siblings are the authority when they
 // exist; their absence is not evidence of anything.
 
-import { getRepoTree, getFileContent } from '../../github/client.js';
+import { getRepoTree, getFileContent, defaultBranchName } from '../../github/client.js';
 
 // How many sibling files to sample. The contract we're reading is a property
 // of the directory, not of any one file, so a handful is plenty — and a blog
@@ -74,6 +74,18 @@ export function frontMatterKeys(raw) {
   return keys;
 }
 
+// The branch every read below happens on. This used to be
+// `ref || site.default_branch || undefined`, and there is no `default_branch`
+// column on a site — it is `repo_default_branch`, which is exactly what
+// defaultBranchName() reads. So `branch` was always `undefined`, getRepoTree
+// asked GitHub for `/git/ref/heads/undefined`, that 404'd, the catch below
+// swallowed it as "could not list", and EVERY caller silently fell back to the
+// config-derived layout this module exists to replace. The module looked
+// correct in tests (which inject their own tree) and was inert in production.
+function refFor(site, ref) {
+  return ref || defaultBranchName(site);
+}
+
 function basename(path) {
   return path.split('/').filter(Boolean).pop() || '';
 }
@@ -88,8 +100,146 @@ function isRepresentative(path, extension) {
   return !/^index\./i.test(name);
 }
 
+const UNKNOWN = Object.freeze({ layout: null, unknown: true, fieldNames: {}, sampled: 0 });
+
+// Reads one file at `path` and returns its front-matter keys plus the layout
+// it declares (null when it declares none), or null when there was nothing to
+// read. Errors are swallowed on purpose at both levels: one unreadable sibling
+// is not evidence about a directory, and the caller distinguishes "learned
+// nothing" from "learned there is no layout" by whether it collected any
+// samples at all.
+async function readFrontMatter(readFile, site, path, ref) {
+  let raw;
+  try {
+    // getFileContent resolves to { content, sha } — or null for a 404 — NOT
+    // a bare string. Unwrapping here rather than at each use is what keeps
+    // frontMatterKeys' contract "takes file text"; handing it the envelope
+    // threw TypeError: raw.match is not a function on the first real call.
+    const file = await readFile(site, path, ref);
+    raw = typeof file === 'string' ? file : file?.content;
+  } catch {
+    return null;
+  }
+  if (!raw) return null; // 404 or empty: same "no evidence" case as a failed read
+  const keys = frontMatterKeys(raw);
+  if (!keys.length) return null;
+  const block = (raw.match(/^---\r?\n([\s\S]*?)\r?\n---/) || [])[1] || '';
+  const declared = /^layout\s*:\s*"?([^"\n]*)"?\s*$/m.exec(block);
+  return { keys, layout: declared ? declared[1].trim() : null };
+}
+
+// Turns a set of real files' front matter into the contract a new file in
+// their company should satisfy. Shared by the directory-sampling path and the
+// single-source-file path (translations) so the two can never disagree about
+// what "this file declares no layout" means.
+function contractFromSamples(samples) {
+  if (!samples.length) return UNKNOWN;
+
+  // If the files that a human wrote declare no layout, a directory data
+  // file (Eleventy's blog.json, Astro's collection config, a Next layout) is
+  // supplying it, and emitting one would override that. This is the whole
+  // reason the module exists, so it is decided by majority rather than by any
+  // single file: one stray post with an explicit layout must not flip it.
+  // (With a single sample — the translation path — majority degenerates to
+  // "do what that one file does", which is exactly the intent there.)
+  const layouts = samples.map((s) => s.layout);
+  const withLayout = layouts.filter(Boolean);
+  const layout = withLayout.length > layouts.length / 2
+    ? mostCommon(withLayout)
+    : null;
+
+  const observed = new Set(samples.flatMap((s) => s.keys));
+  const fieldNames = {};
+  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
+    const used = aliases.find((alias) => observed.has(alias));
+    if (used) fieldNames[canonical] = used;
+  }
+
+  return { layout, unknown: false, fieldNames, sampled: samples.length };
+}
+
+// ---------------------------------------------------------------------------
+// Caching
+//
+// One derivation costs a full recursive getRepoTree (the whole repo's blob
+// list, in one response) plus up to MAX_SIBLINGS getFileContent calls. The
+// daily loop ships up to 60 drafts per site per run and every net-new-content
+// draft derives its own contract, so without memoization one run refetches the
+// identical repo tree dozens of times — and blog-outline and direct-answer on
+// this platform's own first client both target src/blog, so many of those
+// fetches are byte-for-byte the same question.
+//
+// This follows agents/lib/template-repair.js's makeSharedPageCache convention
+// (read each thing once per pass) with one deliberate difference: the callers
+// here are frontend.js's resolveTargetAndBody, reached one draft at a time
+// from generateDraft, with no batch-shaped object to hang a per-pass cache
+// off. So the default cache is module-level and bounded by a TTL instead —
+// short enough that it cannot outlive a single batch run (the loop's two runs
+// are hours apart, a run is minutes), and keyed by repo + branch + directory
+// so it can never answer for a different site. A caller that DOES have a pass
+// to scope to can inject `cache` (or `cache: null` to opt out entirely, which
+// is what the tests do so one test's fixture repo can't answer another's).
+// ---------------------------------------------------------------------------
+
+const CONTRACT_TTL_MS = 10 * 60 * 1000;
+// A ceiling, not a working-set size: (sites × directories) is a handful in
+// practice, and the TTL is what actually evicts. This only stops an unbounded
+// key space from pinning memory if that assumption ever stops holding.
+const MAX_CACHE_ENTRIES = 200;
+
+export function makeContractCache({ ttlMs = CONTRACT_TTL_MS, max = MAX_CACHE_ENTRIES } = {}) {
+  const entries = new Map();
+  return {
+    get(key, now = Date.now()) {
+      const hit = entries.get(key);
+      if (!hit) return undefined;
+      // Expiry is checked on read, not on a timer: an entry nobody asks for
+      // again costs nothing, and a timer would keep the process awake.
+      if (hit.expiresAt <= now) { entries.delete(key); return undefined; }
+      return hit.value;
+    },
+    set(key, value, now = Date.now()) {
+      // Map iterates in insertion order, so the first key is the oldest.
+      if (entries.size >= max && !entries.has(key)) entries.delete(entries.keys().next().value);
+      entries.set(key, { value, expiresAt: now + ttlMs });
+      return value;
+    },
+    size() { return entries.size; },
+  };
+}
+
+const sharedContractCache = makeContractCache();
+
+// site.id alone would be enough today, but the repo coordinates are what the
+// answer is actually ABOUT — a site repointed at a different repo (or branch)
+// keeps its id, and serving it the old repo's layout is the exact class of
+// wrong-answer this module was written to stop.
+function cacheKey(site, ref, suffix) {
+  return `${site.id}|${site.repo_owner}/${site.repo_name}|${ref}|${suffix}`;
+}
+
+// `deps.cache === null` disables caching; omitting it uses the shared one.
+// Anything else is used as-is, so a caller can scope a cache to its own pass.
+function cacheFor(deps) {
+  return deps.cache === undefined ? sharedContractCache : deps.cache;
+}
+
+async function memoized(cache, key, now, derive) {
+  if (!cache) return derive();
+  const hit = cache.get(key, now);
+  if (hit !== undefined) return hit;
+  const value = await derive();
+  // A transient failure (403, network blip) must not be pinned for the rest of
+  // the TTL — the next draft in the batch should get a real answer. Only a
+  // derivation that actually read files is worth remembering. An empty
+  // directory re-derives too; that costs one tree fetch and is the rare case.
+  if (!value.unknown) cache.set(key, value, now);
+  return value;
+}
+
 /**
- * Derive the front-matter contract for new files in `dir`.
+ * Derive the front-matter contract for new files in `dir`, from the files
+ * already sitting in it.
  *
  * Returns:
  *   layout          — the layout value siblings declare, or null when they
@@ -101,65 +251,56 @@ function isRepresentative(path, extension) {
 export async function deriveNewContentContract(site, { dir, extension, ref } = {}, deps = {}) {
   const tree = deps.getRepoTree || getRepoTree;
   const readFile = deps.getFileContent || getFileContent;
-  const unknown = { layout: null, unknown: true, fieldNames: {}, sampled: 0 };
-  if (!site || !dir || !extension) return unknown;
+  if (!site || !dir || !extension) return UNKNOWN;
+  const branch = refFor(site, ref);
 
-  let paths;
-  try {
-    const branch = ref || site.default_branch || undefined;
-    const { files } = await tree(site, branch);
-    const prefix = dir.endsWith('/') ? dir : `${dir}/`;
-    paths = (files || [])
-      .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes('/'))
-      .filter((p) => isRepresentative(p, extension))
-      .slice(0, MAX_SIBLINGS);
-  } catch (err) {
-    console.warn(`[newcontent-contract] site ${site.id}: could not list ${dir} — ${err.message}`);
-    return unknown;
-  }
-  if (!paths.length) return unknown;
-
-  const keySets = [];
-  const layouts = [];
-  for (const path of paths) {
-    let raw;
+  return memoized(cacheFor(deps), cacheKey(site, branch, `${dir}|${extension}`), deps.now, async () => {
+    let paths;
     try {
-      // getFileContent resolves to { content, sha } — or null for a 404 — NOT
-      // a bare string. Unwrapping here rather than at each use is what keeps
-      // frontMatterKeys' contract "takes file text"; handing it the envelope
-      // threw TypeError: raw.match is not a function on the first real call.
-      const file = await readFile(site, path, ref || site.default_branch || undefined);
-      raw = typeof file === 'string' ? file : file?.content;
-    } catch {
-      continue; // one unreadable sibling is not evidence about the directory
+      const { files } = await tree(site, branch);
+      const prefix = dir.endsWith('/') ? dir : `${dir}/`;
+      paths = (files || [])
+        .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes('/'))
+        .filter((p) => isRepresentative(p, extension))
+        .slice(0, MAX_SIBLINGS);
+    } catch (err) {
+      console.warn(`[newcontent-contract] site ${site.id}: could not list ${dir} — ${err.message}`);
+      return UNKNOWN;
     }
-    if (!raw) continue; // 404 or empty: same "no evidence" case as a failed read
-    const keys = frontMatterKeys(raw);
-    if (!keys.length) continue;
-    keySets.push(keys);
-    const declared = /^layout\s*:\s*"?([^"\n]*)"?\s*$/m.exec((raw.match(/^---\r?\n([\s\S]*?)\r?\n---/) || [])[1] || '');
-    layouts.push(declared ? declared[1].trim() : null);
-  }
-  if (!keySets.length) return unknown;
+    if (!paths.length) return UNKNOWN;
 
-  // If the siblings that a human wrote declare no layout, a directory data
-  // file (Eleventy's blog.json, Astro's collection config, a Next layout) is
-  // supplying it, and emitting one would override that. This is the whole
-  // reason the module exists, so it is decided by majority rather than by any
-  // single file: one stray post with an explicit layout must not flip it.
-  const withLayout = layouts.filter(Boolean);
-  const layout = withLayout.length > layouts.length / 2
-    ? mostCommon(withLayout)
-    : null;
+    const samples = [];
+    for (const path of paths) {
+      const sample = await readFrontMatter(readFile, site, path, branch);
+      if (sample) samples.push(sample);
+    }
+    return contractFromSamples(samples);
+  });
+}
 
-  const observed = new Set(keySets.flat());
-  const fieldNames = {};
-  for (const [canonical, aliases] of Object.entries(FIELD_ALIASES)) {
-    const used = aliases.find((alias) => observed.has(alias));
-    if (used) fieldNames[canonical] = used;
-  }
+/**
+ * The same contract, derived from ONE named file rather than from a
+ * directory's siblings.
+ *
+ * This exists for translations. A translation's target is not a
+ * newContentTargets directory at all — resolveTranslationTarget puts it
+ * alongside the SOURCE page (src/pages/about.njk -> src/pages/about.es.njk) —
+ * and the page it must render like is that one specific source page, which the
+ * caller already knows the exact path of. Sampling the whole directory would
+ * be strictly less precise: a src/pages folder holds pages built on several
+ * different layouts, and a majority vote over them can hand a translation the
+ * layout of some other page. The one authority on how /about should look is
+ * /about.
+ */
+export async function deriveContractFromSourceFile(site, filePath, { ref } = {}, deps = {}) {
+  const readFile = deps.getFileContent || getFileContent;
+  if (!site || !filePath) return UNKNOWN;
+  const branch = refFor(site, ref);
 
-  return { layout, unknown: false, fieldNames, sampled: keySets.length };
+  return memoized(cacheFor(deps), cacheKey(site, branch, `file:${filePath}`), deps.now, async () => {
+    const sample = await readFrontMatter(readFile, site, filePath, branch);
+    return contractFromSamples(sample ? [sample] : []);
+  });
 }
 
 function mostCommon(values) {
