@@ -100,6 +100,17 @@ export function recommendationPageKey(item) {
   // has no real generator to draft it yet (requiresFutureInfrastructure).
   // Same failure mode as blog-outline/landing-page above if left uncased.
   if (item.generatorId === 'comparison-page') return `comparison::${item.params?.topic || ''}`;
+  // Same failure-mode class as the four above: content-integrity-repair
+  // takes {page, fixType}, and a page can legitimately have more than one
+  // independent defect (visual-quality.js can flag e.g. a malformed-table
+  // AND a duplicate-faq on the same page in one run) — without fixType in
+  // the key they'd collide onto one recommendation row and one defect would
+  // silently disappear into finding_ids. Also fixes a latent version of the
+  // same bug for font-consistency.js's font-size-override fixType, which
+  // only ever proposed page alone before this.
+  if (item.generatorId === 'content-integrity-repair') {
+    return `${item.params?.page || ''}::${item.params?.fixType || ''}`;
+  }
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }

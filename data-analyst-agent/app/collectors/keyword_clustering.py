@@ -26,7 +26,13 @@ from app.mcp_client.tools import (
 logger = logging.getLogger(__name__)
 
 WINDOW_DAYS = 90  # matches the retired script's own DEFAULT_DAYS
-RECLUSTER_INTERVAL_DAYS = 14
+# Weekly, not the original 14 — content-gap autonomous shipping (Node
+# server/agents/lib/analyst-seo-mapping.js's qualifyAndShipContentGaps) needs
+# a fresh weekly discovery pass to accumulate the 2+ observations it requires
+# before a gap is even eligible to ship; the 14-day cadence that used to live
+# here now lives entirely in the SHIPPING side (sites.keyword_gap_ship_cycle_last_done),
+# never here. This roughly doubles this collector's LLM research calls.
+RECLUSTER_INTERVAL_DAYS = 7
 KEYWORD_FETCH_LIMIT = 2000  # see mcp-server/tools/read-only.js's get_gsc_breakdown cap
 
 

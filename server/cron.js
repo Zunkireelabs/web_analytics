@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runVisualQualityIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -208,6 +208,20 @@ export function startCron() {
           console.error('[cron] font consistency check error:', err.message);
         }
 
+        // Visual Quality — real screenshots + one vision LLM call per site,
+        // weekly (see job.js's runVisualQualityIfDue). Confirmed defects
+        // ship autonomously through the existing safe-tier pipeline in the
+        // SAME daily 07:00 auto-remediation run as everything else; this
+        // detection pass itself only ever writes recommendations.
+        console.log(`[cron] visual quality check started ${new Date().toISOString()}`);
+        try {
+          const results = await runVisualQualityIfDueForAllSites();
+          const analyzed = results.filter(Boolean);
+          console.log(`[cron] visual quality check finished — ${analyzed.length} site(s) analyzed`);
+        } catch (err) {
+          console.error('[cron] visual quality check error:', err.message);
+        }
+
         // AI Executive Report runs right after, on the same weekly cron
         // trigger — not a separate schedule.
         console.log(`[cron] weekly AI executive report started ${new Date().toISOString()}`);
@@ -390,6 +404,22 @@ export function startCron() {
         await runGrowthOpportunitiesSyncForAllSites();
       } catch (err) {
         console.error('[cron] growth opportunities sync error:', err.message);
+      }
+
+      // Content-gap autonomous shipping, same Monday slot — deliberately NOT
+      // a second cron.schedule call (see runKeywordGapShipCycleIfDueForAllSites's
+      // own comment): discovery/observation refresh runs every Monday here,
+      // while shipping only actually does anything on the Monday a site's
+      // own 14-day marker says is due.
+      try {
+        await runKeywordGapDiscoveryRefreshForAllSites();
+      } catch (err) {
+        console.error('[cron] keyword-gap discovery refresh error:', err.message);
+      }
+      try {
+        await runKeywordGapShipCycleIfDueForAllSites();
+      } catch (err) {
+        console.error('[cron] keyword-gap ship cycle error:', err.message);
       }
     }, { timezone: 'UTC' });
     console.log(`[cron] growth opportunities -> Action Center sync scheduled "${growthOppsSync}" (UTC)`);

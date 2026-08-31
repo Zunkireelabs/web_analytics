@@ -151,10 +151,21 @@ function extractBlocksInPage() {
 }
 /* eslint-enable no-undef */
 
-export async function capturePage(browserPage, url) {
+// screenshot: false by default — the Design Agent's own profile-derivation
+// caller never needs it (structured DOM/CSS facts only), and a screenshot on
+// every page load is real added cost. visual-quality.js (server/agents/
+// visual-quality.js) is the one caller that opts in; the base64 JPEG it gets
+// back is never written to disk or the DB anywhere in this codebase — kept
+// in memory only, for the one LLM call it feeds, then discarded.
+export async function capturePage(browserPage, url, { screenshot = false } = {}) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const { title, blocks } = await browserPage.evaluate(extractBlocksInPage);
-  return { url, title, blocks };
+  const result = { url, title, blocks };
+  if (screenshot) {
+    const buf = await browserPage.screenshot({ type: 'jpeg', quality: 70 });
+    result.screenshot = buf.toString('base64');
+  }
+  return result;
 }
 
 // Orchestrates the whole site capture for one job: discover a page-type
@@ -163,6 +174,7 @@ export async function capturePage(browserPage, url) {
 export async function captureSite(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
+  screenshots = false,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -173,7 +185,7 @@ export async function captureSite(homepageUrl, {
     const pages = [];
     for (const { url, pageType } of targets) {
       // eslint-disable-next-line no-await-in-loop
-      const captured = await capturePage(page, url).catch((err) => {
+      const captured = await capturePage(page, url, { screenshot: screenshots }).catch((err) => {
         console.warn(`[design-agent/capture] could not capture ${url}: ${err.message}`);
         return null;
       });

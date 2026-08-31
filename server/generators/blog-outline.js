@@ -31,11 +31,19 @@ const MIN_TOTAL_WORDS = 800;
 // A single expand pass reliably lands close to but still under
 // MIN_TOTAL_WORDS on some runs (LLMs undershoot an unstated-feeling target
 // even when a hard number is given) — e.g. a real run that landed at 740/800
-// and was rejected outright despite being 92% of the way there. Bounded at 2
-// (not unbounded) for the same reason callLLMForJson's own JSON retry is
-// bounded at 2: each attempt recomputes the real shortfall against the
-// latest sections, so a second pass targets "60 more words", not "260 more".
-const MAX_EXPAND_ATTEMPTS = 2;
+// and was rejected outright despite being 92% of the way there. Bounded (not
+// unbounded) for the same reason callLLMForJson's own JSON retry is bounded:
+// each attempt recomputes the real shortfall against the latest sections, so
+// a second pass targets "60 more words", not "260 more".
+//
+// Raised from 2 to 3 (2026-08-31): site 1's real outcomes showed 2 of 4
+// recent attempts still rejected outright after 2 attempts, landing at
+// 703/800 and 726/800 — 71-97 words short, well within what one more bounded
+// pass targeting the exact remaining shortfall should close. That 50%
+// rejection rate on a near-miss shortfall was enough on its own to demote
+// this generator out of auto-execute (generator-learning.js), burying 66
+// unrelated open blog-outline recommendations behind it.
+const MAX_EXPAND_ATTEMPTS = 3;
 // Trimmed, not the whole page — grounding context for a prompt, same reason
 // and size as qa-content.js's/direct-answer.js's own bodyText slice.
 const GROUNDING_EXCERPT_CHARS = 3000;
