@@ -222,6 +222,8 @@ export default function ActionCenter() {
   const [executingSafeFixes, setExecutingSafeFixes] = useState(false);
   const [executionResult, setExecutionResult] = useState(null);
   const [executionJobDetail, setExecutionJobDetail] = useState(null);
+  const [executingBulkApprove, setExecutingBulkApprove] = useState(false);
+  const [bulkApproveResult, setBulkApproveResult] = useState(null);
   // True only while re-fetching a bulk run whose HTTP response the browser
   // abandoned — the work itself is still fine, so this must never read as an
   // error state (see executeSafeFixes' catch).
@@ -386,6 +388,27 @@ export default function ActionCenter() {
       }
     } finally {
       setExecutingSafeFixes(false);
+    }
+  };
+
+  // "Approve All Pending" — ships every draft awaiting approval (any
+  // generator, not just safe-tier) as one batch branch/push/PR instead of
+  // one push per draft. Before this, approving several blog-outline (or
+  // other content) drafts one at a time meant each one raced the previous
+  // draft's still-building Vercel preview and usually cancelled it.
+  const bulkApproveAllPending = async () => {
+    setExecutingBulkApprove(true);
+    setError(null);
+    setBulkApproveResult(null);
+    try {
+      const result = await api.actionCenter.bulkApproveDrafts(undefined, siteId);
+      setBulkApproveResult(result);
+      loadDrafts();
+      loadTodayStats();
+    } catch (e) {
+      setError(e.message || 'Approve All Pending failed');
+    } finally {
+      setExecutingBulkApprove(false);
     }
   };
 
@@ -879,8 +902,32 @@ export default function ActionCenter() {
             <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden flex-1 flex flex-col min-h-[300px]">
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
                 <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Drafts List</span>
-                <span className="text-[10px] font-bold text-slate-400 font-mono">{visibleDrafts?.length || 0} visible</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-slate-400 font-mono">{visibleDrafts?.length || 0} visible</span>
+                  {pendingApprovalCount > 0 && (
+                    <button
+                      onClick={bulkApproveAllPending}
+                      disabled={executingBulkApprove}
+                      title={`Approve all ${pendingApprovalCount} pending draft(s) as one batch push/PR instead of one at a time`}
+                      className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-xl text-white transition hover:scale-[1.02] active:scale-[0.98] shadow-sm disabled:opacity-50 disabled:hover:scale-100 cursor-pointer shrink-0"
+                      style={{ background: 'linear-gradient(135deg,#6366f1,#4f46e5)' }}
+                    >
+                      <Zap size={11} className={executingBulkApprove ? 'animate-pulse' : ''} />
+                      {executingBulkApprove ? '…' : `Approve All (${pendingApprovalCount})`}
+                    </button>
+                  )}
+                </div>
               </div>
+              {bulkApproveResult && (
+                <div className="px-4 py-2.5 border-b border-slate-100 bg-indigo-50/50 flex items-center justify-between gap-2 text-[10px] font-bold text-indigo-700">
+                  <span>
+                    Shipped {bulkApproveResult.shipped}{bulkApproveResult.failed > 0 ? `, ${bulkApproveResult.failed} failed` : ''} — committed to one branch{bulkApproveResult.job?.pr_url ? ', one PR opened' : ''}.
+                  </span>
+                  {bulkApproveResult.job?.pr_url && (
+                    <a href={bulkApproveResult.job.pr_url} target="_blank" rel="noreferrer" className="underline shrink-0">View PR</a>
+                  )}
+                </div>
+              )}
 
               {drafts === null ? (
                 <div className="p-8 text-center text-xs text-slate-450 animate-pulse">Loading list…</div>
