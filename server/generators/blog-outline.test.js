@@ -57,8 +57,20 @@ describe('blog-outline generator — multi-attempt expansion', () => {
 
     const originalProvider = process.env.REPORT_PROVIDER;
     const originalKey = process.env.ANTHROPIC_API_KEY;
+    const originalPexelsKey = process.env.PEXELS_API_KEY;
+    const originalBlogImages = process.env.BLOG_IMAGES_ENABLED;
     process.env.REPORT_PROVIDER = 'anthropic';
     process.env.ANTHROPIC_API_KEY = 'test-key';
+    // Disabled, not just left as-is: when a real PEXELS_API_KEY/
+    // BLOG_IMAGES_ENABLED are set in the environment (as they are for real
+    // dev use — see .env), generate()'s best-effort searchImage call makes
+    // its own real (mock-intercepted) fetch AFTER the word-count assertion
+    // below is meant to hold, which this shared globalThis.fetch mock can't
+    // tell apart from an actual LLM call — silently inflating llmCalls and
+    // making this test's pass/fail depend on ambient env instead of only on
+    // generate()'s own expand-retry behavior.
+    delete process.env.PEXELS_API_KEY;
+    delete process.env.BLOG_IMAGES_ENABLED;
 
     try {
       const { content, summary } = await generate({ siteId: site.id, params: { topic: 'A test blog topic' } });
@@ -72,6 +84,10 @@ describe('blog-outline generator — multi-attempt expansion', () => {
       else process.env.REPORT_PROVIDER = originalProvider;
       if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = originalKey;
+      if (originalPexelsKey === undefined) delete process.env.PEXELS_API_KEY;
+      else process.env.PEXELS_API_KEY = originalPexelsKey;
+      if (originalBlogImages === undefined) delete process.env.BLOG_IMAGES_ENABLED;
+      else process.env.BLOG_IMAGES_ENABLED = originalBlogImages;
     }
   });
 
