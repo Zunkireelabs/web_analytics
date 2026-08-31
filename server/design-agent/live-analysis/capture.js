@@ -81,7 +81,59 @@ function extractBlocksInPage() {
     return {
       fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight,
       lineHeight: cs.lineHeight, color: cs.color, textAlign: cs.textAlign,
+      // textTransform/letterSpacing are what separate a body paragraph from an
+      // eyebrow/kicker label — see isLabelLike. Without them, downstream role
+      // assignment has no framework-agnostic signal to tell the two apart and
+      // has to trust class names, which is how a `text-xs uppercase
+      // tracking-widest` kicker once became this site's `typography.body`.
+      textTransform: cs.textTransform, letterSpacing: cs.letterSpacing,
     };
+  }
+
+  // A section's FIRST <p> is very often not its body copy: on a site that puts
+  // an eyebrow/kicker above each heading ("AI-First Technology Company"), the
+  // first paragraph is a label, and picking it makes every generated paragraph
+  // sitewide render as a tiny uppercase label. Judged on computed style, not
+  // class names, so it holds for any framework.
+  function isLabelLike(el) {
+    if (!el) return true;
+    const cs = window.getComputedStyle(el);
+    if (cs.textTransform === 'uppercase') return true;
+    if (parseFloat(cs.fontSize) < 14) return true;
+    // Wide tracking is a label convention; body copy is at or near normal.
+    const ls = parseFloat(cs.letterSpacing);
+    if (!Number.isNaN(ls) && ls >= 1) return true;
+    // A kicker is a few words. Real body copy is a sentence or more.
+    return (el.textContent || '').trim().length < 40;
+  }
+
+  // The most representative body element in a block, not merely the first.
+  // Falls back to the longest-text candidate, then the first, so a block whose
+  // paragraphs are ALL label-like still yields something rather than nothing.
+  function pickBody(el) {
+    const candidates = [...el.querySelectorAll('p, li, dd')].slice(0, 12);
+    if (!candidates.length) return null;
+    const real = candidates.find((c) => !isLabelLike(c));
+    if (real) return real;
+    return candidates.reduce((best, c) => (
+      (c.textContent || '').trim().length > (best.textContent || '').trim().length ? c : best
+    ), candidates[0]);
+  }
+
+  // Same first-match trap as pickBody: a block's first <a> is usually its CTA
+  // button, so taking it made `typography.link` a button class list, which then
+  // got merged onto every generated inline link. Prefer a plain inline link.
+  function pickLink(el) {
+    const candidates = [...el.querySelectorAll('a')].slice(0, 12);
+    if (!candidates.length) return null;
+    const plain = candidates.find((a) => {
+      const cs = window.getComputedStyle(a);
+      const buttonish = cs.display !== 'inline'
+        && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+      const named = /\b(btn|button)\b/i.test(typeof a.className === 'string' ? a.className : '');
+      return !buttonish && !named;
+    });
+    return plain || candidates[0];
   }
 
   function classesOf(el) {
@@ -104,7 +156,7 @@ function extractBlocksInPage() {
     const rect = el.getBoundingClientRect();
     if (rect.height < 4) continue; // invisible/collapsed — not a real block
     const heading = el.querySelector('h1, h2, h3, h4');
-    const body = el.querySelector('p, li, dd');
+    const body = pickBody(el);
     const cta = el.querySelector('a, button');
     const accordion = el.querySelector('details, [class*="accordion" i]');
     const accordionTrigger = accordion?.querySelector('summary, button, [class*="trigger" i]') || null;
@@ -144,7 +196,7 @@ function extractBlocksInPage() {
       cardLike: !!card,
       cardClasses: { wrapper: classesOf(card), body: classesOf(cardInner) },
       listClasses: { wrapper: classesOf(list), item: classesOf(listItem) },
-      linkClasses: classesOf(el.querySelector('a')),
+      linkClasses: classesOf(pickLink(el)),
     });
   }
   return { title: document.title, blocks };

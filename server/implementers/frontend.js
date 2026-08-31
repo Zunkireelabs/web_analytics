@@ -1,4 +1,5 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
+import { deriveNewContentContract } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
@@ -70,8 +71,20 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'blog-outline', title);
-    const layout = resolveNewContentLayout(site, 'blog-outline');
-    return { ok: true, filePath, body: renderBlogOutlineBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
+    // Siblings first: the posts already in this directory are the authority on
+    // whether a post declares its own layout and what it calls its hero image.
+    // resolveNewContentLayout stays as the fallback for a directory with no
+    // readable siblings. See newcontent-contract.js for why.
+    const contract = await deriveNewContentContract(site, {
+      ...resolveNewContentTargetConfig(site, 'blog-outline'),
+    });
+    const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
+    return {
+      ok: true,
+      filePath,
+      body: renderBlogOutlineBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }),
+      contentFormat: 'markdown',
+    };
   }
 
   if (actionType === 'direct-answer') {
@@ -81,7 +94,13 @@ export async function resolveTargetAndBody(site, draft) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'direct-answer', title);
-    const layout = resolveNewContentLayout(site, 'direct-answer');
+    // Same sibling-derived contract as blog-outline: on this platform's own
+    // first client both types write into the very same src/blog directory, so
+    // a layout that is wrong for one is wrong for the other.
+    const contract = await deriveNewContentContract(site, {
+      ...resolveNewContentTargetConfig(site, 'direct-answer'),
+    });
+    const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
     return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
   }
 

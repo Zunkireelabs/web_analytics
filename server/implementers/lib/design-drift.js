@@ -386,6 +386,74 @@ export function isTemplateVerified(actionType, template) {
 // evidence a template is bad, and must not trigger an expensive re-derivation
 // — 'unreachable' means "we learned nothing", so the caller should leave the
 // template exactly as it found it and try again next pass.
+// The placeholder whose slot holds long-form prose, per action type. This is
+// the one slot where a label style is unambiguously wrong: a heading may
+// legitimately be uppercase, a button usually is, but body copy never is.
+const BODY_SLOT_PLACEHOLDER = {
+  faq: '{{ANSWER}}',
+  'qa-content': '{{ANSWER}}',
+  'expand-content': '{{BODY}}',
+  'content-wrapper': '{{BODY}}',
+  // internal-links' slot is an anchor label, not prose — a site may style its
+  // link lists in caps deliberately. Deliberately excluded.
+};
+
+// The class tokens on the element that directly wraps `placeholder`. Scans
+// back from the placeholder to the nearest opening tag and reads that tag's
+// literal class attribute — the same "literal class attributes only" scope
+// extractLiteralClassNames and filterTemplateToLiveClasses already work in.
+function classesOnSlotElement(markup, placeholder) {
+  const at = markup.indexOf(placeholder);
+  if (at === -1) return [];
+  const open = markup.lastIndexOf('<', at);
+  if (open === -1) return [];
+  const tag = markup.slice(open, at);
+  const match = /\sclass="([^"]*)"/.exec(tag);
+  return match ? match[1].trim().split(/\s+/).filter(Boolean) : [];
+}
+
+// True when the CSS defines `cls` with a rule that makes text read as a label
+// rather than prose. Scoped to the single rule block following the selector so
+// an unrelated later `text-transform` in the sheet can't produce a false
+// positive.
+function classIsLabelStyle(cls, css) {
+  const needle = `.${escapeForCssSelector(cls)}`;
+  let idx = css.indexOf(needle);
+  while (idx !== -1) {
+    const after = css[idx + needle.length];
+    if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
+      const open = css.indexOf('{', idx);
+      const close = open === -1 ? -1 : css.indexOf('}', open);
+      if (open !== -1 && close !== -1) {
+        const body = css.slice(open + 1, close);
+        if (/text-transform\s*:\s*uppercase/i.test(body)) return true;
+        const size = /font-size\s*:\s*([\d.]+)(rem|px|em)/i.exec(body);
+        if (size) {
+          const n = parseFloat(size[1]);
+          const px = size[2].toLowerCase() === 'px' ? n : n * 16;
+          if (px < 14) return true;
+        }
+      }
+    }
+    idx = css.indexOf(needle, idx + 1);
+  }
+  return false;
+}
+
+// Returns a human-readable reason string when the body slot is styled as a
+// label, or null when it looks like real prose (or when there is nothing to
+// judge — no CSS, no such slot, no literal classes: all "can't tell", which
+// must not be reported as a failure).
+export function bodySlotLooksLikeLabel(actionType, template, css) {
+  const placeholder = BODY_SLOT_PLACEHOLDER[actionType];
+  if (!placeholder || !css) return null;
+  const markup = `${template?.row || ''}\n${template?.wrapper || ''}`;
+  const offenders = classesOnSlotElement(markup, placeholder).filter((c) => classIsLabelStyle(c, css));
+  if (!offenders.length) return null;
+  return `The ${placeholder} slot is styled with ${offenders.join(', ')}, which the live CSS defines as a label `
+    + '(uppercase and/or under 14px) rather than body copy. Generated prose would render as a caption.';
+}
+
 export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet } = {}) {
   if (!template?.wrapper) return { ok: false, reason: 'missing' };
   if (!pageUrl) return { ok: false, reason: 'unreachable', error: 'No live page URL available to verify against.' };
@@ -409,6 +477,17 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
   // Such a template is exactly the case a design-profile projection improves
   // on, so report it as unverifiable-here and let the caller fall through.
   if (!freshness.checkedClasses?.length) return { ok: false, reason: 'no-design-claims' };
+
+  // Class EXISTENCE is not class CORRECTNESS. Every check above answers "does
+  // the live site define this class", and a template can pass all of them
+  // while using a perfectly real class in entirely the wrong role — which is
+  // how zunkireelabs.com came to have all five of its templates stamped
+  // `verifiedBy: design-agent` while rendering every generated paragraph in
+  // its eyebrow/kicker style: `text-xs uppercase tracking-widest`, all real,
+  // all defined, all wrong for body copy. Verification has to be able to say
+  // no to that, or the stamp means only "these strings exist".
+  const label = bodySlotLooksLikeLabel(actionType, template, freshness.css);
+  if (label) return { ok: false, reason: 'body-slot-is-label', error: label };
 
   return {
     ok: true,

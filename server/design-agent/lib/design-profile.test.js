@@ -104,7 +104,15 @@ describe('every projection satisfies design-drift\'s placeholder contract', () =
 describe('projections use the site\'s real design language', () => {
   test('FAQ uses the site\'s accordion when it has one', () => {
     const { row, wrapper } = projectComponentTemplate(TAILWIND_PROFILE, 'faq');
-    assert.match(wrapper, /divide-y divide-gray-200/);
+    // Asserted as tokens, not as a contiguous substring: this profile's
+    // list.divider ("divide-y divide-gray-100") and accordion.wrapper
+    // ("divide-y divide-gray-200") both carry `divide-y`, and cx() now emits a
+    // repeated token once. The accordion's divider styling still has to be
+    // there — it just no longer arrives with a duplicate `divide-y` in front.
+    for (const token of ['divide-y', 'divide-gray-200']) {
+      assert.ok(wrapper.includes(token), `wrapper carries ${token}`);
+    }
+    assert.doesNotMatch(wrapper, /divide-y[\s\S]*divide-y/, 'no duplicated token');
     assert.match(row, /w-full flex justify-between text-left/);
     assert.match(row, /text-lg font-medium text-gray-900/, 'question uses the site item-heading style');
     assert.match(row, /text-gray-600 leading-relaxed/, 'answer uses the site body style');
@@ -278,5 +286,59 @@ describe('content-block projections for markdown renderers', () => {
       assert.equal(projectPageWrapper({ version: 1 }), null);
       assert.equal(projectPageWrapper(null), null);
     });
+  });
+});
+
+// Regression: the four projection defects found live on zunkireelabs.com
+// (2026-08-31), each of which shipped to real customer pages under a
+// `verifiedBy: design-agent` stamp.
+describe('projection defects found live on a real customer site', () => {
+  test('no class token is ever emitted twice in one attribute', () => {
+    // layout.prose and spacing.section describing the same real convention is
+    // normal; it produced `class="container-custom py-12 md:py-20 py-12 md:py-20"`.
+    const overlapping = {
+      ...TAILWIND_PROFILE,
+      spacing: { section: 'py-12 md:py-20', itemGap: 'gap-3' },
+      layout: { container: 'container-custom', prose: 'py-12 md:py-20' },
+      components: { ...TAILWIND_PROFILE.components, articleBody: { wrapper: 'py-12 md:py-20' }, list: { wrapper: '', item: 'flex items-start gap-3', divider: '' } },
+    };
+    for (const actionType of projectableActionTypes()) {
+      const projected = projectComponentTemplate(overlapping, actionType);
+      for (const markup of [projected.wrapper, projected.row].filter(Boolean)) {
+        for (const [, attrValue] of markup.matchAll(/\sclass="([^"]*)"/g)) {
+          const tokens = attrValue.trim().split(/\s+/).filter(Boolean);
+          assert.deepEqual(
+            tokens, [...new Set(tokens)],
+            `${actionType} emitted a duplicate class token: "${attrValue}"`,
+          );
+        }
+      }
+    }
+  });
+
+  test('expand-content is placed inside the site container like every sibling', () => {
+    // Without it, the block was the only thing on the page rendering full
+    // bleed while everything around it was gutter-aligned.
+    const { wrapper } = projectComponentTemplate(TAILWIND_PROFILE, 'expand-content');
+    assert.ok(
+      wrapper.includes(TAILWIND_PROFILE.layout.container),
+      'expand-content wrapper must carry layout.container',
+    );
+  });
+
+  test('an internal link is styled as a link, never link classes merged with body classes', () => {
+    const { row } = projectComponentTemplate(TAILWIND_PROFILE, 'internal-links');
+    const cls = /<a href="\{\{URL\}\}" class="([^"]*)"/.exec(row)[1];
+    assert.equal(cls, TAILWIND_PROFILE.typography.link);
+    assert.ok(
+      !cls.includes(TAILWIND_PROFILE.typography.body),
+      'merging both put two competing text-* colours on one anchor',
+    );
+  });
+
+  test('body typography is the fallback for a site with no link convention', () => {
+    const noLink = { ...TAILWIND_PROFILE, typography: { ...TAILWIND_PROFILE.typography, link: null } };
+    const { row } = projectComponentTemplate(noLink, 'internal-links');
+    assert.match(row, /<a href="\{\{URL\}\}" class="text-gray-600 leading-relaxed"/);
   });
 });

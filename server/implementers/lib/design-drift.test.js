@@ -7,6 +7,7 @@ import {
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
   contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
+  bodySlotLooksLikeLabel,
 } from './design-drift.js';
 import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
@@ -900,5 +901,68 @@ describe('withDesignContext — the shared design-intelligence layer\'s system-p
     for (const id of ['meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'security-headers', 'open-graph', 'html-lang', 'viewport', 'llms-txt', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair']) {
       assert.ok(!DESIGN_CONTEXT_GENERATOR_IDS.has(id), `${id} should NOT get design/voice grounding`);
     }
+  });
+});
+
+// Regression: on 2026-08-31 all five of zunkireelabs.com's component templates
+// carried `verifiedBy: design-agent` while rendering every generated paragraph
+// in the site's eyebrow style. Every class in them was real and defined —
+// existence checks alone could never have caught it.
+describe('bodySlotLooksLikeLabel', () => {
+  const CSS = [
+    '.text-xs{font-size:0.75rem;line-height:1rem}',
+    '.uppercase{text-transform:uppercase}',
+    '.tracking-widest{letter-spacing:0.1em}',
+    '.text-zunkiree-600{color:#eb1600}',
+    '.text-gray-600{color:#4b5563}',
+    '.leading-relaxed{line-height:1.625}',
+  ].join('');
+
+  test('rejects the real template that shipped — a label class on the body slot', () => {
+    const reason = bodySlotLooksLikeLabel('expand-content', {
+      wrapper: '<div class="py-12">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="text-4xl">{{HEADING}}</h2>\n    <div class="text-xs uppercase tracking-widest text-zunkiree-600">{{BODY}}</div>\n  </section>',
+    }, CSS);
+    assert.ok(reason, 'must not verify');
+    assert.match(reason, /uppercase/);
+    assert.match(reason, /\{\{BODY\}\}/);
+  });
+
+  test('accepts a body slot styled as real prose', () => {
+    const reason = bodySlotLooksLikeLabel('expand-content', {
+      wrapper: '<div class="py-12">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="text-4xl">{{HEADING}}</h2>\n    <div class="text-gray-600 leading-relaxed">{{BODY}}</div>\n  </section>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('an uppercase HEADING is fine — only the prose slot is judged', () => {
+    const reason = bodySlotLooksLikeLabel('faq', {
+      wrapper: '<dl>\n{{ROWS}}\n</dl>',
+      row: '  <dt class="uppercase tracking-widest">{{QUESTION}}</dt>\n  <dd class="text-gray-600">{{ANSWER}}</dd>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('internal-links is exempt — a link list may be styled in caps deliberately', () => {
+    const reason = bodySlotLooksLikeLabel('internal-links', {
+      wrapper: '<ul>\n{{ROWS}}\n</ul>',
+      row: '  <li><a href="{{URL}}" class="text-xs uppercase">{{ANCHOR_TEXT}}</a></li>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('no CSS and no classes both mean "cannot tell", never "failed"', () => {
+    const template = { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
+    assert.equal(bodySlotLooksLikeLabel('faq', template, ''), null);
+    assert.equal(bodySlotLooksLikeLabel('faq', template, CSS), null);
+  });
+
+  test('a sub-14px body slot is a caption even without uppercase', () => {
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="text-xs">\n{{BODY}}\n</div>',
+    }, CSS);
+    assert.ok(reason);
+    assert.match(reason, /14px/);
   });
 });

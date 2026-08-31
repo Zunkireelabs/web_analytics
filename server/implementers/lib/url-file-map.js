@@ -333,6 +333,16 @@ function slugifyTitle(title) {
 // exactly as today. Deliberately conservative: a layout name that doesn't
 // resolve is not a cosmetic problem, it fails the site BUILD, so this only
 // ever emits a name derived from real configuration, never a guess.
+// The raw { dir, extension } a net-new target writes into — the same config
+// resolveNewContentTarget builds a file path from, exposed on its own so
+// newcontent-contract.js can read that directory's existing files without
+// re-deriving the config or being handed an already-slugified path.
+export function resolveNewContentTargetConfig(site, actionType) {
+  const target = site?.url_file_map?.newContentTargets?.[actionType];
+  if (!target?.dir || !target?.extension) return {};
+  return { dir: target.dir, extension: target.extension };
+}
+
 export function resolveNewContentLayout(site, actionType) {
   const target = site?.url_file_map?.newContentTargets?.[actionType];
   // Explicit per-target config wins, including an explicit null/'' meaning

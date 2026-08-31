@@ -42,6 +42,62 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
   "evidence": { "pagesAnalyzed": string[], "notes": string }
 }`;
 
+// Every observed body-role text sample across every page, as
+// { classes, style, text } — the ground truth the model's `typography.body`
+// pick is checked against below.
+function bodySamples(segmentedPages) {
+  const out = [];
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      for (const item of section.textHierarchy || []) {
+        if (item.role === 'body' && item.classes) out.push(item);
+      }
+    }
+  }
+  return out;
+}
+
+// Mirrors capture.js's in-page isLabelLike, applied here to the style already
+// captured for a sample. Kept as its own copy deliberately: capture.js's runs
+// in the browser and cannot be imported, and this one must keep working
+// against profiles captured before that function existed.
+function isLabelStyle(style) {
+  if (!style) return false;
+  if (style.textTransform === 'uppercase') return true;
+  if (parseFloat(style.fontSize) < 14) return true;
+  const ls = parseFloat(style.letterSpacing);
+  return !Number.isNaN(ls) && ls >= 1;
+}
+
+// The model is told to pick the most CONSISTENT class for each role, and on a
+// site that puts an eyebrow above every section heading, the most consistent
+// body-role class IS the eyebrow. Prompt wording cannot fix that — the label
+// genuinely is the modal paragraph — so the pick is verified against the real
+// computed styles instead, and replaced with the best genuinely body-like
+// sample when it fails.
+//
+// Returning null when NO sample is body-like is the intended outcome, not a
+// degradation: validateDesignProfile requires typography.body, so a null makes
+// the whole profile unusable and every generator falls back to its plain
+// default. Shipping no styling is recoverable; shipping every paragraph on a
+// customer's site as a tiny uppercase label is what this exists to prevent.
+export function correctBodyTypography(chosen, samples) {
+  const matching = samples.filter((s) => s.classes === chosen);
+  const chosenIsLabel = matching.length > 0 && matching.every((s) => isLabelStyle(s.style));
+  if (chosen && !chosenIsLabel) return { body: chosen, corrected: false };
+
+  const bodyLike = samples.filter((s) => !isLabelStyle(s.style));
+  if (!bodyLike.length) return { body: null, corrected: true };
+
+  // Most frequently observed body-like class wins — same "most consistent"
+  // rule the prompt asks for, now applied to a candidate set that cannot
+  // contain a label.
+  const counts = new Map();
+  for (const s of bodyLike) counts.set(s.classes, (counts.get(s.classes) || 0) + 1);
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  return { body: best, corrected: best !== chosen };
+}
+
 function compactPageForPrompt(page) {
   return {
     url: page.url,
@@ -70,12 +126,21 @@ export async function extractDesignProfile(segmentedPages, { siteId, generatorId
     tier: 'monthly', maxTokens: 4000, generatorId, siteId,
   });
 
+  const typography = extracted.typography || {};
+  const { body, corrected } = correctBodyTypography(typography.body || null, bodySamples(segmentedPages));
+  if (corrected) {
+    console.warn(
+      `[design-agent] site ${siteId}: typography.body "${typography.body}" looks like a label `
+      + `(uppercase/small/wide-tracking), not body copy — using ${body ? `"${body}"` : 'null (profile unusable)'} instead.`,
+    );
+  }
+
   return {
     version: DESIGN_PROFILE_VERSION,
     site: { pagesAnalyzed: pages.map((p) => p.url) },
     styling: extracted.styling || 'unknown',
     framework: extracted.framework || null,
-    typography: extracted.typography || {},
+    typography: { ...typography, body },
     color: extracted.color || {},
     spacing: extracted.spacing || {},
     layout: extracted.layout || {},

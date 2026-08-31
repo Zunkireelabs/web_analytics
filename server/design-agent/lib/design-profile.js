@@ -42,8 +42,25 @@ export const DESIGN_PROFILE_VERSION = 2;
 // Joins class fragments, dropping empties, so a profile that legitimately has
 // no value for a slot produces clean markup instead of stray whitespace or
 // the string "undefined" in a class attribute.
+// Dedupes at the TOKEN level, not the fragment level. Two slots on the same
+// profile legitimately carry overlapping classes — a site whose `layout.prose`
+// and `spacing.section` are both "py-12 md:py-20" is describing one real
+// convention twice, not two — and joining them naively shipped
+// `class="py-12 md:py-20 py-12 md:py-20"` and `class="... gap-3 gap-3"` into
+// real customer pages. First occurrence wins, so fragment order still decides
+// precedence for any framework that resolves conflicts by source order.
 function cx(...parts) {
-  return parts.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()).join(' ');
+  const seen = new Set();
+  const out = [];
+  for (const part of parts) {
+    if (typeof part !== 'string') continue;
+    for (const token of part.trim().split(/\s+/)) {
+      if (!token || seen.has(token)) continue;
+      seen.add(token);
+      out.push(token);
+    }
+  }
+  return out.join(' ');
 }
 
 function attr(cls) {
@@ -134,7 +151,17 @@ function projectQaContent(profile) {
 // in the site's own article typography rather than a generic wrapper.
 function projectExpandContent(profile) {
   const t = profile.typography;
-  const wrapperCls = cx(profile.components?.articleBody?.wrapper || profile.layout?.prose, profile.spacing?.section);
+  // layout.container is included here for the same reason every sibling
+  // projection includes it: without it the block is the only thing on the page
+  // that is not inside the site's horizontal container, so it renders full
+  // bleed, edge to edge, while everything above and below it is gutter-aligned.
+  // (Confirmed live on zunkireelabs.com's homepage — expand-content was the one
+  // projection that omitted it.)
+  const wrapperCls = cx(
+    profile.layout?.container,
+    profile.components?.articleBody?.wrapper || profile.layout?.prose,
+    profile.spacing?.section,
+  );
   return {
     wrapper: `<div${attr(wrapperCls)}>\n{{ROWS}}\n</div>`,
     row: `  <section${attr(profile.spacing?.itemGap)}>\n    <h2${attr(t.heading.section || t.heading.item)}>{{HEADING}}</h2>\n    <div${attr(t.body)}>{{BODY}}</div>\n  </section>`,
@@ -148,7 +175,12 @@ function projectInternalLinks(profile) {
   const list = profile.components?.list;
   return {
     wrapper: `<ul${attr(cx(profile.layout?.container, list?.wrapper, profile.spacing?.section))}>\n{{ROWS}}\n</ul>`,
-    row: `  <li${attr(cx(list?.item, profile.spacing?.itemGap))}><a href="{{URL}}"${attr(cx(t.link, t.body))}>{{ANCHOR_TEXT}}</a></li>`,
+    // t.link ALONE when the site has a link convention — never cx(t.link,
+    // t.body). Those two slots each carry a full colour/size/weight class list,
+    // so merging them puts two competing `text-*` colours on one anchor and
+    // lets whichever the framework resolves last win at random. Body typography
+    // is the fallback for a site with no link convention, not a supplement.
+    row: `  <li${attr(cx(list?.item, profile.spacing?.itemGap))}><a href="{{URL}}"${attr(t.link || t.body)}>{{ANCHOR_TEXT}}</a></li>`,
   };
 }
 
