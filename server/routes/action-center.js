@@ -1042,7 +1042,9 @@ export async function finalizeBatchPr(site, branchName, draftIds) {
 // server actually ships cannot disagree. (Before this, 15 was written once
 // here and three more times in ActionCenter.jsx.)
 //
-// Raised from 15 to 30 on request. What actually bounds risk here is
+// Raised from 15 to 30, then to 60 on request (to match
+// DRAFT_BULK_APPROVE_LIMIT below, so the two bulk-ship caps in this file
+// don't drift apart with no reason). What actually bounds risk here is
 // per-item and unchanged by the count: only 'safe'-tier generators are
 // eligible (agents/lib/risk-tiers.js), the Quality Gate runs inside
 // generateDraft with a bounded regeneration attempt, approveAndPublishDraft
@@ -1050,14 +1052,14 @@ export async function finalizeBatchPr(site, branchName, draftIds) {
 // a human still has to merge, and a failure on one item never stops the rest.
 // So the batch size changes throughput, not what can reach a repo.
 //
-// What it DOES change is wall-clock: 30 items each doing an LLM draft plus a
+// What it DOES change is wall-clock: 60 items each doing an LLM draft plus a
 // GitHub push can outrun the browser's own 5-minute fetch ceiling
 // (web/src/api.js's REQUEST_TIMEOUT_MS) on a slow run. The server finishes
 // the job either way, so the client recovers via
 // /action-center/execution-jobs/latest below rather than reporting a failure
 // that didn't happen — without that, raising this number would have made
 // failed items LESS visible, not more.
-export const SAFE_FIX_BATCH_LIMIT = 30;
+export const SAFE_FIX_BATCH_LIMIT = 60;
 
 // "Execute Today's Safe Fixes" — picks up to `limit` open, safe-tier
 // recommendations not already claimed by another job, ships each one via
@@ -1146,6 +1148,88 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   return { job: finishedJob, shipped, failed };
 }
 
+// How many pending drafts one manual "Approve All Pending" click ships in a
+// single batch push/PR. Mirrors SAFE_FIX_BATCH_LIMIT above, but for the
+// draft-based path used by content generators (e.g. blog-outline) that
+// aren't 'safe'-tier recommendations and so never go through
+// executeSafeFixes — before this, approving several of them one at a time
+// meant one real push (and one Vercel preview build) per draft, with each
+// new push racing the previous build and usually cancelling it.
+export const DRAFT_BULK_APPROVE_LIMIT = 60;
+
+// "Approve All Pending" — ships every draft currently awaiting approval for
+// this site (up to `limit`) under ONE batch branch/push/PR, the same
+// beginBatchPush/deferPr/finalizeBatchPr pattern executeSafeFixes uses above.
+// Drafts have no recommendation_id to hang execution_job_recommendations rows
+// off of (that column is NOT NULL, see migration 078_execution_jobs.sql), so
+// this keeps only the execution_jobs row itself for the audit trail and logs
+// per-draft outcomes via appendJobLog instead of per-item job-rec rows.
+export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APPROVE_LIMIT } = {}) {
+  const [drafts, site] = await Promise.all([
+    listDrafts(siteId, { status: 'submitted_for_approval' }),
+    getSiteById(siteId),
+  ]);
+  const targeted = drafts.slice(0, limit);
+  const job = await createExecutionJob(siteId, { trigger: 'bulk-drafts', requestedBy: userId });
+  if (targeted.length === 0) {
+    return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
+  }
+  await appendJobLog(job.id, `Selected ${targeted.length} pending draft(s) for bulk approval.`);
+
+  // Batch the git push — see executeSafeFixes' own comment on beginBatchPush
+  // above for why: every item below runs with deferPr, so its commit is
+  // created but the branch ref doesn't move and no PR opens per item.
+  const branchName = batchBranchName(site);
+  beginBatchPush(site, branchName);
+
+  let shipped = 0;
+  let failed = 0;
+  const pendingIds = [];
+  for (const draft of targeted) {
+    try {
+      const result = await approveAndPublishDraft(siteId, draft.id, { userId, deferPr: true });
+      if (result?.status === 'branch_pushed') {
+        pendingIds.push(draft.id);
+        shipped++;
+      } else {
+        // Approved but didn't reach branch_pushed (e.g. no repo configured,
+        // or an apply failure that returned rather than threw) — nothing to
+        // include in this batch's push.
+        failed++;
+        await appendJobLog(job.id, `Draft #${draft.id} (${draft.action_type}) did not reach branch_pushed (status: ${result?.status}) — skipped from batch push.`);
+      }
+    } catch (err) {
+      failed++;
+      await appendJobLog(job.id, `Draft #${draft.id} (${draft.action_type}) failed: ${err.message}`);
+    }
+  }
+
+  const finalization = await finalizeBatchPr(site, branchName, pendingIds);
+  if (!finalization.ok) {
+    // Same strand-and-hide concern finalizeBatchPr's own comment describes —
+    // nothing in pendingIds actually reached a real PR, so revert every one
+    // of them rather than silently reporting them as shipped.
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pendingIds.length} item(s) reverted to failed.`);
+    await Promise.all(pendingIds.map((id) =>
+      markDraftAbandoned(siteId, id, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
+        console.error(`[action-center] could not abandon draft ${id} after batch push/PR failure:`, err.message);
+      })
+    ));
+    shipped -= pendingIds.length;
+    failed += pendingIds.length;
+  } else if (pendingIds.length > 0) {
+    await appendJobLog(job.id, `Batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s)).`);
+  }
+
+  const finishedJob = await finishExecutionJob(job.id, {
+    status: shipped > 0 ? 'completed' : 'failed',
+    branchName: finalization.ok ? branchName : undefined,
+    prNumber: finalization.prNumber,
+    prUrl: finalization.prUrl,
+  });
+  return { job: finishedJob, shipped, failed };
+}
+
 // Single-recommendation version of the same chain, for the "preview it,
 // then one click" path in the UI — still creates its own (single-item)
 // execution job for the same audit trail bulk runs get.
@@ -1172,6 +1256,15 @@ router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
     res.json(await executeSafeFixes(req.siteId, { userId: req.userId, limit: req.body?.limit }));
   } catch (e) {
     if (e.status) return respondWithStatusError(res, e, 'Could not execute safe fixes right now — try again shortly.');
+    next(e);
+  }
+});
+
+router.post('/action-center/drafts/bulk-approve', async (req, res, next) => {
+  try {
+    res.json(await bulkApproveDrafts(req.siteId, { userId: req.userId, limit: req.body?.limit }));
+  } catch (e) {
+    if (e.status) return respondWithStatusError(res, e, 'Could not approve pending drafts right now — try again shortly.');
     next(e);
   }
 });

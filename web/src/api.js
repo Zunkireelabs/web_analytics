@@ -324,6 +324,7 @@ export const api = {
     previewDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}/preview`, siteId)),
     rollback: (id, siteId) => req(withSite(`/action-center/drafts/${id}/rollback`, siteId), { method: 'POST' }),
     executeSafeFixes: (limit, siteId) => req(withSite('/action-center/execute-safe-fixes', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
+    bulkApproveDrafts: (limit, siteId) => req(withSite('/action-center/drafts/bulk-approve', siteId), { method: 'POST', body: JSON.stringify({ limit }) }),
     latestExecutionJob: (siteId) => req(withSite('/action-center/execution-jobs/latest', siteId)),
     approveAndShip: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/approve-and-ship`, siteId), { method: 'POST' }),
     recheckRecommendation: (recommendationId, siteId) => req(withSite(`/action-center/recommendations/${recommendationId}/recheck`, siteId), { method: 'POST' }),
