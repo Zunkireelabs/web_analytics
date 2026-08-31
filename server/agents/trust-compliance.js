@@ -174,8 +174,8 @@ export async function run({ siteId, start, end }) {
   // draft ships with a placeholder blocking auto-publish until a human fills
   // in the real ID (see generators/analytics-install.js).
   const TRACKER_CHECKS = [
-    { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
-    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
+    { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', trackingId: site.ga4_measurement_id || null, whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
+    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
   ];
   const trackerFindings = TRACKER_CHECKS.filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
@@ -185,7 +185,7 @@ export async function run({ siteId, start, end }) {
     recommendedAction: {
       label: `Draft ${t.label} install script`,
       generatorId: 'analytics-install',
-      params: { provider: t.provider, page: homepageUrl },
+      params: { provider: t.provider, page: homepageUrl, ...(t.trackingId ? { trackingId: t.trackingId } : {}) },
       effort: effortForGenerator('analytics-install'),
     },
     expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
