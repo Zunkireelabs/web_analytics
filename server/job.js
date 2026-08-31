@@ -63,7 +63,7 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_J
 // DAILY_AGENT_IDS automatically unless it's added to THROTTLED_AGENT_IDS
 // below or given its own WEEKLY_ONLY_AGENT_ID-style exclusion — pick the
 // cadence deliberately, don't leave it to default.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'font-consistency']);
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'font-consistency', 'visual-quality']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -517,6 +517,13 @@ export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('auth
 // negligible, same reasoning as competitor-intelligence/authority above.
 export const runFontConsistencyIfDue = (site) => runAgentIfDue(site, 'font-consistency');
 export const runFontConsistencyIfDueForAllSites = () => runAgentIfDueForAllSites('font-consistency');
+
+// Weekly, not the default monthly throttle — a real Playwright browser
+// launch + one vision-capable LLM call per site (see agents/visual-quality.js),
+// same real-cost reasoning as font-consistency's own throttle above, but a
+// broken table/duplicate FAQ is worth catching sooner than once a month.
+export const runVisualQualityIfDue = (site) => runAgentIfDue(site, 'visual-quality', { cadence: 'week' });
+export const runVisualQualityIfDueForAllSites = () => runAgentIfDueForAllSites('visual-quality', { cadence: 'week' });
 
 // AI Recommendation — real AI prompt probes have a real per-call cost that
 // multiplies with every additional configured provider (see

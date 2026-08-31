@@ -105,6 +105,61 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
 }
 
+// callLLM, but for a prompt that also needs to show the model real images —
+// added for visual-quality.js (server/agents/visual-quality.js), the first
+// caller in this codebase that needs multi-modal content. Deliberately a
+// SEPARATE function rather than a `images` option bolted onto callLLM: every
+// existing callLLM caller stays byte-for-byte unaffected, and this function
+// stays free to diverge (e.g. no JSON-retry loop — see below) without that
+// affecting text-only callers.
+//
+// `images` is an array of base64-encoded JPEG strings, kept in memory by the
+// caller only (this codebase writes nothing to disk/DB for them — see
+// capture.js's own screenshot option) and attached as real image content
+// blocks, not described in text. No JSON-retry-on-bad-shape loop like
+// callLLMForJson has: a vision call is already the most expensive kind this
+// codebase makes, so a caller here is expected to defensively re-parse with
+// extractJson() itself and treat a parse failure as "zero findings this
+// run" rather than pay for a second full vision round-trip.
+export async function callLLMWithImages(system, user, images, { model, maxTokens = 1500, tier = 'daily', generatorId, siteId } = {}) {
+  system = await withAgentMemory(system, generatorId, siteId);
+  system = await withDesignContext(system, generatorId, siteId);
+  const provider = pickProvider();
+  const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
+  const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];
+  const imageList = Array.isArray(images) ? images : [];
+
+  if (provider === 'openai') {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: LLM_TIMEOUT_MS });
+    const content = [
+      { type: 'text', text: user },
+      ...imageList.map((data) => ({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${data}` } })),
+    ];
+    const res = await withRetry(() => openai.chat.completions.create({
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content },
+      ],
+    }));
+    return res.choices[0]?.message?.content?.trim() || '';
+  }
+
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: LLM_TIMEOUT_MS });
+  const content = [
+    { type: 'text', text: user },
+    ...imageList.map((data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })),
+  ];
+  const msg = await withRetry(() => anthropic.messages.create({
+    model: resolvedModel,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: 'user', content }],
+  }));
+  return msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
+}
+
 // Strips a markdown code fence wrapper (```json ... ``` or ``` ... ```) if
 // present — models frequently wrap JSON in one despite an explicit
 // "respond with ONLY JSON" instruction.

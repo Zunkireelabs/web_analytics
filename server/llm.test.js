@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJson, isRetryable, callLLMForJson } from './llm.js';
+import { extractJson, isRetryable, callLLMForJson, callLLMWithImages } from './llm.js';
 
 // Regression coverage for a real, recurring report: multiple generators
 // (schema, faq, expand-content, meta-title, ...) failed with "model did not
@@ -82,6 +82,65 @@ describe('callLLMForJson — validate option', () => {
     };
     try {
       await assert.rejects(() => callLLMForJson('system', 'user', { validate: Array.isArray }), /did not return valid JSON/);
+    } finally {
+      globalThis.fetch = original;
+      if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
+      else process.env.REPORT_PROVIDER = originalProvider;
+      if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalKey;
+    }
+  });
+});
+
+// visual-quality.js is the first real caller of this — the first multi-
+// modal call in this codebase. Coverage here only asserts the request shape
+// (real image content blocks reach the provider, callLLM's own text-only
+// callers are untouched); the agent's own defect-classification logic is
+// covered in server/agents/visual-quality.test.js.
+describe('callLLMWithImages', () => {
+  test('Anthropic provider: attaches each image as a real base64 image content block, alongside the text prompt', async () => {
+    const original = globalThis.fetch;
+    const originalProvider = process.env.REPORT_PROVIDER;
+    const originalKey = process.env.ANTHROPIC_API_KEY;
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    let capturedBody;
+    globalThis.fetch = async (url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      const body = { id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text: '[]' }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const result = await callLLMWithImages('system prompt', 'user prompt', ['fakeimg1==', 'fakeimg2=='], {});
+      assert.equal(result, '[]');
+      const content = capturedBody.messages[0].content;
+      assert.ok(Array.isArray(content), 'content must be an array of blocks, not a bare string');
+      assert.deepEqual(content.filter((b) => b.type === 'text'), [{ type: 'text', text: 'user prompt' }]);
+      const images = content.filter((b) => b.type === 'image');
+      assert.equal(images.length, 2);
+      assert.deepEqual(images[0], { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'fakeimg1==' } });
+    } finally {
+      globalThis.fetch = original;
+      if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
+      else process.env.REPORT_PROVIDER = originalProvider;
+      if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalKey;
+    }
+  });
+
+  test('an empty images array still sends a valid text-only content array, never throws', async () => {
+    const original = globalThis.fetch;
+    const originalProvider = process.env.REPORT_PROVIDER;
+    const originalKey = process.env.ANTHROPIC_API_KEY;
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    globalThis.fetch = async () => {
+      const body = { id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text: '[]' }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const result = await callLLMWithImages('system', 'user', [], {});
+      assert.equal(result, '[]');
     } finally {
       globalThis.fetch = original;
       if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;

@@ -18,7 +18,7 @@ import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 // picks up its category/name automatically from meta — no change needed
 // there.
 
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency'];
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency', 'visual-quality'];
 
 
 // Findings from these agents are inherently upside-framed (growth,
