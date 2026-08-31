@@ -1,9 +1,10 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 import {
   Building, Globe, Clock, CheckCircle2, AlertTriangle, GitBranch, Key, Mail, Lock,
   FolderPlus, RefreshCw, ShieldCheck, Settings, Sliders, PauseCircle, PlayCircle,
-  Trash2, AlertOctagon, HelpCircle, DollarSign, User, Bot,
+  Trash2, AlertOctagon, HelpCircle, DollarSign, User, Bot, Palette, ArrowRight,
 } from 'lucide-react';
 import Drawer from './Drawer.jsx';
 import Tabs from './Tabs.jsx';
@@ -360,6 +361,7 @@ function IntegrationsTab({ client, onReload }) {
 
 // ── AI Configuration tab ─────────────────────────────────────────────────
 function AiConfigTab({ client, onReload }) {
+  const navigate = useNavigate();
   const [oauthLevel, setOauthLevel] = useState(client.oauthMaxPermissionLevel || 'read_only');
   const [oauthSaving, setOauthSaving] = useState(false);
   const [oauthError, setOauthError] = useState(null);
@@ -498,6 +500,19 @@ function AiConfigTab({ client, onReload }) {
               : 'This site\'s agents will keep finding and recommending fixes, but nothing ships until someone acts on each one in the Action Center.'}
         </p>
         {autoError && <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{autoError}</div>}
+        {/* The design-integrity gate: the server now REFUSES to enable
+            autonomous fixes for a site whose design was never reviewed (or
+            was re-derived since it was approved) — see
+            validateAutoRemediationRequest, routes/clients.js. Clicking On
+            above without this done first fails with exactly that message
+            in autoError above; this link is the actual next step. */}
+        <button
+          type="button"
+          onClick={() => navigate(`/clients/${client.id}/design-review`)}
+          className="mt-2 inline-flex items-center gap-1.5 text-[10.5px] font-bold text-[#6C63FF] hover:text-[#5951e0] transition"
+        >
+          <Palette size={11} /> Review this site's design <ArrowRight size={11} />
+        </button>
       </div>
 
       {/* OAuth "Connect" ceiling — the max permission_level this client's

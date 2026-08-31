@@ -2,7 +2,12 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import {
+  getDesignProfile, siteHasUsableDesignProfile, designReviewState, designReviewFingerprint,
+  verifyProfileRoles, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE, observedClassesByRole,
+} from '../implementers/lib/design-drift.js';
+import { projectAllComponentTemplates } from '../design-agent/lib/design-profile.js';
 
 import { getSiteById, listSites, getHealthScoreOnOrBefore } from '../store/read.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -16,8 +21,9 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
+import { buildDesignReviewReport } from '../agents/lib/design-review.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 
@@ -228,6 +234,20 @@ router.post('/internal/signup-requests/:id/reject', async (req, res, next) => {
 // secretly still pending. Returns `{error, discovery}` (no throw) on a real
 // ingestion failure so the caller can decide the HTTP status.
 async function runBaselineSequence(siteId, site) {
+  // Design-integrity-gate proposal, change 01: the design read LEADS
+  // onboarding, queued before anything else, so the browser capture runs
+  // while discovery/ingestion/the site audit below are still working — by
+  // the time the rest of this sequence finishes, the profile is usually
+  // ready for staff to review. Fire-and-forget like startFullSiteAudit
+  // further down: a queue-insert failure must never fail onboarding itself,
+  // and needs only a reachable live URL — no repo, no auto-remediation
+  // grant (queueDesignProfileDerivationForOnboarding is deliberately
+  // repo-independent; see its own comment in job.js for why gating it on
+  // either would deadlock the whole design-review gate on itself).
+  queueDesignProfileDerivationForOnboarding(site).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding design-profile derivation failed to queue:`, err.message);
+  });
+
   // Real site structure first — independent of GSC/GA4 having any data
   // yet, works off the live site itself (sitemap + crawl).
   const discovery = await runSiteDiscoveryIfDue(site).catch((err) => {
@@ -597,6 +617,31 @@ export function shouldAutoEnableOnConnect({ existing, site }) {
   return !invalid;
 }
 
+// The design-review-approve mirror of shouldAutoEnableOnConnect above, for
+// the far more common real order of events: repo connected first (which,
+// with the design-integrity gate now folded into validateAutoRemediationRequest,
+// can no longer auto-grant on its own), design reviewed second. Without this,
+// EVERY site would need a THIRD, separate manual click on the
+// /auto-remediation switch after an otherwise-complete setup — staff connect
+// GSC/GA4/the repo, review and approve the design, and autonomy should turn
+// on right there, the same "one combined setup action" shouldAutoEnableOnConnect
+// already promised before this gate existed.
+//
+// `existing` is the site row from BEFORE this approval saved (`site` is the
+// row after updateSiteDesignReview saved it) — scoped to a genuinely FIRST
+// design-review approval for this site (existing.design_review_at was null)
+// for the identical reason shouldAutoEnableOnConnect scopes to a first repo
+// connection: a RE-approval (after a stale rescan) must never silently
+// re-flip a switch a human may have deliberately turned off in between.
+export function shouldAutoEnableOnDesignReviewApproval({ existing, site }) {
+  const isFirstApproval = !existing?.design_review_at;
+  if (!isFirstApproval || site?.auto_remediation_enabled) return false;
+  const invalid = validateAutoRemediationRequest({
+    enabled: true, dailyLimit: site?.auto_remediation_daily_limit, site,
+  });
+  return !invalid;
+}
+
 export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
   if (typeof enabled !== 'boolean') return 'enabled must be true or false.';
   // Matches migration 101's own CHECK (>= 0) rather than inventing a second,
@@ -607,6 +652,21 @@ export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
   // wrong way round.
   if (enabled && !(site?.repo_owner && site?.repo_name)) {
     return 'This site has no GitHub repository connected, so autonomous fixes would have nowhere to open a pull request. Connect a repo first, then enable autonomy.';
+  }
+  // The design-integrity gate: a site whose design has never been reviewed
+  // — or was reviewed against a profile the weekly rescan has since replaced
+  // — must never enter the unattended pipeline. This is the single place
+  // both entry points below (a genuinely first repo connection, and staff
+  // explicitly flipping the switch) share, so neither can drift out of sync
+  // with the other on what "safe to enable" means. See design-drift.js's
+  // designReviewState for what makes a site's review current vs stale.
+  if (enabled) {
+    const review = designReviewState(site);
+    if (!review.ok) {
+      return review.reason === 'stale'
+        ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before autonomy can be enabled."
+        : 'This site\'s design has not been reviewed yet — review and approve it (from the design profile the agent captured) before autonomy can be enabled.';
+    }
   }
   return null;
 }
@@ -743,6 +803,72 @@ router.get('/internal/clients/:id/review', async (req, res, next) => {
 
     const review = await buildReviewReport(siteId);
     res.json(review);
+  } catch (e) { next(e); }
+});
+
+// The design-integrity gate's review screen (design-integrity-gate
+// proposal, change 03): every section the design agent found on this site's
+// real pages, every template it would write in the site's style, and the
+// role-verification verdict + real example behind each — see
+// agents/lib/design-review.js's buildDesignReviewReport for the full
+// contract. Read-only; GETs never require anything be reviewed already.
+router.get('/internal/clients/:id/design-review', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const site = await getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    res.json(buildDesignReviewReport(site));
+  } catch (e) { next(e); }
+});
+
+// Staff sign-off. Pins design_review_fingerprint to the profile AS IT
+// EXISTS RIGHT NOW — never a value the client sent — so an approval can only
+// ever mean "I looked at what this route is showing me at this moment",
+// never "I looked at something, trust me". Refuses when there is no usable
+// profile to approve at all (nothing to sign off on) — a site in that state
+// stays 'unreviewed', the correct honest default (migration 132).
+router.post('/internal/clients/:id/design-review/approve', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const before = buildDesignReviewReport(existing);
+    if (!before.hasProfile || !before.currentFingerprint) {
+      return res.status(400).json({ error: 'This site has no design profile yet — nothing to approve. Wait for the design analysis to finish, or trigger a re-derivation first.' });
+    }
+
+    let site = await updateSiteDesignReview({ siteId, reviewedBy: req.userId, fingerprint: before.currentFingerprint });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.design_review_approved',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { fingerprint: before.currentFingerprint, templateVerdicts: Object.fromEntries(before.templates.map((t) => [t.actionType, t.ok])) },
+      success: true,
+    });
+
+    // Same "one combined setup action" auto-grant shouldAutoEnableOnConnect
+    // already does for a first repo connection — see
+    // shouldAutoEnableOnDesignReviewApproval's own comment for why this is
+    // the necessary mirror of it, not a duplicate.
+    if (shouldAutoEnableOnDesignReviewApproval({ existing, site })) {
+      site = await updateSiteAutoRemediation({ siteId, enabled: true, dailyLimit: site.auto_remediation_daily_limit });
+      await recordAuditEvent(req, {
+        action: 'tenant.auto_remediation_enabled',
+        targetType: 'site',
+        targetId: String(siteId),
+        tenantSiteId: siteId,
+        tenantName: site.name,
+        metadata: { enabled: true, dailyLimit: site.auto_remediation_daily_limit, autoEnabledAtDesignReview: true },
+        success: true,
+      });
+    }
+
+    res.json(buildDesignReviewReport(site));
   } catch (e) { next(e); }
 });
 

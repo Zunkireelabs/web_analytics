@@ -75,7 +75,15 @@ export function validateDesignProfileV2(profile) {
 //     order: number,               // 0-based position on the page
 //     alignment: 'left'|'center'|'right',
 //     width: 'narrow'|'normal'|'wide'|'full',
-//     textHierarchy: [{ role: 'eyebrow'|'heading'|'subheading'|'body'|'cta', text, tag, style }],
+//     textHierarchy: [{ role: 'eyebrow'|'heading'|'subheading'|'body'|'cta'|'link', text, tag, style, classes }],
+//     // 'link' is capture.js's pickLink() result: the block's real inline
+//     // link, already excluded from anything button-shaped (background
+//     // color, or a btn/button class name) — never the same element as a
+//     // 'cta' entry above. This is the real evidence
+//     // design-drift.js's role verification checks typography.link
+//     // against, so a template that mistook a CTA button for the site's
+//     // inline-link style (correctLinkTypography's whole reason to exist)
+//     // has something real to be verified against.
 //     components: string[],        // e.g. ['card', 'button', 'accordion']
 //     spacing: { before: number|null, after: number|null }, // px gap to neighbours
 //     imagery: { count: number, hasBackground: boolean },

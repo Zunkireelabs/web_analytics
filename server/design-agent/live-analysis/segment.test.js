@@ -64,6 +64,24 @@ describe('segmentPage', () => {
     assert.equal(accordion.classes.trigger, 'font-semibold');
   });
 
+  // The bug this closes: capture.js reads linkClasses per block, but until
+  // now textHierarchyOf silently dropped it, so typography.link had no real
+  // evidence in `sections` to verify against — the exact slot
+  // correctLinkTypography exists to fix (a block's first <a> is usually its
+  // CTA button) had no trail proving the site's real inline-link style.
+  test('a real inline link (never the CTA) carries through into textHierarchy as its own role', () => {
+    const [section] = segmentPage([block({ linkClasses: 'text-blue-600 underline' })]);
+    const link = section.textHierarchy.find((h) => h.role === 'link');
+    assert.ok(link);
+    assert.equal(link.classes, 'text-blue-600 underline');
+    assert.equal(link.tag, 'a');
+  });
+
+  test('a block with no real inline link contributes no link entry', () => {
+    const [section] = segmentPage([block({ linkClasses: '' })]);
+    assert.equal(section.textHierarchy.some((h) => h.role === 'link'), false);
+  });
+
   test('spacing.before/after are the pixel gap to neighbouring blocks, clamped at zero', () => {
     const sections = segmentPage([
       block({ order: 0, top: 0, height: 100 }),

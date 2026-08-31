@@ -976,6 +976,31 @@ export async function runTemplateCapabilityRepairForAllSites() {
   return results;
 }
 
+// Runs alongside runTemplateCapabilityRepairForAllSites, in the same 07:00
+// chain — a repo-tree read plus a handful of already-known post checks, cheap
+// enough to run every morning against every site rather than once on demand.
+// A site with nothing to backfill (the common case, most mornings) costs one
+// read and returns immediately. Per-site error isolation, same reasoning as
+// every other *ForAllSites here.
+export async function runBackfillBlogImagesForAllSites() {
+  const { backfillBlogImagesForSite } = await import('./scripts/backfill-blog-images.js');
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const report = await backfillBlogImagesForSite(site.id);
+      if (report.prCreated) {
+        console.log(`[job] backfill-blog-images site ${site.id} "${site.name}": ${report.imaged} image(s) added, ${report.noMatch} post(s) with no good match, PR ${report.prCreated.url}`);
+      }
+      results.push(report);
+    } catch (err) {
+      console.error(`[job] backfill-blog-images failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
 // Daily counterpart to runTemplateCapabilityRepairForAllSites above — runs
 // right after it so it sees the SAME morning's freshly-healed config
 // (autoHealNewContentTarget/autoHealFileMapping already ran, any
@@ -1140,12 +1165,23 @@ export async function queueDesignAgentDerivationForSite(site, {
   enqueueProfileJob = createDesignProfileJob,
   resolvePageUrl = sitePageUrl,
 } = {}) {
-  // Eligibility is derived from auto_remediation_enabled, not a separate
-  // Design Agent flag — see the comment on the gate in design-drift.js's
-  // resolveOrCreateComponentTemplate for why. A site becomes eligible the
-  // moment it has a repo connected AND a human has done the one-time
-  // auto-remediation review, with no second manual toggle to flip.
-  if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  // Eligibility used to also require auto_remediation_enabled, on the
+  // reasoning that a repo-connected site becomes eligible "the moment a
+  // human has done the one-time auto-remediation review." The
+  // design-integrity gate (design-drift.js's designReviewState,
+  // validateAutoRemediationRequest in routes/clients.js) inverted that: a
+  // site can no longer GET auto_remediation_enabled until its design has
+  // been reviewed, and there is nothing to review until a profile has been
+  // derived — so requiring auto_remediation_enabled here made this
+  // permanently unreachable for every site going through this path,
+  // deadlocked on itself. Derivation is read-only (it only writes
+  // designProfile/componentTemplates config, never touches the live repo),
+  // so it never needed that consent in the first place — only SHIPPING
+  // styled markup does, and that is gated separately and directly at apply
+  // time (backend.js's computeMarkerMerge / frontend.js's apply, both via
+  // designReviewState). A connected repo is still required: this queues a
+  // real Design Agent job against that repo's live pages.
+  if (!site?.repo_owner || !site?.repo_name) return false;
   if (hasUsableProfile(site)) return false;
   try {
     const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
@@ -1162,13 +1198,53 @@ export async function queueDesignAgentDerivationsForAllSites({
   listAllSites = listSites,
   queueForSite = queueDesignAgentDerivationForSite,
 } = {}) {
-  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
+  // Matches queueDesignAgentDerivationForSite's own gate — no longer filters
+  // on auto_remediation_enabled, for the same deadlock reason (see that
+  // function's comment). A site awaiting its first design review is exactly
+  // the site this daily sweep most needs to reach — without a profile it
+  // can never move past 'unreviewed'.
+  const sites = (await listAllSites()).filter((s) => s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
     if (await queueForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
   return { queued };
+}
+
+// Queues the FIRST design-profile derivation as part of onboarding itself
+// (routes/clients.js's runBaselineSequence), not on a cron a new client may
+// sit unqueued in front of for hours. This is the design-integrity-gate
+// proposal's change 01: reading a client's design leads onboarding rather
+// than trailing behind it — staff can review and sign off (change 04's
+// gate) in the same sitting they connect GSC/GA4/the repo, before this
+// site's agents are ever allowed to ship a single styled fix.
+//
+// Deliberately repo-INDEPENDENT, unlike queueDesignAgentDerivationForSite
+// above: derivation only needs a reachable live URL to look at (sitePageUrl)
+// — the repository is needed to SHIP a template, never to compose or review
+// one, and per this platform's own account, no client site has a repo
+// connected at onboarding time. Requiring one here would mean design review
+// — and therefore the ability to ever enable autonomy — waits on a step
+// that, for every real client today, hasn't happened yet.
+export async function queueDesignProfileDerivationForOnboarding(site, {
+  hasUsableProfile = siteHasUsableDesignProfile,
+  findQueuedProfileJob = getQueuedComponentTemplateJob,
+  enqueueProfileJob = createDesignProfileJob,
+  resolvePageUrl = sitePageUrl,
+} = {}) {
+  const pageUrl = resolvePageUrl(site);
+  if (!pageUrl) return false;
+  if (hasUsableProfile(site)) return false;
+  try {
+    const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+    if (pending) return false;
+    await enqueueProfileJob(site.id, { requestedBy: null, pageUrl });
+    return true;
+  } catch (err) {
+    console.error(`[job] could not queue onboarding design-profile derivation for site ${site.id}:`, err.message);
+    return false;
+  }
 }
 
 // Design Context (design-agent/live-analysis/) is a durable asset, not

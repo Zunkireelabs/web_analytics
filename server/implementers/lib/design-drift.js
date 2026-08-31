@@ -1155,14 +1155,21 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // self-heal existed.
   }
 
-  // Eligibility is derived from auto_remediation_enabled — the same
-  // real-repo-edit/PR consent this codebase already requires a human to
-  // grant once (routes/clients.js's /auto-remediation route) — rather than
-  // a second, separate design_agent_enabled toggle that had no route to
-  // ever set it. A repo-connected site becomes eligible for Design Agent
-  // derivation automatically the moment that one review has happened, with
-  // no further manual step.
-  if (!site.auto_remediation_enabled || !site.repo_owner || !site.repo_name) {
+  // Eligibility used to also require auto_remediation_enabled ("the same
+  // real-repo-edit/PR consent... a repo-connected site becomes eligible the
+  // moment that one review has happened"). The design-integrity gate
+  // inverted the dependency it relied on: auto_remediation_enabled can no
+  // longer become true until the design HAS been reviewed (routes/
+  // clients.js's validateAutoRemediationRequest), and there is nothing to
+  // review until a profile has been resolved/derived at least once — so
+  // requiring it here made this permanently unreachable pre-review,
+  // deadlocked on itself. Composing or deriving a template is read-only; it
+  // never needed shipping consent. What DOES still require that consent —
+  // actually splicing the resulting markup into a real PR — is gated
+  // directly at apply time (designReviewState, backend.js/frontend.js), not
+  // here. A connected repo is still required: self-heal/derivation below
+  // both read/write real repo state.
+  if (!site.repo_owner || !site.repo_name) {
     return { ok: false, reason: 'not-available', template: null, componentKey };
   }
 

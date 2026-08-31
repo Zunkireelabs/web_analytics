@@ -660,10 +660,22 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(result.reason, 'no-concept');
   });
 
-  test('site without its auto-remediation review reports not-available, and queues nothing', async () => {
-    const result = await resolveOrCreateComponentTemplate({ ...baseSite, auto_remediation_enabled: false }, 'faq', noopDeps());
+  // Eligibility no longer depends on auto_remediation_enabled — see the
+  // gate's own comment in design-drift.js for why that used to be a
+  // deadlock once the design-integrity gate made auto_remediation_enabled
+  // itself depend on a design review having already happened. A site
+  // awaiting its first review still gets its design DERIVED (so there is
+  // something to review); it just can't SHIP with it yet, which is enforced
+  // separately at apply time.
+  test('a site awaiting its design review (auto_remediation not yet enabled) still queues derivation, same as any other site with no profile', async () => {
+    const queued = [];
+    const result = await resolveOrCreateComponentTemplate({ ...baseSite, auto_remediation_enabled: false }, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async (siteId, opts) => { queued.push([siteId, opts]); },
+    });
     assert.equal(result.ok, false);
-    assert.equal(result.reason, 'not-available');
+    assert.equal(result.reason, 'derivation-queued');
+    assert.equal(queued.length, 1);
   });
 
   test('site with no repo configured reports not-available', async () => {

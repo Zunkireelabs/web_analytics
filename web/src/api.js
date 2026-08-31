@@ -150,6 +150,11 @@ export const api = {
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
+    // Design-integrity gate: what the design agent found on this site's real
+    // pages and what it would write, plus the current sign-off state
+    // (server/agents/lib/design-review.js's buildDesignReviewReport).
+    designReview: (id) => req(`/internal/clients/${id}/design-review`),
+    approveDesignReview: (id) => req(`/internal/clients/${id}/design-review/approve`, { method: 'POST' }),
     recalculateFaqBaseline: (id) => req(`/internal/clients/${id}/recalculate-faq-baseline`, { method: 'POST' }),
     growthSummary: () => req('/internal/clients/growth-summary'),
     signupRequests: {
