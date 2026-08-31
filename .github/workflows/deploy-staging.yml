@@ -157,29 +157,26 @@ jobs:
             GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
             GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
 
-            # ── Search grounding (no-billing SerpApi, see
-            # ingest/search-grounding-providers/index.js) ──
-            # Content Expansion citations (opt-in, below) and any future
-            # search-grounding caller try this before falling back to the
-            # (currently broken, no billing linked) Google CSE key above.
+            # SERPAPI_KEY (no-billing SerpApi) is used only by
+            # COMPETITOR_PROVIDER=serpapi above now — no longer a
+            # search-grounding fallback (see the Tavily section below).
             SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
 
-            # ── Content Expansion citations (opt-in, grounded via SERPAPI_KEY above) ──
-            # Without this, expand-content.js refuses to draft external-citations
-            # sections rather than invent an ungrounded link (see generators/expand-content.js).
+            # ── Content Expansion citations (opt-in, grounded via Tavily —
+            # ingest/search-grounding-providers/tavily.js) ──
+            # Sole search-grounding provider for external-citations, deliberately
+            # never Google CSE/SerpApi (those stay reserved for competitor SERP
+            # data above). Without TAVILY_API_KEY, expand-content.js refuses to
+            # draft external-citations sections rather than invent an ungrounded
+            # link (see generators/expand-content.js).
             #
-            # Disabled 2026-08-31: SERPAPI_KEY's free-tier quota is exhausted
-            # ("account has run out of searches", verified live) and the
-            # Google CSE fallback above is still the same broken no-billing
-            # project noted in the COMPETITOR_PROVIDER comment. With both
-            # grounding providers dead, every external-citations attempt was
-            # failing (25 of expand-content's last ~30 real attempts on site
-            # 1), which alone dragged expand-content's learned confidence to
-            # 0.29 and got the whole generator demoted out of auto-execute —
-            # burying its other, unrelated subtypes along with it. Re-enable
-            # once SERPAPI_KEY has a paid quota or Google CSE has billing
-            # linked; no other code change needed.
-            ENABLE_CONTENT_CITATION_SEARCH=false
+            # Re-enabled 2026-08-31, same day it was disabled: that disable was
+            # because SerpApi/Google CSE were both dead (quota exhausted / no
+            # billing), not because citation search itself was the problem —
+            # Tavily replaces both as the sole provider, so the outage this
+            # worked around no longer applies.
+            TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+            ENABLE_CONTENT_CITATION_SEARCH=true
 
             # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
             # Without this, technical-seo.js still reports real GSC index

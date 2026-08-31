@@ -29,13 +29,12 @@ const ENV_REF = /process\.env\.([A-Z][A-Z0-9_]*)/g;
 // on specific credential env vars, instead of learning about the gap from a
 // user-facing failure again.
 // Each flag maps to a list of ALTERNATIVE credential sets, not one flat
-// list — search-grounding now has two interchangeable providers
-// (ingest/search-grounding-providers/index.js tries serpapi, falls back to
-// google-cse), so the flag is satisfied by either SERPAPI_KEY alone OR the
-// full GOOGLE_CSE_API_KEY+GOOGLE_CSE_CX pair, not by requiring all three
-// together.
+// list. search-grounding (ingest/search-grounding-providers/index.js) has a
+// single provider now — Tavily, deliberately never serpapi/google-cse (those
+// stay reserved for competitor-providers/'s real SERP data) — so citation
+// search is satisfied by TAVILY_API_KEY alone.
 const REQUIRED_CREDENTIALS = {
-  ENABLE_CONTENT_CITATION_SEARCH: [['SERPAPI_KEY'], ['GOOGLE_CSE_API_KEY', 'GOOGLE_CSE_CX']],
+  ENABLE_CONTENT_CITATION_SEARCH: [['TAVILY_API_KEY']],
 };
 
 function walk(dir, out = []) {

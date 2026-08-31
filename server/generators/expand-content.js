@@ -5,13 +5,12 @@ import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
 import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
 
-// Real citation search is opt-in, separate from any one provider's own
-// credentials being set (e.g. GOOGLE_CSE_API_KEY, already live for
-// competitor intelligence) — citation search would silently start spending
-// a shared quota on a different feature without this explicit switch. Which
-// specific provider actually serves the search is decided by
-// search-grounding-providers/index.js, not hard-coded here, so adding a
-// second grounding-capable provider later never requires touching this file.
+// Real citation search is opt-in, separate from TAVILY_API_KEY simply being
+// set — citation search would silently start spending Tavily's quota the
+// moment the key existed, without this explicit switch. Tavily is the sole
+// search-grounding provider (search-grounding-providers/index.js) —
+// deliberately never Google CSE or SerpApi, which stay reserved for real
+// SEO/SERP/keyword-demand intelligence in competitor-providers/.
 const CITATION_SEARCH_ENABLED = process.env.ENABLE_CONTENT_CITATION_SEARCH === 'true';
 
 export const meta = {
@@ -182,21 +181,39 @@ export async function generate({ siteId, params }) {
   // straight to a live page. Fail honestly instead of drafting filler.
   if (focus === 'external-citations') {
     if (!CITATION_SEARCH_ENABLED || !groundingProviderConfigured()) {
-      throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + a configured search-grounding provider) — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true });
+      throw Object.assign(new Error('External citations require real search grounding (ENABLE_CONTENT_CITATION_SEARCH + TAVILY_API_KEY) — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-not-configured' });
     }
     let sources;
     try {
       sources = await searchGroundedSources(query || fetched.analysis.title, 3);
     } catch (err) {
+      // Honest failure, not a system fault: Tavily being unavailable/out of
+      // quota is an external-dependency state, not a bug in this code, so
+      // this is marked `refusal: true` explicitly rather than relying on
+      // the 400-499 status-range heuristic auto-remediation.js's isRefusal
+      // otherwise infers status from — a non-4xx status here (e.g. a 502
+      // gateway-style code) would otherwise get scored as a FAULT and could
+      // trip the unattended run's circuit breaker for something that isn't
+      // this generator's own failure. No retry here either: Tavily's own
+      // adapter already applies its strict daily cap and maps quota/outage
+      // errors distinctly (see search-grounding-providers/tavily.js) —
+      // retrying here would just spend more of that same budget for no
+      // better odds of success.
       const { message } = safeMessage('expand-content.searchSources', err, 'Citation search is temporarily unavailable — try again shortly, or draft this section without external citations.');
-      throw Object.assign(new Error(message), { status: 502, userFacing: true });
+      throw Object.assign(new Error(message), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-unavailable' });
     }
     if (!sources.length) {
-      throw Object.assign(new Error('No real source candidates found for this page/query — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true });
+      throw Object.assign(new Error('No real source candidates found for this page/query — refusing to draft an ungrounded citations section.'), { status: 400, userFacing: true, refusal: true, reason: 'citation-grounding-no-sources' });
     }
     system = SYSTEM_CITATIONS_GROUNDED;
+    // `content` (Tavily's own extracted snippet, when present) gives the
+    // model something to actually ground body prose in beyond a bare title
+    // — without it, the LLM has no way to know a candidate is genuinely
+    // relevant versus just plausibly-titled, and SYSTEM_CITATIONS_GROUNDED's
+    // "omit the link rather than force an irrelevant citation" instruction
+    // has no real signal to act on.
     user += `\n\nReal source candidates (cite ONLY from this list, using these exact URLs):\n` +
-      sources.map((s) => `- ${s.title}: ${s.url}`).join('\n');
+      sources.map((s) => `- ${s.title}: ${s.url}${s.content ? `\n  Excerpt: ${s.content}` : ''}`).join('\n');
   }
 
   let sections;
