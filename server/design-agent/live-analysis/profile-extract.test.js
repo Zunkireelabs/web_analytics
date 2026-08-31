@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography } from './profile-extract.js';
+import { correctBodyTypography, bodySamples } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -80,5 +80,59 @@ describe('correctBodyTypography', () => {
     const { body, corrected } = correctBodyTypography(REAL_BODY, []);
     assert.equal(body, REAL_BODY);
     assert.equal(corrected, false);
+  });
+});
+
+describe('bodySamples excludes site chrome', () => {
+  const page = (role, classes) => ({
+    sections: [{ role, textHierarchy: [{ role: 'body', classes, style: { fontSize: '14px' } }] }],
+  });
+
+  test('footer, header and nav paragraphs are not body-copy evidence', () => {
+    const pages = [page('footer', 'a'), page('header', 'b'), page('nav', 'c'), page('content', 'd')];
+    assert.deepEqual(bodySamples(pages).map((s) => s.classes), ['d']);
+  });
+
+  test('a footer class cannot win on frequency alone', () => {
+    // The real regression: `text-navy-200 ... max-w-sm` is light text sized for
+    // a dark navy footer, appears on every page, and beat the true body class
+    // 6-to-3 before chrome was excluded. It would have rendered generated
+    // paragraphs near-invisible on a white content background.
+    const footer = (n) => Array.from({ length: n }, () => page('footer', 'text-navy-200 text-small leading-relaxed'));
+    const content = (n) => Array.from({ length: n }, () => page('content', 'text-gray-600 leading-relaxed'));
+    const { body } = correctBodyTypography(EYEBROW, bodySamples([...footer(6), ...content(3)]));
+    assert.equal(body, 'text-gray-600 leading-relaxed');
+  });
+});
+
+describe('correctBodyTypography picks the central class, not the longest or the first', () => {
+  const at = (size, classes) => ({ role: 'body', classes, style: { fontSize: size, textTransform: 'none', letterSpacing: 'normal' } });
+
+  test('recurring tokens beat per-section emphasis modifiers', () => {
+    // Every one of these is unique as a whole string, so whole-string counting
+    // has nothing to go on and falls back to insertion order. `text-gray-600`
+    // and `leading-relaxed` recur across all of them; the size and width
+    // modifiers do not.
+    const samples = [
+      at('24px', 'text-xl md:text-2xl text-gray-900 leading-relaxed font-normal'),
+      at('20px', 'text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl'),
+      at('18px', 'text-lg text-gray-600 mb-8 max-w-2xl mx-auto'),
+      at('16px', 'text-gray-600 leading-relaxed'),
+    ];
+    assert.equal(correctBodyTypography(EYEBROW, samples).body, 'text-gray-600 leading-relaxed');
+  });
+
+  test('whitespace variants of one class are treated as the same class', () => {
+    const samples = [at('16px', 'text-gray-600  leading-relaxed'), at('16px', ' text-gray-600 leading-relaxed ')];
+    assert.equal(correctBodyTypography(EYEBROW, samples).body, 'text-gray-600 leading-relaxed');
+  });
+
+  test('a 24px pull-quote does not win just by being listed first', () => {
+    const samples = [
+      at('24px', 'text-xl md:text-2xl text-gray-900 leading-relaxed font-normal italic'),
+      at('16px', 'text-gray-600 leading-relaxed'),
+      at('16px', 'pt-4 text-gray-600 leading-relaxed'),
+    ];
+    assert.equal(correctBodyTypography(EYEBROW, samples).body, 'text-gray-600 leading-relaxed');
   });
 });

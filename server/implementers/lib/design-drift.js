@@ -1061,6 +1061,36 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
         // DESIGN_AGENT defaults untouched — this branch already re-validated
         // placeholders before verifying, so 'invalid-placeholders' here would
         // only mean the LIVE check disagreed, which should never happen.
+        //
+        // 'body-slot-is-label' is the one verdict that must NOT fall through.
+        // Every other failure here means "we could not confirm this template",
+        // and the DESIGN_AGENT default is defensible for those. This one means
+        // the opposite — we DID confirm it, and it is wrong: the body slot
+        // carries the site's eyebrow/kicker styling, so generated prose ships
+        // as a caption. Falling through stamped it `verifiedBy: design-agent`
+        // anyway, which is exactly how the original incident's five templates
+        // came to be marked verified while rendering every paragraph wrong.
+        // The defect is in the PROFILE (typography.body is a label class), not
+        // in this projection, so re-deriving the profile is the real repair —
+        // and correctBodyTypography now rejects a label-styled body pick.
+        if (checked.reason === 'body-slot-is-label') {
+          const alreadyQueued = await findQueuedDerivation(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
+          if (!alreadyQueued) {
+            await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl }).catch((err) => {
+              console.error(`[design-drift] could not queue design-profile re-derivation for site ${site.id}:`, err.message);
+            });
+          }
+          return {
+            ok: false,
+            reason: 'body-slot-is-label',
+            detail: `This site's design profile describes its body text with a class the live CSS defines as a label, `
+              + `so a generated "${actionType}" block would render as a caption rather than prose. ${checked.error} `
+              + 'The Design Agent has been queued to re-derive the site\'s typography; this stays blocked until it does, '
+              + 'deliberately — shipping no block is recoverable, shipping every paragraph as a label is not.',
+            template: null,
+            componentKey,
+          };
+        }
       }
 
       const stamped = verifiedBy

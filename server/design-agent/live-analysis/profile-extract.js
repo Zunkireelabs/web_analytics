@@ -45,10 +45,19 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
 // Every observed body-role text sample across every page, as
 // { classes, style, text } — the ground truth the model's `typography.body`
 // pick is checked against below.
-function bodySamples(segmentedPages) {
+// Site chrome is not a model for page body copy. A footer paragraph on this
+// platform's own first client is `text-navy-200 ... max-w-sm` — light text
+// sized for a dark navy footer — and it appears on every page, so it wins any
+// frequency contest against the real prose class while rendering nearly
+// invisible on a white content background. Header/nav are excluded for the
+// same reason.
+const CHROME_ROLES = new Set(['header', 'nav', 'footer']);
+
+export function bodySamples(segmentedPages) {
   const out = [];
   for (const page of segmentedPages || []) {
     for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
       for (const item of section.textHierarchy || []) {
         if (item.role === 'body' && item.classes) out.push(item);
       }
@@ -82,20 +91,65 @@ function isLabelStyle(style) {
 // default. Shipping no styling is recoverable; shipping every paragraph on a
 // customer's site as a tiny uppercase label is what this exists to prevent.
 export function correctBodyTypography(chosen, samples) {
-  const matching = samples.filter((s) => s.classes === chosen);
-  const chosenIsLabel = matching.length > 0 && matching.every((s) => isLabelStyle(s.style));
-  if (chosen && !chosenIsLabel) return { body: chosen, corrected: false };
+  // Nothing captured means nothing to check against — not evidence the pick is
+  // wrong. Every other path below has real samples to reason from.
+  if (!samples.length) return { body: chosen, corrected: false };
+
+  // The pick stands only when it was actually OBSERVED and observed as prose.
+  // A class the model returned that appears in no body sample is unconfirmed:
+  // the prompt requires every value to be copied from the supplied data, so an
+  // unobserved one is either from another role or invented, and neither earns
+  // the benefit of the doubt when a verified candidate is available.
+  const matching = samples.filter((s) => normalizeClasses(s.classes) === normalizeClasses(chosen || ''));
+  if (chosen && matching.length && !matching.every((s) => isLabelStyle(s.style))) {
+    return { body: chosen, corrected: false };
+  }
 
   const bodyLike = samples.filter((s) => !isLabelStyle(s.style));
   if (!bodyLike.length) return { body: null, corrected: true };
 
-  // Most frequently observed body-like class wins — same "most consistent"
-  // rule the prompt asks for, now applied to a candidate set that cannot
-  // contain a label.
-  const counts = new Map();
-  for (const s of bodyLike) counts.set(s.classes, (counts.get(s.classes) || 0) + 1);
-  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  // Scored by TOKEN centrality, not by how often a whole class string repeats.
+  // Counting whole strings barely works: real sites give almost every
+  // paragraph its own combination of one-off modifiers (`max-w-2xl mx-auto`,
+  // `line-clamp-2`, `mb-8`), so nearly every candidate is unique and the
+  // "winner" is decided by map insertion order — which is how the first
+  // version of this picked a 24px pull-quote.
+  //
+  // The site's actual body convention is the tokens that recur ACROSS those
+  // variants. On this platform's first client, `text-gray-600` and
+  // `leading-relaxed` appear on the 16px, 18px and 20px paragraphs alike,
+  // while the size and width modifiers differ every time — so the class made
+  // of only high-frequency tokens is the convention, and the long ones are
+  // that convention plus per-section emphasis.
+  const df = new Map();
+  for (const s of bodyLike) {
+    for (const token of new Set(normalizeClasses(s.classes).split(' '))) {
+      df.set(token, (df.get(token) || 0) + 1);
+    }
+  }
+
+  const candidates = new Map();
+  for (const s of bodyLike) {
+    const norm = normalizeClasses(s.classes);
+    if (!candidates.has(norm)) candidates.set(norm, 0);
+    candidates.set(norm, candidates.get(norm) + 1);
+  }
+
+  const best = [...candidates.entries()]
+    .map(([classes, count]) => {
+      const tokens = classes.split(' ');
+      const meanDf = tokens.reduce((sum, t) => sum + df.get(t), 0) / tokens.length;
+      return { classes, count, meanDf, size: tokens.length };
+    })
+    // Most central first; then the one actually seen most often; then the
+    // shorter one, which is the convention without a section's extra emphasis.
+    .sort((a, b) => b.meanDf - a.meanDf || b.count - a.count || a.size - b.size)[0].classes;
+
   return { body: best, corrected: best !== chosen };
+}
+
+function normalizeClasses(classes) {
+  return classes.trim().split(/\s+/).filter(Boolean).join(' ');
 }
 
 function compactPageForPrompt(page) {

@@ -124,10 +124,16 @@ export async function deriveNewContentContract(site, { dir, extension, ref } = {
   for (const path of paths) {
     let raw;
     try {
-      raw = await readFile(site, path, ref || site.default_branch || undefined);
+      // getFileContent resolves to { content, sha } — or null for a 404 — NOT
+      // a bare string. Unwrapping here rather than at each use is what keeps
+      // frontMatterKeys' contract "takes file text"; handing it the envelope
+      // threw TypeError: raw.match is not a function on the first real call.
+      const file = await readFile(site, path, ref || site.default_branch || undefined);
+      raw = typeof file === 'string' ? file : file?.content;
     } catch {
       continue; // one unreadable sibling is not evidence about the directory
     }
+    if (!raw) continue; // 404 or empty: same "no evidence" case as a failed read
     const keys = frontMatterKeys(raw);
     if (!keys.length) continue;
     keySets.push(keys);

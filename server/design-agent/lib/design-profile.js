@@ -108,11 +108,19 @@ export function isProfileUsable(profile) {
 function projectFaq(profile) {
   const t = profile.typography;
   const acc = profile.components?.accordion;
-  const wrapperCls = cx(profile.layout?.container, profile.spacing?.section, profile.components?.list?.divider);
+  const baseCls = cx(profile.layout?.container, profile.spacing?.section);
 
   if (acc?.trigger && acc?.panel) {
+    // list.divider is deliberately NOT merged in here. The accordion carries
+    // its own wrapper convention, and a site whose list divider differs from
+    // its accordion's (divide-gray-100 vs divide-gray-200 — the values in this
+    // module's own test fixture) ends up with two competing divide-* colours
+    // on one element, resolved by whichever the framework happens to emit
+    // last. That is the same class-merge bug this file already fixes for
+    // internal-links' anchor; the divider belongs only to the <dl> fallback
+    // below, which is the branch that actually renders a divided list.
     return {
-      wrapper: `<div${attr(cx(wrapperCls, acc.wrapper))} x-data="{ activeIndex: null }">\n{{ROWS}}\n</div>`,
+      wrapper: `<div${attr(cx(baseCls, acc.wrapper))} x-data="{ activeIndex: null }">\n{{ROWS}}\n</div>`,
       row: [
         `  <div${attr(cx(acc.item, profile.spacing?.itemGap))}>`,
         `    <button @click="activeIndex = activeIndex === {{INDEX}} ? null : {{INDEX}}"${attr(cx(acc.trigger, t.heading.item))}>{{QUESTION}}</button>`,
@@ -123,7 +131,7 @@ function projectFaq(profile) {
   }
 
   return {
-    wrapper: `<dl${attr(wrapperCls)}>\n{{ROWS}}\n</dl>`,
+    wrapper: `<dl${attr(cx(baseCls, profile.components?.list?.divider))}>\n{{ROWS}}\n</dl>`,
     row: `  <dt${attr(t.heading.item)}>{{QUESTION}}</dt>\n  <dd${attr(cx(t.body, profile.spacing?.itemGap))}>{{ANSWER}}</dd>`,
   };
 }
@@ -140,7 +148,18 @@ function projectQaContent(profile) {
     wrapper: `<div${attr(wrapperCls)}>\n{{ROWS}}\n</div>`,
     row: [
       `  <details${attr(cx(profile.components?.card?.wrapper, profile.spacing?.itemGap))}>`,
-      `    <summary${attr(t.heading.item)}>{{QUESTION}}</summary>`,
+      // The <h3> is load-bearing, not decoration. qa-content exists to fix
+      // "Missing question-style headings", and the only thing that measures
+      // that is page-content.js's questionHeadingCount: h1/h2/h3 whose text
+      // ends in "?". A bare <summary> is not a heading tag and never counts,
+      // so a projected template — the path EVERY site with a design profile
+      // takes — shipped Q&A that could never satisfy the check that drafted
+      // it, silently, forever. marker-merge.js's DEFAULT_QA_TEMPLATE nests
+      // the h3 for exactly this reason and says so; the projection has to
+      // match that structure, not just its styling.
+      '    <summary>',
+      `      <h3${attr(t.heading.item)}>{{QUESTION}}</h3>`,
+      '    </summary>',
       `    <div${attr(t.body)}>{{ANSWER}}</div>`,
       '  </details>',
     ].join('\n'),
@@ -260,10 +279,22 @@ export function projectAllComponentTemplates(profile, actionTypes = projectableA
 // A real call-to-action in the site's own button styling. Falls back to null
 // (caller keeps its markdown link) when the site has no button convention —
 // inventing one would be exactly the guessing this module exists to stop.
+// `label` is raw LLM output (landing-page.js's content.cta) and this is the
+// one place in the projection layer that splices a model-authored string into
+// raw HTML. Every comparable substitution site — marker-merge.js's QUESTION /
+// ANSWER / ANCHOR_TEXT fills — escapes first; this one did not, so a CTA
+// containing a `<` or a bare `&` (ordinary LLM output, e.g. "Save 20% & book")
+// emitted a broken or arbitrary inline tag into a live customer page. Kept as
+// a local copy rather than imported: design-agent must not depend on
+// implementers, and this is four replaces.
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export function projectCta(profile, { label, href = '#' } = {}) {
   const cls = profile?.components?.button?.primary;
   if (!cls || !label) return null;
-  return `<a href="${href}" class="${cls}">${label}</a>`;
+  return `<a href="${escapeHtml(href)}" class="${cls}">${escapeHtml(label)}</a>`;
 }
 
 // One content block in the site's card convention, with its markdown body

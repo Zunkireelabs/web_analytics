@@ -48,9 +48,13 @@ function depsFor(files, { treeError = null, readError = null } = {}) {
       if (treeError) throw new Error(treeError);
       return { files: Object.keys(files), truncated: false };
     },
+    // Mirrors the REAL getFileContent contract deliberately: { content, sha },
+    // or null when the file isn't on this ref. Returning a bare string here is
+    // what let the module ship calling .match() on the envelope object — the
+    // mock was the only thing that made it look like it worked.
     getFileContent: async (_site, path) => {
       if (readError) throw new Error(readError);
-      return files[path];
+      return files[path] === undefined ? null : { content: files[path], sha: 'sha-fake' };
     },
   };
 }
