@@ -136,6 +136,68 @@ function extractBlocksInPage() {
     return plain || candidates[0];
   }
 
+  function fontPx(el) {
+    return parseFloat(window.getComputedStyle(el).fontSize) || 0;
+  }
+
+  // A block's heading is its VISUALLY DOMINANT heading, not its first one in
+  // DOM order. Some sites mark the eyebrow above a section title as a real
+  // low-level heading (an <h4>/<h6>, often for a11y outline reasons), and that
+  // eyebrow comes first — so first-match recorded the kicker's classes as this
+  // site's heading convention and every generated <h2> inherited them.
+  //
+  // Deliberately NOT judged with isLabelLike: a heading may legitimately be
+  // uppercase or wide-tracked (that is an ordinary display-type convention),
+  // so the label test that is correct for body copy would reject real headings
+  // here. Rendered size is the framework-agnostic signal that actually
+  // separates a kicker from the title it sits above.
+  function pickHeading(el) {
+    const candidates = [...el.querySelectorAll('h1, h2, h3, h4')].slice(0, 12);
+    if (!candidates.length) return null;
+    // reduce keeps the FIRST of equal-sized candidates, so DOM order still
+    // breaks ties between two headings of genuinely equal weight.
+    return candidates.reduce((best, c) => (fontPx(c) > fontPx(best) ? c : best), candidates[0]);
+  }
+
+  // The inverse of pickLink, and the reason it has to exist: `cta` fed
+  // components.button.primary, which projectCta stamps onto every generated
+  // call-to-action sitewide. Taking the block's first <a>/<button> meant a
+  // breadcrumb, a logo anchor, a "read more" text link or a nav toggle could
+  // become the site's button convention.
+  //
+  // Returns null when the block has no genuinely button-like element, instead
+  // of falling back to the first candidate. That is the point: no button
+  // convention recorded means projectCta returns null and the caller keeps its
+  // own plain markdown link, which is recoverable. A wrong one means every CTA
+  // this platform ever writes for the site renders as something that is not a
+  // button, which is not.
+  function isChromeControl(el) {
+    // Menu toggles, search and close buttons are button-shaped by definition
+    // and carry no CTA styling worth copying.
+    if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls')) return true;
+    const cls = typeof el.className === 'string' ? el.className : '';
+    return /\b(toggle|hamburger|menu|close|search|dismiss|carousel|slider|tab)\b/i.test(cls);
+  }
+
+  function pickCta(el) {
+    const candidates = [...el.querySelectorAll('a, button')].slice(0, 16);
+    return candidates.find((c) => {
+      if (isChromeControl(c)) return false;
+      // A real CTA is labelled. Icon-only controls have no text to speak of,
+      // and their padding/sizing is wrong for a text button anyway.
+      const text = (c.textContent || '').trim();
+      if (text.length < 2 || text.length > 60) return false;
+      const named = /\b(btn|button|cta)\b/i.test(typeof c.className === 'string' ? c.className : '');
+      if (named) return true;
+      // Otherwise it has to LOOK like a button: laid out as a box (not inline
+      // running text) and visually bounded by a fill, a border, or a radius.
+      const cs = window.getComputedStyle(c);
+      if (cs.display === 'inline') return false;
+      const filled = cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+      return filled || parseFloat(cs.borderTopWidth) > 0 || parseFloat(cs.borderRadius) > 0;
+    }) || null;
+  }
+
   function classesOf(el) {
     return (el && el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
   }
@@ -155,9 +217,9 @@ function extractBlocksInPage() {
   for (const el of topLevel) {
     const rect = el.getBoundingClientRect();
     if (rect.height < 4) continue; // invisible/collapsed — not a real block
-    const heading = el.querySelector('h1, h2, h3, h4');
+    const heading = pickHeading(el);
     const body = pickBody(el);
-    const cta = el.querySelector('a, button');
+    const cta = pickCta(el);
     const accordion = el.querySelector('details, [class*="accordion" i]');
     const accordionTrigger = accordion?.querySelector('summary, button, [class*="trigger" i]') || null;
     const accordionPanel = accordion?.querySelector('[class*="panel" i], [class*="content" i]') || null;

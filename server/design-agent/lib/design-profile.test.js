@@ -113,6 +113,12 @@ describe('projections use the site\'s real design language', () => {
       assert.ok(wrapper.includes(token), `wrapper carries ${token}`);
     }
     assert.doesNotMatch(wrapper, /divide-y[\s\S]*divide-y/, 'no duplicated token');
+    // The accordion's OWN divider wins outright — list.divider is not merged
+    // in alongside it. Both slots carry a divide-* colour, and shipping
+    // `divide-gray-200 divide-gray-100` on one element leaves the rule that
+    // actually applies up to whichever the framework emits last. Token
+    // dedupe cannot save this: the two tokens are genuinely different.
+    assert.ok(!wrapper.includes('divide-gray-100'), 'list.divider is not merged into the accordion wrapper');
     assert.match(row, /w-full flex justify-between text-left/);
     assert.match(row, /text-lg font-medium text-gray-900/, 'question uses the site item-heading style');
     assert.match(row, /text-gray-600 leading-relaxed/, 'answer uses the site body style');
@@ -124,6 +130,21 @@ describe('projections use the site\'s real design language', () => {
     assert.match(row, /<dt class="faq-question">/);
     assert.match(row, /<dd class="body-text">/);
     assert.doesNotMatch(row, /x-show|@click/, 'no JS behaviour invented for a site that has none');
+  });
+
+  test('qa-content nests a real heading tag, so the check it exists to fix can pass', () => {
+    // qa-content is drafted to fix "Missing question-style headings", and the
+    // only measurement of that is page-content.js's questionHeadingCount:
+    // h1/h2/h3 whose text ends in "?". A <summary> is not a heading tag. When
+    // the projection dropped the <h3>, every site WITH a design profile — the
+    // default autonomous path — shipped Q&A that could never satisfy the
+    // recommendation that generated it, while the no-profile default template
+    // did it correctly. Structure, not just styling, is part of the contract.
+    for (const profile of [TAILWIND_PROFILE, PLAIN_PROFILE]) {
+      const { row } = projectComponentTemplate(profile, 'qa-content');
+      assert.match(row, /<summary[^>]*>\s*<h3[^>]*>\{\{QUESTION\}\}<\/h3>\s*<\/summary>/,
+        'the question sits in an <h3> inside the <summary>');
+    }
   });
 
   test('internal-links uses the site\'s list pattern and link colour', () => {
@@ -243,6 +264,17 @@ describe('content-block projections for markdown renderers', () => {
 
     test('returns null with no label rather than an empty button', () => {
       assert.equal(projectCta(WITH_PATTERNS, { label: '' }), null);
+    });
+
+    test('escapes the label — it is raw model output going into raw HTML', () => {
+      // content.cta comes straight from the landing-page generator's LLM call.
+      // An ampersand is ordinary copy, and a stray tag is ordinary LLM noise;
+      // unescaped, the first produces invalid markup and the second injects an
+      // arbitrary element into a live customer page. Every sibling
+      // substitution site (marker-merge.js) already escapes.
+      const html = projectCta(WITH_PATTERNS, { label: 'Save 20% & <b>book</b>' });
+      assert.match(html, /&amp;/);
+      assert.ok(!html.includes('<b>'), 'no raw tag from model output survives into the markup');
     });
   });
 

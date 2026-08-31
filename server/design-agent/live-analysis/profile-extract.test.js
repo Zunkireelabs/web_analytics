@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, correctLinkTypography } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -134,5 +134,74 @@ describe('correctBodyTypography picks the central class, not the longest or the 
       at('16px', 'pt-4 text-gray-600 leading-relaxed'),
     ];
     assert.equal(correctBodyTypography(EYEBROW, samples).body, 'text-gray-600 leading-relaxed');
+  });
+});
+
+describe('correctHeadingTypography', () => {
+  const h = (tag, classes, fontSize = '36px') => ({
+    role: 'heading', tag, classes, style: { fontSize, textTransform: 'none', letterSpacing: 'normal' },
+  });
+  const page = (items, role = 'content') => ({ sections: [{ role, textHierarchy: items }] });
+
+  test('a section heading comes from h2, not from the page h1', () => {
+    // The real defect: this site's typography.heading.section was its homepage
+    // <h1> class, so every heading in an injected expand-content block rendered
+    // at hero size, visibly larger than the real section headings around it.
+    const H1 = 'text-4xl md:text-5xl lg:text-6xl font-normal text-gray-900 leading-tight mb-8';
+    const H2 = 'text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900';
+    const pages = [page([h('h1', H1, '60px'), h('h2', H2)]), page([h('h2', H2)]), page([h('h2', H2)])];
+    const { heading, corrected } = correctHeadingTypography({ section: H1, item: null }, headingSamplesByLevel(pages));
+    assert.equal(heading.section, H2);
+    assert.ok(corrected.includes('section'));
+  });
+
+  test('an item heading prefers h3, falling back to h2 when the site has none', () => {
+    const H2 = 'text-3xl font-normal text-gray-900';
+    const H3 = 'text-xl md:text-2xl font-normal text-gray-900 mb-3';
+    const withH3 = headingSamplesByLevel([page([h('h2', H2), h('h3', H3, '24px')])]);
+    assert.equal(correctHeadingTypography({}, withH3).heading.item, H3);
+
+    const noH3 = headingSamplesByLevel([page([h('h2', H2)])]);
+    assert.equal(correctHeadingTypography({}, noH3).heading.item, H2);
+  });
+
+  test('an uppercase eyebrow marked up as an h2 is not a heading candidate', () => {
+    const EYEBROW_H2 = 'text-sm uppercase tracking-widest text-gray-500 font-medium mb-4';
+    const H2 = 'text-3xl md:text-4xl font-normal text-gray-900';
+    const pages = [page([
+      { role: 'heading', tag: 'h2', classes: EYEBROW_H2, style: { fontSize: '14px', textTransform: 'uppercase', letterSpacing: '2px' } },
+      h('h2', H2),
+    ])];
+    assert.equal(correctHeadingTypography({}, headingSamplesByLevel(pages)).heading.section, H2);
+  });
+
+  test('chrome headings are excluded, and no evidence leaves the pick alone', () => {
+    const pages = [page([h('h2', 'footer-heading')], 'footer')];
+    const { heading, corrected } = correctHeadingTypography({ section: 'kept', item: 'kept-too' }, headingSamplesByLevel(pages));
+    assert.deepEqual(heading, { section: 'kept', item: 'kept-too' });
+    assert.deepEqual(corrected, []);
+  });
+});
+
+describe('correctLinkTypography', () => {
+  const BUTTON = 'inline-flex items-center justify-center px-7 py-3.5 bg-zunkiree-600 text-white font-medium';
+  const TEXT_LINK = 'text-zunkiree-600 hover:underline';
+
+  test('a link class identical to the primary button is a CTA, not a link style', () => {
+    // internal-links rendered every related link as a full-width filled button.
+    const { link, corrected } = correctLinkTypography(BUTTON, { button: { primary: BUTTON, secondary: TEXT_LINK } });
+    assert.equal(link, TEXT_LINK);
+    assert.equal(corrected, true);
+  });
+
+  test('null when the site has no secondary treatment — never an invented one', () => {
+    const { link } = correctLinkTypography(BUTTON, { button: { primary: BUTTON, secondary: null } });
+    assert.equal(link, null);
+  });
+
+  test('a genuine inline link style is left alone', () => {
+    const { link, corrected } = correctLinkTypography(TEXT_LINK, { button: { primary: BUTTON, secondary: TEXT_LINK } });
+    assert.equal(link, TEXT_LINK);
+    assert.equal(corrected, false);
   });
 });

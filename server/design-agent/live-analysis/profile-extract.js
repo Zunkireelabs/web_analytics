@@ -108,44 +108,117 @@ export function correctBodyTypography(chosen, samples) {
   const bodyLike = samples.filter((s) => !isLabelStyle(s.style));
   if (!bodyLike.length) return { body: null, corrected: true };
 
-  // Scored by TOKEN centrality, not by how often a whole class string repeats.
-  // Counting whole strings barely works: real sites give almost every
-  // paragraph its own combination of one-off modifiers (`max-w-2xl mx-auto`,
-  // `line-clamp-2`, `mb-8`), so nearly every candidate is unique and the
-  // "winner" is decided by map insertion order — which is how the first
-  // version of this picked a 24px pull-quote.
-  //
-  // The site's actual body convention is the tokens that recur ACROSS those
-  // variants. On this platform's first client, `text-gray-600` and
-  // `leading-relaxed` appear on the 16px, 18px and 20px paragraphs alike,
-  // while the size and width modifiers differ every time — so the class made
-  // of only high-frequency tokens is the convention, and the long ones are
-  // that convention plus per-section emphasis.
+  const best = pickCentralClass(bodyLike);
+  return { body: best, corrected: best !== chosen };
+}
+
+// The most REPRESENTATIVE class string in a set of samples, scored by token
+// centrality rather than by how often a whole class string repeats.
+//
+// Counting whole strings barely works: real sites give almost every element
+// its own combination of one-off modifiers (`max-w-2xl mx-auto`,
+// `line-clamp-2`, `mb-8`), so nearly every candidate is unique and the
+// "winner" comes down to map insertion order — which is how an early version
+// of this picked a 24px pull-quote as the site's body copy.
+//
+// The convention is the tokens that recur ACROSS those variants. On this
+// platform's first client, `text-gray-600` and `leading-relaxed` appear on the
+// 16px, 18px and 20px paragraphs alike while the size and width modifiers
+// differ every time — so the class made of only high-frequency tokens is the
+// convention, and the longer ones are that convention plus local emphasis.
+function pickCentralClass(samples) {
   const df = new Map();
-  for (const s of bodyLike) {
+  for (const s of samples) {
     for (const token of new Set(normalizeClasses(s.classes).split(' '))) {
       df.set(token, (df.get(token) || 0) + 1);
     }
   }
 
   const candidates = new Map();
-  for (const s of bodyLike) {
+  for (const s of samples) {
     const norm = normalizeClasses(s.classes);
-    if (!candidates.has(norm)) candidates.set(norm, 0);
-    candidates.set(norm, candidates.get(norm) + 1);
+    candidates.set(norm, (candidates.get(norm) || 0) + 1);
   }
 
-  const best = [...candidates.entries()]
+  return [...candidates.entries()]
     .map(([classes, count]) => {
       const tokens = classes.split(' ');
       const meanDf = tokens.reduce((sum, t) => sum + df.get(t), 0) / tokens.length;
       return { classes, count, meanDf, size: tokens.length };
     })
     // Most central first; then the one actually seen most often; then the
-    // shorter one, which is the convention without a section's extra emphasis.
+    // shorter one, which is the convention without an element's extra emphasis.
     .sort((a, b) => b.meanDf - a.meanDf || b.count - a.count || a.size - b.size)[0].classes;
+}
 
-  return { body: best, corrected: best !== chosen };
+// typography.link is meant to be the site's INLINE link style — what a link
+// inside a sentence or a related-links list looks like. When it comes back
+// byte-identical to components.button.primary, it is not that: capture.js used
+// to take each block's first <a>, which in a hero is the CTA button, so the
+// profile learned a button as the site's link convention and internal-links
+// rendered every related link as a full-width filled button.
+//
+// capture.js no longer picks that way, but a profile derived before the fix
+// still carries it, and this is cheap and unambiguous. The secondary button —
+// the site's own low-emphasis text link treatment — is the honest replacement
+// when there is one; null otherwise, which drops internal-links back to body
+// typography rather than inventing a link style.
+export function correctLinkTypography(chosen, components = {}) {
+  const primary = components.button?.primary;
+  if (!chosen || !primary || normalizeClasses(chosen) !== normalizeClasses(primary)) {
+    return { link: chosen, corrected: false };
+  }
+  return { link: components.button?.secondary || null, corrected: true };
+}
+
+// Heading classes observed on real heading TAGS, grouped by level, excluding
+// site chrome. capture.js records the tag it read each style from, which is
+// the only thing that reliably separates "the page title" from "a section
+// title" — the two look similar in a flat class list and are very different
+// in size.
+export function headingSamplesByLevel(segmentedPages) {
+  const byLevel = new Map();
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        if (!/^h[1-6]$/.test(item.tag || '') || !item.classes) continue;
+        if (isLabelStyle(item.style)) continue; // an uppercase eyebrow rendered as an <h2>
+        if (!byLevel.has(item.tag)) byLevel.set(item.tag, []);
+        byLevel.get(item.tag).push(item);
+      }
+    }
+  }
+  return byLevel;
+}
+
+// Same failure as typography.body, one level up. A generated block's <h2> is a
+// SECTION heading, but nothing checked which tag a candidate class came from,
+// so this platform's first client had typography.heading.section set to its
+// homepage <h1> style (`text-4xl md:text-5xl lg:text-6xl`). Every heading in
+// an injected expand-content block therefore rendered at hero size — visibly
+// larger than the real section headings above and below it on the same page.
+//
+// h2 is the authority for a section heading and h3 for a repeating item
+// heading (an FAQ question), falling back to h2 when a site has no h3. A level
+// with no samples leaves the model's pick alone: no evidence is not a defect.
+export function correctHeadingTypography(chosen = {}, byLevel) {
+  const out = { ...chosen };
+  const corrected = [];
+
+  const sectionSamples = byLevel.get('h2');
+  if (sectionSamples?.length) {
+    const best = pickCentralClass(sectionSamples);
+    if (best !== chosen.section) { out.section = best; corrected.push('section'); }
+  }
+
+  const itemSamples = byLevel.get('h3')?.length ? byLevel.get('h3') : byLevel.get('h2');
+  if (itemSamples?.length) {
+    const best = pickCentralClass(itemSamples);
+    if (best !== chosen.item) { out.item = best; corrected.push('item'); }
+  }
+
+  return { heading: out, corrected };
 }
 
 function normalizeClasses(classes) {
@@ -189,16 +262,35 @@ export async function extractDesignProfile(segmentedPages, { siteId, generatorId
     );
   }
 
+  const { heading, corrected: headingsCorrected } = correctHeadingTypography(
+    typography.heading || {}, headingSamplesByLevel(segmentedPages),
+  );
+  for (const slot of headingsCorrected) {
+    console.warn(
+      `[design-agent] site ${siteId}: typography.heading.${slot} was not the class this site uses on its `
+      + `${slot === 'section' ? 'h2' : 'h3'} elements — corrected to "${heading[slot]}".`,
+    );
+  }
+
+  const components = extracted.components || {};
+  const { link, corrected: linkCorrected } = correctLinkTypography(typography.link || null, components);
+  if (linkCorrected) {
+    console.warn(
+      `[design-agent] site ${siteId}: typography.link was identical to components.button.primary `
+      + `— that is a CTA button, not an inline link style. Using ${link ? `"${link}"` : 'null'} instead.`,
+    );
+  }
+
   return {
     version: DESIGN_PROFILE_VERSION,
     site: { pagesAnalyzed: pages.map((p) => p.url) },
     styling: extracted.styling || 'unknown',
     framework: extracted.framework || null,
-    typography: { ...typography, body },
+    typography: { ...typography, body, heading, link },
     color: extracted.color || {},
     spacing: extracted.spacing || {},
     layout: extracted.layout || {},
-    components: extracted.components || {},
+    components,
     responsive: extracted.responsive || { breakpoints: [] },
     navigation: extracted.navigation || {},
     pages: (segmentedPages || []).map((p) => ({ url: p.url, pageType: p.pageType, sections: p.sections })),
