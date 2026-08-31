@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -530,5 +530,60 @@ describe('analyzePage — structured-data repair signals', () => {
     assert.equal(a.malformedJsonLdBlocks, 0);
     assert.deepEqual(a.malformedSchemaBlocks, []);
     assert.deepEqual(a.duplicateSchemaTypes, []);
+  });
+});
+
+// Regression coverage for the wrong-@type bug: inferSchemaType used to end in
+// `return 'Article'`, so every page that didn't match one of five hardcoded
+// ENGLISH path words got an Article recommendation — and since the `schema`
+// generator is SAFE-tier (agents/lib/risk-tiers.js) and generators/schema.js
+// only validates field VALUES, that wrong @type could reach a tenant's live
+// site unattended. Abstaining (null) is the only correct answer when the
+// page's own evidence doesn't support a type.
+describe('inferSchemaType', () => {
+  test('abstains rather than guessing Article for a page with no type evidence', () => {
+    assert.equal(inferSchemaType('https://example.com/pricing', []), null);
+    assert.equal(inferSchemaType('https://example.com/services/booking', []), null);
+    assert.equal(inferSchemaType('https://example.com/team', []), null);
+  });
+
+  test('abstains on a non-English site, where no path hint can ever match', () => {
+    // The exact case the English regexes silently mistyped as Article for
+    // every page on the site.
+    assert.equal(inferSchemaType('https://example.de/produkte/wanderstiefel', []), null);
+    assert.equal(inferSchemaType('https://example.fr/a-propos', []), null);
+    assert.equal(inferSchemaType('https://example.jp/よくある質問', []), null);
+  });
+
+  test('abstains on an unparseable URL instead of falling back to a default', () => {
+    assert.equal(inferSchemaType('not a url', []), null);
+  });
+
+  test('a real non-boilerplate @type already on the page wins over everything else', () => {
+    assert.equal(inferSchemaType('https://example.com/blog/post', ['Course']), 'Course');
+    // Site-wide boilerplate says nothing about THIS page, so it is skipped.
+    assert.equal(inferSchemaType('https://example.com/pricing', ['Organization', 'WebSite']), null);
+  });
+
+  test('og:type is real page-declared evidence and works with no English in the URL', () => {
+    assert.equal(inferSchemaType('https://example.de/beitrag/xyz', [], { openGraphType: 'article' }), 'Article');
+    assert.equal(inferSchemaType('https://example.de/xyz', [], { openGraphType: 'product' }), 'Product');
+    // 'website' is the near-universal default and says nothing page-specific.
+    assert.equal(inferSchemaType('https://example.de/xyz', [], { openGraphType: 'website' }), null);
+  });
+
+  test('still returns the types it can honestly derive', () => {
+    assert.equal(inferSchemaType('https://example.com/', []), 'Organization');
+    assert.equal(inferSchemaType('https://example.com/products/hat', []), 'Product');
+    assert.equal(inferSchemaType('https://example.com/faq', []), 'FAQPage');
+    assert.equal(inferSchemaType('https://example.com/blog/post', []), 'Article');
+  });
+});
+
+describe('analyzePage openGraphType', () => {
+  test('captures the page\'s own og:type declaration, null when absent', () => {
+    const withOg = '<html><head><meta property="og:type" content="product"></head><body></body></html>';
+    assert.equal(analyzePage(withOg, 'https://example.com/x').openGraphType, 'product');
+    assert.equal(analyzePage('<html><head></head><body></body></html>', 'https://example.com/x').openGraphType, null);
   });
 });

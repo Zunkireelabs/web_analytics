@@ -86,10 +86,22 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const rankedGroups = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const priorities = priorityByRank(rankedGroups);
   const findings = rankedGroups.map((g, i) => {
-    const target = [...g.pages].sort()[0]; // deterministic id anchor, not a "which is canonical" judgment
     return makeFinding({
-      id: `duplicate-content:${target}`,
-      evidence: { pages: g.pages },
+      // Keyed on the CONTENT HASH the group is defined by, not on a member
+      // page. The id used to be the alphabetically-first page in the group,
+      // which made it unstable under exactly the change this agent exists to
+      // detect: discovering a third URL serving the same content could sort
+      // ahead of the previous anchor, so the same unresolved duplication
+      // re-appeared under a brand-new id — a "new" finding in Action Center,
+      // a broken match against the already-open recommendation, and a lost
+      // history. The hash is what makes these pages one group, so it is the
+      // group's identity: adding or removing a member never changes it, and
+      // two genuinely different duplicate groups can never collide because
+      // different body content is exactly what a different hash means.
+      id: `duplicate-content:hash:${g.hash}`,
+      // Sorted so the same group renders identically run to run regardless of
+      // the order pages happened to come back from the inventory query.
+      evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash },
       whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
       priority: priorities[i],
       recommendedAction: null, // picking a canonical URL / merging pages is a real editorial decision, not draftable content

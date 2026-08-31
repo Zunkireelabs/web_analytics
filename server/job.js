@@ -17,7 +17,7 @@ import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
-import { meta as execReportMeta } from './agents/executive-report.js';
+import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
@@ -168,11 +168,23 @@ export async function runDailyAgentAnalysisForSite(site) {
   const start = daysAgoInTz(site.timezone, 7);
 
   const result = await runOrchestration({ siteId: site.id, start, end, agentIds: DAILY_AGENT_IDS, persistSubAgentRuns: true });
+  // runOrchestration never throws — it catches per agent and records each
+  // one's own status — so writing a hardcoded 'ok' here meant a run in which
+  // EVERY specialist agent failed persisted as a clean, empty result. This is
+  // the daily path, and command-center.js:194 maps this row's status straight
+  // onto what the user sees, so a total outage read as "ran clean, nothing
+  // found" on the screen people actually look at. See orchestrationStatus for
+  // why a sub-agent's own 'insufficient-data' deliberately does not downgrade.
+  const health = orchestrationStatus(result.perAgent, DAILY_AGENT_IDS);
   await saveAgentRun({
     siteId: site.id, agentId: 'executive-report', agentVersion: execReportMeta.version,
-    input: { siteId: site.id, start, end }, status: 'ok',
-    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
-    narrative: result.narrative, error: null, tookMs: null,
+    input: { siteId: site.id, start, end }, status: health.status,
+    facts: {
+      rangeStart: start, rangeEnd: end, sections: result.perAgent,
+      topFindings: result.findings.slice(0, 3), findings: result.findings,
+      failedAgentIds: health.failedAgentIds,
+    },
+    narrative: result.narrative, error: health.message, tookMs: null,
   });
 
   const implementedFindingIds = await getImplementedFindingIds(site.id);

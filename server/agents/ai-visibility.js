@@ -31,6 +31,15 @@ const MAX_PAGES = 20;
 // vocabulary is defined — not guessed downstream from the label text later.
 // null = a real, worthwhile recommendation with no matching draft generator
 // today (a structural fix, not content to draft).
+//
+// `key` is the rule's STABLE identity, and it is what the finding id is built
+// from. The id used to embed the human-readable `label`, which meant editing
+// the wording of a recommendation — even fixing a typo in it — silently
+// re-issued every finding of that kind under a new id: dedupe against the
+// already-open recommendation broke, and the fix history for that page
+// started over. generatorId can't serve as the key (two rules draft via
+// 'faq', two via 'schema'), so each rule carries its own short slug that must
+// never be renamed once shipped, however the label is reworded.
 const RECOMMENDATION_RULES = [
   // schemaScore only ever produces {0,25,50,75,100} (schemaTypes.length * 25)
   // — <=50 (not <50) so exactly 2 schema types still gets the "add more"
@@ -44,15 +53,15 @@ const RECOMMENDATION_RULES = [
   // only lets this fire when the page's schema ALSO lacks real entity
   // coverage, so a page already covered by 2+ genuine entity types stops
   // getting told to add markup that's already there.
-  { test: (c) => c.schema <= 50 && c.entities < 100, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
+  { key: 'add-schema', test: (c) => c.schema <= 50 && c.entities < 100, label: 'Add schema markup (e.g. Article, Product, or Organization as relevant to the page).', generatorId: 'schema' },
   // structuredContentScore only ever produces {0,33,34,66,67,100} — the label
   // requires all three of H1/H2/list-or-table, so "not 100" is the correct
   // condition, not an arbitrary 67 cutoff that misses both 2-of-3 states that
   // land on exactly 67 (H1+H2 no list, or H1+list no H2).
-  { test: (c) => c.structuredContent < 100, label: 'Fix heading structure: exactly one H1, add H2 subheadings, and add a list or table.', generatorId: null },
-  { test: (c) => c.faq === 0, label: 'Add an FAQ section.', generatorId: 'faq' },
-  { test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
-  { test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
+  { key: 'heading-structure', test: (c) => c.structuredContent < 100, label: 'Fix heading structure: exactly one H1, add H2 subheadings, and add a list or table.', generatorId: null },
+  { key: 'add-faq', test: (c) => c.faq === 0, label: 'Add an FAQ section.', generatorId: 'faq' },
+  { key: 'faq-schema', test: (c) => c.faq > 0 && c.faq < 100, label: 'Convert the existing FAQ into FAQPage schema so it\'s machine-readable.', generatorId: 'faq' },
+  { key: 'entity-schema', test: (c) => c.entities < 70, label: 'Add entity schema (Organization, Product, Person, or LocalBusiness) to help AI engines identify what/who the page is about.', generatorId: 'schema' },
   // Retired 2026-08-03: citationReadiness < 60 used to recommend
   // expand-content's 'qa-subheadings' focus — bare question-form
   // subheadings spliced straight into body copy via componentTemplates.
@@ -120,7 +129,7 @@ function llmsTxtFinding({ llmsReadiness, prioritized, priorities, start, end }) 
 }
 
 export function recommendationsFor(categories) {
-  return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ label, generatorId }) => ({ label, generatorId }));
+  return RECOMMENDATION_RULES.filter((r) => r.test(categories)).map(({ key, label, generatorId }) => ({ key, label, generatorId }));
 }
 
 // WebMCP is genuinely optional and forward-looking (low real-world adoption
@@ -185,7 +194,16 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const llmsScore = llmsReadiness ? scoreLlmsReadiness(llmsReadiness) : null;
 
   const pages = fetched.map((f) => {
-    const base = { page: f.page, impressions: f.impressions, topQuery: f.topQuery, schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [] };
+    const base = {
+      page: f.page, impressions: f.impressions, topQuery: f.topQuery,
+      schemaTypes: f.result.ok ? f.result.analysis.schemaTypes : [],
+      // Resolved here, where this page's own fetched analysis is still in
+      // scope, so inferSchemaType can read its og:type evidence — the same
+      // call in the findings loop below only has schemaTypes and would fall
+      // back to the English URL-path hints alone. Stored as the resolved
+      // string (not the analysis object) to keep it out of persisted facts.
+      schemaType: f.result.ok ? inferSchemaType(f.page, f.result.analysis.schemaTypes, f.result.analysis) : null,
+    };
     if (!f.result.ok) return { ...base, score: null, fetchError: f.result.error };
     const categories = scorePageCategories(f.result.analysis);
     const scored = llmsScore != null ? combineScores(categories, llmsScore, geoSignalsScore(f.result.analysis)) : { overall: null, categories };
@@ -216,22 +234,31 @@ export async function run({ siteId, start, end, pageCache, params }) {
     const priority = priorities[i];
     const expectedImpact = { label: impactFromPriority(priority), basis: 'computed', value: p.impressions };
     return p.recommendations.map((rec) => makeFinding({
-      id: `ai-visibility:${p.page}:${rec.label}`,
+      id: `ai-visibility:${rec.key}:${p.page}`,
       evidence: { page: p.page, score: p.score.overall, impressions: p.impressions },
       whyItMatters: `AI Visibility score ${p.score.overall}/100 for this page (${p.impressions} impressions).`,
       priority,
-      recommendedAction: {
-        label: rec.label,
-        generatorId: rec.generatorId,
-        // faq.js needs a real query/topic (schemaType is secondary there —
-        // only used to steer utility-page FAQs like Contact/About away from
-        // generic brand content, see generators/faq.js) — everything else
-        // keeps the page+schemaType shape schema.js actually consumes.
-        params: rec.generatorId === 'faq'
-          ? { page: p.page, query: p.topQuery, schemaType: inferSchemaType(p.page, p.schemaTypes) }
-          : { page: p.page, schemaType: inferSchemaType(p.page, p.schemaTypes) },
-        effort: effortForGenerator(rec.generatorId),
-      },
+      // Same abstention opportunity.js and content-gap.js make: inferSchemaType
+      // now returns null rather than defaulting an unrecognised path to
+      // 'Article', and generators/schema.js throws a 400 without a type — so
+      // offering a schema action with no type would queue a draft that can
+      // only ever fail, on every run, forever. The finding itself is still
+      // true and still reported; it just carries no action. Every other
+      // generator here treats schemaType as optional and is unaffected.
+      recommendedAction: rec.generatorId === 'schema' && !p.schemaType
+        ? null
+        : {
+          label: rec.label,
+          generatorId: rec.generatorId,
+          // faq.js needs a real query/topic (schemaType is secondary there —
+          // only used to steer utility-page FAQs like Contact/About away from
+          // generic brand content, see generators/faq.js) — everything else
+          // keeps the page+schemaType shape schema.js actually consumes.
+          params: rec.generatorId === 'faq'
+            ? { page: p.page, query: p.topQuery, schemaType: p.schemaType }
+            : { page: p.page, schemaType: p.schemaType },
+          effort: effortForGenerator(rec.generatorId),
+        },
       expectedImpact,
     }));
   });

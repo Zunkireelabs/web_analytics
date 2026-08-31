@@ -4,7 +4,7 @@ import { getCommandCenterData } from '../agents/lib/command-center.js';
 import { runOrchestration } from '../agents/orchestrator.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { RECOMMENDATION_AGENT_IDS } from '../agents/lib/insights.js';
-import { meta as execReportMeta } from '../agents/executive-report.js';
+import { meta as execReportMeta, orchestrationStatus } from '../agents/executive-report.js';
 import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { syncWatchlist } from '../agents/lib/watchlist.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
@@ -52,11 +52,21 @@ export async function refreshCommandCenter(siteId, { start, end }) {
   } else {
     result = await runOrchestration({ siteId, start, end, agentIds: RECOMMENDATION_AGENT_IDS, persistSubAgentRuns: true });
   }
+  // Same hardcoded-'ok' bug as job.js's daily path: runOrchestration resolves
+  // even when every agent inside it failed, so a manual refresh during an
+  // outage wrote a row this very route later renders as "complete". The user
+  // pressed Refresh, saw a clean empty report, and had no way to tell it from
+  // a healthy site with no findings.
+  const health = orchestrationStatus(result.perAgent, RECOMMENDATION_AGENT_IDS);
   await saveAgentRun({
     siteId, agentId: 'executive-report', agentVersion: execReportMeta.version,
-    input: { siteId, start, end }, status: 'ok',
-    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
-    narrative: result.narrative, error: null, tookMs: null,
+    input: { siteId, start, end }, status: health.status,
+    facts: {
+      rangeStart: start, rangeEnd: end, sections: result.perAgent,
+      topFindings: result.findings.slice(0, 3), findings: result.findings,
+      failedAgentIds: health.failedAgentIds,
+    },
+    narrative: result.narrative, error: health.message, tookMs: null,
   });
 
   // Opportunity Watchlist syncs on every fresh analysis, same as the daily

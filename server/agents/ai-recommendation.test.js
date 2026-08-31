@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeProviderFacts, computeBlendedVisibilityPct, computeVoiceAndGap } from './ai-recommendation.js';
+import { computeProviderFacts, computeBlendedVisibilityPct, computeVoiceAndGap, verifyExtractedCompetitors } from './ai-recommendation.js';
 
 // These exercise the pure, DB/API-free aggregation math only — the same
 // functions run() itself calls. No real DB, no real provider calls: every
@@ -121,5 +121,42 @@ describe('computeVoiceAndGap — Share of AI Voice / Competitor Citation Gap', (
     assert.equal(result.topCompetitorName, 'Big');
     // Our rate 50%, Big's rate 60% -> gap = 60 - 50 = +10
     assert.equal(result.competitorCitationGapPct, 10);
+  });
+});
+
+describe('verifyExtractedCompetitors', () => {
+  // detectMention has always regex-verified THIS company against the raw
+  // answer text. The extraction pass's competitor names had no such check, so
+  // a name the model pattern-completed rather than read could be persisted
+  // and then counted into shareOfAiVoicePct / the rising-competitor findings
+  // as if it were a real occurrence.
+  const raw = 'For roofing in Denver, look at Summit Roofing or Rival Roofing Co. Both are well reviewed.';
+
+  test('keeps names that really occur in the raw answer', () => {
+    assert.deepEqual(
+      verifyExtractedCompetitors(raw, ['Summit Roofing', 'Rival Roofing Co']),
+      ['Summit Roofing', 'Rival Roofing Co']
+    );
+  });
+
+  test('drops a name the model produced that is not in the answer at all', () => {
+    assert.deepEqual(verifyExtractedCompetitors(raw, ['Summit Roofing', 'Apex Roofing']), ['Summit Roofing']);
+  });
+
+  test('matching is case-insensitive but whole-match, never a substring accident', () => {
+    assert.deepEqual(verifyExtractedCompetitors(raw, ['summit roofing']), ['summit roofing']);
+    // "Rival" is a whole word here; "Riva" is only ever part of one.
+    assert.deepEqual(verifyExtractedCompetitors(raw, ['Riva']), []);
+  });
+
+  test('de-duplicates names differing only by case', () => {
+    assert.deepEqual(verifyExtractedCompetitors(raw, ['Summit Roofing', 'summit roofing']), ['Summit Roofing']);
+  });
+
+  test('a missing/!array/garbage extraction result is an empty list, never a throw', () => {
+    assert.deepEqual(verifyExtractedCompetitors(raw, undefined), []);
+    assert.deepEqual(verifyExtractedCompetitors(raw, null), []);
+    assert.deepEqual(verifyExtractedCompetitors(raw, 'Summit Roofing'), []);
+    assert.deepEqual(verifyExtractedCompetitors(raw, [null, 42, '', 'x']), []);
   });
 });

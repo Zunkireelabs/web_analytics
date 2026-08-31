@@ -86,12 +86,20 @@ export async function run({ siteId, start, end, pageCache }) {
       value: o.estimatedTrafficGain,
     };
     const effort = effortFromDifficulty(o.estimatedDifficulty);
+    // inferSchemaType abstains rather than defaulting to 'Article' on a path
+    // it cannot recognise, so a schema-generator action may now have no type
+    // to offer. generators/schema.js throws a 400 on a missing schemaType, so
+    // emitting one anyway would queue work that can only ever fail — drop the
+    // action instead and leave the finding itself, which is still true.
+    const schemaType = inferSchemaType(o.page, o.schemaTypes);
     return o.recommendations.map((tag) => makeFinding({
       id: `opportunity:${o.page}:${o.query}:${tag}`,
       evidence: { query: o.query, page: o.page, avgPosition: o.avgPosition, impressions: o.impressions, clicks: o.clicks, opportunityScore: o.opportunityScore },
       whyItMatters: `"${o.query}" ranks #${o.avgPosition.toFixed(1)}, ${o.impressions} impressions — est. +${o.estimatedTrafficGain} clicks if improved.`,
       priority,
-      recommendedAction: { label: tag, generatorId: TAG_TO_GENERATOR[tag] ?? null, params: { page: o.page, query: o.query, schemaType: inferSchemaType(o.page, o.schemaTypes) }, effort },
+      recommendedAction: TAG_TO_GENERATOR[tag] === 'schema' && !schemaType
+        ? null
+        : { label: tag, generatorId: TAG_TO_GENERATOR[tag] ?? null, params: { page: o.page, query: o.query, schemaType }, effort },
       expectedImpact,
     }));
   });

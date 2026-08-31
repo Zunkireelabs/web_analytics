@@ -199,12 +199,26 @@ export async function run({ siteId, start, end, pageCache, params }) {
       getPage: (p) => p.page,
       getImpressions: (p) => p.impressions,
       whyItMatters: (n, c) => `${n} of ${c} checked pages have no structured data (JSON-LD) on the page.`,
-      recommendedAction: (rep) => ({
-        label: 'Missing schema',
-        generatorId: 'schema',
-        params: { page: rep.page, query: rep.topQueries?.[0] || '', schemaType: inferSchemaType(rep.page, rep.schemaTypes) },
-        effort: effortForGenerator('schema'),
-      }),
+      // Same shape as technical-seo.js's missingSchemaFinding, and for the same
+      // reason: inferSchemaType now abstains (null) instead of defaulting every
+      // unrecognised path to 'Article'. A systemic finding carries only ONE
+      // draftable example, so pick the highest-impression page whose type is
+      // actually derivable — otherwise one untypeable top page drops the action
+      // for the whole batch. A null action still reports the verified gap; it
+      // just doesn't offer a draft built on a guessed @type.
+      pickRepresentative: (affected) => [...affected]
+        .sort((a, b) => (b.impressions || 0) - (a.impressions || 0))
+        .find((p) => inferSchemaType(p.page, p.schemaTypes)) || null,
+      recommendedAction: (rep) => {
+        const schemaType = inferSchemaType(rep.page, rep.schemaTypes);
+        if (!schemaType) return null;
+        return {
+          label: 'Missing schema',
+          generatorId: 'schema',
+          params: { page: rep.page, query: rep.topQueries?.[0] || '', schemaType },
+          effort: effortForGenerator('schema'),
+        };
+      },
     }),
     aggregateSystemicFinding({
       id: 'content-gap:site:missing-canonical',
@@ -249,7 +263,11 @@ export async function run({ siteId, start, end, pageCache, params }) {
           ? `${g.detail} ${competitive.withFeature} of ${competitive.total} tracked real competitors already have this.`
           : g.detail,
         priority,
-        recommendedAction: generatorId
+        // The schema generator REQUIRES a type (generators/schema.js throws a
+        // 400 without one), so offering it an action with a null schemaType
+        // would queue a recommendation that fails on every run forever. Every
+        // other generator treats schemaType as optional and is unaffected.
+        recommendedAction: generatorId && !(generatorId === 'schema' && !inferSchemaType(p.page, p.schemaTypes))
           ? { label: g.type, generatorId, params: { page: p.page, query: p.topQueries?.[0] || '', schemaType: inferSchemaType(p.page, p.schemaTypes) }, effort: effortForGenerator(generatorId) }
           : null,
         expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: p.impressions },
