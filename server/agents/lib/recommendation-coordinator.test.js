@@ -95,3 +95,24 @@ describe('recommendationPageKey — blog-outline keys by topic, not page', () =>
     assert.notEqual(keyB, '');
   });
 });
+
+// visual-quality.js can flag more than one independent defect (e.g. a
+// malformed-table AND a duplicate-faq) on the SAME page in one run — without
+// fixType in the key, both would collide onto the same recommendations row
+// and the second one would silently disappear into finding_ids, same
+// failure mode as analytics-install/expand-content/broken-link-fix above.
+describe('recommendationPageKey — content-integrity-repair keys by fixType too, not just page', () => {
+  test('two distinct fixTypes on the same page produce distinct keys', () => {
+    const page = 'https://example.com/pricing';
+    const keyA = recommendationPageKey({ generatorId: 'content-integrity-repair', params: { page, fixType: 'malformed-table' } });
+    const keyB = recommendationPageKey({ generatorId: 'content-integrity-repair', params: { page, fixType: 'duplicate-faq' } });
+    assert.notEqual(keyA, keyB);
+  });
+
+  test('the same page+fixType still produces the same key (real dedup preserved)', () => {
+    const params = { page: 'https://example.com/pricing', fixType: 'malformed-table' };
+    const keyA = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
+    const keyB = recommendationPageKey({ generatorId: 'content-integrity-repair', params: { ...params } });
+    assert.equal(keyA, keyB);
+  });
+});

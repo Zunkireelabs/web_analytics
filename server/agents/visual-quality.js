@@ -4,6 +4,7 @@ import { captureSite } from '../design-agent/live-analysis/capture.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { makeFinding } from './lib/findings.js';
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
+import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
 
 // Visual Quality Agent — the missing "does an EXISTING page actually look
@@ -25,6 +26,27 @@ import { callLLMWithImages, extractJson } from '../llm.js';
 // kind of fix or act as an unrestricted redesign agent. What actually
 // SHIPS is decided by a second, fully deterministic layer (see below), not
 // by trusting the vision call's own say-so.
+//
+// A page can have more than one independent defect (a broken table AND a
+// duplicate FAQ are unrelated regions), so this processes ALL of them, not
+// just the first — recommendationPageKey (recommendation-coordinator.js)
+// now includes fixType for this generatorId, so each distinct defect gets
+// its own recommendation row rather than colliding into one. Multiple
+// recommendations for the same page never mean multiple competing PRs: the
+// existing daily auto-remediation run batches every safe-tier recommendation
+// it ships that day — across every page, not just this one — into a SINGLE
+// branch/PR (github-ops.js's beginBatchPush/finalizeBatchPr), unchanged by
+// anything here. "Re-captured/revalidated before shipping" is likewise the
+// existing content-integrity-repair contract, not a new mechanism: each
+// fixType's own generate() call re-fetches and re-confirms its OWN specific
+// condition immediately before drafting, and content-integrity-inject.js's
+// apply step only ever writes when the exact anchor text is still found
+// byte-for-byte in the page's current real source (which, within one batch,
+// already reflects any earlier fix on the same page — anchor matching is a
+// full-text search, not a line offset, so it's correct regardless of
+// ordering). A second full-page re-screenshot after each fix would be a
+// parallel validation system duplicating a safety net that already exists
+// and is already trusted by every other content-integrity-repair caller.
 export const meta = {
   id: 'visual-quality',
   name: 'Visual Quality Agent',
@@ -128,12 +150,21 @@ export async function run({ siteId, capture = captureSite, fetchSite = getSiteBy
   // discarded here, never reaches a page load or a recommendation.
   const grounded = candidates.filter((c) => c && byUrl.has(c.page) && KNOWN_FIXTYPES.has(c.fixType) && typeof c.description === 'string');
 
-  // At most one finding per page this run — content-integrity-repair's
-  // params key on {page, fixType} alone, so a second distinct fixType on
-  // the same page in the same run would collide into one recommendation
-  // row; the highest-confidence (first-listed) candidate per page wins.
-  const seenPages = new Set();
-  const deduped = grounded.filter((c) => (seenPages.has(c.page) ? false : (seenPages.add(c.page), true)));
+  // Every distinct real defect this run flagged gets processed — a page can
+  // legitimately have more than one independent issue (a malformed table AND
+  // a duplicate FAQ are unrelated regions of the same page). Only exact
+  // (page, fixType) repeats collapse to one, via recommendationPageKey below
+  // (recommendation-coordinator.js), which now carries fixType specifically
+  // so two distinct defects on the same page never collide into one row and
+  // silently lose one of them (same class of bug analytics-install/expand-
+  // content/broken-link-fix/blog-outline were each fixed for previously).
+  const seenKeys = new Set();
+  const deduped = grounded.filter((c) => {
+    const key = recommendationPageKey({ generatorId: 'content-integrity-repair', params: { page: c.page, fixType: c.fixType } });
+    if (seenKeys.has(key)) return false;
+    seenKeys.add(key);
+    return true;
+  });
 
   const findings = [];
   let manualCreated = 0;
@@ -184,12 +215,19 @@ export async function run({ siteId, capture = captureSite, fetchSite = getSiteBy
       // decides." Clicking Generate on it still runs the real generator,
       // which will honestly refuse if this truly isn't fixable, or
       // succeed if this pre-check was a false negative.
+      // Keyed the SAME way the standard grounded pipeline would key this
+      // exact (generatorId, params) pair (recommendationPageKey, now with
+      // fixType — see recommendation-coordinator.js) — the confirmed and
+      // unconfirmed paths must never be able to collide with or shadow each
+      // other for the same page, and two distinct unconfirmed fixTypes on
+      // the same page must each get their own row too.
+      const recKey = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
       // eslint-disable-next-line no-await-in-loop
-      const existing = await findOpenRecommendation(siteId, page, 'content-integrity-repair');
+      const existing = await findOpenRecommendation(siteId, recKey, 'content-integrity-repair');
       if (!existing) {
         // eslint-disable-next-line no-await-in-loop
         await insertRecommendation(siteId, {
-          page,
+          page: recKey,
           recommendationType: 'content-integrity-repair',
           issue: `Possible ${fixType.replace(/-/g, ' ')} on this page`,
           reason: `${description} Flagged by the visual-quality vision pass, but the deterministic content-integrity ` +
