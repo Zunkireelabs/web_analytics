@@ -179,7 +179,13 @@ function readIfExists(path) {
 // isn't tripped sitewide by an unrelated CSS/JS bundle hash on every build.
 export function normalizeBuildAssetHashes(html) {
   if (html == null) return html;
-  return html.replace(/((?:src|href)=["'])([^"']*?)-[A-Za-z0-9_]{6,}\.(css|js|mjs)(["'])/g, '$1$2-HASH.$3$4');
+  // The hash charset includes '-': Vite (and Rollup) emit base64url-flavoured
+  // hashes, so "main-CxmWWX-y.js" is an ordinary filename. Excluding '-' meant
+  // exactly those hashes were left un-normalized, and since the CSS hash
+  // usually has no dash while the JS one sometimes does, a build could
+  // normalize half its assets and still report every page in every family as
+  // changed — which is what this function exists to prevent.
+  return html.replace(/((?:src|href)=["'])([^"']*?)-[A-Za-z0-9_-]{6,}\.(css|js|mjs)(["'])/g, '$1$2-HASH.$3$4');
 }
 
 // The gate itself: for one route, which of its record URLs differ between
