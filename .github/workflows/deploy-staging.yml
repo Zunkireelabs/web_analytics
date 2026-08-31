@@ -167,7 +167,19 @@ jobs:
             # ── Content Expansion citations (opt-in, grounded via SERPAPI_KEY above) ──
             # Without this, expand-content.js refuses to draft external-citations
             # sections rather than invent an ungrounded link (see generators/expand-content.js).
-            ENABLE_CONTENT_CITATION_SEARCH=true
+            #
+            # Disabled 2026-08-31: SERPAPI_KEY's free-tier quota is exhausted
+            # ("account has run out of searches", verified live) and the
+            # Google CSE fallback above is still the same broken no-billing
+            # project noted in the COMPETITOR_PROVIDER comment. With both
+            # grounding providers dead, every external-citations attempt was
+            # failing (25 of expand-content's last ~30 real attempts on site
+            # 1), which alone dragged expand-content's learned confidence to
+            # 0.29 and got the whole generator demoted out of auto-execute —
+            # burying its other, unrelated subtypes along with it. Re-enable
+            # once SERPAPI_KEY has a paid quota or Google CSE has billing
+            # linked; no other code change needed.
+            ENABLE_CONTENT_CITATION_SEARCH=false
 
             # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
             # Without this, technical-seo.js still reports real GSC index
