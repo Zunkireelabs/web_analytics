@@ -2,7 +2,7 @@ import { getSiteById } from '../store/read.js';
 import { sitePageUrl } from '../implementers/lib/design-drift.js';
 import { captureSite } from '../design-agent/live-analysis/capture.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
-import { makeFinding } from './lib/findings.js';
+import { makeFinding, priorityByRank, impactFromPriority } from './lib/findings.js';
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
 import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
@@ -76,6 +76,33 @@ const FIXTYPE_CONFIRMERS = {
   'raw-text-table': (a) => (a.rawTextTableBlocks || []).some((b) => b.clean),
   'faq-schema-mismatch': (a) => !!(a.faqSchemaRaw && a.faqSchemaSimple && a.faqExtractionComplete),
   'duplicate-faq': (a) => !!a.duplicateFaqRemovalHtml,
+};
+
+// How BIG the confirmed defect actually is, read from the exact same real
+// analysis facts the confirmer above just checked — a count of genuinely
+// defective regions on the page, never a guess. This is the run's only real
+// numeric signal about a visual defect (there is no traffic/score dimension
+// on a screenshot), and it is what `priority` and `expectedImpact.value` are
+// derived from below. Before this, every confirmed defect was hardcoded
+// priority 'high' with expectedImpact {label:'Medium', basis:'computed',
+// value:1} — a literal constant claiming a computed basis, which types.js
+// forbids for both fields (priority "computed per agent from a real signal
+// already in facts — never a fixed constant"; basis 'computed' = "derived
+// directly from this run's real numbers"). A page with six broken tables and
+// a page with one now rank differently, and the number a reader is shown is
+// the real count they can go and verify on the page.
+const FIXTYPE_EXTENT = {
+  'malformed-table': (a) => (a.removableMalformedTables || []).length,
+  'raw-text-table': (a) => (a.rawTextTableBlocks || []).filter((b) => b.clean).length,
+  // Real count of visible FAQ entries the page's FAQPage schema doesn't
+  // account for. When the two counts happen to match but the schema is still
+  // stale, the single out-of-sync schema block is itself the one defective
+  // region — hence the floor of 1, never 0 for a confirmed defect.
+  'faq-schema-mismatch': (a) => Math.abs((a.faqVisibleQuestionCount || 0) - (a.faqMainEntityCount || 0)) || 1,
+  // page-content.js sets duplicateFaqRemovalHtml to the html of exactly ONE
+  // confirmed-duplicate container (and only when the overlap is confident),
+  // so a confirmed duplicate-faq is precisely one defective region.
+  'duplicate-faq': () => 1,
 };
 
 const VISION_SYSTEM = 'You are a web QA specialist reviewing real screenshots of live pages from one website. You are ' +
@@ -166,82 +193,108 @@ export async function run({ siteId, capture = captureSite, fetchSite = getSiteBy
     return true;
   });
 
-  const findings = [];
-  let manualCreated = 0;
-
+  // Pass 1 — run the deterministic re-confirmation for every candidate and,
+  // for the confirmed ones, measure the defect's real extent (FIXTYPE_EXTENT
+  // above) from the same analysis. Split into its own pass because priority
+  // is a RELATIVE rank across this run's confirmed defects (priorityByRank,
+  // the shared convention every other agent uses) — it can't be assigned
+  // while still walking the candidates one at a time.
+  const assessed = [];
   for (const candidate of deduped) {
-    const { page, fixType, description } = candidate;
+    const { page, fixType } = candidate;
     // eslint-disable-next-line no-await-in-loop
     const analysis = await analyzePage(page).catch(() => null);
     const confirmed = !!(analysis?.ok && FIXTYPE_CONFIRMERS[fixType]?.(analysis.analysis));
+    assessed.push({
+      ...candidate,
+      confirmed,
+      extent: confirmed ? (FIXTYPE_EXTENT[fixType]?.(analysis.analysis) || 1) : 0,
+    });
+  }
 
+  const recommendedActionFor = (params) => ({
+    label: `Fix ${params.fixType.replace(/-/g, ' ')}`,
+    generatorId: 'content-integrity-repair',
+    params,
+    effort: effortForGenerator('content-integrity-repair'),
+  });
+
+  // Worst-first by the real number of confirmed defective regions, so
+  // priorityByRank buckets on a genuine signal from this run's own facts.
+  const confirmedDefects = assessed.filter((a) => a.confirmed).sort((a, b) => b.extent - a.extent);
+  const confirmedPriorities = priorityByRank(confirmedDefects);
+  // Standard grounded-finding shape (facts.findings) — the existing
+  // detection -> recommendation -> auto-remediation -> batch-PR pipeline
+  // picks this up exactly like every other safe-tier generator's findings,
+  // with zero new plumbing: content-integrity-repair is already 'safe'-tier
+  // (risk-tiers.js), and its own generate() function independently
+  // re-verifies the exact same real condition at apply time (re-fetching the
+  // page, refusing if the anchor/condition no longer holds) — the
+  // "re-captured/revalidated before shipping" requirement is satisfied by
+  // that existing safety net, not by anything new here.
+  const findings = confirmedDefects.map(({ page, fixType, description, extent }, i) => {
+    const priority = confirmedPriorities[i];
+    return makeFinding({
+      id: `visual-quality:${fixType}:${page}`,
+      // The real, deterministically re-confirmed count of defective regions
+      // is part of the evidence, not just a ranking input — it's the number
+      // expectedImpact.basis 'computed' is pointing at, and a reader can
+      // count the same broken tables on the page themselves.
+      evidence: { page, fixType, description, confirmed: true, defectiveRegions: extent },
+      whyItMatters: description,
+      priority,
+      recommendedAction: recommendedActionFor({ page, fixType }),
+      expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: extent },
+    });
+  });
+
+  // Pass 2 — everything vision saw that the deterministic check could NOT
+  // independently confirm.
+  let manualCreated = 0;
+  for (const { page, fixType, description } of assessed.filter((a) => !a.confirmed)) {
     const params = { page, fixType };
-    const recommendedAction = {
-      label: `Fix ${fixType.replace(/-/g, ' ')}`,
-      generatorId: 'content-integrity-repair',
-      params,
-      effort: effortForGenerator('content-integrity-repair'),
-    };
-
-    if (confirmed) {
-      // Standard grounded-finding shape (facts.findings) — the existing
-      // detection -> recommendation -> auto-remediation -> batch-PR pipeline
-      // picks this up exactly like every other safe-tier generator's
-      // findings, with zero new plumbing: content-integrity-repair is
-      // already 'safe'-tier (risk-tiers.js), and its own generate() function
-      // independently re-verifies the exact same real condition at apply
-      // time (re-fetching the page, refusing if the anchor/condition no
-      // longer holds) — the "re-captured/revalidated before shipping"
-      // requirement is satisfied by that existing safety net, not by
-      // anything new here.
-      findings.push(makeFinding({
-        id: `visual-quality:${fixType}:${page}`,
-        evidence: { page, fixType, description, confirmed: true },
-        whyItMatters: description,
-        priority: 'high',
-        recommendedAction,
-        expectedImpact: { label: 'Medium', basis: 'computed', value: 1 },
-      }));
-    } else {
-      // Vision saw something, but the same deterministic check
-      // content-integrity-repair itself relies on could not independently
-      // confirm it — never silently dropped (unlike font-consistency's own
-      // recommendedAction:null findings, which the standard grounded
-      // pipeline filters out with no trace in Action Center): this is the
-      // one place this agent writes directly to `recommendations`, at
-      // riskTier 'manual', same established precedent as keyword_gaps'
-      // 'comparison-page' pseudo-type (analyst-seo-mapping.js) — a real,
-      // already-used pattern for "flagged, no confirmed safe autofix, human
-      // decides." Clicking Generate on it still runs the real generator,
-      // which will honestly refuse if this truly isn't fixable, or
-      // succeed if this pre-check was a false negative.
-      // Keyed the SAME way the standard grounded pipeline would key this
-      // exact (generatorId, params) pair (recommendationPageKey, now with
-      // fixType — see recommendation-coordinator.js) — the confirmed and
-      // unconfirmed paths must never be able to collide with or shadow each
-      // other for the same page, and two distinct unconfirmed fixTypes on
-      // the same page must each get their own row too.
-      const recKey = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
+    // Vision saw something, but the same deterministic check
+    // content-integrity-repair itself relies on could not independently
+    // confirm it — never silently dropped (unlike font-consistency's own
+    // recommendedAction:null findings, which the standard grounded
+    // pipeline filters out with no trace in Action Center): this is the
+    // one place this agent writes directly to `recommendations`, at
+    // riskTier 'manual', same established precedent as keyword_gaps'
+    // 'comparison-page' pseudo-type (analyst-seo-mapping.js) — a real,
+    // already-used pattern for "flagged, no confirmed safe autofix, human
+    // decides." Clicking Generate on it still runs the real generator,
+    // which will honestly refuse if this truly isn't fixable, or
+    // succeed if this pre-check was a false negative.
+    // Keyed the SAME way the standard grounded pipeline would key this
+    // exact (generatorId, params) pair (recommendationPageKey, now with
+    // fixType — see recommendation-coordinator.js) — the confirmed and
+    // unconfirmed paths must never be able to collide with or shadow each
+    // other for the same page, and two distinct unconfirmed fixTypes on
+    // the same page must each get their own row too.
+    const recKey = recommendationPageKey({ generatorId: 'content-integrity-repair', params });
+    // eslint-disable-next-line no-await-in-loop
+    const existing = await findOpenRecommendation(siteId, recKey, 'content-integrity-repair');
+    if (!existing) {
       // eslint-disable-next-line no-await-in-loop
-      const existing = await findOpenRecommendation(siteId, recKey, 'content-integrity-repair');
-      if (!existing) {
-        // eslint-disable-next-line no-await-in-loop
-        await insertRecommendation(siteId, {
-          page: recKey,
-          recommendationType: 'content-integrity-repair',
-          issue: `Possible ${fixType.replace(/-/g, ' ')} on this page`,
-          reason: `${description} Flagged by the visual-quality vision pass, but the deterministic content-integrity ` +
-            `check could not independently confirm a fixable ${fixType} condition on this page — needs human review ` +
-            'before this can safely auto-apply.',
-          params,
-          findingId: `visual-quality:${fixType}:${page}`,
-          detectingAgent: meta.id,
-          priority: 'medium',
-          riskTier: 'manual',
-          blockedReason: 'Unconfirmed by deterministic content-integrity check — vision-flagged only.',
-        });
-        manualCreated++;
-      }
+      await insertRecommendation(siteId, {
+        page: recKey,
+        recommendationType: 'content-integrity-repair',
+        issue: `Possible ${fixType.replace(/-/g, ' ')} on this page`,
+        reason: `${description} Flagged by the visual-quality vision pass, but the deterministic content-integrity ` +
+          `check could not independently confirm a fixable ${fixType} condition on this page — needs human review ` +
+          'before this can safely auto-apply.',
+        params,
+        findingId: `visual-quality:${fixType}:${page}`,
+        detectingAgent: meta.id,
+        // Deliberately below every confirmed defect's priority band: the
+        // only real signal this row carries is that the deterministic
+        // check DISAGREED with vision, so it must never sort above a
+        // defect that was independently confirmed and measured.
+        priority: 'low',
+        riskTier: 'manual',
+        blockedReason: 'Unconfirmed by deterministic content-integrity check — vision-flagged only.',
+      });
+      manualCreated++;
     }
   }
 

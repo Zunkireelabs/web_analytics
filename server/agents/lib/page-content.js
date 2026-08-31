@@ -737,6 +737,12 @@ export function analyzePage(html, pageUrl) {
     pageHost: host, // this page's own hostname, already resolved above for internalLinks — exposed so callers can compare canonicalUrl's host without re-parsing pageUrl
     isRootPage, // true for the homepage (no path segments) — see contentGapChecks' breadcrumbs check below
     hasOpenGraph: $('meta[property="og:title"]').length > 0 || $('meta[property="og:description"]').length > 0,
+    // Raw og:type value, null when absent — the page's own declaration of
+    // what KIND of page it is, in a fixed vocabulary with no language
+    // assumption baked in. Read by inferSchemaType() above so a schema.org
+    // @type can be derived from real page evidence on a non-English site,
+    // where the English URL-path hints can never match.
+    openGraphType: ($('meta[property="og:type"]').first().attr('content') || '').trim() || null,
     listCount: $('ul, ol').length,
     tableCount: $('table').length,
     internalLinkCount,
@@ -1079,13 +1085,56 @@ const GENERATOR_EFFORT = {
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
-// Best-effort schema type for an "Add schema markup" recommendation — never
-// blindly 'Article'. Prefers a real signal already on the page (an existing
-// JSON-LD @type from analyzePage's schemaTypes, even if incomplete/partial)
-// over a URL-path guess, and only falls back to 'Article' when neither applies.
+// Which schema.org @type to recommend ADDING to a page — or null when the
+// page's own real evidence doesn't support any specific type.
+//
+// This used to end in `return 'Article'`, and that default was actively
+// dangerous: the `schema` generator is in SAFE_GENERATOR_IDS
+// (agents/lib/risk-tiers.js), so its draft can be auto-generated, approved
+// and shipped by the execution engine with no human ever reading it, and
+// generators/schema.js only guards against fabricated field *values* — it
+// has no way to notice that the @type itself is semantically wrong. The
+// PATH_SCHEMA_HINTS below are five ENGLISH path words, so on the first
+// tenant (an English Eleventy site whose real pages happened to be blog
+// posts) the default looked harmless, while for anyone else it silently
+// merged `schema.org/Article` JSON-LD into the live site for every
+// /pricing, /services, /booking, /team page — and for a non-English site,
+// for literally every page, since none of the five regexes can ever match.
+//
+// So: evidence or nothing. Every branch below is a fact the page itself
+// asserts; when none of them fires we return null and the caller drops the
+// recommendation (see technical-seo.js's missing-schema finding) rather
+// than shipping a confident wrong answer. Callers that pass a null straight
+// into params still fail loudly — generators/schema.js rejects a missing
+// schemaType with a 400 — which is the intended degradation: a refused
+// draft, never a wrong one.
+//
 // Boilerplate types (site-wide Organization/WebSite/BreadcrumbList markup)
 // are skipped since they say nothing about this specific page's content type.
 const BOILERPLATE_SCHEMA_TYPES = new Set(['Organization', 'WebSite', 'BreadcrumbList', 'WebPage']);
+
+// og:type is the page author's OWN machine-readable declaration of what kind
+// of page this is, in a fixed vocabulary — unlike the path hints below it
+// carries no language assumption at all, so it works identically on a German
+// booking site and an English blog. Only the two unambiguous values are
+// mapped: 'website' is the near-universal default and says nothing
+// page-specific (deliberately absent so the root-path rule below still
+// applies), and og:type values like profile/video.*/music.* have no
+// safe one-to-one schema.org equivalent to guess at.
+const OG_TYPE_SCHEMA = {
+  article: 'Article',
+  'article:blog': 'Article',
+  blog: 'Article',
+  product: 'Product',
+  'product.item': 'Product',
+};
+
+// Kept because a match here IS real evidence — a URL path segment of
+// "/products/" really does describe the page. What changed is that a MISS is
+// no longer a guess: the list is additive coverage for English-language URL
+// conventions only, and anything it doesn't recognise falls through to null.
+// Do not "fix" this by adding invented translations of these words; add a
+// language's conventions only from a real tenant's real URLs.
 const PATH_SCHEMA_HINTS = [
   [/\/(products?|shop|store)\//i, 'Product'],
   [/\/(faq|faqs)(\/|$)/i, 'FAQPage'],
@@ -1093,21 +1142,37 @@ const PATH_SCHEMA_HINTS = [
   [/\/(about|about-us|company)(\/|$)/i, 'AboutPage'],
   [/\/(blog|articles?|news)\//i, 'Article'],
 ];
-export function inferSchemaType(pageUrl, schemaTypes = []) {
+
+// `analysis` is optional (an analyzePage result) — callers that already
+// fetched the page pass it so the og:type evidence can be used; callers that
+// only have a URL keep working exactly as before, just with the honest null
+// at the end instead of 'Article'.
+export function inferSchemaType(pageUrl, schemaTypes = [], analysis = null) {
   const existing = (schemaTypes || []).find((t) => t && !BOILERPLATE_SCHEMA_TYPES.has(t));
   if (existing) return existing;
-  let path = '';
-  try { path = new URL(pageUrl).pathname; } catch { /* leave path empty, fall through to default */ }
-  for (const [re, type] of PATH_SCHEMA_HINTS) if (re.test(path)) return type;
-  // A bare root path is a homepage far more often than it's an article — the
-  // generic 'Article' fallback below is wrong for exactly this common case
+
+  const ogType = (analysis?.openGraphType || '').trim().toLowerCase();
+  if (OG_TYPE_SCHEMA[ogType]) return OG_TYPE_SCHEMA[ogType];
+
+  // null, not '', for an unparseable URL. The old code used '' for both "no
+  // path" and "couldn't parse", so a malformed URL fell into the homepage
+  // branch below and was confidently typed 'Organization' — a guess dressed
+  // up as the root-path rule. Nothing was observed here, so nothing is
+  // claimed.
+  let path = null;
+  try { path = new URL(pageUrl).pathname; } catch { /* stays null — fall through to the abstention */ }
+  if (path === null) return null;
+  // A bare root path is a homepage far more often than it's an article
   // (confirmed in practice: a SaaS app's homepage failed Article generation
   // outright, since there's no headline/body to write an article about).
   // 'Organization' is BOILERPLATE_SCHEMA_TYPES-listed above only for
   // skipping an *already-existing* type that says nothing page-specific —
-  // it's still the right type to recommend *adding* when nothing exists yet.
+  // it's still the right type to recommend *adding* when nothing exists yet,
+  // and "this site's homepage describes the organisation behind it" holds
+  // regardless of the tenant's language or vertical.
   if (path === '/' || path === '') return 'Organization';
-  return 'Article';
+  for (const [re, type] of PATH_SCHEMA_HINTS) if (re.test(path)) return type;
+  return null;
 }
 
 // Deterministic on-page completeness gaps for the Content Gap Agent — every

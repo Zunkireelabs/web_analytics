@@ -2,7 +2,7 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
-import { searchImage } from './lib/pexels-client.js';
+import { searchImage, buildImageQueries } from './lib/pexels-client.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -157,8 +157,12 @@ export async function generate({ siteId, params }) {
 
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
-  // complete blog draft — see lib/pexels-client.js's searchImage.
-  const featuredImage = await searchImage(parsed.title || topic);
+  // complete blog draft — see lib/pexels-client.js's searchImage. Title first
+  // (most specific), then the raw topic, then a generic AI/tech fallback —
+  // searchImage scores every candidate from every query and keeps only the
+  // best-matching one, so a weak title match can still lose to a stronger
+  // fallback-query match.
+  const featuredImage = await searchImage(buildImageQueries({ title: parsed.title, topic }));
 
   const content = {
     topic,

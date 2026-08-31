@@ -261,6 +261,23 @@ export async function updateSiteAutoRemediation({ siteId, enabled, dailyLimit })
   return rows[0];
 }
 
+// Records staff sign-off on a site's design profile (migration 132) — pinned
+// to `fingerprint` (design-integrity-gate's designReviewFingerprint), so a
+// later re-derivation that actually changes what will ship can be told apart
+// from one that doesn't (designReviewState reads this same column pair).
+// `reviewedBy` is the staff user's id (req.userId after requireAuth) — never
+// null on a real approval; the column itself stays nullable only because
+// ON DELETE SET NULL must remain possible for a since-deleted staff account,
+// not because an anonymous approval is a real case this route ever takes.
+export async function updateSiteDesignReview({ siteId, reviewedBy, fingerprint }) {
+  const { rows } = await query(
+    `UPDATE sites SET design_review_at = now(), design_review_by = $1, design_review_fingerprint = $2 WHERE id = $3 RETURNING *`,
+    [reviewedBy, fingerprint, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 // The site's real author/byline identity (migration 090) — read by
 // generators/schema.js (populates Article/BlogPosting/NewsArticle's
 // `author` field) and generators/expand-content.js (drafts a real, on-page

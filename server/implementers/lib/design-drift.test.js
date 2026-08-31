@@ -7,6 +7,9 @@ import {
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
   contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
+  bodySlotLooksLikeLabel,
+  observedClassesByRole, checkTypographyRole, verifyProfileRoles,
+  designReviewFingerprint, designReviewState,
 } from './design-drift.js';
 import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
@@ -386,6 +389,41 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(result.source, 'design-profile');
   });
 
+  test('a projection whose body slot is styled as a label is BLOCKED, never stamped verified', async () => {
+    // The regression this whole branch exists for. Every other verification
+    // failure means "we could not confirm this template", and falling through
+    // to the DESIGN_AGENT stamp is defensible for those. 'body-slot-is-label'
+    // means the opposite: the check ran, succeeded, and found the template
+    // genuinely wrong — its prose slot carries the site's eyebrow styling.
+    // Falling through stamped it verified anyway, which is precisely how five
+    // templates came to read `verifiedBy: design-agent` while rendering every
+    // generated paragraph as a tiny uppercase caption on a live site.
+    const labelProfile = { ...PROFILE, typography: { ...PROFILE.typography, body: 'eyebrow' } };
+    const site = {
+      ...baseSite,
+      website_domain: 'zunkireelabs.com',
+      url_file_map: { siteRoot: { designProfile: labelProfile } },
+    };
+    let saved = null;
+    let queuedFor = null;
+
+    const result = await resolveOrCreateComponentTemplate(site, 'qa-content', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+      enqueueProfileDerivation: async (siteId) => { queuedFor = siteId; return { id: 99 }; },
+      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head></html>',
+      // Every class the projection uses really exists — so this cannot pass or
+      // fail as 'stale'. Existence was never the question; role was.
+      fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}.text-lg{a}.font-medium{a}.eyebrow{text-transform:uppercase}',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'body-slot-is-label');
+    assert.equal(result.template, null, 'no template is handed back for a draft to render with');
+    assert.equal(saved, null, 'nothing is persisted — a known-bad template must not be stamped');
+    assert.equal(queuedFor, site.id, 'the profile itself is re-derived, since that is where the bad body class came from');
+  });
+
   test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {
     // The self-heal check runs BEFORE the projection path — for a template
     // that is merely unstamped and genuinely matches the live site, checking
@@ -622,10 +660,22 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(result.reason, 'no-concept');
   });
 
-  test('site without its auto-remediation review reports not-available, and queues nothing', async () => {
-    const result = await resolveOrCreateComponentTemplate({ ...baseSite, auto_remediation_enabled: false }, 'faq', noopDeps());
+  // Eligibility no longer depends on auto_remediation_enabled — see the
+  // gate's own comment in design-drift.js for why that used to be a
+  // deadlock once the design-integrity gate made auto_remediation_enabled
+  // itself depend on a design review having already happened. A site
+  // awaiting its first review still gets its design DERIVED (so there is
+  // something to review); it just can't SHIP with it yet, which is enforced
+  // separately at apply time.
+  test('a site awaiting its design review (auto_remediation not yet enabled) still queues derivation, same as any other site with no profile', async () => {
+    const queued = [];
+    const result = await resolveOrCreateComponentTemplate({ ...baseSite, auto_remediation_enabled: false }, 'faq', {
+      ...noopDeps(),
+      enqueueProfileDerivation: async (siteId, opts) => { queued.push([siteId, opts]); },
+    });
     assert.equal(result.ok, false);
-    assert.equal(result.reason, 'not-available');
+    assert.equal(result.reason, 'derivation-queued');
+    assert.equal(queued.length, 1);
   });
 
   test('site with no repo configured reports not-available', async () => {
@@ -849,6 +899,206 @@ describe('verifyTemplateAgainstLiveSite', () => {
   });
 });
 
+// Minimal profile.pages[].sections[].textHierarchy[] fixture — the shape
+// segment.js's segmentPage actually produces (see segment.test.js), reduced
+// to only what observedClassesByRole/checkTypographyRole read.
+function pageWith(sections) {
+  return { url: 'https://example.com/', pageType: 'homepage', sections };
+}
+function item(role, classes) {
+  return { role, text: null, tag: 'p', style: null, classes };
+}
+
+describe('observedClassesByRole / checkTypographyRole / verifyProfileRoles — role verification', () => {
+  test('observedClassesByRole groups normalized class strings by the role they were seen playing', () => {
+    const profile = {
+      pages: [pageWith([
+        { role: 'hero', textHierarchy: [item('body', 'text-lg   text-gray-700')] },
+        { role: 'footer', textHierarchy: [item('body', 'text-lg text-gray-700'), item('cta', 'btn btn-primary')] },
+      ])],
+    };
+    const observed = observedClassesByRole(profile);
+    // Same string, different whitespace, across two different sections —
+    // normalized to the one entry, not two.
+    assert.equal(observed.get('body').size, 1);
+    assert.equal(observed.get('body').has('text-lg text-gray-700'), true);
+    assert.equal(observed.get('cta').has('btn btn-primary'), true);
+  });
+
+  // The incident this whole check exists to catch: real classes, real
+  // sections, but typography.body names the class this site actually uses
+  // for its eyebrow (captured under textHierarchy role 'cta' here, since
+  // segment.js has no dedicated 'eyebrow' role — any role other than 'body'
+  // demonstrates the same defect: the class was never observed AS body copy).
+  const EYEBROW_AS_BODY_PROFILE = {
+    typography: { body: 'text-xs uppercase tracking-widest text-gray-500', heading: { item: 'text-2xl font-bold' } },
+    pages: [pageWith([
+      { role: 'hero', textHierarchy: [
+        item('cta', 'text-xs uppercase tracking-widest text-gray-500'), // the real eyebrow
+        item('body', 'text-base leading-relaxed text-gray-700'),        // the real body copy
+        item('heading', 'text-2xl font-bold'),
+      ] },
+    ])],
+  };
+
+  test('checkTypographyRole names the real role a misassigned class belongs to', () => {
+    const result = checkTypographyRole(EYEBROW_AS_BODY_PROFILE, { field: 'typography.body', roles: ['body'], get: (p) => p.typography.body });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'role-mismatch');
+    assert.equal(result.observedAs, 'cta');
+    assert.match(result.error, /typography\.body uses classes this site only ever uses for its cta/);
+  });
+
+  test('verifyProfileRoles independently rediscovers the eyebrow-as-body-copy incident', () => {
+    const result = verifyProfileRoles(EYEBROW_AS_BODY_PROFILE);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'role-mismatch');
+    assert.equal(result.field, 'typography.body');
+  });
+
+  test('a correctly-assigned profile passes cleanly', () => {
+    const result = verifyProfileRoles({
+      typography: { body: 'text-base leading-relaxed text-gray-700', heading: { item: 'text-2xl font-bold' }, link: 'text-blue-600 underline' },
+      pages: [pageWith([
+        { role: 'hero', textHierarchy: [
+          item('body', 'text-base leading-relaxed text-gray-700'),
+          item('heading', 'text-2xl font-bold'),
+          item('link', 'text-blue-600 underline'),
+        ] },
+      ])],
+    });
+    assert.deepEqual(result, { ok: true });
+  });
+
+  test('a class never observed in ANY role is class-unobserved, not role-mismatch — weaker evidence, does not block', () => {
+    const result = checkTypographyRole(
+      { typography: { body: 'text-lg italic' }, pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'btn')] }])] },
+      { field: 'typography.body', roles: ['body'], get: (p) => p.typography.body },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'class-unobserved');
+    assert.equal(result.observedAs, null);
+    // verifyProfileRoles only blocks on a CONFIRMED mismatch — this weaker
+    // case must pass through as ok, so a thin 8-page sample doesn't
+    // permanently flag a real, correctly-assigned site.
+    const gate = verifyProfileRoles({ typography: { body: 'text-lg italic' }, pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'btn')] }])] });
+    assert.equal(gate.ok, true);
+  });
+
+  test('a null typography field is an honest abstention, never a failure', () => {
+    const result = checkTypographyRole({ typography: {}, pages: [] }, { field: 'typography.link', roles: ['link'], get: (p) => p.typography.link });
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, 'not-set');
+  });
+
+  // typography.heading.item accepts BOTH 'heading' and 'subheading' as
+  // matching evidence — segment.js only distinguishes h1-vs-not, with no
+  // section-vs-item concept of its own, the same generosity
+  // correctHeadingTypography's own headingSamplesByLevel already extends.
+  test('typography.heading.item matches evidence recorded as either heading or subheading', () => {
+    const result = checkTypographyRole(
+      { typography: { heading: { item: 'text-xl font-semibold' } }, pages: [pageWith([{ role: 'content', textHierarchy: [item('subheading', 'text-xl font-semibold')] }])] },
+      { field: 'typography.heading.item', roles: ['heading', 'subheading'], get: (p) => p.typography.heading.item },
+    );
+    assert.equal(result.ok, true);
+  });
+
+  // The gap this closes: expand-content's own heading slot (projectExpandContent
+  // in design-profile.js) uses typography.heading.section first, falling back
+  // to heading.item — but only heading.item was ever role-checked, so a
+  // section-heading defect specific to expand-content had no coverage at all.
+  test('typography.heading.section is checked too, not only heading.item', () => {
+    const result = verifyProfileRoles({
+      typography: { heading: { section: 'text-xs uppercase tracking-widest text-gray-500' } }, // really the eyebrow
+      pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'text-xs uppercase tracking-widest text-gray-500')] }])],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.field, 'typography.heading.section');
+    assert.equal(result.observedAs, 'cta');
+  });
+
+  test('a link style secretly identical to a button is caught the same way, keyed to typography.link', () => {
+    const profile = {
+      typography: { link: 'inline-block bg-blue-600 text-white px-6 py-3 rounded-full' }, // really the CTA button's classes
+      pages: [pageWith([
+        { role: 'hero', textHierarchy: [
+          item('cta', 'inline-block bg-blue-600 text-white px-6 py-3 rounded-full'),
+          item('link', 'text-blue-600 underline'), // the site's real inline link
+        ] },
+      ])],
+    };
+    const result = verifyProfileRoles(profile);
+    assert.equal(result.ok, false);
+    assert.equal(result.field, 'typography.link');
+    assert.equal(result.observedAs, 'cta');
+  });
+});
+
+describe('designReviewFingerprint / designReviewState — sign-off is pinned to the exact profile reviewed', () => {
+  const USABLE = {
+    version: DESIGN_PROFILE_VERSION,
+    typography: { body: 'text-base leading-relaxed', heading: { item: 'text-2xl font-bold' }, link: 'text-blue-600 underline' },
+    layout: { container: 'max-w-7xl mx-auto' },
+    components: {},
+    spacing: {},
+    pages: [],
+  };
+
+  test('is deterministic — the same profile always fingerprints the same', () => {
+    assert.equal(designReviewFingerprint(USABLE), designReviewFingerprint(structuredClone(USABLE)));
+  });
+
+  // The gate this exists to prevent: profile.evidence/site.pagesAnalyzed
+  // change on every weekly rescan without a single thing that ships actually
+  // changing. Fingerprinting those would invalidate a valid, already-reviewed
+  // sign-off on pure noise — training staff to click approve without reading.
+  test('metadata that never reaches a template (evidence, pagesAnalyzed) does not change the fingerprint', () => {
+    const withMetadata = { ...USABLE, evidence: { notes: 'voice is playful', pagesAnalyzed: ['https://x.com/new-page'] }, site: { pagesAnalyzed: ['https://x.com/'] } };
+    assert.equal(designReviewFingerprint(USABLE), designReviewFingerprint(withMetadata));
+  });
+
+  test('a real design change (a rescan altering typography.body) changes the fingerprint', () => {
+    const changed = { ...USABLE, typography: { ...USABLE.typography, body: 'text-lg leading-loose' } };
+    assert.notEqual(designReviewFingerprint(USABLE), designReviewFingerprint(changed));
+  });
+
+  test('null profile fingerprints to null, never throws', () => {
+    assert.equal(designReviewFingerprint(null), null);
+  });
+
+  test('a site that was never reviewed is unreviewed, not stale', () => {
+    const result = designReviewState({ url_file_map: { siteRoot: { designProfile: USABLE } } });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'unreviewed');
+  });
+
+  test('a site whose stored fingerprint matches its current profile passes', () => {
+    const site = {
+      design_review_at: '2026-08-01T00:00:00Z',
+      design_review_fingerprint: designReviewFingerprint(USABLE),
+      url_file_map: { siteRoot: { designProfile: USABLE } },
+    };
+    assert.deepEqual(designReviewState(site), { ok: true });
+  });
+
+  // The scenario this whole distinction exists for: the weekly rescan
+  // (cron.js) overwrites designProfile with a freshly re-derived one after a
+  // real redesign, without touching design_review_at/design_review_fingerprint
+  // — a six-week-old approval must not silently keep authorizing templates
+  // derived from a design nobody has actually looked at since.
+  test('a site whose design was re-derived after review is stale, not silently still approved', () => {
+    const changedProfile = { ...USABLE, typography: { ...USABLE.typography, body: 'text-lg leading-loose' } };
+    const site = {
+      design_review_at: '2026-08-01T00:00:00Z',
+      design_review_fingerprint: designReviewFingerprint(USABLE), // approved BEFORE the rescan
+      url_file_map: { siteRoot: { designProfile: changedProfile } }, // rescan already overwrote it
+    };
+    const result = designReviewState(site);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'stale');
+  });
+});
+
 describe('withDesignContext — the shared design-intelligence layer\'s system-prompt grounding', () => {
   const USABLE_PROFILE = {
     version: DESIGN_PROFILE_VERSION,
@@ -900,5 +1150,68 @@ describe('withDesignContext — the shared design-intelligence layer\'s system-p
     for (const id of ['meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'security-headers', 'open-graph', 'html-lang', 'viewport', 'llms-txt', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair']) {
       assert.ok(!DESIGN_CONTEXT_GENERATOR_IDS.has(id), `${id} should NOT get design/voice grounding`);
     }
+  });
+});
+
+// Regression: on 2026-08-31 all five of zunkireelabs.com's component templates
+// carried `verifiedBy: design-agent` while rendering every generated paragraph
+// in the site's eyebrow style. Every class in them was real and defined —
+// existence checks alone could never have caught it.
+describe('bodySlotLooksLikeLabel', () => {
+  const CSS = [
+    '.text-xs{font-size:0.75rem;line-height:1rem}',
+    '.uppercase{text-transform:uppercase}',
+    '.tracking-widest{letter-spacing:0.1em}',
+    '.text-zunkiree-600{color:#eb1600}',
+    '.text-gray-600{color:#4b5563}',
+    '.leading-relaxed{line-height:1.625}',
+  ].join('');
+
+  test('rejects the real template that shipped — a label class on the body slot', () => {
+    const reason = bodySlotLooksLikeLabel('expand-content', {
+      wrapper: '<div class="py-12">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="text-4xl">{{HEADING}}</h2>\n    <div class="text-xs uppercase tracking-widest text-zunkiree-600">{{BODY}}</div>\n  </section>',
+    }, CSS);
+    assert.ok(reason, 'must not verify');
+    assert.match(reason, /uppercase/);
+    assert.match(reason, /\{\{BODY\}\}/);
+  });
+
+  test('accepts a body slot styled as real prose', () => {
+    const reason = bodySlotLooksLikeLabel('expand-content', {
+      wrapper: '<div class="py-12">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="text-4xl">{{HEADING}}</h2>\n    <div class="text-gray-600 leading-relaxed">{{BODY}}</div>\n  </section>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('an uppercase HEADING is fine — only the prose slot is judged', () => {
+    const reason = bodySlotLooksLikeLabel('faq', {
+      wrapper: '<dl>\n{{ROWS}}\n</dl>',
+      row: '  <dt class="uppercase tracking-widest">{{QUESTION}}</dt>\n  <dd class="text-gray-600">{{ANSWER}}</dd>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('internal-links is exempt — a link list may be styled in caps deliberately', () => {
+    const reason = bodySlotLooksLikeLabel('internal-links', {
+      wrapper: '<ul>\n{{ROWS}}\n</ul>',
+      row: '  <li><a href="{{URL}}" class="text-xs uppercase">{{ANCHOR_TEXT}}</a></li>',
+    }, CSS);
+    assert.equal(reason, null);
+  });
+
+  test('no CSS and no classes both mean "cannot tell", never "failed"', () => {
+    const template = { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
+    assert.equal(bodySlotLooksLikeLabel('faq', template, ''), null);
+    assert.equal(bodySlotLooksLikeLabel('faq', template, CSS), null);
+  });
+
+  test('a sub-14px body slot is a caption even without uppercase', () => {
+    const reason = bodySlotLooksLikeLabel('content-wrapper', {
+      wrapper: '<div class="text-xs">\n{{BODY}}\n</div>',
+    }, CSS);
+    assert.ok(reason);
+    assert.match(reason, /14px/);
   });
 });

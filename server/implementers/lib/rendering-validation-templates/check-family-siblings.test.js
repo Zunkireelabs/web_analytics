@@ -243,3 +243,37 @@ describe('the CLI end-to-end, via a real git repo and real subprocess', () => {
     assert.equal(commitMessagesInRange(dir, 'nonexistent-ref', 'HEAD'), '');
   });
 });
+
+// Regression: zunkireelabs-web PR #69 reported all 21 /glossary/* pages as
+// changed by a PR that touches no glossary file. The CSS bundle normalized
+// (main-N5DfGeKq.css, no dash) but the JS one did not (main-CxmWWX-y.js), so
+// every page still differed by one <script src> and the gate fired sitewide.
+describe('normalizeBuildAssetHashes — hashes containing a dash', () => {
+  test('normalizes a Vite base64url hash with a dash in it', () => {
+    assert.equal(
+      normalizeBuildAssetHashes('<script src="/assets/main-CxmWWX-y.js"></script>'),
+      '<script src="/assets/main-HASH.js"></script>',
+    );
+  });
+
+  test('still normalizes a hash with no dash', () => {
+    assert.equal(
+      normalizeBuildAssetHashes('<link rel="stylesheet" href="/assets/main-N5DfGeKq.css">'),
+      '<link rel="stylesheet" href="/assets/main-HASH.css">',
+    );
+  });
+
+  test('two builds of the same page compare equal once normalized', () => {
+    const page = (js, css) => `<link href="/assets/main-${css}.css"><script src="/assets/main-${js}.js"></script><h1>Same</h1>`;
+    assert.equal(
+      normalizeBuildAssetHashes(page('CxmWWX-y', 'N5DfGeKq')),
+      normalizeBuildAssetHashes(page('DawqColI', '50TC51LD')),
+    );
+  });
+
+  test('leaves a real content path that merely contains a dash alone', () => {
+    // Not a hash: too short after the final dash to be one.
+    const html = '<a href="/blog/how-to-build-rag-pipeline/">Guide</a>';
+    assert.equal(normalizeBuildAssetHashes(html), html);
+  });
+});

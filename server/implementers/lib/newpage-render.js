@@ -74,7 +74,17 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
-export function renderBlogOutlineBody(content, site, { permalink = null, layout = null } = {}) {
+export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
+  // `fieldNames` maps a canonical field onto whatever THIS directory's
+  // existing posts call it (newcontent-contract.js). The defaults below are
+  // only what gets used when no sibling could be read — they are not a
+  // contract any particular site honours. This mattered: the hardcoded
+  // `image` key meant zunkireelabs.com's blog template, which reads
+  // `featuredImage`, rendered no image on any generated post even though the
+  // Pexels URL was sitting right there in the front matter.
+  const imageKey = fieldNames.featuredImage || 'image';
+  const altKey = fieldNames.featuredImageAlt || 'image_alt';
+  const creditKey = fieldNames.featuredImageCredit || 'image_credit';
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
@@ -86,9 +96,9 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     // frontMatter()'s existing null/empty skip, same as every other field
     // here. A remote URL in front matter, not a binary committed to the
     // repo — the client's blog template is responsible for rendering it.
-    ['image', content.featuredImage?.url],
-    ['image_alt', content.featuredImage?.alt],
-    ['image_credit', content.featuredImage?.photographer
+    [imageKey, content.featuredImage?.url],
+    [altKey, content.featuredImage?.alt],
+    [creditKey, content.featuredImage?.photographer
       ? `Photo by ${content.featuredImage.photographer} on Pexels`
       : null],
   ], site);

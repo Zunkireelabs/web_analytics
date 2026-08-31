@@ -17,6 +17,7 @@ const GrowthReport = lazy(() => import('./pages/GrowthReport.jsx'));
 const AiGrowth = lazy(() => import('./pages/AiGrowth.jsx'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter.jsx'));
 const ClientOnboarding = lazy(() => import('./pages/ClientOnboarding.jsx'));
+const DesignReview = lazy(() => import('./pages/DesignReview.jsx'));
 const Analyst = lazy(() => import('./pages/Analyst.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 const OAuthAuthorize = lazy(() => import('./pages/OAuthAuthorize.jsx'));
@@ -170,6 +171,7 @@ export default function App() {
                   unnoticed; it stops coinciding the moment a non-admin
                   teammate is added. */}
               {isPlatformAdmin && <Route path="/clients" element={<ClientOnboarding />} />}
+              {isPlatformAdmin && <Route path="/clients/:id/design-review" element={<DesignReview />} />}
               {isPlatformAdmin && <Route path="/analyst" element={<Analyst />} />}
               {/* OAuth "Connect" consent screen — reached via a 302 from
                   mcp-server/oauth-provider.js's authorize(), scoped to this

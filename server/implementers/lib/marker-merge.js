@@ -386,7 +386,7 @@ export function spliceMarkers(fileContent, markerMap, values) {
   return { ok: true, newContent: result, changedRegions };
 }
 
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
@@ -395,7 +395,7 @@ function escapeHtml(s) {
 // Split/join instead of a regex replace so a value that itself happens to
 // contain `{{...}}`-shaped text (rare but possible in LLM output) is never
 // misinterpreted as another placeholder.
-function fillTemplate(template, vars) {
+export function fillTemplate(template, vars) {
   return Object.entries(vars).reduce((s, [key, value]) => s.split(`{{${key}}}`).join(value), template);
 }
 
@@ -415,7 +415,7 @@ function fillTemplate(template, vars) {
 // this code emitted before per-site templates existed) rather than any
 // specific tenant's real styling, so an unconfigured site never gets
 // another tenant's component injected into it.
-function renderFromTemplate(template, rows) {
+export function renderFromTemplate(template, rows) {
   return fillTemplate(template.wrapper, { ROWS: rows.join('\n') });
 }
 
@@ -428,7 +428,7 @@ const DEFAULT_FAQ_TEMPLATE = {
 // transform of the same approved items (server/generators/faq.js), reused
 // verbatim here rather than re-derived, so there's exactly one source of
 // truth for it — only the visible HTML representation varies per site.
-function renderFaqHtml(items, template = DEFAULT_FAQ_TEMPLATE) {
+export function renderFaqHtml(items, template = DEFAULT_FAQ_TEMPLATE) {
   const rows = items.map((qa, i) => fillTemplate(template.row, {
     INDEX: String(i + 1), QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
   }));
@@ -461,7 +461,7 @@ const DEFAULT_QA_TEMPLATE = {
 // substitute the same placeholder faq's own row template does. Harmless
 // no-op for a plain DEFAULT_QA_TEMPLATE/static template with no {{INDEX}}
 // token — fillTemplate only replaces tokens that are actually present.
-function renderQaHtml(items, template = DEFAULT_QA_TEMPLATE) {
+export function renderQaHtml(items, template = DEFAULT_QA_TEMPLATE) {
   const rows = items.map((qa, i) => fillTemplate(template.row, {
     INDEX: String(i + 1), QUESTION: escapeHtml(qa.question), ANSWER: escapeHtml(qa.answer),
   }));
@@ -476,7 +476,7 @@ const DEFAULT_LINKS_TEMPLATE = {
 // anchorText/targetUrl are escaped since they ultimately come from LLM
 // output (already filtered against real candidate URLs at generation time,
 // see generators/internal-links.js, but still untrusted as raw HTML).
-function renderLinksHtml(suggestions, template = DEFAULT_LINKS_TEMPLATE) {
+export function renderLinksHtml(suggestions, template = DEFAULT_LINKS_TEMPLATE) {
   const rows = suggestions.map((s) => fillTemplate(template.row, {
     URL: escapeHtml(s.targetUrl), ANCHOR_TEXT: escapeHtml(s.anchorText),
   }));
@@ -627,13 +627,33 @@ function toTitleCase(key) {
 // field name. Returns '' (not a stray empty <table>) for anything
 // malformed, so a caller can always safely concatenate this after body
 // prose.
-function renderComparisonTable(table) {
+// `style` is the site's own table convention, stored per tenant as
+// componentTemplates.table (a class map, captured from a real table in the
+// tenant's repo — see scripts/capture-component-template.js). Without it this
+// emitted a bare <table> with no classes at all, which on a Tailwind site
+// means no borders, no padding, no header contrast: a generated comparison
+// table was visibly not part of the page it sat on. Every slot falls back to
+// '' so a site with no captured table renders exactly the bare markup it did
+// before, rather than borrowing another tenant's look.
+function attrIf(cls) {
+  return cls ? ` class="${cls}"` : '';
+}
+
+function renderComparisonTable(table, style = {}) {
   if (!Array.isArray(table) || !table.length) return '';
   const columns = Object.keys(table[0]);
   if (!columns.length) return '';
-  const th = columns.map((c) => `<th>${escapeHtml(toTitleCase(c))}</th>`).join('');
-  const body = table.map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(String(row?.[c] ?? ''))}</td>`).join('')}</tr>`).join('');
-  return `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`;
+  const th = columns.map((c) => `<th${attrIf(style.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
+  const body = table.map((row) => `<tr>${columns.map((c, i) => (
+    // The first column is the row label on every comparison table this renders,
+    // and the site's own tables give it more weight than the values beside it.
+    `<td${attrIf(i === 0 ? (style.tdFirst || style.td) : style.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
+  )).join('')}</tr>`).join('');
+  const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
+    + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
+  // The wrapper carries the border/rounding on the sites that use one, and
+  // keeps a wide table scrollable instead of overflowing its column.
+  return style.wrapper ? `<div class="${style.wrapper}">${html}</div>` : html;
 }
 
 // Each section is a real, LLM-grounded heading+body pair (generators/
@@ -643,10 +663,32 @@ function renderComparisonTable(table) {
 // sibling block right after the body — never nested inside body's own <p>,
 // same "block content is never trapped in a <p>" rule markdownToHtml's own
 // list/table handling already follows.
-function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE) {
-  const rows = sections.map((s) => fillTemplate(template.row, {
-    HEADING: escapeHtml(s.heading), BODY: markdownToHtml(s.body) + renderComparisonTable(s.table),
-  }));
+// A site's captured template can put {{BODY}} inside a <p>, because the real
+// example it was captured from is one paragraph of prose. A generated body is
+// not: markdownToHtml emits <p>/<ul>/<table> blocks, and renderComparisonTable
+// appends a <div><table>. A <table> inside a <p> is invalid HTML, and browsers
+// "fix" it by closing the <p> early — which strands the table OUTSIDE the
+// styled wrapper it was supposed to be in, on the live page, silently.
+//
+// Swapping the slot's <p> for a <div> keeps the same class and the same visual
+// result while being valid either way. Only done when the body actually
+// contains a block element, so a one-paragraph body still renders as the
+// site's own example did.
+const BLOCK_LEVEL = /<(table|ul|ol|div|h[1-6]|blockquote|pre|figure|section|p)[\s>]/i;
+
+function blockSafeRow(rowTemplate, body, slot) {
+  if (!BLOCK_LEVEL.test(body)) return rowTemplate;
+  const re = new RegExp(`<p(\\s[^>]*)?>(\\s*\\{\\{${slot}\\}\\}\\s*)</p>`);
+  return rowTemplate.replace(re, (m, attrs, inner) => `<div${attrs || ''}>${inner}</div>`);
+}
+
+export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, tableStyle = {}) {
+  const rows = sections.map((s) => {
+    const body = markdownToHtml(s.body) + renderComparisonTable(s.table, tableStyle);
+    return fillTemplate(blockSafeRow(template.row, body, 'BODY'), {
+      HEADING: escapeHtml(s.heading), BODY: body,
+    });
+  });
   return renderFromTemplate(template, rows);
 }
 
@@ -777,7 +819,16 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'expand-content') {
     if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
     if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
-    return { ok: true, values: { expandedContent: renderExpandedHtml(content.sections, templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE)) } };
+    return {
+      ok: true,
+      values: {
+        expandedContent: renderExpandedHtml(
+          content.sections,
+          templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE),
+          componentTemplates.table || {},
+        ),
+      },
+    };
   }
 
   if (actionType === 'qa-content') {

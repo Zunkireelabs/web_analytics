@@ -17,7 +17,7 @@ import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
-import { meta as execReportMeta } from './agents/executive-report.js';
+import { meta as execReportMeta, orchestrationStatus } from './agents/executive-report.js';
 import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
@@ -168,11 +168,23 @@ export async function runDailyAgentAnalysisForSite(site) {
   const start = daysAgoInTz(site.timezone, 7);
 
   const result = await runOrchestration({ siteId: site.id, start, end, agentIds: DAILY_AGENT_IDS, persistSubAgentRuns: true });
+  // runOrchestration never throws — it catches per agent and records each
+  // one's own status — so writing a hardcoded 'ok' here meant a run in which
+  // EVERY specialist agent failed persisted as a clean, empty result. This is
+  // the daily path, and command-center.js:194 maps this row's status straight
+  // onto what the user sees, so a total outage read as "ran clean, nothing
+  // found" on the screen people actually look at. See orchestrationStatus for
+  // why a sub-agent's own 'insufficient-data' deliberately does not downgrade.
+  const health = orchestrationStatus(result.perAgent, DAILY_AGENT_IDS);
   await saveAgentRun({
     siteId: site.id, agentId: 'executive-report', agentVersion: execReportMeta.version,
-    input: { siteId: site.id, start, end }, status: 'ok',
-    facts: { rangeStart: start, rangeEnd: end, sections: result.perAgent, topFindings: result.findings.slice(0, 3), findings: result.findings },
-    narrative: result.narrative, error: null, tookMs: null,
+    input: { siteId: site.id, start, end }, status: health.status,
+    facts: {
+      rangeStart: start, rangeEnd: end, sections: result.perAgent,
+      topFindings: result.findings.slice(0, 3), findings: result.findings,
+      failedAgentIds: health.failedAgentIds,
+    },
+    narrative: result.narrative, error: health.message, tookMs: null,
   });
 
   const implementedFindingIds = await getImplementedFindingIds(site.id);
@@ -964,6 +976,79 @@ export async function runTemplateCapabilityRepairForAllSites() {
   return results;
 }
 
+// Runs alongside runTemplateCapabilityRepairForAllSites, in the same 07:00
+// chain — a repo-tree read plus a handful of already-known post checks, cheap
+// enough to run every morning against every site rather than once on demand.
+// A site with nothing to backfill (the common case, most mornings) costs one
+// read and returns immediately. Per-site error isolation, same reasoning as
+// every other *ForAllSites here.
+export async function runBackfillBlogImagesForAllSites() {
+  const { backfillBlogImagesForSite } = await import('./scripts/backfill-blog-images.js');
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const report = await backfillBlogImagesForSite(site.id);
+      if (report.prCreated) {
+        console.log(`[job] backfill-blog-images site ${site.id} "${site.name}": ${report.imaged} image(s) added, ${report.noMatch} post(s) with no good match, PR ${report.prCreated.url}`);
+      }
+      results.push(report);
+    } catch (err) {
+      console.error(`[job] backfill-blog-images failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
+// Runs the role-correction pass (server/scripts/repair-design-profile-roles.js)
+// against every site with a stored design profile, every morning — the
+// role-mismatch defect it fixes (a real, live class assigned to the wrong
+// typography slot) is a property of the DERIVATION, so it can recur on any
+// site whenever its profile is re-derived (queueDesignProfileRescanForAllSites,
+// weekly). Deliberately runs BEFORE runContentRepairForAllSites in the same
+// morning chain, so content-repair always re-renders shipped content through
+// whatever this pass just corrected, never a stale template.
+export async function runDesignProfileRoleCorrectionForAllSites() {
+  const { repairDesignProfileRolesForSites } = await import('./scripts/repair-design-profile-roles.js');
+  const { rows: sites } = await query(`select * from sites
+     where url_file_map->'siteRoot'->'designProfile' is not null order by id`);
+  const result = await repairDesignProfileRolesForSites(sites, { commit: true });
+  if (result.changed) {
+    console.log(`[job] design-profile role correction: ${result.changed}/${result.examined} site(s) had role corrections, ${result.failed} failed.`);
+  }
+  return result;
+}
+
+// The systemic counterpart to repair-design-profile-roles.js's morning role
+// re-verification (see queueDesignProfileRescanForAllSites/cron.js): correcting
+// the STORED templates fixes what a site generates from now on, but content
+// already spliced into the repo before the correction stays wrong until
+// something re-renders it. This is that something, run every morning against
+// every connected site rather than once by hand — the exact repair used to fix
+// zunkireelabs.com's shipped content (component-template restyling,
+// visible_faq_cap enforcement, blog front-matter contract, directory-collection
+// self-inclusion, and unresolved-placeholder/fabricated-competitor removal),
+// now automated. See scripts/repair-site-content-live.js's own module comment.
+export async function runContentRepairForAllSites() {
+  const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const report = await repairSiteContentLive(site.id);
+      if (report.prCreated) {
+        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, PR ${report.prCreated.url}`);
+      }
+      results.push(report);
+    } catch (err) {
+      console.error(`[job] content-repair failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
 // Daily counterpart to runTemplateCapabilityRepairForAllSites above — runs
 // right after it so it sees the SAME morning's freshly-healed config
 // (autoHealNewContentTarget/autoHealFileMapping already ran, any
@@ -1128,12 +1213,23 @@ export async function queueDesignAgentDerivationForSite(site, {
   enqueueProfileJob = createDesignProfileJob,
   resolvePageUrl = sitePageUrl,
 } = {}) {
-  // Eligibility is derived from auto_remediation_enabled, not a separate
-  // Design Agent flag — see the comment on the gate in design-drift.js's
-  // resolveOrCreateComponentTemplate for why. A site becomes eligible the
-  // moment it has a repo connected AND a human has done the one-time
-  // auto-remediation review, with no second manual toggle to flip.
-  if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  // Eligibility used to also require auto_remediation_enabled, on the
+  // reasoning that a repo-connected site becomes eligible "the moment a
+  // human has done the one-time auto-remediation review." The
+  // design-integrity gate (design-drift.js's designReviewState,
+  // validateAutoRemediationRequest in routes/clients.js) inverted that: a
+  // site can no longer GET auto_remediation_enabled until its design has
+  // been reviewed, and there is nothing to review until a profile has been
+  // derived — so requiring auto_remediation_enabled here made this
+  // permanently unreachable for every site going through this path,
+  // deadlocked on itself. Derivation is read-only (it only writes
+  // designProfile/componentTemplates config, never touches the live repo),
+  // so it never needed that consent in the first place — only SHIPPING
+  // styled markup does, and that is gated separately and directly at apply
+  // time (backend.js's computeMarkerMerge / frontend.js's apply, both via
+  // designReviewState). A connected repo is still required: this queues a
+  // real Design Agent job against that repo's live pages.
+  if (!site?.repo_owner || !site?.repo_name) return false;
   if (hasUsableProfile(site)) return false;
   try {
     const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
@@ -1150,13 +1246,53 @@ export async function queueDesignAgentDerivationsForAllSites({
   listAllSites = listSites,
   queueForSite = queueDesignAgentDerivationForSite,
 } = {}) {
-  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
+  // Matches queueDesignAgentDerivationForSite's own gate — no longer filters
+  // on auto_remediation_enabled, for the same deadlock reason (see that
+  // function's comment). A site awaiting its first design review is exactly
+  // the site this daily sweep most needs to reach — without a profile it
+  // can never move past 'unreviewed'.
+  const sites = (await listAllSites()).filter((s) => s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
     if (await queueForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} whole-site derivation(s) ahead of today's 07:00 run`);
   return { queued };
+}
+
+// Queues the FIRST design-profile derivation as part of onboarding itself
+// (routes/clients.js's runBaselineSequence), not on a cron a new client may
+// sit unqueued in front of for hours. This is the design-integrity-gate
+// proposal's change 01: reading a client's design leads onboarding rather
+// than trailing behind it — staff can review and sign off (change 04's
+// gate) in the same sitting they connect GSC/GA4/the repo, before this
+// site's agents are ever allowed to ship a single styled fix.
+//
+// Deliberately repo-INDEPENDENT, unlike queueDesignAgentDerivationForSite
+// above: derivation only needs a reachable live URL to look at (sitePageUrl)
+// — the repository is needed to SHIP a template, never to compose or review
+// one, and per this platform's own account, no client site has a repo
+// connected at onboarding time. Requiring one here would mean design review
+// — and therefore the ability to ever enable autonomy — waits on a step
+// that, for every real client today, hasn't happened yet.
+export async function queueDesignProfileDerivationForOnboarding(site, {
+  hasUsableProfile = siteHasUsableDesignProfile,
+  findQueuedProfileJob = getQueuedComponentTemplateJob,
+  enqueueProfileJob = createDesignProfileJob,
+  resolvePageUrl = sitePageUrl,
+} = {}) {
+  const pageUrl = resolvePageUrl(site);
+  if (!pageUrl) return false;
+  if (hasUsableProfile(site)) return false;
+  try {
+    const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
+    if (pending) return false;
+    await enqueueProfileJob(site.id, { requestedBy: null, pageUrl });
+    return true;
+  } catch (err) {
+    console.error(`[job] could not queue onboarding design-profile derivation for site ${site.id}:`, err.message);
+    return false;
+  }
 }
 
 // Design Context (design-agent/live-analysis/) is a durable asset, not

@@ -5,6 +5,7 @@ import { findEmptySections } from './empty-section-guard.js';
 import { checkPositioning } from './positioning-guard.js';
 import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
 import { checkDesignConsistency } from './design-consistency-gate.js';
+import { checkPlaceholders } from './placeholder-guard.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
@@ -84,6 +85,12 @@ export async function runQualityGate(content, generatorId, siteId) {
     ...(isNonLlmContent ? [] : findScaffoldingIssues(content, generatorId)),
     ...(isNonLlmContent ? [] : findDuplicateParagraphs(content)),
     ...findSchemaIssues(content),
+    // Applies to EVERY generator, LLM-backed or not, and is deliberately not
+    // scoped to a generator allow-list: an unfilled placeholder is wrong
+    // wherever it appears, and the incident that prompted it (a fabricated
+    // competitor table) lived in expand-content's structured `table` rows,
+    // which no prose-shaped check inspects.
+    ...checkPlaceholders(content).issues,
     ...findEmptySections(content),
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
     ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),

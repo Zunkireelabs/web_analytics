@@ -56,6 +56,17 @@ function textHierarchyOf(block) {
   }
   if (block.bodyText) items.push({ role: 'body', text: block.bodyText, tag: 'p', style: block.bodyStyle, classes: block.bodyClasses || '' });
   if (block.ctaText) items.push({ role: 'cta', text: block.ctaText, tag: block.ctaTag, style: null, classes: block.ctaClasses || '' });
+  // capture.js's pickLink() already excludes anything button-shaped (a
+  // background color, or a btn/button class) so this is real inline-link
+  // evidence, not another copy of the cta above — see pickLink's own comment
+  // for the "first <a> in a block is usually its CTA" trap this avoids.
+  // No `text`: capture.js only reads this link's classes, not its content.
+  // profile-extract.js's typography.link is exactly what this role backs,
+  // and design-drift.js's role verification reads this role to catch a link
+  // template that was actually derived from a button (the bug
+  // correctLinkTypography exists to fix) — before this, that check had no
+  // evidence to verify against, because this role never reached `sections`.
+  if (block.linkClasses) items.push({ role: 'link', text: null, tag: 'a', style: null, classes: block.linkClasses || '' });
   return items;
 }
 

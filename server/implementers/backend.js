@@ -9,7 +9,7 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY } from './lib/design-drift.js';
+import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, designReviewState } from './lib/design-drift.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
@@ -805,6 +805,35 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
         ok: false, reason: 'template-stale',
         error: `This page's live site no longer defines the CSS classes this template expects (${freshness.missingClasses.join(', ')}) — the site's design may have changed since "${componentKey}" was configured. Regenerate it from the site's current design before applying.`,
         missingClasses: freshness.missingClasses, componentKey, actionType: draft.action_type,
+      };
+    }
+  }
+
+  // The design-integrity gate (design-integrity-gate proposal, change 04) —
+  // last, because it's the most drastic refusal and every cheaper check
+  // above should get a chance to give a more specific reason first.
+  //
+  // This action type's styled markup either comes from a REAL configured
+  // componentTemplates entry (already checked for staleness above) OR —
+  // when none is configured — from an ON-THE-FLY projection straight off
+  // site.url_file_map.siteRoot.designProfile (buildMergeValues' own
+  // templateFor fallback: `configured || projectComponentTemplate(...) ||
+  // fallback`, marker-merge.js). BOTH paths trace back to the same captured
+  // profile, so this gates on "does a usable profile exist and is it
+  // unreviewed" — not on whether a componentTemplates entry happens to be
+  // configured. A site with NO configured entry at all was exactly as
+  // exposed to the wrong-role incident as one with a stale entry: it just
+  // silently fell through to the live projection instead, with the
+  // template-stale check above never even running (`if (mode === 'visible'
+  // && templateEntry)` skips when templateEntry is undefined).
+  if (mode === 'visible' && siteHasUsableDesignProfile(site)) {
+    const review = designReviewState(site);
+    if (!review.ok) {
+      return {
+        ok: false, reason: 'design-unreviewed',
+        error: review.reason === 'stale'
+          ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before styled content can ship again."
+          : "This site's design has not been reviewed yet — review and approve it (Clients → this site → Review this site's design) before styled content can ship.",
       };
     }
   }

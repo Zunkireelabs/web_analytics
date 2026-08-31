@@ -81,7 +81,121 @@ function extractBlocksInPage() {
     return {
       fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight,
       lineHeight: cs.lineHeight, color: cs.color, textAlign: cs.textAlign,
+      // textTransform/letterSpacing are what separate a body paragraph from an
+      // eyebrow/kicker label — see isLabelLike. Without them, downstream role
+      // assignment has no framework-agnostic signal to tell the two apart and
+      // has to trust class names, which is how a `text-xs uppercase
+      // tracking-widest` kicker once became this site's `typography.body`.
+      textTransform: cs.textTransform, letterSpacing: cs.letterSpacing,
     };
+  }
+
+  // A section's FIRST <p> is very often not its body copy: on a site that puts
+  // an eyebrow/kicker above each heading ("AI-First Technology Company"), the
+  // first paragraph is a label, and picking it makes every generated paragraph
+  // sitewide render as a tiny uppercase label. Judged on computed style, not
+  // class names, so it holds for any framework.
+  function isLabelLike(el) {
+    if (!el) return true;
+    const cs = window.getComputedStyle(el);
+    if (cs.textTransform === 'uppercase') return true;
+    if (parseFloat(cs.fontSize) < 14) return true;
+    // Wide tracking is a label convention; body copy is at or near normal.
+    const ls = parseFloat(cs.letterSpacing);
+    if (!Number.isNaN(ls) && ls >= 1) return true;
+    // A kicker is a few words. Real body copy is a sentence or more.
+    return (el.textContent || '').trim().length < 40;
+  }
+
+  // The most representative body element in a block, not merely the first.
+  // Falls back to the longest-text candidate, then the first, so a block whose
+  // paragraphs are ALL label-like still yields something rather than nothing.
+  function pickBody(el) {
+    const candidates = [...el.querySelectorAll('p, li, dd')].slice(0, 12);
+    if (!candidates.length) return null;
+    const real = candidates.find((c) => !isLabelLike(c));
+    if (real) return real;
+    return candidates.reduce((best, c) => (
+      (c.textContent || '').trim().length > (best.textContent || '').trim().length ? c : best
+    ), candidates[0]);
+  }
+
+  // Same first-match trap as pickBody: a block's first <a> is usually its CTA
+  // button, so taking it made `typography.link` a button class list, which then
+  // got merged onto every generated inline link. Prefer a plain inline link.
+  function pickLink(el) {
+    const candidates = [...el.querySelectorAll('a')].slice(0, 12);
+    if (!candidates.length) return null;
+    const plain = candidates.find((a) => {
+      const cs = window.getComputedStyle(a);
+      const buttonish = cs.display !== 'inline'
+        && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+      const named = /\b(btn|button)\b/i.test(typeof a.className === 'string' ? a.className : '');
+      return !buttonish && !named;
+    });
+    return plain || candidates[0];
+  }
+
+  function fontPx(el) {
+    return parseFloat(window.getComputedStyle(el).fontSize) || 0;
+  }
+
+  // A block's heading is its VISUALLY DOMINANT heading, not its first one in
+  // DOM order. Some sites mark the eyebrow above a section title as a real
+  // low-level heading (an <h4>/<h6>, often for a11y outline reasons), and that
+  // eyebrow comes first — so first-match recorded the kicker's classes as this
+  // site's heading convention and every generated <h2> inherited them.
+  //
+  // Deliberately NOT judged with isLabelLike: a heading may legitimately be
+  // uppercase or wide-tracked (that is an ordinary display-type convention),
+  // so the label test that is correct for body copy would reject real headings
+  // here. Rendered size is the framework-agnostic signal that actually
+  // separates a kicker from the title it sits above.
+  function pickHeading(el) {
+    const candidates = [...el.querySelectorAll('h1, h2, h3, h4')].slice(0, 12);
+    if (!candidates.length) return null;
+    // reduce keeps the FIRST of equal-sized candidates, so DOM order still
+    // breaks ties between two headings of genuinely equal weight.
+    return candidates.reduce((best, c) => (fontPx(c) > fontPx(best) ? c : best), candidates[0]);
+  }
+
+  // The inverse of pickLink, and the reason it has to exist: `cta` fed
+  // components.button.primary, which projectCta stamps onto every generated
+  // call-to-action sitewide. Taking the block's first <a>/<button> meant a
+  // breadcrumb, a logo anchor, a "read more" text link or a nav toggle could
+  // become the site's button convention.
+  //
+  // Returns null when the block has no genuinely button-like element, instead
+  // of falling back to the first candidate. That is the point: no button
+  // convention recorded means projectCta returns null and the caller keeps its
+  // own plain markdown link, which is recoverable. A wrong one means every CTA
+  // this platform ever writes for the site renders as something that is not a
+  // button, which is not.
+  function isChromeControl(el) {
+    // Menu toggles, search and close buttons are button-shaped by definition
+    // and carry no CTA styling worth copying.
+    if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls')) return true;
+    const cls = typeof el.className === 'string' ? el.className : '';
+    return /\b(toggle|hamburger|menu|close|search|dismiss|carousel|slider|tab)\b/i.test(cls);
+  }
+
+  function pickCta(el) {
+    const candidates = [...el.querySelectorAll('a, button')].slice(0, 16);
+    return candidates.find((c) => {
+      if (isChromeControl(c)) return false;
+      // A real CTA is labelled. Icon-only controls have no text to speak of,
+      // and their padding/sizing is wrong for a text button anyway.
+      const text = (c.textContent || '').trim();
+      if (text.length < 2 || text.length > 60) return false;
+      const named = /\b(btn|button|cta)\b/i.test(typeof c.className === 'string' ? c.className : '');
+      if (named) return true;
+      // Otherwise it has to LOOK like a button: laid out as a box (not inline
+      // running text) and visually bounded by a fill, a border, or a radius.
+      const cs = window.getComputedStyle(c);
+      if (cs.display === 'inline') return false;
+      const filled = cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+      return filled || parseFloat(cs.borderTopWidth) > 0 || parseFloat(cs.borderRadius) > 0;
+    }) || null;
   }
 
   function classesOf(el) {
@@ -103,9 +217,9 @@ function extractBlocksInPage() {
   for (const el of topLevel) {
     const rect = el.getBoundingClientRect();
     if (rect.height < 4) continue; // invisible/collapsed — not a real block
-    const heading = el.querySelector('h1, h2, h3, h4');
-    const body = el.querySelector('p, li, dd');
-    const cta = el.querySelector('a, button');
+    const heading = pickHeading(el);
+    const body = pickBody(el);
+    const cta = pickCta(el);
     const accordion = el.querySelector('details, [class*="accordion" i]');
     const accordionTrigger = accordion?.querySelector('summary, button, [class*="trigger" i]') || null;
     const accordionPanel = accordion?.querySelector('[class*="panel" i], [class*="content" i]') || null;
@@ -144,7 +258,7 @@ function extractBlocksInPage() {
       cardLike: !!card,
       cardClasses: { wrapper: classesOf(card), body: classesOf(cardInner) },
       listClasses: { wrapper: classesOf(list), item: classesOf(listItem) },
-      linkClasses: classesOf(el.querySelector('a')),
+      linkClasses: classesOf(pickLink(el)),
     });
   }
   return { title: document.title, blocks };

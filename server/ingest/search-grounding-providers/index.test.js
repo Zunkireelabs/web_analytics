@@ -1,79 +1,76 @@
 import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Regression coverage for a real, systemic failure: with only
-// getConfiguredGroundingProvider() (no fallback), a single configured
-// provider (serpapi, listed first — see index.js's own comment) whose quota
-// was exhausted or which had a transient outage made EVERY
-// expand-content::external-citations run fail identically, across many
-// unrelated pages on the same day, even though google-cse was also
-// configured and could have served the request. mock.module swaps both
-// concrete provider adapters so this exercises the real fallback logic in
+// Tavily is the sole search-grounding provider (see index.js's own comment
+// for why google-cse/serpapi were removed from this registry). This mocks
+// the concrete adapter so tests exercise the real registry logic in
 // index.js, not a hand-rolled substitute for it.
-let serpapiConfigured = true;
-let serpapiBehavior = async () => { throw new Error('SerpApi is temporarily unavailable (rate limited).'); };
-let googleCseConfigured = true;
-let googleCseBehavior = async () => [{ title: 'Google result', url: 'https://example.com/google' }];
+let tavilyConfigured = true;
+let tavilyBehavior = async () => [{ title: 'Tavily result', url: 'https://example.com/tavily' }];
 
-mock.module('../competitor-providers/serpapi.js', {
+mock.module('./tavily.js', {
   namedExports: {
-    id: 'serpapi',
-    configured: () => serpapiConfigured,
-    searchSources: (...args) => serpapiBehavior(...args),
+    id: 'tavily',
+    configured: () => tavilyConfigured,
+    searchSources: (...args) => tavilyBehavior(...args),
   },
 });
+
+// Regression guard: index.js must not import EITHER of these adapters at
+// all any more (they still back competitor-providers/ for real SEO/SERP
+// data — untouched — but must never again serve expand-content.js's
+// citation-search path). Mocked with a spy that fails the test if it's ever
+// even reached, so this catches "someone re-adds a fallback" whether the
+// fallback is reached on a Tavily failure OR when Tavily is unconfigured.
+let googleCseCalled = false;
+let serpapiCalled = false;
 mock.module('../competitor-providers/google-cse.js', {
   namedExports: {
     id: 'google-cse',
-    configured: () => googleCseConfigured,
-    searchSources: (...args) => googleCseBehavior(...args),
+    configured: () => { googleCseCalled = true; return true; },
+    searchSources: async () => { googleCseCalled = true; return [{ title: 'Google CSE result', url: 'https://example.com/google-cse' }]; },
+  },
+});
+mock.module('../competitor-providers/serpapi.js', {
+  namedExports: {
+    id: 'serpapi',
+    configured: () => { serpapiCalled = true; return true; },
+    searchSources: async () => { serpapiCalled = true; return [{ title: 'SerpApi result', url: 'https://example.com/serpapi' }]; },
   },
 });
 
 const { searchGroundedSources, groundingProviderConfigured } = await import('./index.js');
 
 describe('searchGroundedSources', () => {
-  test('falls back to the next configured provider when the first one throws', async () => {
+  test('returns Tavily results when configured', async () => {
     const sources = await searchGroundedSources('nepal software firms', 3);
-    assert.deepEqual(sources, [{ title: 'Google result', url: 'https://example.com/google' }]);
+    assert.deepEqual(sources, [{ title: 'Tavily result', url: 'https://example.com/tavily' }]);
   });
 
-  test('does not fall back when the first configured provider succeeds', async () => {
-    let googleCalled = false;
-    serpapiBehavior = async () => [{ title: 'SerpApi result', url: 'https://example.com/serpapi' }];
-    googleCseBehavior = async () => { googleCalled = true; return []; };
+  test('propagates a Tavily failure (e.g. quota exhausted) rather than falling back to another provider', async () => {
+    tavilyBehavior = async () => { throw new Error('Tavily account quota is exhausted for now.'); };
 
-    const sources = await searchGroundedSources('nepal software firms', 3);
-    assert.deepEqual(sources, [{ title: 'SerpApi result', url: 'https://example.com/serpapi' }]);
-    assert.equal(googleCalled, false);
+    await assert.rejects(() => searchGroundedSources('nepal software firms', 3), /Tavily account quota is exhausted/);
+    assert.equal(googleCseCalled, false, 'must never fall back to Google CSE');
+    assert.equal(serpapiCalled, false, 'must never fall back to SerpApi');
+
+    tavilyBehavior = async () => [{ title: 'Tavily result', url: 'https://example.com/tavily' }];
   });
 
-  test('throws the last error when every configured provider fails', async () => {
-    serpapiBehavior = async () => { throw new Error('serpapi down'); };
-    googleCseBehavior = async () => { throw new Error('google-cse down'); };
-
-    await assert.rejects(() => searchGroundedSources('nepal software firms', 3), /google-cse down/);
-  });
-
-  test('skips an unconfigured provider entirely rather than trying and failing it', async () => {
-    serpapiConfigured = false;
-    googleCseConfigured = true;
-    googleCseBehavior = async () => [{ title: 'Google result', url: 'https://example.com/google' }];
-
-    const sources = await searchGroundedSources('nepal software firms', 3);
-    assert.deepEqual(sources, [{ title: 'Google result', url: 'https://example.com/google' }]);
-
-    serpapiConfigured = true;
-  });
-
-  test('throws when no provider is configured at all', async () => {
-    serpapiConfigured = false;
-    googleCseConfigured = false;
+  test('throws when Tavily is not configured, with no other provider to fall back to', async () => {
+    tavilyConfigured = false;
 
     await assert.rejects(() => searchGroundedSources('nepal software firms', 3), /No search-grounding provider is configured/);
     assert.equal(groundingProviderConfigured(), false);
+    assert.equal(googleCseCalled, false, 'must never fall back to Google CSE');
+    assert.equal(serpapiCalled, false, 'must never fall back to SerpApi');
 
-    serpapiConfigured = true;
-    googleCseConfigured = true;
+    tavilyConfigured = true;
+  });
+
+  test('never even checks Google CSE / SerpApi configured() on the happy path', async () => {
+    await searchGroundedSources('nepal software firms', 3);
+    assert.equal(googleCseCalled, false, 'Google CSE configured()/searchSources() must never be invoked from this registry');
+    assert.equal(serpapiCalled, false, 'SerpApi configured()/searchSources() must never be invoked from this registry');
   });
 });

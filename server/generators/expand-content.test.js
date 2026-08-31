@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { generate, meta, sanitizeTable } from './expand-content.js';
 import { runQualityGate } from './lib/quality-gate.js';
 import { query, pool } from '../db.js';
+import { _resetQuotaForTests } from '../ingest/search-grounding-providers/tavily.js';
 
 // Only exercises the input-validation path, which throws before ever
 // fetching the live page or calling the LLM — no real network needed.

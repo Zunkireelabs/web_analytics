@@ -24,6 +24,28 @@ export const meta = {
 
 const MIN_IMPRESSIONS = 5;
 
+// One real number to rank discovered competitors by, strongest evidence
+// first, so priorityByRank has a genuine signal to bucket on instead of the
+// flat 'medium' every discovery finding used to carry.
+//
+// The ordering is deliberately evidence-strength before magnitude: a domain
+// both lenses agree on outranks one only real Google rankings found, which
+// outranks anything an LLM named on its own — and among LLM-only candidates,
+// the ones whose homepage actually covers this site's own real search queries
+// (queryRelevanceOverlap, free, no SERP provider needed) outrank the ones
+// that cover none of them. The structural score gap only breaks ties within
+// a tier; it can't promote an ungrounded guess above a confirmed competitor,
+// which is the whole point — a real-but-irrelevant company the model recalled
+// must never be presented as this site's most urgent competitive threat.
+const DISCOVERY_CONFIDENCE_WEIGHT = { both: 1200, serp: 1000, llm: 0, forced: 0 };
+const QUERY_OVERLAP_WEIGHT = 100;
+function discoveryConfidence(c) {
+  const source = DISCOVERY_CONFIDENCE_WEIGHT[c.discoverySource] ?? 0;
+  const overlap = (c.queryOverlap?.overlapCount || 0) * QUERY_OVERLAP_WEIGHT;
+  const scoreGap = (c.competitorScore ?? 0) - (c.ownScore ?? 0); // -100..100, tiebreak only
+  return source + overlap + scoreGap;
+}
+
 export async function run({ siteId, start, end, params }) {
   // Always-available path: LLM discovers real competitors, crawls them,
   // compares structural signals — never blocked on external SEO API
@@ -42,7 +64,7 @@ export async function run({ siteId, start, end, params }) {
   // equality instead of a time-window heuristic (see its comment).
   const runAt = new Date();
   await Promise.all(reached.map((c) =>
-    upsertCompetitorProfile(siteId, c.domain, { ...c.comparison, ownScore: c.ownScore, competitorScore: c.competitorScore, discoverySource: c.discoverySource }, runAt)
+    upsertCompetitorProfile(siteId, c.domain, { ...c.comparison, ownScore: c.ownScore, competitorScore: c.competitorScore, discoverySource: c.discoverySource, queryOverlap: c.queryOverlap }, runAt)
       .catch((err) => console.error(`[agents] competitor-intelligence: failed to save profile for ${c.domain}:`, err.message))
   ));
   // Real, insert-only history alongside the overwrite-per-domain profile
@@ -53,18 +75,54 @@ export async function run({ siteId, start, end, params }) {
       .catch((err) => console.error(`[agents] competitor-intelligence: failed to save structural snapshot for ${c.domain}:`, err.message))
   ));
 
-  const discoveryFindings = reached.map((c) => makeFinding({
-    id: `competitor-intelligence:discovery:${c.domain}`,
-    evidence: { domain: c.domain, ownScore: c.ownScore, competitorScore: c.competitorScore, discoverySource: c.discoverySource, ...c.comparison },
-    whyItMatters: c.comparison.verdict || `${c.domain} was identified as a real competitor for this site's audience.`,
-    // These are comparative/informational findings, not ranked by a single
-    // real number the way ranking-based findings below are — 'medium' is an
-    // honest flat default here (see expectedImpact.basis: 'estimate'),
-    // never dressed up as a computed rank.
-    priority: 'medium',
-    recommendedAction: null,
-    expectedImpact: { label: 'Medium', basis: 'estimate', value: null },
-  }));
+  // Evidence carries ONLY real numbers/booleans about this competitor — the
+  // two structural scores, the real structural signals crawled off its
+  // homepage, how the domain was actually discovered, and the free
+  // query-overlap grounding. It used to `...c.comparison` the whole parsed
+  // LLM object in, so positioning/contentDepth/seoStructure/aiVisibility/
+  // verdict — paragraphs of model commentary — were presented to a customer
+  // in the one field types.js defines as "the specific real numbers backing
+  // this finding". That prose still exists, in facts.comparisons and in the
+  // narrative below, where it is plainly prose and not evidence.
+  const discoveryCandidates = [...reached].sort((a, b) => discoveryConfidence(b) - discoveryConfidence(a));
+  const discoveryPriorities = priorityByRank(discoveryCandidates);
+  const discoveryFindings = discoveryCandidates.map((c, i) => {
+    const overlap = c.queryOverlap || { queriesChecked: 0, overlapCount: 0, matchedQueries: [] };
+    const serpVerified = c.discoverySource === 'serp' || c.discoverySource === 'both';
+    const priority = discoveryPriorities[i];
+    return makeFinding({
+      id: `competitor-intelligence:discovery:${c.domain}`,
+      evidence: {
+        domain: c.domain, ownScore: c.ownScore, competitorScore: c.competitorScore,
+        scoreGap: c.competitorScore != null && c.ownScore != null ? c.competitorScore - c.ownScore : null,
+        discoverySource: c.discoverySource, serpVerified,
+        queriesChecked: overlap.queriesChecked, queryOverlapCount: overlap.overlapCount,
+        matchedQueries: overlap.matchedQueries,
+        structuralSignals: c.comparison?.structuralSignals ?? null,
+      },
+      // Says out loud how this domain was actually found. A competitor
+      // nobody's real rankings confirmed is AI market-research recall, and
+      // saying so is the difference between evidence and an assertion.
+      whyItMatters: serpVerified
+        ? `${c.domain} really ranks on Google for this site's own tracked queries, and scores ${c.competitorScore}/100 structurally versus this site's ${c.ownScore}/100.`
+        : `${c.domain} was named by AI market-research reasoning, not confirmed by any real ranking data (no SERP provider is connected). Its homepage covers ${overlap.overlapCount} of the ${overlap.queriesChecked} tracked quer${overlap.queriesChecked === 1 ? 'y' : 'ies'} this site actually gets searches for, and it scores ${c.competitorScore}/100 structurally versus this site's ${c.ownScore}/100.`,
+      // Ranked by discoveryConfidence below — real ranking confirmation
+      // first, then free query-overlap grounding, then the structural score
+      // gap. Never the flat 'medium' constant this used to hardcode
+      // (types.js: priority is "computed per agent from a real signal
+      // already in facts — never a fixed constant").
+      priority,
+      recommendedAction: null,
+      // 'estimate', not 'computed': even with the grounding above, "this
+      // company is a competitor worth acting on" is a judgment, not a
+      // measurement. The structural score gap is the real number behind it.
+      expectedImpact: {
+        label: impactFromPriority(priority),
+        basis: 'estimate',
+        value: c.competitorScore != null && c.ownScore != null ? c.competitorScore - c.ownScore : null,
+      },
+    });
+  });
 
   // Enrichment path: real keyword-level "who outranks us" findings, only
   // produced when a SERP provider is actually configured and has real
@@ -116,7 +174,12 @@ export async function run({ siteId, start, end, params }) {
     discoverySource: reached.map((c) => ({ domain: c.domain, source: c.discoverySource })),
     competitorsIdentified: reached.map((c) => c.domain),
     competitorsUnreachable: unreachable.map((c) => ({ domain: c.domain, error: c.error })),
-    comparisons: reached.map((c) => ({ domain: c.domain, ownScore: c.ownScore, competitorScore: c.competitorScore, ...c.comparison })),
+    // ownScore/competitorScore/structuralSignals/queryOverlap are real
+    // computed values; positioning/contentDepth/seoStructure/aiVisibility/
+    // verdict are LLM commentary on those same signals. Both are fine to
+    // carry in `facts` (the narrative call below reads them), but only the
+    // former ever belong in a Finding's `evidence` — see discoveryFindings.
+    comparisons: reached.map((c) => ({ domain: c.domain, ownScore: c.ownScore, competitorScore: c.competitorScore, queryOverlap: c.queryOverlap, ...c.comparison })),
     rankingDataAvailable: rankingFindings.length > 0,
     findings,
   };
@@ -138,7 +201,10 @@ export async function run({ siteId, start, end, params }) {
     'comparison (facts.backlinkComparison), write 2-4 sentences: name the most notable real competitor and the ' +
     'single most actionable gap versus them, and if ranking or backlinkComparison data is present, name the most ' +
     'damaging real competitive loss by search demand or referring-domain gap. If you cite backlinkComparison, ' +
-    'always label it as free Common Crawl data, distinct from any paid backlink data. Use ONLY the data given, ' +
+    'always label it as free Common Crawl data, distinct from any paid backlink data. If the competitor you name ' +
+    'has discoverySource "llm" (see facts.discoverySource), you MUST say plainly that it was identified by AI ' +
+    'market research and has not been confirmed against real Google ranking data — never present it as measured. ' +
+    'Use ONLY the data given, ' +
     'never invent a competitor name or number not present in the facts. A lower search position is BETTER. ' +
     'Plain text, no markdown, no bullets.';
   const narrative = await callLLM(system, `Facts: ${JSON.stringify(facts)}`, { maxTokens: 350 })

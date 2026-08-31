@@ -105,6 +105,40 @@ function detectMention(rawResponse, companyName, domain) {
   return false;
 }
 
+// The same deterministic ground-truth discipline detectMention applies to
+// THIS company, applied to the competitor names the extraction LLM reports.
+// competitorsMentioned came straight out of provider.extract() with no check
+// that the name it returned is actually present in the answer it was reading
+// — so a model that pattern-completed a plausible rival, or normalized a name
+// into a form the answer never used, got that name persisted into
+// ai_prompt_runs. From there it feeds getCompetitorMentionCounts, which feeds
+// shareOfAiVoicePct, competitorCitationGapPct and the rising-competitor
+// findings: a name that was never in any real AI answer could end up as a
+// "computed" count shown to a customer. Every name now has to survive the
+// exact same whole-match test against the raw response text before it is
+// stored, so the counts downstream are counts of real occurrences.
+//
+// A name the model reports but that isn't literally in the text is dropped,
+// not softened — abstaining costs one competitor row, asserting costs the
+// customer's trust in every number built on top of it.
+export function verifyExtractedCompetitors(rawResponse, extractedNames) {
+  if (!Array.isArray(extractedNames)) return [];
+  const text = String(rawResponse || '').toLowerCase();
+  const seen = new Set();
+  const verified = [];
+  for (const candidate of extractedNames) {
+    const name = typeof candidate === 'string' ? candidate.trim() : '';
+    // Single characters can't be whole-matched meaningfully (and would match
+    // half the alphabet in any long answer).
+    if (name.length < 2) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key) || !includesWholeMatch(text, key)) continue;
+    seen.add(key);
+    verified.push(name);
+  }
+  return verified;
+}
+
 // Pure, DB/API-free aggregation helpers — exported so the multi-provider
 // blending/percentage math has real unit test coverage (server/agents/
 // ai-recommendation.test.js) without needing a live DB or real provider
@@ -237,7 +271,10 @@ export async function run({ siteId, start, end }) {
         const saved = await saveAiPromptRun(siteId, {
           promptId: prompt.id, provider: provider.id, model: probe.model, runDate, rawResponse: probe.raw, mentioned,
           approximatePosition: mentioned ? (extracted?.approximatePosition ?? null) : null,
-          competitorsMentioned: extracted?.competitorsMentioned ?? [],
+          // Only names that really appear in probe.raw — see
+          // verifyExtractedCompetitors for why the model's own list isn't
+          // trusted as-is.
+          competitorsMentioned: verifyExtractedCompetitors(probe.raw, extracted?.competitorsMentioned),
           sentiment: extracted?.sentiment ?? null,
           recommendationStrength: mentioned ? (extracted?.recommendationStrength ?? null) : 'none',
         });
@@ -296,6 +333,14 @@ export async function run({ siteId, start, end }) {
     .filter((c) => c.current > c.prior && priorCounts.competitorCounts.size > 0)
     .sort((a, b) => (b.current - b.prior) - (a.current - a.prior));
   const risingPriorities = priorityByRank(risingCompetitors);
+  // basis 'computed' is honest for these two findings ONLY because every
+  // competitor name behind the counts was verified to really occur in a real
+  // AI answer (verifyExtractedCompetitors, at save time) — the counts are
+  // counts of real occurrences, and the deltas are plain arithmetic over
+  // them. Whether a verified name is genuinely a competitor rather than some
+  // other company the answer happened to name is still the extraction
+  // model's judgment; that caveat is stated in facts.note, and it is why
+  // neither finding carries a draftable recommendedAction.
   const risingFindings = risingCompetitors.slice(0, 3).map((c, i) => makeFinding({
     id: `ai-recommendation:rising-competitor:${c.name}`,
     evidence: { competitor: c.name, currentMentions: c.current, priorMentions: c.prior },
@@ -338,8 +383,12 @@ export async function run({ siteId, start, end }) {
     findings,
     note: 'aiVisibilityPct and mentioned/missed prompts are computed from a real, deterministic JS string/domain ' +
       'match against each raw AI response — never trusted from the model\'s own self-report. ' +
-      'approximatePosition/competitorsMentioned/sentiment/recommendationStrength are a separate LLM extraction ' +
-      'pass over the already-real response text, confidence-unlabeled qualitative parsing, not independently verified facts. ' +
+      'competitorsMentioned names are proposed by a separate LLM extraction pass but only persisted after the same ' +
+      'deterministic whole-word match confirms the name really occurs in that raw response, so every competitor ' +
+      'count here counts real occurrences; whether a confirmed name is genuinely a competitor remains the ' +
+      'extraction model\'s judgment. Counts drawn from runs recorded before that verification was added may still ' +
+      'include an unconfirmed name. approximatePosition/sentiment/recommendationStrength are that same extraction ' +
+      'pass, confidence-unlabeled qualitative parsing, not independently verified facts. ' +
       'When more than one AI model is configured, the top-level aiVisibilityPct is the average of each model\'s own ' +
       'rate, not a pooled mention/checked count — see facts.providers for the real per-model breakdown. ' +
       'shareOfAiVoicePct and competitorCitationGapPct are both computed purely from real, already-persisted ' +

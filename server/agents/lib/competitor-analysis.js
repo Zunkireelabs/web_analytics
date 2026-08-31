@@ -76,9 +76,19 @@ async function detectCompetitorsFromSerp(ownDomain, topQueries, { locationCode, 
 // required, unlike the real SERP path above, but also no way to verify
 // against what's actually ranking today — only used when no real SERP
 // provider is configured (see runCompetitorDiscovery). The LLM can name a
-// domain that doesn't actually exist or isn't reachable — step 2 (crawl) is
-// the real filter: a fake/unreachable domain simply fails to fetch and gets
-// dropped, never trusted on the LLM's say-so alone.
+// domain that doesn't actually exist or isn't reachable — step 2 (crawl)
+// drops those: a fake/unreachable domain simply fails to fetch, never
+// trusted on the LLM's say-so alone.
+//
+// But reachability is ALL it proves. A real, operating, entirely irrelevant
+// company fetches fine, so a domain that arrives here with discoverySource
+// 'llm' is model recall and nothing more — it is never "computed". Two
+// things keep that honest downstream and neither of them needs a paid API:
+// analyzeCompetitor attaches queryOverlap (a real, free relevance number
+// measured against this site's own Search Console queries — see
+// queryRelevanceOverlap), and competitor-intelligence.js labels the finding
+// with how the domain was actually found and refuses to rank an
+// unverified, zero-overlap candidate alongside a SERP-confirmed one.
 export async function detectCompetitors(ownDomain, topPages, topQueries, businessContext = {}) {
   const { title, metaDescription } = businessContext;
   const system = 'You are a market-research analyst identifying REAL business competitors for a company — not an ' +
@@ -128,10 +138,52 @@ export function normalizeCompetitorDomain(raw) {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) ? d : null;
 }
 
+// Words that carry no topical signal, so a query made only of these can't
+// tell us anything about whether a candidate is really in the same market.
+const RELEVANCE_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'near', 'best', 'top', 'how', 'what', 'who', 'why', 'when', 'where',
+  'you', 'your', 'our', 'are', 'from', 'that', 'this', 'about', 'into', 'www', 'com',
+]);
+
+// Free, deterministic relevance grounding for a candidate nobody verified
+// against a real SERP. Without a SERP provider configured — the default for
+// any tenant that isn't paying for DataForSEO — competitor discovery is
+// purely an LLM recalling well-known companies from training data, and the
+// ONLY filter it then passed through was "the homepage fetched successfully".
+// A real, operating, completely irrelevant company clears that bar easily and
+// then gets presented to a customer as an identified competitor. This asks a
+// question that can be answered from data we already have, for free: does
+// this candidate's own homepage actually talk about the things this site's
+// real Search Console searchers are searching for? A query counts as matched
+// only when every one of its topical terms is literally present in the
+// candidate's fetched homepage text — never a similarity guess.
+//
+// Brand terms (the site's own domain label) are dropped from each query
+// before testing: a competitor's homepage will never contain this site's own
+// brand name, so leaving those in would score every genuine competitor zero.
+// A query left with no topical terms at all (a pure brand search) is not
+// counted as checked either — it's an unanswerable test, not a failed one,
+// and `queriesChecked: 0` is how the caller knows the overlap number carries
+// no information rather than being real evidence of irrelevance.
+export function queryRelevanceOverlap(analysis, topQueries, ownDomain) {
+  const haystack = `${analysis.title || ''} ${analysis.metaDescription || ''} ${analysis.bodyText || ''}`.toLowerCase();
+  const brandTerms = new Set(String(ownDomain || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const matched = [];
+  let queriesChecked = 0;
+  for (const q of topQueries) {
+    const terms = String(q).toLowerCase().split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 4 && !RELEVANCE_STOPWORDS.has(t) && !brandTerms.has(t));
+    if (!terms.length) continue;
+    queriesChecked++;
+    if (terms.every((t) => haystack.includes(t))) matched.push(q);
+  }
+  return { queriesChecked, overlapCount: matched.length, matchedQueries: matched.slice(0, 5) };
+}
+
 // Step 2 (crawl) + 3 (compare) — fetch one candidate's real homepage and, if
 // it resolves, ask an LLM to compare it against the site's own already-
 // fetched analysis using only the real structural signals given.
-export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore) {
+export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore, topQueries = []) {
   const fetched = await analyzePageUrl(`https://${domain}`);
   if (!fetched.ok) return { domain, ok: false, error: fetched.error };
   const competitorScore = overallStructuralScore(fetched.analysis);
@@ -144,6 +196,11 @@ export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore
     hasSchema: fetched.analysis.hasSchema,
     hasComparisonContent: fetched.analysis.hasComparisonContent,
   };
+  // Real, free relevance evidence about THIS candidate — see
+  // queryRelevanceOverlap above. Returned as its own top-level field, never
+  // folded into `comparison` below, precisely because it is a computed number
+  // and everything in `comparison` (apart from structuralSignals) is not.
+  const queryOverlap = queryRelevanceOverlap(fetched.analysis, topQueries, ownDomain);
 
   // Earlier version had the model refer to the two sites as "Site A"/"Site B"
   // in its own output text — those placeholder labels then got stored
@@ -168,7 +225,18 @@ export async function analyzeCompetitor(domain, ownAnalysis, ownDomain, ownScore
   if (!raw) return { domain, ok: false, error: 'comparison LLM call failed' };
   try {
     const comparison = JSON.parse(stripJsonFences(raw));
-    return { domain, ok: true, comparison: { ...comparison, structuralSignals }, ownScore, competitorScore };
+    // WARNING for every consumer: apart from `structuralSignals` (real
+    // booleans computed from the fetched HTML, which content-gap.js
+    // aggregates), every field of `comparison` — positioning, contentDepth,
+    // seoStructure, aiVisibility, verdict — is free-text LLM commentary.
+    // competitor-intelligence.js used to spread this whole object straight
+    // into a Finding's `evidence`, which types.js reserves for "the specific
+    // real numbers backing this finding, never a re-statement or a new
+    // invented number" — so a paragraph of model prose was being shown to a
+    // customer as computed evidence. It belongs in facts/narrative, never in
+    // evidence; the real numbers a Finding may cite are ownScore,
+    // competitorScore, structuralSignals and queryOverlap.
+    return { domain, ok: true, comparison: { ...comparison, structuralSignals }, queryOverlap, ownScore, competitorScore };
   } catch {
     return { domain, ok: false, error: 'comparison response was not valid JSON' };
   }
@@ -235,7 +303,7 @@ export async function runCompetitorDiscovery(siteId, start, end, { forceDomain }
     : discoveredDomains;
 
   const competitors = await Promise.all(candidateDomains.map((d) =>
-    analyzeCompetitor(d, ownPageFetch.analysis, ownDomain, ownScore)
+    analyzeCompetitor(d, ownPageFetch.analysis, ownDomain, ownScore, queryTexts)
       .then((c) => ({ ...c, discoverySource: sourceByDomain.get(d) || 'forced' }))
   ));
 

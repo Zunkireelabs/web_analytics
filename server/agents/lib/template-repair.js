@@ -60,7 +60,7 @@ export async function repairSiteTemplates(siteId, {
   // template at all" and "this site's faq template is already verified" are
   // different facts, and collapsing them makes the summary unreadable — a site
   // with one verified template out of five would report skipped:5 either way.
-  const counts = { verified: 0, stale: 0, unreachable: 0, skipped: 0, absent: 0 };
+  const counts = { verified: 0, stale: 0, bodySlotIsLabel: 0, unreachable: 0, skipped: 0, absent: 0 };
 
   // One shared fetch cache across every key checked in this pass.
   const cache = makeSharedPageCache();
@@ -91,6 +91,15 @@ export async function repairSiteTemplates(siteId, {
     } else if (result.reason === 'stale') {
       counts.stale++;
       log.warn(`[template-repair] site ${siteId}: ${componentKey} claims class(es) the live site no longer ships (${(result.missingClasses || []).join(', ')}) — leaving it unverified for the Design Agent to re-derive.`);
+    } else if (result.reason === 'body-slot-is-label') {
+      // Counted and logged separately from 'unreachable' on purpose. The two
+      // are opposites: 'unreachable' means the check learned nothing (a
+      // network blip, retry next pass), while this means the check succeeded
+      // and found a real defect an engineer should see. Bucketing it as
+      // unreachable made a genuine design-drift finding indistinguishable
+      // from a timeout, and silent — this branch logged nothing at all.
+      counts.bodySlotIsLabel++;
+      log.warn(`[template-repair] site ${siteId}: ${componentKey} styles its body slot as a label — ${result.error} Leaving it unverified; the site's design profile needs re-deriving.`);
     } else {
       counts.unreachable++;
     }
@@ -112,7 +121,7 @@ export async function repairSiteTemplates(siteId, {
       targetId: String(site.id),
       tenantSiteId: site.id,
       tenantName: site.name,
-      metadata: { verified: counts.verified, stale: counts.stale, pageUrl },
+      metadata: { verified: counts.verified, stale: counts.stale, bodySlotIsLabel: counts.bodySlotIsLabel, pageUrl },
       success: true,
     }).catch(() => {});
   }

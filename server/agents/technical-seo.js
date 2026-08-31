@@ -52,6 +52,52 @@ function sumImpressions(pages) {
   return pages.reduce((s, p) => s + (p.impressions || 0), 0);
 }
 
+// Near-always a shared page-template gap (the template never emits JSON-LD at
+// all) — one "N of M checked pages" finding, not one card per affected page.
+// One affected page carries the single draftable action a sitewide finding
+// can still offer.
+//
+// Exported (rather than inlined in run()) so the abstention below is
+// regression-testable without a live site or a DB.
+//
+// The @type is derived from each candidate's OWN fetched page — its og:type,
+// its URL — never guessed. This used to call `inferSchemaType(rep.page, [])`
+// against a version of inferSchemaType that ended in `return 'Article'`, so
+// any page whose path didn't match one of five hardcoded ENGLISH words (a
+// /pricing, /services or /booking page — or on a non-English site, every
+// single page) got an "Add schema" action asking for schema.org/Article
+// markup. The `schema` generator is SAFE-tier (agents/lib/risk-tiers.js) and
+// generators/schema.js only validates field VALUES, never the @type, so that
+// wrong type could be drafted, approved and merged into a tenant's live site
+// with no human ever reading it.
+export function missingSchemaFinding(pageResults) {
+  const schemaTypeFor = (r) => inferSchemaType(r.page, r.analysis?.schemaTypes || [], r.analysis);
+  return aggregateSystemicFinding({
+    id: 'technical-seo:site:missing-schema',
+    affected: pageResults.filter((r) => r.technicalAudit?.ok && !r.technicalAudit.hasSchema),
+    checkedCount: pageResults.filter((r) => r.technicalAudit?.ok).length,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages have no structured data (JSON-LD).`,
+    // A systemic finding only ever carries ONE draftable example, so pick the
+    // highest-impression page whose type is actually derivable rather than
+    // letting the default (highest-impression page overall) drop the action
+    // for every affected page just because that one page happens to be
+    // untypeable.
+    pickRepresentative: (affected) => [...affected]
+      .sort((a, b) => (b.impressions || 0) - (a.impressions || 0))
+      .find((r) => schemaTypeFor(r)) || null,
+    // Null means "no page in this batch gave us honest evidence of its type"
+    // — the finding still reports the real, verified missing-schema gap, it
+    // just offers no action, exactly like the canonical-mismatch finding.
+    recommendedAction: (rep) => {
+      const schemaType = schemaTypeFor(rep);
+      if (!schemaType) return null;
+      return { label: 'Add schema', generatorId: 'schema', params: { page: rep.page, schemaType }, effort: effortForGenerator('schema') };
+    },
+  });
+}
+
 export async function run({ siteId, start, end, pageCache, params }) {
   const site = await getSiteById(siteId);
   // params.pages (from the bulk full-site-audit engine, agents/lib/bulk-audit.js)
@@ -355,20 +401,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     }),
   ].filter(Boolean);
 
-  // Near-always a shared page-template gap (the template never emits
-  // JSON-LD at all) — one "N of M checked pages" finding, not one card per
-  // affected page. The highest-impression affected page carries the one
-  // draftable action a sitewide finding can still offer.
-  const schemaCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasSchema);
-  const schemaFinding = aggregateSystemicFinding({
-    id: 'technical-seo:site:missing-schema',
-    affected: schemaCandidates,
-    checkedCount: pageResults.filter((r) => r.technicalAudit.ok).length,
-    getPage: (r) => r.page,
-    getImpressions: (r) => r.impressions,
-    whyItMatters: (n, c) => `${n} of ${c} checked pages have no structured data (JSON-LD).`,
-    recommendedAction: (rep) => ({ label: 'Add schema', generatorId: 'schema', params: { page: rep.page, schemaType: inferSchemaType(rep.page, []) }, effort: effortForGenerator('schema') }),
-  });
+  const schemaFinding = missingSchemaFinding(pageResults);
   const schemaFindings = schemaFinding ? [schemaFinding] : [];
 
   const sourceImpressions = (sourcePages) => Math.max(0, ...sourcePages.map((p) => impressionsByPage.get(p) || 0));

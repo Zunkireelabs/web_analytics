@@ -2,6 +2,7 @@ import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   queueDesignAgentDerivationForSite, queueDesignAgentDerivationsForAllSites,
+  queueDesignProfileDerivationForOnboarding,
   queueDesignProfileRescanForSite, queueDesignProfileRescanForAllSites,
 } from './job.js';
 
@@ -9,11 +10,22 @@ import {
 // gate, the capability-repair Design Agent path) used to be keyed off
 // site.design_agent_enabled — a flag with no route, UI, or onboarding step
 // that ever set it, so it could only be true via a hand-written SQL UPDATE.
-// Eligibility is now derived from site.auto_remediation_enabled instead: the
-// SAME real-repo-edit/PR consent this codebase already requires a human to
-// grant once (routes/clients.js's platform_admin-only /auto-remediation
-// route), rather than a second, separate, unreachable toggle. These tests
-// prove the three required outcomes generically — no tenant-specific
+// Eligibility was then derived from site.auto_remediation_enabled instead:
+// the SAME real-repo-edit/PR consent this codebase already requires a human
+// to grant once (routes/clients.js's platform_admin-only /auto-remediation
+// route).
+//
+// The design-integrity gate inverted that dependency: auto_remediation_
+// enabled can no longer become true until a design review has happened
+// (routes/clients.js's validateAutoRemediationRequest), and there is
+// nothing to review until a profile has been derived at least once — so
+// requiring it here would make derivation permanently unreachable,
+// deadlocked on itself. Eligibility is now just "a repo is connected" —
+// derivation is read-only and never needed shipping consent; only actually
+// splicing markup into a PR does, and that is gated separately, directly at
+// apply time (see backend.js/frontend.js's own designReviewState checks).
+//
+// These tests prove the outcomes generically — no tenant-specific
 // hardcoding — via the module's own injectable-deps surface (same pattern
 // design-drift.js's resolveOrCreateComponentTemplate already uses), a plain
 // import with no module mocking: job.js's own import graph reaches openai's
@@ -35,7 +47,7 @@ const fakeDeps = (overrides = {}) => ({
   ...overrides,
 });
 
-describe('queueDesignAgentDerivationForSite — auto_remediation_enabled derives eligibility, not design_agent_enabled', () => {
+describe('queueDesignAgentDerivationForSite — eligibility is just "a repo is connected"', () => {
   test('repo connected + auto_remediation_enabled true -> eligible, queues a derivation', async () => {
     const site = { id: 1, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true };
     const queued = await queueDesignAgentDerivationForSite(site, fakeDeps());
@@ -44,17 +56,16 @@ describe('queueDesignAgentDerivationForSite — auto_remediation_enabled derives
     assert.equal(createdJobs[0].siteId, 1);
   });
 
-  test('repo connected + auto_remediation_enabled false -> not eligible, never reaches the deps', async () => {
+  // The deadlock this fixes: a site with no design review yet is EXACTLY
+  // the site that most needs its profile derived, so there is something to
+  // review in the first place. Refusing here would mean no site could ever
+  // get past 'unreviewed'.
+  test('repo connected + auto_remediation_enabled FALSE (awaiting its first design review) -> still eligible, still queues', async () => {
     const site = { id: 2, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: false };
-    let touched = false;
-    const deps = fakeDeps({
-      hasUsableProfile: () => { touched = true; return false; },
-      findQueuedProfileJob: async () => { touched = true; return null; },
-    });
-    const queued = await queueDesignAgentDerivationForSite(site, deps);
-    assert.equal(queued, false);
-    assert.equal(touched, false, 'the ineligibility gate must short-circuit before any dependency is called');
-    assert.equal(createdJobs.length, 0);
+    const queued = await queueDesignAgentDerivationForSite(site, fakeDeps());
+    assert.equal(queued, true);
+    assert.equal(createdJobs.length, 1);
+    assert.equal(createdJobs[0].siteId, 2);
   });
 
   test('no repo connected -> not eligible regardless of auto_remediation_enabled', async () => {
@@ -69,7 +80,7 @@ describe('queueDesignAgentDerivationForSite — auto_remediation_enabled derives
 
   test('legacy design_agent_enabled has no effect either way — eligibility never reads it', async () => {
     const onlyLegacyFlag = { id: 4, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: false, design_agent_enabled: true };
-    assert.equal(await queueDesignAgentDerivationForSite(onlyLegacyFlag, fakeDeps()), false);
+    assert.equal(await queueDesignAgentDerivationForSite(onlyLegacyFlag, fakeDeps()), true);
 
     const onlyRealFlag = { id: 5, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true, design_agent_enabled: false };
     assert.equal(await queueDesignAgentDerivationForSite(onlyRealFlag, fakeDeps()), true);
@@ -84,12 +95,12 @@ describe('queueDesignAgentDerivationForSite — auto_remediation_enabled derives
 });
 
 describe('queueDesignAgentDerivationsForAllSites — generic across the whole tenant list, no per-tenant special-casing', () => {
-  test('only sites with a connected repo AND a granted auto-remediation review get queued', async () => {
+  test('every site with a connected repo gets queued, reviewed or not', async () => {
     const sites = [
-      { id: 10, repo_owner: 'a', repo_name: 'a-web', auto_remediation_enabled: true }, // eligible
-      { id: 11, repo_owner: 'b', repo_name: 'b-web', auto_remediation_enabled: false }, // repo only, unreviewed
-      { id: 12, repo_owner: null, repo_name: null, auto_remediation_enabled: true }, // reviewed, no repo
-      { id: 13, repo_owner: 'd', repo_name: 'd-web', auto_remediation_enabled: true }, // eligible
+      { id: 10, repo_owner: 'a', repo_name: 'a-web', auto_remediation_enabled: true }, // reviewed, eligible
+      { id: 11, repo_owner: 'b', repo_name: 'b-web', auto_remediation_enabled: false }, // repo only, unreviewed — still eligible
+      { id: 12, repo_owner: null, repo_name: null, auto_remediation_enabled: true }, // reviewed, no repo — ineligible
+      { id: 13, repo_owner: 'd', repo_name: 'd-web', auto_remediation_enabled: true }, // reviewed, eligible
     ];
     const queuedSites = [];
     const result = await queueDesignAgentDerivationsForAllSites({
@@ -97,8 +108,8 @@ describe('queueDesignAgentDerivationsForAllSites — generic across the whole te
       queueForSite: async (site) => { queuedSites.push(site.id); return true; },
     });
 
-    assert.equal(result.queued, 2);
-    assert.deepEqual(queuedSites.sort(), [10, 13], 'the ineligible sites (11, 12) must never even reach queueForSite');
+    assert.equal(result.queued, 3);
+    assert.deepEqual(queuedSites.sort(), [10, 11, 13], 'only the repo-less site (12) must never reach queueForSite');
   });
 
   test('an empty eligible set queues nothing and never calls queueForSite', async () => {
@@ -109,6 +120,54 @@ describe('queueDesignAgentDerivationsForAllSites — generic across the whole te
     });
     assert.equal(result.queued, 0);
     assert.equal(calls, 0);
+  });
+});
+
+// The onboarding path (design-integrity-gate proposal, change 01): queued as
+// the FIRST step of routes/clients.js's runBaselineSequence, not trailing a
+// cron. Repo-independent by design — the mirror of
+// queueDesignAgentDerivationForSite's own repo-required gate — since a
+// design profile can be read and reviewed with only a live URL, and per this
+// platform's own state, no client site has a repo connected at onboarding
+// time.
+describe('queueDesignProfileDerivationForOnboarding — repo-independent, needs only a live URL', () => {
+  test('a reachable site with no repo at all still queues — this is the whole point', async () => {
+    const site = { id: 50, repo_owner: null, repo_name: null };
+    const queued = await queueDesignProfileDerivationForOnboarding(site, fakeDeps({ resolvePageUrl: () => 'https://example.com/' }));
+    assert.equal(queued, true);
+    assert.equal(createdJobs.length, 1);
+    assert.equal(createdJobs[0].siteId, 50);
+  });
+
+  test('no resolvable live URL at all -> not eligible, never reaches the deps', async () => {
+    const site = { id: 51 };
+    let touched = false;
+    const deps = fakeDeps({
+      resolvePageUrl: () => null,
+      hasUsableProfile: () => { touched = true; return false; },
+    });
+    const queued = await queueDesignProfileDerivationForOnboarding(site, deps);
+    assert.equal(queued, false);
+    assert.equal(touched, false);
+    assert.equal(createdJobs.length, 0);
+  });
+
+  test('a site that already has a usable design profile is not re-queued', async () => {
+    const site = { id: 52 };
+    const queued = await queueDesignProfileDerivationForOnboarding(site, fakeDeps({
+      resolvePageUrl: () => 'https://example.com/', hasUsableProfile: () => true,
+    }));
+    assert.equal(queued, false);
+    assert.equal(createdJobs.length, 0);
+  });
+
+  test('a derivation already pending is not duplicated', async () => {
+    const site = { id: 53 };
+    const queued = await queueDesignProfileDerivationForOnboarding(site, fakeDeps({
+      resolvePageUrl: () => 'https://example.com/', findQueuedProfileJob: async () => ({ id: 999 }),
+    }));
+    assert.equal(queued, false);
+    assert.equal(createdJobs.length, 0);
   });
 });
 

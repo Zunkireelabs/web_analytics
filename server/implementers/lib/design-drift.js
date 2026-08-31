@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
@@ -386,6 +387,257 @@ export function isTemplateVerified(actionType, template) {
 // evidence a template is bad, and must not trigger an expensive re-derivation
 // — 'unreachable' means "we learned nothing", so the caller should leave the
 // template exactly as it found it and try again next pass.
+// The placeholder whose slot holds long-form prose, per action type. This is
+// the one slot where a label style is unambiguously wrong: a heading may
+// legitimately be uppercase, a button usually is, but body copy never is.
+const BODY_SLOT_PLACEHOLDER = {
+  faq: '{{ANSWER}}',
+  'qa-content': '{{ANSWER}}',
+  'expand-content': '{{BODY}}',
+  'content-wrapper': '{{BODY}}',
+  // internal-links' slot is an anchor label, not prose — a site may style its
+  // link lists in caps deliberately. Deliberately excluded.
+};
+
+// The class tokens on the element that directly wraps `placeholder`. Scans
+// back from the placeholder to the nearest opening tag and reads that tag's
+// literal class attribute — the same "literal class attributes only" scope
+// extractLiteralClassNames and filterTemplateToLiveClasses already work in.
+function classesOnSlotElement(markup, placeholder) {
+  const at = markup.indexOf(placeholder);
+  if (at === -1) return [];
+  const open = markup.lastIndexOf('<', at);
+  if (open === -1) return [];
+  const tag = markup.slice(open, at);
+  const match = /\sclass="([^"]*)"/.exec(tag);
+  return match ? match[1].trim().split(/\s+/).filter(Boolean) : [];
+}
+
+// True when the CSS defines `cls` with a rule that makes text read as a label
+// rather than prose. Scoped to the single rule block following the selector so
+// an unrelated later `text-transform` in the sheet can't produce a false
+// positive.
+function classIsLabelStyle(cls, css) {
+  const needle = `.${escapeForCssSelector(cls)}`;
+  let idx = css.indexOf(needle);
+  while (idx !== -1) {
+    const after = css[idx + needle.length];
+    if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
+      const open = css.indexOf('{', idx);
+      const close = open === -1 ? -1 : css.indexOf('}', open);
+      if (open !== -1 && close !== -1) {
+        const body = css.slice(open + 1, close);
+        if (/text-transform\s*:\s*uppercase/i.test(body)) return true;
+        const size = /font-size\s*:\s*([\d.]+)(rem|px|em)/i.exec(body);
+        if (size) {
+          const n = parseFloat(size[1]);
+          const px = size[2].toLowerCase() === 'px' ? n : n * 16;
+          if (px < 14) return true;
+        }
+      }
+    }
+    idx = css.indexOf(needle, idx + 1);
+  }
+  return false;
+}
+
+// Returns a human-readable reason string when the body slot is styled as a
+// label, or null when it looks like real prose (or when there is nothing to
+// judge — no CSS, no such slot, no literal classes: all "can't tell", which
+// must not be reported as a failure).
+export function bodySlotLooksLikeLabel(actionType, template, css) {
+  const placeholder = BODY_SLOT_PLACEHOLDER[actionType];
+  if (!placeholder || !css) return null;
+  const markup = `${template?.row || ''}\n${template?.wrapper || ''}`;
+  const offenders = classesOnSlotElement(markup, placeholder).filter((c) => classIsLabelStyle(c, css));
+  if (!offenders.length) return null;
+  return `The ${placeholder} slot is styled with ${offenders.join(', ')}, which the live CSS defines as a label `
+    + '(uppercase and/or under 14px) rather than body copy. Generated prose would render as a caption.';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ROLE VERIFICATION — is a typography field the class this site actually
+// uses for that role, not just a class that exists.
+//
+// bodySlotLooksLikeLabel above catches one specific, CSS-provable shape of
+// wrong role (a class the live stylesheet itself defines as uppercase/small,
+// i.e. objectively caption-styled). It says nothing when the wrong class has
+// no such tell — a 24px pull-quote wrongly picked as body copy has no
+// text-transform or small font-size to catch it that way (that particular
+// case is what correctBodyTypography's own token-centrality scoring already
+// fixes, upstream of here).
+//
+// This check is independent and complementary: rather than judging a class's
+// CSS properties, it asks whether the class was ever REAL EVIDENCE for the
+// role it is now being used as. profile.pages[].sections[].textHierarchy[]
+// (segment.js) already records, for every captured page, which class string
+// was observed playing which role — body, heading, subheading, cta, link.
+// A typography field that names a class this site only ever uses for a
+// DIFFERENT role — an eyebrow's classes stored as typography.body, a hero
+// CTA button's classes stored as typography.link — is a confirmed defect:
+// the classes are real, and the site's own pages are the evidence that they
+// mean something else. This is the exact incident this platform's first
+// client shipped (body copy rendered in eyebrow style, related links
+// rendered as filled buttons) caught generically instead of as one
+// hardcoded special case.
+//
+// Structural fields (layout.container, spacing.section, components.*) are
+// deliberately out of scope — they carry no text role, so there is no role
+// for them to be wrong about.
+// Deliberately a private copy of profile-extract.js's own normalizeClasses,
+// not an import of it — profile-extract.js pulls in llm.js
+// (callLLMForJson), and design-drift.js is imported (via sitePageUrl) by
+// agents that mock llm.js with a deliberately partial namedExports list
+// (font-consistency.test.js, visual-quality.test.js: only callLLM/
+// callLLMWithImages, no callLLMForJson). Node's --experimental-test-
+// module-mocks resolves mocked bindings statically, so a real transitive
+// import into llm.js from inside design-drift.js breaks every one of those
+// tests at module-load time, before a single assertion runs. Same
+// "kept as its own copy deliberately" precedent profile-extract.js's own
+// isLabelStyle already follows for the identical reason, one file over.
+function normalizeClasses(classes) {
+  return classes.trim().split(/\s+/).filter(Boolean).join(' ');
+}
+
+// Both heading.section (an <h2>, e.g. expand-content's own section heading —
+// see projectExpandContent) and heading.item (an <h3>-or-fallback-h2, e.g. an
+// FAQ question) are checked against the SAME evidence — textHierarchy's role
+// is only 'heading' (h1) vs 'subheading' (anything else), with no h2-vs-h3
+// split the way correctHeadingTypography's own byLevel map has. That is
+// coarser than the correction it verifies: this check can still catch either
+// field naming a class this site never uses on ANY heading tag at all (e.g.
+// a class that's really the site's cta/body/link style), but it cannot catch
+// heading.section and heading.item being swapped with each other — both
+// read as legitimate 'subheading' evidence either way. Real, honest
+// evidence, just at a coarser grain than the two-field split it's checking.
+export const TYPOGRAPHY_ROLE_SOURCE = [
+  { field: 'typography.body', roles: ['body'], get: (p) => p?.typography?.body },
+  { field: 'typography.heading.section', roles: ['heading', 'subheading'], get: (p) => p?.typography?.heading?.section },
+  { field: 'typography.heading.item', roles: ['heading', 'subheading'], get: (p) => p?.typography?.heading?.item },
+  { field: 'typography.link', roles: ['link'], get: (p) => p?.typography?.link },
+];
+
+// role -> Set of normalized class strings actually observed playing that
+// role, across every captured page's every section's textHierarchy. Built
+// once per profile so per-field lookups below are a Set membership check,
+// not a re-scan of every page.
+export function observedClassesByRole(profile) {
+  const byRole = new Map();
+  for (const page of profile?.pages || []) {
+    for (const section of page.sections || []) {
+      for (const item of section.textHierarchy || []) {
+        if (!item.classes) continue;
+        const norm = normalizeClasses(item.classes);
+        if (!norm) continue;
+        if (!byRole.has(item.role)) byRole.set(item.role, new Set());
+        byRole.get(item.role).add(norm);
+      }
+    }
+  }
+  return byRole;
+}
+
+// Which role (if any) a class string WAS observed playing, when it was not
+// observed in the role currently being checked. This is what turns a plain
+// miss into a NAMED defect — "your body copy is set to your eyebrow style"
+// is a real, actionable finding; "we never saw this exact string" is not.
+function roleThisClassActuallyPlays(observed, classes) {
+  const norm = normalizeClasses(classes);
+  for (const [role, set] of observed) {
+    if (set.has(norm)) return role;
+  }
+  return null;
+}
+
+// Checks ONE typography field against the section evidence. Exported so a
+// reporting tool can run every field and show the full picture — every
+// field's verdict, not just the first failure — while verifyProfileRoles
+// below stops at the first CONFIRMED mismatch, matching this file's existing
+// single-reason-per-check convention (validatePlaceholders,
+// checkTemplateFreshness) for the ship-gate use this is ultimately for.
+//
+// `observed` is optional — a standalone caller (a test, a one-off script)
+// can omit it and pay the one-time scan; verifyProfileRoles computes it once
+// and threads it through its own three calls instead.
+export function checkTypographyRole(profile, source, observed = observedClassesByRole(profile)) {
+  const classes = source.get(profile);
+  // A null field is an honest abstention (extractDesignProfile already
+  // prefers null over inventing a value) — nothing to verify, not a failure.
+  if (!classes) return { ok: true, field: source.field, reason: 'not-set' };
+
+  if (source.roles.some((r) => observed.get(r)?.has(normalizeClasses(classes)))) {
+    return { ok: true, field: source.field };
+  }
+
+  const actual = roleThisClassActuallyPlays(observed, classes);
+  return {
+    ok: false,
+    field: source.field, classes, observedAs: actual,
+    // 'role-mismatch': the classes are real AND demonstrably used for a
+    // different role — confirmed defect, this is what blocks (Phase 5).
+    // 'class-unobserved': never seen in ANY role across the capture. Weaker
+    // evidence — the capture samples up to 8 pages, so a class the site
+    // genuinely uses elsewhere can legitimately be absent from the sample —
+    // reported, but never blocks on its own.
+    reason: actual ? 'role-mismatch' : 'class-unobserved',
+    error: actual
+      ? `${source.field} uses classes this site only ever uses for its ${actual}.`
+      : `${source.field} uses classes never observed on any captured page.`,
+  };
+}
+
+// The ship-gate contract (not yet wired into verifyTemplateAgainstLiveSite —
+// see the platform's design-integrity-gate proposal, Phase 5: enforcement is
+// the LAST phase, only turned on once this has been run against real,
+// already-derived profiles and shown to report true defects, not false
+// positives from a thin capture sample). Returns the first CONFIRMED
+// role-mismatch across every typography field, or ok:true — never blocks on
+// class-unobserved alone.
+export function verifyProfileRoles(profile) {
+  const observed = observedClassesByRole(profile);
+  for (const source of TYPOGRAPHY_ROLE_SOURCE) {
+    const result = checkTypographyRole(profile, source, observed);
+    if (!result.ok && result.reason === 'role-mismatch') return result;
+  }
+  return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DESIGN REVIEW SIGN-OFF — a staff human's confirmation that this profile
+// was actually looked at, recorded against the EXACT profile they saw.
+//
+// Deterministic fingerprint over only what a reviewer actually approved: the
+// five projected component templates (the real markup that will ship), plus
+// the raw typography inputs role verification reads (TYPOGRAPHY_ROLE_SOURCE
+// — the same four class strings the review screen shows next to their
+// role-check verdict). Deliberately NOT the whole stored profile —
+// profile.evidence.notes and profile.site.pagesAnalyzed change on every
+// weekly rescan without changing a single thing that ships, and
+// fingerprinting the whole profile would invalidate a valid review on that
+// noise, training staff to re-approve without reading, which is worse than
+// no gate at all.
+export function designReviewFingerprint(profile) {
+  if (!profile) return null;
+  const templates = projectAllComponentTemplates(profile);
+  const typographyInputs = Object.fromEntries(TYPOGRAPHY_ROLE_SOURCE.map((s) => [s.field, s.get(profile) || null]));
+  return createHash('sha256').update(JSON.stringify({ templates, typographyInputs })).digest('hex');
+}
+
+// The ship-time question: has a human signed off on the design THIS SITE
+// CURRENTLY HAS, not merely on some design it had once. `design_review_at`
+// null means never reviewed — the honest default for every site that
+// predates this gate (migration 132, no backfill). A later re-derivation
+// (the weekly rescan) that changes the fingerprint makes an existing
+// sign-off 'stale' rather than silently absent — a meaningful distinction:
+// 'stale' asks a human to re-approve a diff, 'unreviewed' asks them to look
+// at a site nobody has ever looked at.
+export function designReviewState(site) {
+  if (!site?.design_review_at) return { ok: false, reason: 'unreviewed' };
+  const currentFingerprint = designReviewFingerprint(getDesignProfile(site));
+  if (currentFingerprint !== site.design_review_fingerprint) return { ok: false, reason: 'stale' };
+  return { ok: true };
+}
+
 export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet } = {}) {
   if (!template?.wrapper) return { ok: false, reason: 'missing' };
   if (!pageUrl) return { ok: false, reason: 'unreachable', error: 'No live page URL available to verify against.' };
@@ -409,6 +661,17 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
   // Such a template is exactly the case a design-profile projection improves
   // on, so report it as unverifiable-here and let the caller fall through.
   if (!freshness.checkedClasses?.length) return { ok: false, reason: 'no-design-claims' };
+
+  // Class EXISTENCE is not class CORRECTNESS. Every check above answers "does
+  // the live site define this class", and a template can pass all of them
+  // while using a perfectly real class in entirely the wrong role — which is
+  // how zunkireelabs.com came to have all five of its templates stamped
+  // `verifiedBy: design-agent` while rendering every generated paragraph in
+  // its eyebrow/kicker style: `text-xs uppercase tracking-widest`, all real,
+  // all defined, all wrong for body copy. Verification has to be able to say
+  // no to that, or the stamp means only "these strings exist".
+  const label = bodySlotLooksLikeLabel(actionType, template, freshness.css);
+  if (label) return { ok: false, reason: 'body-slot-is-label', error: label };
 
   return {
     ok: true,
@@ -892,14 +1155,21 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
     // self-heal existed.
   }
 
-  // Eligibility is derived from auto_remediation_enabled — the same
-  // real-repo-edit/PR consent this codebase already requires a human to
-  // grant once (routes/clients.js's /auto-remediation route) — rather than
-  // a second, separate design_agent_enabled toggle that had no route to
-  // ever set it. A repo-connected site becomes eligible for Design Agent
-  // derivation automatically the moment that one review has happened, with
-  // no further manual step.
-  if (!site.auto_remediation_enabled || !site.repo_owner || !site.repo_name) {
+  // Eligibility used to also require auto_remediation_enabled ("the same
+  // real-repo-edit/PR consent... a repo-connected site becomes eligible the
+  // moment that one review has happened"). The design-integrity gate
+  // inverted the dependency it relied on: auto_remediation_enabled can no
+  // longer become true until the design HAS been reviewed (routes/
+  // clients.js's validateAutoRemediationRequest), and there is nothing to
+  // review until a profile has been resolved/derived at least once — so
+  // requiring it here made this permanently unreachable pre-review,
+  // deadlocked on itself. Composing or deriving a template is read-only; it
+  // never needed shipping consent. What DOES still require that consent —
+  // actually splicing the resulting markup into a real PR — is gated
+  // directly at apply time (designReviewState, backend.js/frontend.js), not
+  // here. A connected repo is still required: self-heal/derivation below
+  // both read/write real repo state.
+  if (!site.repo_owner || !site.repo_name) {
     return { ok: false, reason: 'not-available', template: null, componentKey };
   }
 
@@ -982,6 +1252,36 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
         // DESIGN_AGENT defaults untouched — this branch already re-validated
         // placeholders before verifying, so 'invalid-placeholders' here would
         // only mean the LIVE check disagreed, which should never happen.
+        //
+        // 'body-slot-is-label' is the one verdict that must NOT fall through.
+        // Every other failure here means "we could not confirm this template",
+        // and the DESIGN_AGENT default is defensible for those. This one means
+        // the opposite — we DID confirm it, and it is wrong: the body slot
+        // carries the site's eyebrow/kicker styling, so generated prose ships
+        // as a caption. Falling through stamped it `verifiedBy: design-agent`
+        // anyway, which is exactly how the original incident's five templates
+        // came to be marked verified while rendering every paragraph wrong.
+        // The defect is in the PROFILE (typography.body is a label class), not
+        // in this projection, so re-deriving the profile is the real repair —
+        // and correctBodyTypography now rejects a label-styled body pick.
+        if (checked.reason === 'body-slot-is-label') {
+          const alreadyQueued = await findQueuedDerivation(site.id, DESIGN_PROFILE_JOB_KEY).catch(() => null);
+          if (!alreadyQueued) {
+            await enqueueProfileDerivation(site.id, { requestedBy: null, pageUrl }).catch((err) => {
+              console.error(`[design-drift] could not queue design-profile re-derivation for site ${site.id}:`, err.message);
+            });
+          }
+          return {
+            ok: false,
+            reason: 'body-slot-is-label',
+            detail: `This site's design profile describes its body text with a class the live CSS defines as a label, `
+              + `so a generated "${actionType}" block would render as a caption rather than prose. ${checked.error} `
+              + 'The Design Agent has been queued to re-derive the site\'s typography; this stays blocked until it does, '
+              + 'deliberately — shipping no block is recoverable, shipping every paragraph as a label is not.',
+            template: null,
+            componentKey,
+          };
+        }
       }
 
       const stamped = verifiedBy

@@ -209,6 +209,61 @@ describe('visual-quality agent', () => {
     assert.notEqual(inserted[0].page, inserted[1].page, 'each unconfirmed fixType on the same page must get a distinct recommendation key');
   });
 
+  // priority used to be hardcoded 'high' for every confirmed defect and
+  // expectedImpact a literal {label:'Medium', basis:'computed', value:1} —
+  // a constant claiming a computed basis, which types.js forbids. Both now
+  // come from the real count of defective regions the deterministic check
+  // itself found.
+  test('expectedImpact.value is the real defective-region count, not a constant 1', async () => {
+    visionResponse = [{ page: 'https://example.com/pricing', fixType: 'malformed-table', description: 'Broken tables.' }];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => ({ pages: [page('https://example.com/pricing')] }),
+      analyzePage: async () => ({
+        ok: true,
+        analysis: { removableMalformedTables: [{ reason: 'no-rows' }, { reason: 'empty-row' }, { reason: 'no-rows' }] },
+      }),
+    });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.expectedImpact.value, 3);
+    assert.equal(finding.evidence.defectiveRegions, 3);
+    assert.equal(finding.expectedImpact.basis, 'computed');
+    assert.equal(finding.expectedImpact.label, { high: 'High', medium: 'Medium', low: 'Low' }[finding.priority]);
+  });
+
+  test('priority is ranked by real defect extent, not hardcoded high for everything', async () => {
+    visionResponse = [
+      { page: 'https://example.com/a', fixType: 'malformed-table', description: 'many broken tables' },
+      { page: 'https://example.com/b', fixType: 'duplicate-faq', description: 'one duplicate faq' },
+    ];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => ({ pages: [page('https://example.com/a'), page('https://example.com/b')] }),
+      analyzePage: async (url) => (url.endsWith('/a')
+        ? { ok: true, analysis: { removableMalformedTables: [{}, {}, {}, {}, {}] } }
+        : { ok: true, analysis: { duplicateFaqRemovalHtml: '<section>dup</section>' } }),
+    });
+    const byPage = new Map(result.facts.findings.map((f) => [f.evidence.page, f]));
+    assert.equal(byPage.get('https://example.com/a').evidence.defectiveRegions, 5);
+    assert.equal(byPage.get('https://example.com/b').evidence.defectiveRegions, 1);
+    assert.equal(byPage.get('https://example.com/a').priority, 'high');
+    assert.notEqual(byPage.get('https://example.com/b').priority, 'high', 'the smaller real defect must not carry the same priority as the largest');
+  });
+
+  test('an unconfirmed, vision-only flag never outranks a confirmed defect', async () => {
+    visionResponse = [{ page: 'https://example.com/x', fixType: 'raw-text-table', description: 'maybe a table' }];
+    await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => ({ pages: [page('https://example.com/x')] }),
+      analyzePage: async () => ({ ok: true, analysis: { rawTextTableBlocks: [{ clean: false }] } }),
+    });
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0].priority, 'low');
+  });
+
   test('a vision call failure degrades to zero candidates rather than throwing the whole agent run', async () => {
     const result = await run({
       siteId: 1,

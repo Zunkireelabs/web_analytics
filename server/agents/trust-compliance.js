@@ -3,7 +3,7 @@ import { fetchHtml, effortForGenerator } from './lib/page-content.js';
 import { getSiteById } from '../store/read.js';
 import { knownDomain, resolveOwnDomain } from './lib/site-domain.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
-import { collectSiteTrackerFacts } from './lib/site-trackers.js';
+import { collectSiteTrackerFacts, trackerAbsenceIsProvable } from './lib/site-trackers.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -177,7 +177,15 @@ export async function run({ siteId, start, end }) {
     { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', trackingId: site.ga4_measurement_id || null, whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
     { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
   ];
-  const trackerFindings = TRACKER_CHECKS.filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
+  // trackerAbsenceIsProvable gates the whole check: these two findings assert
+  // a NEGATIVE ("no GA4 on this page"), and site-trackers.js can only read
+  // static HTML, so a Google Tag Manager container on the page makes that
+  // negative unknowable — GTM loads its tags at runtime. Filing the finding
+  // anyway told every GTM-based tenant their live analytics was missing and
+  // offered to install a second copy of it (double-counted pageviews). No
+  // finding is the honest output there, not a hedged one.
+  const trackerFindings = (trackerAbsenceIsProvable(trackerFacts) ? TRACKER_CHECKS : [])
+    .filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
     whyItMatters: t.whyItMatters,

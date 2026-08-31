@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runVisualQualityIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runVisualQualityIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runBackfillBlogImagesForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -41,6 +41,41 @@ export function startCron() {
         console.log(`[cron] template-capability repair run finished — ${prsOpened} PR(s) opened across ${results.length} site(s)`);
       } catch (err) {
         console.error('[cron] template-capability repair run error:', err.message);
+      }
+
+      // Same reasoning as the block above: a cheap, independent repair pass
+      // in the same morning chain, not gated behind detection finding
+      // anything. Backfills a featured image onto any existing blog post
+      // published with none — opens its own PR, direct, never auto-merged.
+      console.log(`[cron] blog-image backfill run started ${new Date().toISOString()}`);
+      try {
+        const results = await runBackfillBlogImagesForAllSites();
+        const imaged = results.reduce((n, r) => n + (r.imaged || 0), 0);
+        const prsOpened = results.filter((r) => r.prCreated).length;
+        console.log(`[cron] blog-image backfill run finished — ${imaged} image(s) added, ${prsOpened} PR(s) opened across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] blog-image backfill run error:', err.message);
+      }
+
+      // Role correction FIRST, content repair SECOND — content-repair reads
+      // each site's stored componentTemplates, so it must run after any
+      // correction to them in the same pass, never before.
+      console.log(`[cron] design-profile role correction run started ${new Date().toISOString()}`);
+      try {
+        const result = await runDesignProfileRoleCorrectionForAllSites();
+        console.log(`[cron] design-profile role correction run finished — ${result.changed}/${result.examined} site(s) corrected, ${result.failed} failed`);
+      } catch (err) {
+        console.error('[cron] design-profile role correction run error:', err.message);
+      }
+
+      console.log(`[cron] content repair run started ${new Date().toISOString()}`);
+      try {
+        const results = await runContentRepairForAllSites();
+        const filesRepaired = results.reduce((n, r) => n + (r.changedFiles?.length || 0), 0);
+        const prsOpened = results.filter((r) => r.prCreated).length;
+        console.log(`[cron] content repair run finished — ${filesRepaired} file(s) repaired, ${prsOpened} PR(s) opened across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] content repair run error:', err.message);
       }
 
       // Daily blocked-recommendation refresh, right after template-capability
