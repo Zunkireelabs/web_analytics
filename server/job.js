@@ -1001,6 +1001,54 @@ export async function runBackfillBlogImagesForAllSites() {
   return results;
 }
 
+// Runs the role-correction pass (server/scripts/repair-design-profile-roles.js)
+// against every site with a stored design profile, every morning — the
+// role-mismatch defect it fixes (a real, live class assigned to the wrong
+// typography slot) is a property of the DERIVATION, so it can recur on any
+// site whenever its profile is re-derived (queueDesignProfileRescanForAllSites,
+// weekly). Deliberately runs BEFORE runContentRepairForAllSites in the same
+// morning chain, so content-repair always re-renders shipped content through
+// whatever this pass just corrected, never a stale template.
+export async function runDesignProfileRoleCorrectionForAllSites() {
+  const { repairDesignProfileRolesForSites } = await import('./scripts/repair-design-profile-roles.js');
+  const { rows: sites } = await query(`select * from sites
+     where url_file_map->'siteRoot'->'designProfile' is not null order by id`);
+  const result = await repairDesignProfileRolesForSites(sites, { commit: true });
+  if (result.changed) {
+    console.log(`[job] design-profile role correction: ${result.changed}/${result.examined} site(s) had role corrections, ${result.failed} failed.`);
+  }
+  return result;
+}
+
+// The systemic counterpart to repair-design-profile-roles.js's morning role
+// re-verification (see queueDesignProfileRescanForAllSites/cron.js): correcting
+// the STORED templates fixes what a site generates from now on, but content
+// already spliced into the repo before the correction stays wrong until
+// something re-renders it. This is that something, run every morning against
+// every connected site rather than once by hand — the exact repair used to fix
+// zunkireelabs.com's shipped content (component-template restyling,
+// visible_faq_cap enforcement, blog front-matter contract, directory-collection
+// self-inclusion, and unresolved-placeholder/fabricated-competitor removal),
+// now automated. See scripts/repair-site-content-live.js's own module comment.
+export async function runContentRepairForAllSites() {
+  const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
+  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
+  const results = [];
+  for (const site of sites) {
+    try {
+      const report = await repairSiteContentLive(site.id);
+      if (report.prCreated) {
+        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, PR ${report.prCreated.url}`);
+      }
+      results.push(report);
+    } catch (err) {
+      console.error(`[job] content-repair failed for site ${site.id} "${site.name}":`, err.message);
+      results.push({ siteId: site.id, error: err.message });
+    }
+  }
+  return results;
+}
+
 // Daily counterpart to runTemplateCapabilityRepairForAllSites above — runs
 // right after it so it sees the SAME morning's freshly-healed config
 // (autoHealNewContentTarget/autoHealFileMapping already ran, any

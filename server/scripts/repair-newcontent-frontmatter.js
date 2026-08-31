@@ -28,19 +28,6 @@
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? null : process.argv[i + 1];
-}
-
-const repo = arg('repo');
-const dir = arg('dir');
-const write = process.argv.includes('--write');
-if (!repo || !dir) {
-  console.error('Usage: repair-newcontent-frontmatter.js --repo <path> --dir <src/blog> [--write]');
-  process.exit(1);
-}
-
 const FRONT_MATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 
 function keysOf(raw) {
@@ -60,83 +47,6 @@ function declaredLayout(raw) {
   return l ? l[1].trim() : null;
 }
 
-const full = path.join(repo, dir);
-const entries = (await readdir(full)).filter((f) => /\.(md|njk|html)$/.test(f) && !/^index\./i.test(f) && !f.startsWith('_'));
-
-// Split the directory into the files a human wrote (no agent marker) and the
-// ones the agent generated. The former define the contract.
-const files = [];
-for (const name of entries) {
-  const p = path.join(full, name);
-  const raw = await readFile(p, 'utf8');
-  files.push({ name, p, raw, generated: /^\s*templateEngineOverride\s*:/m.test((FRONT_MATTER.exec(raw) || ['', ''])[1]) });
-}
-
-const human = files.filter((f) => !f.generated);
-if (!human.length) {
-  console.error(`No hand-written sibling in ${dir} to read the contract from — refusing to guess.`);
-  process.exit(1);
-}
-
-const humanLayouts = human.map((f) => declaredLayout(f.raw));
-const layoutIsDeclared = humanLayouts.filter(Boolean).length > humanLayouts.length / 2;
-const humanKeys = new Set(human.flatMap((f) => keysOf(f.raw)));
-
-const IMAGE_ALIASES = ['featuredImage', 'image', 'heroImage', 'cover', 'thumbnail'];
-const ALT_ALIASES = ['featuredImageAlt', 'imageAlt', 'image_alt', 'coverAlt'];
-const imageKey = IMAGE_ALIASES.find((k) => humanKeys.has(k));
-const altKey = ALT_ALIASES.find((k) => humanKeys.has(k));
-
-console.log(`Contract read from ${human.length} hand-written file(s) in ${dir}:`);
-console.log(`  layout      : ${layoutIsDeclared ? humanLayouts.find(Boolean) : 'NOT declared (the directory supplies it)'}`);
-console.log(`  image key   : ${imageKey || '(none observed)'}`);
-console.log(`  image alt   : ${altKey || '(none observed)'}\n`);
-
-let changed = 0;
-for (const f of files.filter((x) => x.generated)) {
-  const m = FRONT_MATTER.exec(f.raw);
-  if (!m) continue;
-  let block = m[1];
-  const before = block;
-  const notes = [];
-
-  if (!layoutIsDeclared && /^layout\s*:/m.test(block)) {
-    const was = declaredLayout(f.raw);
-    block = block.split('\n').filter((l) => !/^layout\s*:/.test(l)).join('\n');
-    notes.push(`removed layout: "${was}" (blog.json supplies the real one)`);
-  }
-  if (imageKey && imageKey !== 'image' && /^image\s*:/m.test(block)) {
-    block = block.replace(/^image\s*:/m, `${imageKey}:`);
-    notes.push(`image -> ${imageKey}`);
-  }
-  if (altKey && altKey !== 'image_alt' && /^image_alt\s*:/m.test(block)) {
-    block = block.replace(/^image_alt\s*:/m, `${altKey}:`);
-    notes.push(`image_alt -> ${altKey}`);
-  }
-
-  // The generated body is wrapped in the site's contentWrapper — a container
-  // plus section padding. That wrapper exists for a page with no layout doing
-  // the job. The moment we hand the file back to the directory's real layout
-  // (above), that layout supplies the container AND the prose typography, and
-  // the generated one becomes a second container nested inside it: doubled
-  // padding, and a max-width inside a grid column that already has one.
-  //
-  // Only stripped when the layout was removed — i.e. only when we know a
-  // layout is now doing the wrapping. A page that genuinely declares its own
-  // layout keeps its wrapper, because nothing else would style it.
-  let body = f.raw.slice(FRONT_MATTER.exec(f.raw)[0].length);
-  const unwrapped = stripContentWrapper(body);
-  if (notes.some((n) => n.startsWith('removed layout')) && unwrapped !== null) {
-    body = unwrapped;
-    notes.push('removed redundant container wrapper (the layout supplies container + prose)');
-  }
-
-  if (block === before && body === f.raw.slice(FRONT_MATTER.exec(f.raw)[0].length)) continue;
-  changed++;
-  console.log(`  ${f.name}\n     ${notes.join('\n     ')}`);
-  if (write) await writeFile(f.p, `---\n${block}\n---\n${body}`);
-}
-
 // Returns the body with its outermost contentWrapper <div> removed, or null
 // when the body is not wrapped in one. Deliberately conservative: it must be
 // the FIRST thing in the body and the LAST, and it must be a container-ish
@@ -150,5 +60,115 @@ function stripContentWrapper(body) {
   return `\n${trimmed.slice(open[0].length, -'</div>'.length).trim()}\n`;
 }
 
-console.log(`\n${changed} file(s) ${write ? 'updated' : 'would be updated'}.`);
-if (!write) console.log('Dry run — re-run with --write to apply.');
+/**
+ * @param {string} repoDir a real directory containing the repo's `src/`
+ * @param {string} dir     target directory relative to repoDir, e.g. "src/blog"
+ * @param {{write?: boolean}} [opts]
+ * @returns {{ok: boolean, reason?: string, contract?: object, changedFiles: string[]}}
+ */
+export async function repairNewContentFrontmatter(repoDir, dir, { write = false } = {}) {
+  const full = path.join(repoDir, dir);
+  let entries;
+  try {
+    entries = (await readdir(full)).filter((f) => /\.(md|njk|html)$/.test(f) && !/^index\./i.test(f) && !f.startsWith('_'));
+  } catch {
+    return { ok: false, reason: 'directory-not-found', changedFiles: [] };
+  }
+
+  // Split the directory into the files a human wrote (no agent marker) and the
+  // ones the agent generated. The former define the contract.
+  const files = [];
+  for (const name of entries) {
+    const p = path.join(full, name);
+    const raw = await readFile(p, 'utf8');
+    files.push({ name, p, raw, generated: /^\s*templateEngineOverride\s*:/m.test((FRONT_MATTER.exec(raw) || ['', ''])[1]) });
+  }
+
+  const human = files.filter((f) => !f.generated);
+  if (!human.length) return { ok: false, reason: 'no-human-sibling', changedFiles: [] };
+
+  const humanLayouts = human.map((f) => declaredLayout(f.raw));
+  const layoutIsDeclared = humanLayouts.filter(Boolean).length > humanLayouts.length / 2;
+  const humanKeys = new Set(human.flatMap((f) => keysOf(f.raw)));
+
+  const IMAGE_ALIASES = ['featuredImage', 'image', 'heroImage', 'cover', 'thumbnail'];
+  const ALT_ALIASES = ['featuredImageAlt', 'imageAlt', 'image_alt', 'coverAlt'];
+  const imageKey = IMAGE_ALIASES.find((k) => humanKeys.has(k));
+  const altKey = ALT_ALIASES.find((k) => humanKeys.has(k));
+
+  const changedFiles = [];
+  for (const f of files.filter((x) => x.generated)) {
+    const m = FRONT_MATTER.exec(f.raw);
+    if (!m) continue;
+    let block = m[1];
+    const before = block;
+    let layoutRemoved = false;
+
+    if (!layoutIsDeclared && /^layout\s*:/m.test(block)) {
+      block = block.split('\n').filter((l) => !/^layout\s*:/.test(l)).join('\n');
+      layoutRemoved = true;
+    }
+    if (imageKey && imageKey !== 'image' && /^image\s*:/m.test(block)) {
+      block = block.replace(/^image\s*:/m, `${imageKey}:`);
+    }
+    if (altKey && altKey !== 'image_alt' && /^image_alt\s*:/m.test(block)) {
+      block = block.replace(/^image_alt\s*:/m, `${altKey}:`);
+    }
+
+    // The generated body is wrapped in the site's contentWrapper — a container
+    // plus section padding. That wrapper exists for a page with no layout doing
+    // the job. The moment we hand the file back to the directory's real layout,
+    // that layout supplies the container AND the prose typography, and the
+    // generated one becomes a second container nested inside it: doubled
+    // padding, and a max-width inside a grid column that already has one.
+    //
+    // Only stripped when the layout was removed — i.e. only when we know a
+    // layout is now doing the wrapping. A page that genuinely declares its own
+    // layout keeps its wrapper, because nothing else would style it.
+    let body = f.raw.slice(m[0].length);
+    if (layoutRemoved) {
+      const unwrapped = stripContentWrapper(body);
+      if (unwrapped !== null) body = unwrapped;
+    }
+
+    if (block === before && body === f.raw.slice(m[0].length)) continue;
+    changedFiles.push(f.name);
+    if (write) await writeFile(f.p, `---\n${block}\n---\n${body}`);
+  }
+
+  return {
+    ok: true,
+    contract: { layout: layoutIsDeclared ? humanLayouts.find(Boolean) : null, imageKey, altKey },
+    changedFiles,
+  };
+}
+
+// CLI entrypoint only — importing this module must never parse argv or exit.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const arg = (name) => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i === -1 ? null : process.argv[i + 1];
+  };
+  const repo = arg('repo');
+  const dir = arg('dir');
+  const write = process.argv.includes('--write');
+  if (!repo || !dir) {
+    console.error('Usage: repair-newcontent-frontmatter.js --repo <path> --dir <src/blog> [--write]');
+    process.exit(1);
+  }
+
+  const result = await repairNewContentFrontmatter(repo, dir, { write });
+  if (!result.ok) {
+    console.error(result.reason === 'no-human-sibling'
+      ? `No hand-written sibling in ${dir} to read the contract from — refusing to guess.`
+      : `Could not read ${dir}.`);
+    process.exit(1);
+  }
+  console.log(`Contract read from ${dir}:`);
+  console.log(`  layout      : ${result.contract.layout || 'NOT declared (the directory supplies it)'}`);
+  console.log(`  image key   : ${result.contract.imageKey || '(none observed)'}`);
+  console.log(`  image alt   : ${result.contract.altKey || '(none observed)'}\n`);
+  for (const f of result.changedFiles) console.log(`  ${f}`);
+  console.log(`\n${result.changedFiles.length} file(s) ${write ? 'updated' : 'would be updated'}.`);
+  if (!write) console.log('Dry run — re-run with --write to apply.');
+}

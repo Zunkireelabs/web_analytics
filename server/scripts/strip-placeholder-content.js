@@ -33,18 +33,6 @@ import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? null : process.argv[i + 1];
-}
-
-const repo = arg('repo');
-const write = process.argv.includes('--write');
-if (!repo) {
-  console.error('Usage: strip-placeholder-content.js --repo <path> [--write]');
-  process.exit(1);
-}
-
 // A markdown link whose href was never resolved. The href alternatives are the
 // literal placeholders actually observed; a real URL is left alone.
 // Not /g: a global regex carries lastIndex between .test() calls, which made
@@ -117,54 +105,82 @@ function structureSurvived(before, after) {
   return count(after) > 0 || removedTags === count(before);
 }
 
-const files = walk(path.join(repo, 'src'));
-let totalTables = 0;
+/**
+ * @param {string} repoDir a real directory containing the repo's `src/`
+ * @param {{write?: boolean}} [opts]
+ * @returns {{totalSections: number, changedFiles: {path: string, sections: number}[]}}
+ */
+export async function stripPlaceholderContent(repoDir, { write = false } = {}) {
+  const files = walk(path.join(repoDir, 'src'));
+  let totalSections = 0;
+  const changedFiles = [];
 
-for (const file of files) {
-  let text;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch { continue; }
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch { continue; }
 
-  const rel = path.relative(repo, file);
-  const isData = /_data[\\/].*\.js$/.test(rel);
-  let updated = text;
-  let tables = 0;
+    const rel = path.relative(repoDir, file);
+    const isData = /_data[\\/].*\.js$/.test(rel);
+    let updated = text;
+    let sections = 0;
 
-  if (isData) {
-    // Data files hold the markup as JS string literals — decode, clean, re-encode.
-    updated = text.replace(/(\bexpandedContent\s*:\s*)("(?:[^"\\]|\\.)*")/g, (whole, prefix, literal) => {
-      let inner;
-      try { inner = JSON.parse(literal); } catch { return whole; }
-      const b = stripFabricatedSections(inner);
-      if (!b.removed) return whole;
-      if (!structureSurvived(inner, b.html)) {
-        console.error(`    ! ${rel}: refusing to write — markup did not survive the transform`);
-        return whole;
-      }
-      tables += b.removed;
-      return `${prefix}${JSON.stringify(b.html)}`;
-    });
-  } else {
-    updated = text.replace(/(<!--\s*SEOAI:[A-Z]+:START\s*-->)([\s\S]*?)(<!--\s*SEOAI:[A-Z]+:END\s*-->)/g,
-      (whole, start, body, end) => {
-        const b = stripFabricatedSections(body);
+    if (isData) {
+      // Data files hold the markup as JS string literals — decode, clean, re-encode.
+      updated = text.replace(/(\bexpandedContent\s*:\s*)("(?:[^"\\]|\\.)*")/g, (whole, prefix, literal) => {
+        let inner;
+        try { inner = JSON.parse(literal); } catch { return whole; }
+        const b = stripFabricatedSections(inner);
         if (!b.removed) return whole;
-        if (!structureSurvived(body, b.html)) {
+        if (!structureSurvived(inner, b.html)) {
           console.error(`    ! ${rel}: refusing to write — markup did not survive the transform`);
           return whole;
         }
-        tables += b.removed;
-        return `${start}${b.html}${end}`;
+        sections += b.removed;
+        return `${prefix}${JSON.stringify(b.html)}`;
       });
+    } else {
+      updated = text.replace(/(<!--\s*SEOAI:[A-Z]+:START\s*-->)([\s\S]*?)(<!--\s*SEOAI:[A-Z]+:END\s*-->)/g,
+        (whole, start, body, end) => {
+          const b = stripFabricatedSections(body);
+          if (!b.removed) return whole;
+          if (!structureSurvived(body, b.html)) {
+            console.error(`    ! ${rel}: refusing to write — markup did not survive the transform`);
+            return whole;
+          }
+          sections += b.removed;
+          return `${start}${b.html}${end}`;
+        });
+    }
+
+    if (updated === text) continue;
+    changedFiles.push({ path: rel, sections });
+    totalSections += sections;
+    if (write) await writeFile(file, updated);
   }
 
-  if (updated === text) continue;
-  console.log(`  ${rel}`);
-  console.log(`    - ${tables} section(s) removed (unresolved citation or fictional competitor)`);
-  totalTables += tables;
-  if (write) await writeFile(file, updated);
+  return { totalSections, changedFiles };
 }
 
-console.log(`\n${totalTables} section(s) removed across the site.`);
-console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
+// CLI entrypoint only — importing this module must never parse argv or exit.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const arg = (name) => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i === -1 ? null : process.argv[i + 1];
+  };
+  const repo = arg('repo');
+  const write = process.argv.includes('--write');
+  if (!repo) {
+    console.error('Usage: strip-placeholder-content.js --repo <path> [--write]');
+    process.exit(1);
+  }
+
+  const result = await stripPlaceholderContent(repo, { write });
+  for (const f of result.changedFiles) {
+    console.log(`  ${f.path}`);
+    console.log(`    - ${f.sections} section(s) removed (unresolved citation or fictional competitor)`);
+  }
+  console.log(`\n${result.totalSections} section(s) removed across the site.`);
+  console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
+}

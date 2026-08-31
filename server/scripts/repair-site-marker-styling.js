@@ -28,38 +28,20 @@
 //   node server/scripts/repair-site-marker-styling.js --site 1 --repo /path/to/checkout
 //   node server/scripts/repair-site-marker-styling.js --site 1 --repo /path/to/checkout --write
 
-import 'dotenv/config';
 import { readFile, writeFile } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
-import { query } from '../db.js';
 import { fillTemplate, renderFromTemplate, escapeHtml } from '../implementers/lib/marker-merge.js';
-
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? null : process.argv[i + 1];
-}
-
-const siteId = Number(arg('site'));
-const repo = arg('repo');
-const write = process.argv.includes('--write');
-if (!siteId || !repo) {
-  console.error('Usage: repair-site-marker-styling.js --site <id> --repo <path> [--write]');
-  process.exit(1);
-}
-
-const { rows } = await query('select url_file_map from sites where id = $1', [siteId]);
-const templates = rows[0]?.url_file_map?.siteRoot?.componentTemplates;
-if (!templates) {
-  console.error(`Site ${siteId} has no componentTemplates. Run repair-design-profile-roles.js first.`);
-  process.exit(1);
-}
 
 // Marker name -> how to parse its content back out, and how to re-render it.
 // Parsers return null when the region is not in a shape they recognise, which
-// is the signal to leave it completely alone.
-const HANDLERS = {
+// is the signal to leave it completely alone. Built fresh per call from the
+// site's own componentTemplates, rather than a module-level constant, so this
+// module can be called for many sites in one process (job.js/cron.js) without
+// one site's templates leaking into another's repair.
+function buildHandlers(templates) {
+  return {
   FAQ: {
     template: templates.faq,
     parse(html) {
@@ -129,7 +111,8 @@ const HANDLERS = {
       HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseTables(it.body), tpl.row, 'BODY'),
     }), (it) => blockSafeRow(tpl.row, normaliseTables(it.body), 'BODY')),
   },
-};
+  };
+}
 
 // Deliberately NOT marker-merge's renderFaqHtml / renderQaHtml /
 // renderExpandedHtml. Those take a draft's RAW content — plain-text answers,
@@ -283,12 +266,12 @@ function normaliseTables(html) {
   return $.html();
 }
 
-async function repairDataFile(file) {
+async function repairDataFile(file, handlers, write) {
   const text = await readFile(file, 'utf8');
   if (!DATA_FIELD.test(text)) return 0;
   DATA_FIELD.lastIndex = 0;
 
-  const handler = HANDLERS.EXPANDEDCONTENT;
+  const handler = handlers.EXPANDEDCONTENT;
   if (!handler.template) return 0;
 
   let count = 0;
@@ -315,75 +298,101 @@ async function repairDataFile(file) {
   return count;
 }
 
-const src = path.join(repo, 'src');
-const files = walk(src);
-let changedFiles = 0;
-let changedRegions = 0;
-let skipped = 0;
+/**
+ * @param {string} repoDir a real directory containing the repo's `src/`
+ * @param {object} templates site.url_file_map.siteRoot.componentTemplates
+ * @param {{write?: boolean}} [opts]
+ * @returns {{changedFiles: number, changedRegions: number, dataFields: number, skipped: number}}
+ */
+export async function repairSiteMarkerStyling(repoDir, templates, { write = false } = {}) {
+  const handlers = buildHandlers(templates);
+  const files = walk(path.join(repoDir, 'src'));
+  let changedFiles = 0;
+  let changedRegions = 0;
+  let skipped = 0;
 
-for (const file of files) {
-  let text;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch {
-    continue;
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (!text.includes('SEOAI:')) continue;
+
+    let updated = text;
+    const regionNotes = [];
+
+    for (const [name, handler] of Object.entries(handlers)) {
+      if (!handler.template) continue;
+      const pattern = new RegExp(`(<!--\\s*SEOAI:${name}:START\\s*-->)([\\s\\S]*?)(<!--\\s*SEOAI:${name}:END\\s*-->)`, 'g');
+      updated = updated.replace(pattern, (whole, start, body, end) => {
+        const inner = body.trim();
+        if (!inner) return whole; // an empty marker is a placeholder, not damage
+
+        const { stripped, scripts } = extractSchemaBlocks(inner);
+        const items = handler.parse(stripped);
+        if (!items) {
+          skipped++;
+          regionNotes.push(`    ? ${name} — unrecognised shape, left as-is`);
+          return whole;
+        }
+
+        // A markdown post is hosted inside the layout's prose wrapper; a .njk
+        // page template is not, and needs the full standalone component.
+        const hostIsProse = file.endsWith('.md');
+        const template = (hostIsProse && PROSE_TEMPLATES[name]) || handler.template;
+        const rendered = `${handler.render(items, template)}${scripts.join('')}`;
+        if (rendered.trim() === inner) return whole;
+
+        changedRegions++;
+        regionNotes.push(`    ~ ${name} — ${items.length} item(s) re-rendered`);
+        return `${start}${rendered}${end}`;
+      });
+    }
+
+    if (updated !== text) {
+      changedFiles++;
+      if (write) await writeFile(file, updated);
+    }
   }
-  if (!text.includes('SEOAI:')) continue;
 
-  let updated = text;
-  const rel = path.relative(repo, file);
-  const regionNotes = [];
-
-  for (const [name, handler] of Object.entries(HANDLERS)) {
-    if (!handler.template) continue;
-    const pattern = new RegExp(`(<!--\\s*SEOAI:${name}:START\\s*-->)([\\s\\S]*?)(<!--\\s*SEOAI:${name}:END\\s*-->)`, 'g');
-    updated = updated.replace(pattern, (whole, start, body, end) => {
-      const inner = body.trim();
-      if (!inner) return whole; // an empty marker is a placeholder, not damage
-
-      const { stripped, scripts } = extractSchemaBlocks(inner);
-      const items = handler.parse(stripped);
-      if (!items) {
-        skipped++;
-        regionNotes.push(`    ? ${name} — unrecognised shape, left as-is`);
-        return whole;
-      }
-
-      // A markdown post is hosted inside the layout's prose wrapper; a .njk
-      // page template is not, and needs the full standalone component.
-      const hostIsProse = file.endsWith('.md');
-      const template = (hostIsProse && PROSE_TEMPLATES[name]) || handler.template;
-      const rendered = `${handler.render(items, template)}${scripts.join('')}`;
-      if (rendered.trim() === inner) return whole;
-
-      changedRegions++;
-      regionNotes.push(`    ~ ${name} — ${items.length} item(s) re-rendered`);
-      return `${start}${rendered}${end}`;
-    });
+  // Data files are walked separately: their content is not in markers, so the
+  // marker loop above never sees it.
+  let dataFields = 0;
+  for (const file of files.filter((f) => f.includes(`${path.sep}_data${path.sep}`) && f.endsWith('.js'))) {
+    const n = await repairDataFile(file, handlers, write);
+    if (n) dataFields += n;
   }
 
-  if (updated !== text) {
-    changedFiles++;
-    console.log(`  ${rel}`);
-    for (const note of regionNotes) console.log(note);
-    if (write) await writeFile(file, updated);
-  } else if (regionNotes.length) {
-    console.log(`  ${rel}`);
-    for (const note of regionNotes) console.log(note);
-  }
+  return { changedFiles, changedRegions, dataFields, skipped };
 }
 
-// Data files are walked separately: their content is not in markers, so the
-// marker loop above never sees it.
-let dataFields = 0;
-for (const file of files.filter((f) => f.includes(`${path.sep}_data${path.sep}`) && f.endsWith('.js'))) {
-  const n = await repairDataFile(file);
-  if (n) {
-    dataFields += n;
-    console.log(`  ${path.relative(repo, file)}\n    ~ ${n} expandedContent field(s) re-rendered`);
-  }
-}
+// CLI entrypoint only — importing this module must never parse argv or exit.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const { query } = await import('../db.js');
 
-console.log(`\n${changedFiles} file(s), ${changedRegions} region(s) re-rendered; ${dataFields} data field(s) re-rendered; ${skipped} region(s) skipped as unrecognised.`);
-console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
-process.exit(0);
+  const arg = (name) => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i === -1 ? null : process.argv[i + 1];
+  };
+  const siteId = Number(arg('site'));
+  const repo = arg('repo');
+  const write = process.argv.includes('--write');
+  if (!siteId || !repo) {
+    console.error('Usage: repair-site-marker-styling.js --site <id> --repo <path> [--write]');
+    process.exit(1);
+  }
+
+  const { rows } = await query('select url_file_map from sites where id = $1', [siteId]);
+  const templates = rows[0]?.url_file_map?.siteRoot?.componentTemplates;
+  if (!templates) {
+    console.error(`Site ${siteId} has no componentTemplates. Run repair-design-profile-roles.js first.`);
+    process.exit(1);
+  }
+
+  const result = await repairSiteMarkerStyling(repo, templates, { write });
+  console.log(`\n${result.changedFiles} file(s), ${result.changedRegions} region(s) re-rendered; `
+    + `${result.dataFields} data field(s) re-rendered; ${result.skipped} region(s) skipped as unrecognised.`);
+  console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
+}

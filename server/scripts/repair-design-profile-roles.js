@@ -54,47 +54,61 @@ function arg(name) {
   return i === -1 ? null : process.argv[i + 1];
 }
 
-const siteId = Number(arg('site'));
-const all = process.argv.includes('--all');
-const commit = process.argv.includes('--commit');
-const show = process.argv.includes('--show');
-
-if (!siteId && !all) {
-  console.error('Usage: repair-design-profile-roles.js (--site <id> | --all) [--commit] [--show]');
-  process.exit(1);
-}
-
-// select * — sitePageUrl reads whichever of the site's URL columns is
-// populated, so a narrowed projection silently makes every template
-// "unreachable" and the whole repair a no-op that looks like success.
-const { rows: sites } = all
-  ? await query(`select * from sites
-       where url_file_map->'siteRoot'->'designProfile' is not null
-       order by id`)
-  : await query('select * from sites where id = $1', [siteId]);
-
-if (!sites.length) {
-  console.error(all ? 'No site has a stored design profile.' : `No site ${siteId}.`);
-  process.exit(1);
-}
-
-let changed = 0;
-let failed = 0;
-for (const site of sites) {
-  try {
-    if (await repairSite(site)) changed++;
-  } catch (err) {
-    // One tenant's failure must never abort the fleet run.
-    failed++;
-    console.error(`  ! site ${site.id}: ${err.message}`);
+// Runs the role-correction + re-verification for every given site, writing
+// when `commit` is true. Pulled out from the CLI body below so job.js/cron.js
+// can run this same repair as part of the automated morning pipeline instead
+// of only ever by hand — the role-mismatch defect this fixes is a property of
+// the derivation (see the module doc above), so every site is worth checking
+// every morning, not just once.
+export async function repairDesignProfileRolesForSites(sites, { commit = false, show = false } = {}) {
+  let changed = 0;
+  let failed = 0;
+  for (const site of sites) {
+    try {
+      if (await repairSite(site, { commit, show })) changed++;
+    } catch (err) {
+      // One tenant's failure must never abort the fleet run.
+      failed++;
+      console.error(`  ! site ${site.id}: ${err.message}`);
+    }
   }
+  return { examined: sites.length, changed, failed };
 }
 
-console.log(`\n${sites.length} site(s) examined, ${changed} with role corrections, ${failed} failed.`);
-if (!commit) console.log('Dry run — re-run with --commit to write.');
-process.exit(failed ? 1 : 0);
+// CLI entrypoint only — `import`ing this module (job.js/cron.js, this file's
+// own test) must never trigger argv parsing or process.exit as a side effect.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const siteId = Number(arg('site'));
+  const all = process.argv.includes('--all');
+  const commit = process.argv.includes('--commit');
+  const show = process.argv.includes('--show');
 
-async function repairSite(site) {
+  if (!siteId && !all) {
+    console.error('Usage: repair-design-profile-roles.js (--site <id> | --all) [--commit] [--show]');
+    process.exit(1);
+  }
+
+  // select * — sitePageUrl reads whichever of the site's URL columns is
+  // populated, so a narrowed projection silently makes every template
+  // "unreachable" and the whole repair a no-op that looks like success.
+  const { rows: sites } = all
+    ? await query(`select * from sites
+         where url_file_map->'siteRoot'->'designProfile' is not null
+         order by id`)
+    : await query('select * from sites where id = $1', [siteId]);
+
+  if (!sites.length) {
+    console.error(all ? 'No site has a stored design profile.' : `No site ${siteId}.`);
+    process.exit(1);
+  }
+
+  const { examined, changed, failed } = await repairDesignProfileRolesForSites(sites, { commit, show });
+  console.log(`\n${examined} site(s) examined, ${changed} with role corrections, ${failed} failed.`);
+  if (!commit) console.log('Dry run — re-run with --commit to write.');
+  process.exit(failed ? 1 : 0);
+}
+
+async function repairSite(site, { commit, show }) {
   const urlFileMap = site.url_file_map || {};
   const siteRoot = urlFileMap.siteRoot || {};
   const profile = siteRoot.designProfile;

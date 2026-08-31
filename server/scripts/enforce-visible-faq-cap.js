@@ -29,40 +29,9 @@
 //   node server/scripts/enforce-visible-faq-cap.js --site 1 --repo <path>
 //   node server/scripts/enforce-visible-faq-cap.js --site 1 --repo <path> --write
 
-import 'dotenv/config';
 import { readFile, writeFile } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { query } from '../db.js';
-
-function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? null : process.argv[i + 1];
-}
-
-const siteId = Number(arg('site'));
-const repo = arg('repo');
-const write = process.argv.includes('--write');
-if (!siteId || !repo) {
-  console.error('Usage: enforce-visible-faq-cap.js --site <id> --repo <path> [--write]');
-  process.exit(1);
-}
-
-const { rows } = await query('select visible_faq_cap, url_file_map from sites where id = $1', [siteId]);
-if (!rows.length) {
-  console.error(`No site ${siteId}.`);
-  process.exit(1);
-}
-const cap = rows[0].visible_faq_cap;
-if (cap == null) {
-  console.error(`Site ${siteId} has no visible_faq_cap set — nothing to enforce.`);
-  process.exit(1);
-}
-
-// The site's own accordion, identified by the component it actually uses
-// rather than by a class name: the expand-all control is unique to it.
-const configuredFaq = rows[0].url_file_map?.siteRoot?.componentTemplates?.faq?.wrapper || '';
-const ACCORDION_MARK = /expandAll/;
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -77,60 +46,90 @@ function walk(dir, out = []) {
 const REGION = /(<!--\s*SEOAI:FAQ:START\s*-->)([\s\S]*?)(<!--\s*SEOAI:FAQ:END\s*-->)/;
 const SCHEMA = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi;
 
-const visible = [];
-for (const file of walk(path.join(repo, 'src'))) {
-  let text;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch { continue; }
-  const m = REGION.exec(text);
-  if (!m) continue;
-  const body = m[2].trim();
-  if (!body) continue;
+/**
+ * @param {string} repoDir  a real directory containing the repo's `src/`
+ * @param {number} cap      site.visible_faq_cap
+ * @param {string} configuredFaqWrapper  site's componentTemplates.faq.wrapper,
+ *   used only to recognise the site's own accordion by the control unique to
+ *   it (`expandAll`) rather than by a class name.
+ * @param {{write?: boolean}} [opts]
+ * @returns {{cap, visibleFound, demoted, changedPaths: string[]}}
+ */
+export async function enforceVisibleFaqCap(repoDir, cap, configuredFaqWrapper, { write = false } = {}) {
+  const ACCORDION_MARK = /expandAll/;
+  const visible = [];
+  for (const file of walk(path.join(repoDir, 'src'))) {
+    let text;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch { continue; }
+    const m = REGION.exec(text);
+    if (!m) continue;
+    const body = m[2].trim();
+    if (!body) continue;
 
-  const scripts = body.match(SCHEMA) || [];
-  const withoutSchema = body.replace(SCHEMA, '').trim();
-  if (!withoutSchema) continue; // already schema-only
+    const scripts = body.match(SCHEMA) || [];
+    const withoutSchema = body.replace(SCHEMA, '').trim();
+    if (!withoutSchema) continue; // already schema-only
 
-  visible.push({
-    file,
-    rel: path.relative(repo, file),
-    isSiteComponent: ACCORDION_MARK.test(withoutSchema) && ACCORDION_MARK.test(configuredFaq),
-    scripts,
-    text,
-    region: m,
-  });
+    visible.push({
+      file,
+      rel: path.relative(repoDir, file),
+      isSiteComponent: ACCORDION_MARK.test(withoutSchema) && ACCORDION_MARK.test(configuredFaqWrapper || ''),
+      scripts,
+      text,
+    });
+  }
+
+  if (visible.length <= cap) return { cap, visibleFound: visible.length, demoted: 0, changedPaths: [] };
+
+  // The site's own component first, then alphabetical for a stable, reviewable
+  // ordering rather than filesystem order.
+  visible.sort((a, b) => (b.isSiteComponent - a.isSiteComponent) || a.rel.localeCompare(b.rel));
+  const demote = visible.slice(cap);
+
+  const changedPaths = [];
+  for (const v of demote) {
+    if (!v.scripts.length) continue; // no schema to fall back to — never silently delete content
+    const updated = v.text.replace(REGION, `$1${v.scripts.join('')}$3`);
+    changedPaths.push(v.rel);
+    if (write) await writeFile(v.file, updated);
+  }
+  return { cap, visibleFound: visible.length, demoted: changedPaths.length, changedPaths };
 }
 
-console.log(`visible_faq_cap = ${cap}; found ${visible.length} page(s) with a visible FAQ.\n`);
-if (visible.length <= cap) {
-  console.log('Within the cap — nothing to do.');
+// CLI entrypoint only — importing this module must never parse argv or exit.
+if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const { query } = await import('../db.js');
+
+  const arg = (name) => {
+    const i = process.argv.indexOf(`--${name}`);
+    return i === -1 ? null : process.argv[i + 1];
+  };
+  const siteId = Number(arg('site'));
+  const repo = arg('repo');
+  const write = process.argv.includes('--write');
+  if (!siteId || !repo) {
+    console.error('Usage: enforce-visible-faq-cap.js --site <id> --repo <path> [--write]');
+    process.exit(1);
+  }
+
+  const { rows } = await query('select visible_faq_cap, url_file_map from sites where id = $1', [siteId]);
+  if (!rows.length) { console.error(`No site ${siteId}.`); process.exit(1); }
+  const cap = rows[0].visible_faq_cap;
+  if (cap == null) { console.error(`Site ${siteId} has no visible_faq_cap set — nothing to enforce.`); process.exit(1); }
+
+  const result = await enforceVisibleFaqCap(
+    repo, cap, rows[0].url_file_map?.siteRoot?.componentTemplates?.faq?.wrapper, { write },
+  );
+  console.log(`visible_faq_cap = ${result.cap}; found ${result.visibleFound} page(s) with a visible FAQ.\n`);
+  if (result.demoted) {
+    console.log('DEMOTED to schema-only:');
+    for (const p of result.changedPaths) console.log(`   ${p}`);
+  } else {
+    console.log('Within the cap — nothing to do.');
+  }
+  console.log(`\n${result.visibleFound} -> ${result.visibleFound - result.demoted} visible FAQ page(s).`);
+  console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
   process.exit(0);
 }
-
-// The site's own component first, then alphabetical for a stable, reviewable
-// ordering rather than filesystem order.
-visible.sort((a, b) => (b.isSiteComponent - a.isSiteComponent) || a.rel.localeCompare(b.rel));
-
-const keep = visible.slice(0, cap);
-const demote = visible.slice(cap);
-
-console.log('KEEPING visible:');
-for (const v of keep) console.log(`   ${v.isSiteComponent ? 'site accordion' : 'other        '}  ${v.rel}`);
-console.log('\nDEMOTING to schema-only:');
-
-let demoted = 0;
-for (const v of demote) {
-  if (!v.scripts.length) {
-    console.log(`   SKIPPED (no FAQPage schema in the region — demoting would delete content): ${v.rel}`);
-    continue;
-  }
-  const updated = v.text.replace(REGION, `$1${v.scripts.join('')}$3`);
-  console.log(`   ${v.rel}  (${v.scripts.length} schema block(s) preserved)`);
-  demoted++;
-  if (write) await writeFile(v.file, updated);
-}
-
-console.log(`\n${visible.length} -> ${visible.length - demoted} visible FAQ page(s).`);
-console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');
-process.exit(0);
