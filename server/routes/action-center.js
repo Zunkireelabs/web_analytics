@@ -1200,7 +1200,14 @@ export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APP
       }
     } catch (err) {
       failed++;
-      await appendJobLog(job.id, `Draft #${draft.id} (${draft.action_type}) failed: ${err.message}`);
+      // Same sanitize-before-log convention as shipRecommendation's own
+      // catch above (this file, ~line 965) — approveAndPublishDraft's errors
+      // are user-facing httpErrors already carrying a safe .message, but a
+      // non-httpError (e.g. a network failure inside implementer.apply())
+      // would otherwise leak its raw text into this job log, which the
+      // Action Center UI surfaces directly.
+      const message = err.userFacing ? err.message : (sanitizeForCustomer(err.message) ?? safeMessage('action-center.bulkApproveDrafts', err, 'Approval failed').message);
+      await appendJobLog(job.id, `Draft #${draft.id} (${draft.action_type}) failed: ${message}`);
     }
   }
 
