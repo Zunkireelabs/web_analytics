@@ -8,7 +8,7 @@
 // gate's whole point is a checkable mechanism, not a trust-me screen).
 import {
   observedClassesByRole, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE,
-  designReviewFingerprint, designReviewState, getDesignProfile,
+  designReviewFingerprint, designReviewState, getDesignProfile, COMPONENT_TEMPLATE_KEY,
 } from '../../implementers/lib/design-drift.js';
 import { projectAllComponentTemplates } from '../../design-agent/lib/design-profile.js';
 import { renderFaqHtml, renderQaHtml, renderExpandedHtml, renderLinksHtml } from '../../implementers/lib/marker-merge.js';
@@ -107,6 +107,12 @@ function reviewTemplate(actionType, profile, template, observed) {
     actionType,
     available: !!template,
     sample,
+    // 'generated-layout' when this template's markup structure was composed
+    // by compose-expand-layout.js rather than reused verbatim from the
+    // site's own observed pattern (design-profile.js's projectors) — every
+    // class it uses is still real (see that module's validator), only the
+    // arrangement is new. Absent/'projected' covers every other template.
+    source: template?.source || 'projected',
     roleChecks,
     // A template only genuinely fails review when one of its OWN role checks
     // is a CONFIRMED mismatch — class-unobserved is weak evidence and must
@@ -153,6 +159,19 @@ export function buildDesignReviewReport(site) {
   }
 
   const templates = projectAllComponentTemplates(profile);
+  // The projection above is what a site with NO persisted/derived template
+  // would ship. A site that already has one — including a
+  // compose-expand-layout.js-generated expand-content layout, persisted into
+  // this exact slot by worker.js's persistDerivedComponentTemplates — ships
+  // THAT instead (marker-merge.js's templateFor: configured template wins
+  // over a fresh projection). Overriding here the same way keeps this
+  // reviewer looking at whatever will actually render, not a stale
+  // approximation of it.
+  const persisted = site?.url_file_map?.siteRoot?.componentTemplates || {};
+  for (const actionType of Object.keys(templates)) {
+    const stored = persisted[COMPONENT_TEMPLATE_KEY[actionType]];
+    if (stored?.wrapper) templates[actionType] = stored;
+  }
   const observed = observedClassesByRole(profile);
   const templateReviews = REVIEWABLE_ACTION_TYPES.map((actionType) => reviewTemplate(actionType, profile, templates[actionType], observed));
 

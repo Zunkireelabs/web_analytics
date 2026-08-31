@@ -18,7 +18,7 @@ const ACTION_TYPE_LABEL = {
   'internal-links': 'Related links list', 'content-wrapper': 'New page / long-form content',
 };
 
-function Pill({ tone, children }) {
+function Pill({ tone, children, title }) {
   const tones = {
     good: 'bg-emerald-50 text-emerald-700 border-emerald-100',
     warn: 'bg-amber-50 text-amber-700 border-amber-100',
@@ -26,7 +26,7 @@ function Pill({ tone, children }) {
     neutral: 'bg-slate-100 text-slate-500 border-slate-200',
   };
   return (
-    <span className={`inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-full border ${tones[tone]}`}>
+    <span title={title} className={`inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-full border ${tones[tone]}`}>
       {children}
     </span>
   );
@@ -90,7 +90,14 @@ function TemplateCard({ template }) {
   return (
     <div className="card p-5 space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-extrabold text-slate-900">{ACTION_TYPE_LABEL[template.actionType] || template.actionType}</div>
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-extrabold text-slate-900">{ACTION_TYPE_LABEL[template.actionType] || template.actionType}</div>
+          {template.source === 'generated-layout' && (
+            <Pill tone="neutral" title="This layout's markup structure was composed by the Design Agent, grounded in this site's own real classes — not just its existing prose pattern reused as-is.">
+              Generated design
+            </Pill>
+          )}
+        </div>
         <Pill tone={tone}>{label}</Pill>
       </div>
       {template.sample && (

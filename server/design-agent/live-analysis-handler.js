@@ -12,6 +12,7 @@
 import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
 import { extractDesignProfile } from './live-analysis/profile-extract.js';
+import { composeGeneratedExpandLayout } from './live-analysis/compose-expand-layout.js';
 import { projectAllComponentTemplates } from './lib/design-profile.js';
 
 function taggedError(message, stage) {
@@ -23,6 +24,7 @@ function taggedError(message, stage) {
 export function createLiveDesignAnalysisHandler({
   captureSiteFn = captureSite,
   extractProfileFn = extractDesignProfile,
+  composeExpandLayoutFn = composeGeneratedExpandLayout,
 } = {}) {
   return async function liveDesignAnalysisHandler(job) {
     const pageUrl = job.params?.pageUrl;
@@ -42,7 +44,32 @@ export function createLiveDesignAnalysisHandler({
 
     if (job.params?.mode === 'component-templates') {
       const requested = (job.params.componentKeys || []).filter((k) => k !== '__design-profile__');
-      return { jobId: job.id, componentTemplates: projectAllComponentTemplates(profile, requested) };
+      const componentTemplates = projectAllComponentTemplates(profile, requested);
+
+      // A generated layout is a strict upgrade over the plain projection, not
+      // a different concept — same {wrapper,row} shape, same persistence
+      // slot, same downstream verification. It replaces the projected
+      // entry in-place only when validateGeneratedExpandLayout confirms it
+      // uses no class outside this site's own real vocabulary; any failure
+      // (non-Tailwind site, no usable profile, model output that didn't
+      // validate even after one retry) is swallowed inside
+      // composeGeneratedExpandLayout, and the plain projection above ships
+      // exactly as it always has.
+      if (requested.includes('expand-content')) {
+        const generated = await composeExpandLayoutFn(profile, { siteId: job.site_id }).catch((err) => {
+          console.warn(`[design-agent] site ${job.site_id}: expand-content layout generation threw — keeping the plain projected template (${err.message}).`);
+          return null;
+        });
+        // `source` is inert to every existing reader (design-drift.js's
+        // validatePlaceholders/stampTemplateVerification and marker-merge.js's
+        // renderers only ever read .wrapper/.row) — added purely so
+        // design-review.js can tell a reviewer this template's markup
+        // structure was composed by the model, not just this site's own
+        // observed pattern reused verbatim.
+        if (generated) componentTemplates['expand-content'] = { ...generated, source: 'generated-layout' };
+      }
+
+      return { jobId: job.id, componentTemplates };
     }
     return { jobId: job.id, designProfile: profile };
   };
