@@ -135,6 +135,18 @@ export function buildComplianceDesignDriftFindings(resolvedPages, wrapperVerific
   }));
 }
 
+// Whether a missing-tracker finding can actually be COMPLETED if filed.
+// analytics-install can only ship a real script when it has the site's own
+// tracking ID; with none it emits a placeholder, the draft refuses at the
+// placeholder gate, and the recommendation reopens for the next run — forever.
+//
+// Keyed on the ID being present rather than on the provider, so no edit is
+// needed the day a facebook_pixel_id column exists: the check simply starts
+// firing again, for every tenant at once.
+export function trackerCheckIsActionable(check) {
+  return typeof check?.trackingId === 'string' && check.trackingId.trim() !== '';
+}
+
 export async function run({ siteId, start, end }) {
   const site = await getSiteById(siteId);
   const domain = knownDomain(site) || (await resolveOwnDomain(site, siteId, start, end));
@@ -237,7 +249,25 @@ export async function run({ siteId, start, end }) {
   // offered to install a second copy of it (double-counted pageviews). No
   // finding is the honest output there, not a hedged one.
   const trackerFindings = (trackerAbsenceIsProvable(trackerFacts) ? TRACKER_CHECKS : [])
-    .filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
+    .filter((t) => !trackerFacts.trackersDetected.includes(t.label))
+    // Don't file a finding whose fix this platform cannot possibly complete.
+    // analytics-install can only ship a real script when it has the site's own
+    // tracking ID; with none it emits a placeholder, the draft refuses at the
+    // placeholder gate, and the recommendation reopens for the next run —
+    // forever. That is not hypothetical: Meta/Facebook Pixel's trackingId is
+    // hardcoded null below because there is NO column to store a Pixel ID,
+    // making `trust-compliance:facebook-pixel:missing` site 1's single worst
+    // repeat offender at 15 failed attempts, each costing a generation call to
+    // reach the same refusal.
+    //
+    // See trackerCheckIsActionable below for the rule and why it is keyed on
+    // the ID rather than on the provider.
+    .filter((t) => {
+      if (trackerCheckIsActionable(t)) return true;
+      console.log(`[trust-compliance] site ${site.id}: skipping "${t.label}" — no tracking ID is stored for this site, so no draft could ever be completed for it.`);
+      return false;
+    })
+    .map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
     whyItMatters: t.whyItMatters,
