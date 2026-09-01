@@ -10,6 +10,7 @@ function block(overrides = {}) {
     ctaText: null, ctaTag: null, ctaClasses: '', imageCount: 0, hasBackgroundImage: false,
     accordionLike: false, accordionClasses: { wrapper: '', item: '', trigger: '', panel: '' },
     cardLike: false, cardClasses: { wrapper: '', body: '' }, listClasses: { wrapper: '', item: '' }, linkClasses: '',
+    tableLike: false, tableClasses: { wrapper: '', headerCell: '', row: '', cell: '' },
     ...overrides,
   };
 }
@@ -62,6 +63,25 @@ describe('segmentPage', () => {
     const accordion = section.components.find((c) => c.type === 'accordion');
     assert.ok(accordion);
     assert.equal(accordion.classes.trigger, 'font-semibold');
+  });
+
+  // The gap this closes: capture.js never looked for a <table> at all before
+  // this, so a site's own real comparison-table markup — the one thing
+  // table repair most needs to imitate — never reached the profile.
+  test('a real table carries its live classes through into components, never invented', () => {
+    const [section] = segmentPage([block({
+      tableLike: true,
+      tableClasses: { wrapper: 'w-full acme-table', headerCell: 'acme-th', row: 'acme-row', cell: 'acme-td' },
+    })]);
+    const table = section.components.find((c) => c.type === 'table');
+    assert.ok(table);
+    assert.equal(table.classes.wrapper, 'w-full acme-table');
+    assert.equal(table.classes.cell, 'acme-td');
+  });
+
+  test('a block with no table contributes no table component', () => {
+    const [section] = segmentPage([block()]);
+    assert.equal(section.components.find((c) => c.type === 'table'), undefined);
   });
 
   // The bug this closes: capture.js reads linkClasses per block, but until

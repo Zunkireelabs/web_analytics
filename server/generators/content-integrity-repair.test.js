@@ -1,6 +1,21 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta } from './content-integrity-repair.js';
+
+// mock.module (same convention as design-drift.test.js/auto-remediation.test.js)
+// swaps out store/read.js's getSiteById so the raw-text-table styling tests
+// below can control exactly what design profile — real, none, or absent —
+// the generator sees, without a live DB connection. `siteFixture` is
+// reassigned per-test; every OTHER describe block in this file never sets
+// it, so getSiteById resolves to `undefined` for them, and buildTableHtml's
+// styles argument stays null — the same unstyled-fallback behavior those
+// tests already asserted before table styling existed.
+const resolve = (p) => new URL(p, import.meta.url).href;
+let siteFixture;
+mock.module(resolve('../store/read.js'), {
+  namedExports: { getSiteById: async () => siteFixture },
+});
+
+const { generate, meta } = await import('./content-integrity-repair.js');
 
 function stubFetchHtml(html) {
   const original = globalThis.fetch;
@@ -128,6 +143,58 @@ describe('content-integrity-repair — raw-text-table', () => {
         /cleanly-structured/i,
       );
     } finally { restore(); }
+  });
+
+  // The table-capture/projectTable gap this whole exercise exists to close
+  // (see design-agent/lib/design-profile.js's projectTable): before this,
+  // buildTableHtml always emitted bare <table><thead><tr><th> with no site
+  // styling at all, regardless of what design profile a site had. These
+  // three prove the generator actually reaches into the site's own profile.
+  test('a site with a REAL captured table pattern gets its own table styled with that exact pattern', async () => {
+    const raw = 'Feature | Plan A | Plan B\nPrice | $10 | $20\nSupport | Email | Phone';
+    const restore = stubFetchHtml(`<html><body>${GROUNDING}<p>${raw}</p></body></html>`);
+    siteFixture = {
+      url_file_map: { siteRoot: { designProfile: {
+        components: { table: { wrapper: 'w-full acme-table', headerCell: 'acme-th', row: 'acme-row', cell: 'acme-td' } },
+      } } },
+    };
+    try {
+      const { content } = await generate({ siteId: 1, params: { page: 'https://example.com/r', fixType: 'raw-text-table' } });
+      assert.match(content.replacement, /<table class="w-full acme-table">/);
+      assert.match(content.replacement, /<th class="acme-th">Feature<\/th>/);
+      assert.match(content.replacement, /<tr class="acme-row">/);
+      assert.match(content.replacement, /<td class="acme-td">\$10<\/td>/);
+      assert.match(content.replacement, /overflow-x-auto/, 'the horizontal-scroll wrapper is structural, present regardless of tenant');
+    } finally { restore(); siteFixture = undefined; }
+  });
+
+  test('a site with NO captured table but real typography/color tokens gets a composed table using ONLY those tokens', async () => {
+    const raw = 'Feature | Plan A | Plan B\nPrice | $10 | $20\nSupport | Email | Phone';
+    const restore = stubFetchHtml(`<html><body>${GROUNDING}<p>${raw}</p></body></html>`);
+    siteFixture = {
+      url_file_map: { siteRoot: { designProfile: {
+        typography: { body: 'text-base text-gray-700', heading: { item: 'text-sm font-semibold' } },
+        color: { border: 'border-gray-200', surface: 'bg-gray-50' },
+      } } },
+    };
+    try {
+      const { content } = await generate({ siteId: 2, params: { page: 'https://example.com/r', fixType: 'raw-text-table' } });
+      assert.match(content.replacement, /<th class="text-sm font-semibold bg-gray-50 text-left">/);
+      assert.match(content.replacement, /<tr class="border-b border-gray-200">/);
+      assert.match(content.replacement, /<td class="text-base text-gray-700 text-left">/);
+      assert.doesNotMatch(content.replacement, /acme/, 'must be composed from THIS site\'s own tokens, never another tenant\'s');
+    } finally { restore(); siteFixture = undefined; }
+  });
+
+  test('a site with no usable profile at all still gets a real <table>, just unstyled — never worse than before', async () => {
+    const raw = 'Feature | Plan A | Plan B\nPrice | $10 | $20\nSupport | Email | Phone';
+    const restore = stubFetchHtml(`<html><body>${GROUNDING}<p>${raw}</p></body></html>`);
+    siteFixture = { url_file_map: { siteRoot: {} } };
+    try {
+      const { content } = await generate({ siteId: 3, params: { page: 'https://example.com/r', fixType: 'raw-text-table' } });
+      assert.match(content.replacement, /<table>/);
+      assert.match(content.replacement, /<th>Feature<\/th>/);
+    } finally { restore(); siteFixture = undefined; }
   });
 });
 
