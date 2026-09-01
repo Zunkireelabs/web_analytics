@@ -1,3 +1,4 @@
+import pLimit from 'p-limit';
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
@@ -34,16 +35,29 @@ export const meta = {
 
 // Cheap-wide half of the cost-conscious detection strategy: every check
 // below is one static fetch + cheerio parse per page (page-content.js's
-// analyzePageUrl), fully parallelized (Promise.all), with a single LLM call
-// per RUN (not per page — the narrative summary at the bottom of run()), so
-// raising this is nearly free. Was 20, which meant a full sweep of a
-// several-dozen-page blog inventory took many days via selectCandidatePages'
-// rotation — the confirmed root cause of "lots of blog posts still have
-// broken tables" (2026-09-01 audit): the detector existed and was correctly
-// wired into cron, it just could not reach most of the site in any
-// reasonable time. This is the cheap tier; visual-quality.js is the
-// expensive, narrower tier layered on top of it.
+// analyzePageUrl), with a single LLM call per RUN (not per page — the
+// narrative summary at the bottom of run()), so raising this is nearly
+// free. Was 20, which meant a full sweep of a several-dozen-page blog
+// inventory took many days via selectCandidatePages' rotation — the
+// confirmed root cause of "lots of blog posts still have broken tables"
+// (2026-09-01 audit): the detector existed and was correctly wired into
+// cron, it just could not reach most of the site in any reasonable time.
+// This is the cheap tier; visual-quality.js is the expensive, narrower
+// tier layered on top of it.
 const MAX_PAGES = 100;
+
+// 100 pages scanned per run is NOT the same thing as 100 simultaneous
+// requests to one tenant's host — that's real, sudden traffic a client's
+// server/WAF has no reason to expect and every reason to flag. Bounded to a
+// small number of concurrent in-flight fetches at a time (same p-limit
+// convention agents/lib/bulk-audit.js already uses for exactly this
+// reasoning), configurable per-deployment since "polite" depends on the
+// target host, not on this platform. Read inside run() (call time), not as
+// a module-level constant — an env var is meant to be observable per call,
+// not frozen at first import.
+function fetchConcurrency() {
+  return Number(process.env.CONTENT_INTEGRITY_FETCH_CONCURRENCY) || 10;
+}
 
 // Prefers a representative that's actually safe to auto-fix (so
 // recommendedAction has something real to act on), falling back to the
@@ -103,7 +117,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
   }
 
   const fetchPage = pageCache || analyzePageUrl;
-  const fetched = await Promise.all(batch.map(async (page) => ({ page, result: await fetchPage(page) })));
+  const limit = pLimit(fetchConcurrency());
+  const fetched = await Promise.all(batch.map((page) => limit(async () => ({ page, result: await fetchPage(page) }))));
   if (!params?.pages?.length) await markPagesChecked(siteId, 'content-integrity', batch);
 
   const reachable = fetched.filter((r) => r.result.ok).map((r) => ({ page: r.page, analysis: r.result.analysis, impressions: impressionsByPage.get(r.page) || 0 }));
