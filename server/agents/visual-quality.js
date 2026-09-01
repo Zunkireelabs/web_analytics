@@ -1,11 +1,81 @@
-import { getSiteById } from '../store/read.js';
-import { sitePageUrl } from '../implementers/lib/design-drift.js';
-import { captureSite } from '../design-agent/live-analysis/capture.js';
+import { launchBrowser, capturePage } from '../design-agent/live-analysis/capture.js';
+import { classifyPageType } from '../design-agent/live-analysis/schema.js';
+import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { makeFinding, priorityByRank, impactFromPriority } from './lib/findings.js';
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
 import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
+
+// Expensive, narrow tier of the cost-conscious detection strategy —
+// content-integrity.js is the cheap-wide tier this layers on top of.
+// Screenshots + one multi-image vision call are real cost, so this stays
+// small; what changed (2026-09-01) is HOW the small batch is chosen.
+//
+// Before this, the page set came from capture.js's discoverPages(): the
+// homepage plus the first same-origin link found for each OTHER page type,
+// re-crawled fresh every run. That crawl is deterministic — the homepage's
+// own link order doesn't change run to run — so this agent had been vision-
+// auditing the exact same ~8 pages every single day since it was built.
+// Every other page on the site had NEVER been visually checked, no matter
+// how many days passed. Confirmed live: identical `checkedPages` across
+// separate runs.
+//
+// Now uses the SAME rotation ledger (agent_page_rotation via
+// selectCandidatePages/markPagesChecked) content-integrity.js and every
+// other page-level agent already share, under its own 'visual-quality'
+// agentId so its rotation position is independent of theirs. This is what
+// "cheap-wide, expensive-narrow" actually means in practice: the expensive
+// tier still only touches a handful of pages per run, but those pages
+// rotate — least-recently-checked and GSC-traffic-weighted, the same real
+// prioritization signal every other candidate-driven agent already trusts —
+// so the whole site is eventually covered instead of a frozen sample.
+const VISUAL_BATCH_SIZE = 8;
+
+// The real per-URL capture (launchBrowser + capturePage, both already used
+// elsewhere) applied to an EXPLICIT candidate list, instead of capture.js's
+// captureSite/discoverPages doing its own blind same-origin link crawl.
+// classifyPageType stands in for discoverPages' page-type tagging — the
+// prompt's summarizeBlocksForPrompt reads page.pageType, and URL-shape
+// classification is the same heuristic discoverPages itself used.
+async function capturePagesFor(urls, { screenshots = true, launchBrowserFn = launchBrowser } = {}) {
+  if (!urls.length) return { pages: [] };
+  const browser = await launchBrowserFn();
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const browserPage = await context.newPage();
+    const pages = [];
+    for (const url of urls) {
+      // eslint-disable-next-line no-await-in-loop
+      const captured = await capturePage(browserPage, url, { screenshot: screenshots }).catch((err) => {
+        console.warn(`[visual-quality] could not capture ${url}: ${err.message}`);
+        return null;
+      });
+      if (captured) pages.push({ ...captured, pageType: classifyPageType(url) });
+    }
+    return { pages };
+  } finally {
+    await browser.close();
+  }
+}
+
+// run()'s injectable `capture` seam, default implementation: select this
+// run's rotation-position candidates, screenshot them, then advance the
+// rotation — the three steps a real run needs, bundled so run() itself stays
+// a plain "capture -> judge -> ship" pipeline with no rotation bookkeeping of
+// its own. A site with no candidate pages (no domain configured, or nothing
+// in page_inventory/GSC yet) returns no pages, same as before this rotation
+// existed — run() already treats "no screenshots" as insufficient-data.
+export async function defaultCapture(siteId, {
+  start, end, screenshots = true, batchSize = VISUAL_BATCH_SIZE,
+  selectCandidates = selectCandidatePages, capturePages = capturePagesFor, mark = markPagesChecked,
+} = {}) {
+  const { batch } = await selectCandidates(siteId, 'visual-quality', { start, end, batchSize });
+  if (!batch.length) return { pages: [] };
+  const { pages } = await capturePages(batch, { screenshots });
+  await mark(siteId, 'visual-quality', batch);
+  return { pages };
+}
 
 // Visual Quality Agent — the missing "does an EXISTING page actually look
 // right" check. Every other content-integrity check (font-consistency.js,
@@ -130,26 +200,20 @@ function summarizeBlocksForPrompt(page) {
   };
 }
 
-export async function run({ siteId, capture = captureSite, fetchSite = getSiteById, analyzePage = analyzePageUrl }) {
-  const site = await fetchSite(siteId);
-  const homepageUrl = sitePageUrl(site);
-  if (!homepageUrl) {
-    return {
-      meta, status: 'insufficient-data', facts: null, narrative: null,
-      message: 'No website_domain/gsc_property configured for this site — nothing to capture.',
-      generatedAt: new Date().toISOString(),
-    };
-  }
-
+export async function run({ siteId, start, end, capture = defaultCapture, analyzePage = analyzePageUrl }) {
   // Same "propagate to runner.js's own try/catch" discipline as font-
   // consistency.js — a live-capture failure is a real infrastructure error,
-  // not a customer-facing string to hand-build here.
-  const { pages } = await capture(homepageUrl, { screenshots: true });
+  // not a customer-facing string to hand-build here. Covers both "nothing to
+  // capture" cases in one message now: no candidate pages at all (no domain
+  // configured, or nothing in page_inventory/GSC yet — selectCandidatePages'
+  // own concern) and every real navigation failing, since both end the same
+  // way — no screenshot to show a reviewer or a vision call.
+  const { pages } = await capture(siteId, { start, end, screenshots: true });
   const withScreenshots = (pages || []).filter((p) => p.screenshot);
   if (!withScreenshots.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
-      message: 'Could not capture any real page screenshots for this site (all navigations failed).',
+      message: 'No real page screenshots were available for this site — either no candidate pages yet, or every navigation failed.',
       generatedAt: new Date().toISOString(),
     };
   }
