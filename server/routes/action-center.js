@@ -9,6 +9,7 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 // Its own module, not auto-remediation.js's export, because this file and
 // auto-remediation.js already import each other — see ship-pacing.js.
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
+import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
@@ -932,10 +933,41 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false 
     // as success instead, and let the stale `recommendations` row close out
     // via its normal getDraftedFindingIds-based reopening rather than
     // retrying it every run.
-    if (draft.status !== 'draft' && draft.status !== 'edited') {
+    // ...but "not submittable" is not one condition, it is three, and
+    // collapsing them into "already shipped" reported work as landed that
+    // never reached GitHub. A draft stranded at 'approved' by a failed
+    // apply() has no branch and no PR; calling that shipped is the one
+    // outcome worse than calling it failed. See lib/draft-ship-state.js for
+    // the measured case (8 expand-content drafts stuck since 2026-08-28).
+    const shipState = draftShipState(draft);
+    if (shipState === SHIP_STATE.SHIPPED) {
       await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
       await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
       return { ok: true, draft, alreadyShipped: true };
+    }
+    if (shipState === SHIP_STATE.AWAITING_PR) {
+      // A real commit exists but its PR was never opened. Hand it to the
+      // batch's pending list so finalizeBatchPr covers it, instead of
+      // declaring it done and leaving the commit permanently PR-less.
+      await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
+      return { ok: true, draft, jobRecId: jobRec.id, pendingPr: deferPr };
+    }
+    if (shipState === SHIP_STATE.RESUME_APPLY) {
+      // Re-run only the step that failed. The content is already generated
+      // and Quality-Gated; regenerating would spend another model call to
+      // arrive at the same draft.
+      const pushed = await pushDraftBranch(siteId, draft.id);
+      await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: pushed.id });
+      return { ok: true, draft: pushed, jobRecId: jobRec.id, pendingPr: deferPr };
+    }
+    if (shipState === SHIP_STATE.STRANDED) {
+      // Never leave a partially-failed draft in a non-terminal status (this
+      // repo's own recorded lesson for these paths). Reset it so the next run
+      // generates a clean one, and report an honest failure — not a ship.
+      await markDraftAbandoned(siteId, draft.id, `Stuck at "${draft.status}" and not resumable — abandoned so a fresh draft can be generated.`, null)
+        .catch((err) => console.error(`[action-center] could not abandon unresumable draft ${draft.id}:`, err.message));
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: `Draft was stuck at "${draft.status}" and has been reset for a fresh attempt.` });
+      return { ok: false };
     }
 
     const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);

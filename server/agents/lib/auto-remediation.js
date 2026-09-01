@@ -12,6 +12,7 @@ import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-r
 import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { classifyFailure } from '../../lib/failure-classification.js';
+import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -577,17 +578,17 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     // start over. This is the same recovery the UI already offers by hand,
     // reusing that exact function rather than a second implementation.
     const current = await getDraft(siteId, draft.id);
-    if (current?.status === 'approved') {
+    const state = draftShipState(current);
+    if (state === SHIP_STATE.RESUME_APPLY) {
       // Re-run apply() — the step that actually failed. The content is
       // already generated, Quality-Gated and approved; regenerating it would
       // spend another model call to arrive at the same draft.
       return await pushDraftBranch(siteId, draft.id);
     }
-    if (current?.status === 'branch_pushed') {
-      // Already applied; only the shared PR step is outstanding, which the
-      // caller's finalizeBatchPr does for the whole batch. Nothing to redo.
-      return current;
-    }
+    // Already applied (AWAITING_PR), or genuinely finished (SHIPPED) — either
+    // way nothing here should redo it. The caller's finalizeBatchPr opens the
+    // one shared PR for whatever is pending.
+    if (state === SHIP_STATE.AWAITING_PR || state === SHIP_STATE.SHIPPED) return current;
     // Any other non-submittable state is a genuinely stuck row, and the
     // repo's own recorded lesson for this code applies: never leave a
     // partially-failed draft sitting in a non-terminal status. Abandon it so
