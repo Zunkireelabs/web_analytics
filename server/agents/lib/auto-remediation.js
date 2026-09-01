@@ -2,7 +2,7 @@ import { listOpenRecommendations, closeRecommendation } from '../../store/recomm
 import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
-import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch } from '../../routes/action-center.js';
+import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
@@ -13,6 +13,7 @@ import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { classifyFailure } from '../../lib/failure-classification.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
+import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -593,7 +594,17 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     // start over. This is the same recovery the UI already offers by hand,
     // reusing that exact function rather than a second implementation.
     const current = await getDraft(siteId, draft.id);
-    const state = draftShipState(current, { currentBatchBranch: batchBranch });
+    // A 'branch_pushed' draft's commit is live either on the given batch
+    // branch, OR — when this call isn't batched at all (deferPr false, e.g.
+    // learned-repair.js's single-item ship, never wrapped in a beginBatchPush)
+    // — on the draft's OWN branch, since a non-batched apply() moves the real
+    // ref directly with no overlay involved. Without this, every non-batched
+    // caller passed no batchBranch, currentBatchBranch was always null, and a
+    // draft that had genuinely pushed (only the PR-open step remaining) was
+    // misclassified STRANDED and abandoned — discarding real, already-shipped
+    // work and forcing a full, costly regeneration.
+    const liveBranch = deferPr ? batchBranch : current?.branch_name;
+    const state = draftShipState(current, { currentBatchBranch: liveBranch });
     if (state === SHIP_STATE.RESUME_APPLY) {
       // Re-run apply() — the step that actually failed. The content is
       // already generated, Quality-Gated and approved; regenerating it would
@@ -601,8 +612,17 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       return await pushDraftBranch(siteId, draft.id);
     }
     if (state === SHIP_STATE.AWAITING_PR) {
-      // A real commit on THIS run's branch, still needing the shared PR the
-      // caller opens once for the whole batch. Safe to queue.
+      if (!deferPr) {
+        // Non-batched (learned-repair.js's single-item ship): no batch
+        // finalize step is ever coming for this call, so open the PR
+        // directly rather than returning a branch_pushed draft with no PR
+        // and no caller left to open one — the same permanently-PR-less
+        // outcome fixed in routes/action-center.js's shipRecommendation,
+        // for this codepath's own non-batched caller.
+        return await openDraftPr(siteId, draft.id);
+      }
+      // Batched: a real commit on THIS run's branch, still needing the
+      // shared PR the caller opens once for the whole batch. Safe to queue.
       return current;
     }
     if (state === SHIP_STATE.SHIPPED) {
@@ -666,7 +686,7 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       err.refusal = true;
       err.stale = true;
       err.reason = 'source-anchor-not-found';
-    } else if (/^No url_file_map entry matches|^No markers configured for/.test(message)) {
+    } else if (message.startsWith(NO_FILE_MAPPING_FRAGMENT) || message.startsWith(NO_MARKERS_CONFIGURED_FRAGMENT)) {
       // url-file-map.js's 'no-file-mapping'/'no-insertion-marker': a page or
       // marker this site's operator hasn't onboarded yet (see
       // action-center-onboarding skill). Real and worth surfacing — left
@@ -674,6 +694,17 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // not a systemic fault, so it must not trip the breaker either.
       err.refusal = true;
       err.reason = 'no-file-mapping';
+    } else if (message.includes(UNVERIFIED_PLACEHOLDER_FRAGMENT)) {
+      // marker-merge.js / data-array-content.js: the generator could not
+      // confirm a real value for a field (analytics-install's trackingId is
+      // the recurring case — trust-compliance.js deliberately files that
+      // finding even with no stored ID, so a human can generate the draft
+      // and edit the placeholder by hand). This recurs identically on every
+      // unattended attempt until a human does that, exactly the same
+      // per-item, non-systemic shape as the two patterns above — it must
+      // not trip the breaker either.
+      err.refusal = true;
+      err.reason = 'unverified-placeholder-field';
     } else if (/uses classes this site only ever uses for its/.test(message)) {
       // design-drift.js's checkDesignIntegrityGate: THIS recommendation's
       // styled markup failed automated role verification (a confirmed

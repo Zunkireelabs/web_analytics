@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildComplianceDesignDriftFindings, trackerCheckIsActionable } from './trust-compliance.js';
+import { buildComplianceDesignDriftFindings } from './trust-compliance.js';
 
 const TRACKER_FACTS = { siteName: 'Acme', domain: 'acme.example', cookiesObserved: [], trackersDetected: [] };
 const RESOLVED_PAGES = [
@@ -40,29 +40,20 @@ describe('buildComplianceDesignDriftFindings', () => {
   });
 });
 
-// A missing-tracker finding is only worth filing if the fix can actually be
-// completed. analytics-install needs the site's own tracking ID; with none it
-// emits a placeholder, the draft refuses at the placeholder gate, and the
-// recommendation reopens next run — forever. Meta/Facebook Pixel had no
-// column to store an ID at all, which made
-// `trust-compliance:facebook-pixel:missing` site 1's worst repeat offender at
-// 15 failed attempts, each costing a generation call to reach the same
-// refusal.
-describe('trackerCheckIsActionable', () => {
-  test('a tracker with a real ID is filed as before', () => {
-    assert.equal(trackerCheckIsActionable({ label: 'GA4', trackingId: 'G-2ZQRDS0D14' }), true);
-  });
-
-  test('a tracker with no stored ID is not filed — the draft could never be completed', () => {
-    assert.equal(trackerCheckIsActionable({ label: 'Meta/Facebook Pixel', trackingId: null }), false);
-    assert.equal(trackerCheckIsActionable({ label: 'x', trackingId: '' }), false);
-    assert.equal(trackerCheckIsActionable({ label: 'x', trackingId: '   ' }), false);
-    assert.equal(trackerCheckIsActionable({ label: 'x' }), false);
-  });
-
-  // Keyed on the ID, not the provider, so the day a facebook_pixel_id column
-  // exists the check starts firing again with no code change here.
-  test('the rule is about the ID, not about which provider it is', () => {
-    assert.equal(trackerCheckIsActionable({ label: 'Meta/Facebook Pixel', trackingId: '1234567890' }), true);
-  });
-});
+// DESIGN NOTE (not independently unit-testable here): a missing-tracker
+// finding (TRACKER_CHECKS inside run(), no exported seam of its own) is filed
+// REGARDLESS of whether a trackingId is known — the draft ships with a
+// placeholder blocking auto-publish until a human fills in the real ID by
+// hand-editing it in the Action Center. An earlier version of this file
+// suppressed filing entirely once a tracker had no stored ID
+// (trackerCheckIsActionable, since removed), on the reasoning that an
+// unattended draft could never complete it — correct about the unattended
+// loop, wrong about the fix: it also hid the finding from the ONE place a
+// human could ever discover and fix it, since nothing in this app writes
+// ga4_measurement_id or facebook_pixel_id automatically (confirmed: no route
+// or script in this repo sets either column). The unattended-loop problem
+// (facebook-pixel:missing had 15 wasted auto-remediation attempts) now
+// belongs at ship-pacing.js's convergence cap instead, which holds a finding
+// after repeated identical failures while leaving it open and visible for a
+// human — see store/drafts.test.js and auto-remediation.test.js's
+// 'unverified placeholder field'/UNVERIFIED_PLACEHOLDER_FRAGMENT coverage.

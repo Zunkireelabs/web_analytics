@@ -203,7 +203,7 @@ mock.module(resolve('../../routes/action-center.js'), {
   },
 });
 
-const { autoRemediateSafeRecommendations } = await import('./auto-remediation.js');
+const { autoRemediateSafeRecommendations, shipDraftForRecommendation } = await import('./auto-remediation.js');
 
 describe('auto-remediation — opt-in gate', () => {
   beforeEach(reset);
@@ -701,6 +701,28 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
     assert.deepEqual(calls.closed, [], 'unlike a stale anchor, the underlying issue is still real — never close it silently');
   });
 
+  // trust-compliance.js deliberately files a missing-tracker finding even
+  // with no stored ID, so a human can generate the draft and fill in the
+  // placeholder by hand — but that means an unattended attempt at the SAME
+  // finding hits this refusal identically forever until they do. Must never
+  // trip the breaker, same as the two known per-item conditions above.
+  test('an unverified placeholder field (missing tracking ID) refuses but stays open', async () => {
+    applyFailureMessageOn = (type) => type === 'analytics-install'
+      ? 'This analytics-install draft has 1 unverified placeholder field(s) (trackingId) — the site\'s real tracking ID wasn\'t given. Fill it in manually (edit the draft) before this can be applied.'
+      : null;
+    recommendations = [
+      rec(1, { type: 'analytics-install' }), rec(2, { type: 'analytics-install' }), rec(3, { type: 'analytics-install' }),
+      rec(4, { type: 'analytics-install' }), rec(5, { type: 'analytics-install' }), rec(6),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'a placeholder waiting on a human is a known condition, not a systemic fault');
+    assert.equal(result.refused, 5);
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.closed, [], 'the recommendation stays open — a human can still fix it by hand at any time');
+  });
+
   test('an apply failure with no recognized message shape is still a genuine failure and trips the breaker', async () => {
     applyFailureMessageOn = (type) => type === 'qa-content' ? 'upstream GitHub API returned 503' : null;
     recommendations = [
@@ -839,6 +861,29 @@ describe('autoRemediateSafeRecommendations — resuming a stranded draft', () =>
 
     assert.notEqual(result.stoppedReason, 'circuit-breaker', 'seven stranded drafts must not look like a systemic fault');
     assert.equal(result.refused, 7, 'every one is attempted and reset, none halts the run');
+  });
+});
+
+// Review finding: shipDraftForRecommendation's stranded-draft resume only
+// ever checked the commit against a `batchBranch` that batched callers pass
+// (auto-remediation.js's own loop always does). learned-repair.js calls this
+// function directly with NO deferPr/batchBranch — a genuinely non-batched,
+// single-item ship, whose apply() moves the real ref directly with no batch
+// overlay involved. Before this fix, `currentBatchBranch` was always null for
+// that caller, so a draft that had truly, successfully pushed (only the
+// PR-open step remaining) was misclassified STRANDED and abandoned —
+// discarding real, already-shipped work.
+describe('shipDraftForRecommendation — resuming a NON-batched (single-item) ship', () => {
+  beforeEach(reset);
+
+  test('a branch_pushed draft on its OWN branch opens its PR directly — no batch step is ever coming for it', async () => {
+    stuckDraftStatus = 'branch_pushed';
+    stuckDraftBranch = 'auto/d-f1'; // the draft's own branch — no batching involved
+
+    await shipDraftForRecommendation(1, { generatorId: 'meta-title', params: {}, findingId: 'f1', source: 'learned-repair' });
+
+    assert.deepEqual(calls.prsOpened, ['d-f1'], 'the commit is already live — only the PR-open step is outstanding, and no batch finalize will ever run for this single-item call');
+    assert.deepEqual(calls.abandoned, [], 'never discarded');
   });
 });
 

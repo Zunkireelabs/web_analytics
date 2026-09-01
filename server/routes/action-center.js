@@ -38,7 +38,7 @@ import { resolveImplementerForApply, resolveImplementerForMerge } from '../imple
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
-import { getFileContent, getPullRequest } from '../github/client.js';
+import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
 import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
@@ -939,7 +939,16 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
     // apply() has no branch and no PR; calling that shipped is the one
     // outcome worse than calling it failed. See lib/draft-ship-state.js for
     // the measured case (8 expand-content drafts stuck since 2026-08-28).
-    const shipState = draftShipState(draft, { currentBatchBranch: batchBranch });
+    // A 'branch_pushed' draft's commit is live either on the given batch
+    // branch, OR — when this call is a single, non-batched ship
+    // (approveAndShipRecommendation's deferPr:false path, never wrapped in a
+    // beginBatchPush) — on the draft's OWN branch, since a non-batched
+    // apply() moves the real ref directly with no overlay involved. Without
+    // this, a single-click "approve and ship" resuming a genuinely-pushed
+    // draft saw currentBatchBranch: null, was misclassified STRANDED, and was
+    // abandoned — discarding real, already-shipped work.
+    const liveBranch = deferPr ? batchBranch : draft.branch_name;
+    const shipState = draftShipState(draft, { currentBatchBranch: liveBranch });
     if (shipState === SHIP_STATE.HUMAN_OWNED) {
       // A person submitted this and is reviewing it. Never ship it out from
       // under them, and never reset it — just report it honestly and leave it.
@@ -952,8 +961,19 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
       return { ok: true, draft, alreadyShipped: true };
     }
     if (shipState === SHIP_STATE.AWAITING_PR) {
-      // A real commit exists but its PR was never opened. Hand it to the
-      // batch's pending list so finalizeBatchPr covers it, instead of
+      if (!deferPr) {
+        // Non-batched single ship: no finalizeBatchPr call is ever coming for
+        // this one, so open its PR directly rather than marking it
+        // 'submitted' and leaving it waiting on a batch step that will never
+        // run — the exact "commit permanently PR-less" outcome this branch
+        // exists to avoid, just via a different route for the unbatched path.
+        const opened = await openDraftPr(siteId, draft.id);
+        await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: opened.id });
+        await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
+        return { ok: true, draft: opened, alreadyShipped: true };
+      }
+      // Batched: a real commit exists but its PR was never opened. Hand it to
+      // the batch's pending list so finalizeBatchPr covers it, instead of
       // declaring it done and leaving the commit permanently PR-less.
       await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
       return { ok: true, draft, jobRecId: jobRec.id, pendingPr: deferPr };
@@ -1164,6 +1184,18 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   let failed = 0;
   const pending = []; // { draftId, jobRecId, recId }
   for (const rec of recs) {
+    // Same rate-limit pre-check as auto-remediation.js's identical loop —
+    // this PR explicitly unified the sibling pacing/convergence rules between
+    // both ship paths on the grounds that THIS bulk path is where the real
+    // volume is, so it needs this stop just as much. Without it, "Execute
+    // Today's Safe Fixes" keeps spending a generateDraft LLM call per item
+    // and retrying through githubRequest's own backoff on each one, all the
+    // way down a 60-item batch, instead of stopping after the first item that
+    // proves the budget is gone.
+    if (getLastKnownRateLimit().low) {
+      await appendJobLog(job.id, `GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${recs.length - shipped - failed} item(s) left untouched; they will be re-attempted next run.`);
+      break;
+    }
     // Same file-level guard as auto-remediation.js's autonomous path (see
     // getPendingDraftFilePaths' comment, store/drafts.js): skip a
     // recommendation targeting a file that already has an earlier draft

@@ -3,6 +3,7 @@ import { listPageInventory } from '../store/page-inventory.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { knownDomain, filterOwnDomainPages } from './lib/site-domain.js';
 import { sortByRotation } from './lib/rotation.js';
+import { filterSoftNotFoundPages } from './lib/candidate-pages.js';
 import {
   upsertTrackedQuery, listActiveQueries, upsertQueryStatus,
   getCheckedAtForQueries, recordGrowthQueryCheck, getRecentChecks,
@@ -227,7 +228,14 @@ export async function run({ siteId, start, end }) {
   // knownDomain (primary domain only), not ownDomains — see candidate-pages.js's
   // own comment on this same 2026-08-24 fix.
   const inventory = filterOwnDomainPages(await listPageInventory(siteId, { limit: 500 }), knownDomain(site), (r) => r.page);
-  const inventoryUrls = inventory.map((r) => r.page);
+  // candidate-pages.js's own soft-404 filter, applied here too — otherwise
+  // this module is the one page-listing path a site's catch-all misconfig
+  // still reaches, contradicting the "every agent inherits it at once" design
+  // that filter was built for. A phantom URL like /gaas/ renders the
+  // homepage's real content, so findCoveringPage below could conclude a
+  // query is genuinely "covered" by a page that doesn't exist — silently
+  // suppressing a real content-gap finding rather than reporting it.
+  const { pages: inventoryUrls } = await filterSoftNotFoundPages(siteId, inventory.map((r) => r.page));
   const pageAnalysisCache = new Map();
   async function analysisFor(url) {
     if (pageAnalysisCache.has(url)) return pageAnalysisCache.get(url);

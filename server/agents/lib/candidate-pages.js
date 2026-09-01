@@ -160,6 +160,7 @@ export async function selectCandidatePages(siteId, agentId, {
   start, end, gscLimit = DEFAULT_GSC_LIMIT, zeroTrafficLimit = DEFAULT_ZERO_TRAFFIC_LIMIT, batchSize = DEFAULT_BATCH_SIZE,
   getCheckedAtForPages = getCheckedAtForPagesDefault,
   filterSoftNotFound = filterSoftNotFoundPages,
+  markPagesCheckedFn = markPagesChecked,
 } = {}) {
   const [site, gscPagesRaw, inventoryRaw] = await Promise.all([
     getSiteById(siteId),
@@ -210,6 +211,17 @@ export async function selectCandidatePages(siteId, agentId, {
   const { pages: realPages, dropped } = await filterSoftNotFound(siteId, batch);
   if (dropped.length) {
     console.log(`[candidate-pages] site ${siteId} (${agentId}): skipping ${dropped.length}/${beforeFilter} candidate(s) that render this site's catch-all page, not a real page: ${dropped.slice(0, 5).join(', ')}${dropped.length > 5 ? ` (+${dropped.length - 5} more)` : ''}`);
+    // Mark the phantom itself checked, right here, rather than leaving that to
+    // callers — every caller below marks only the RETURNED `batch`, which by
+    // definition no longer contains a dropped page. Left unmarked, a phantom's
+    // rotation timestamp never updates, sortByRotation keeps ranking it as
+    // "never checked" forever, and it re-wins a batch slot — and gets
+    // soft-404-checked again — on every single future run, permanently
+    // starving a real never-checked page out of that slot instead of the
+    // one-time skip this filter was meant to provide.
+    await markPagesCheckedFn(siteId, agentId, dropped).catch((err) => {
+      console.error(`[candidate-pages] site ${siteId} (${agentId}): could not mark ${dropped.length} phantom page(s) checked:`, err.message);
+    });
   }
   batch = realPages;
 

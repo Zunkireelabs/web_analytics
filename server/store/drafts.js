@@ -1,6 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
+import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT } from '../lib/draft-failure-phrases.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -772,9 +773,15 @@ const UNCOUNTED_ABANDON_REASONS = [
   // never "this item is unfixable" — and the moment that config lands, the
   // item must become eligible again immediately rather than staying retired
   // on the strength of failures whose cause is gone.
-  "abandoned_reason NOT LIKE '%No markers configured%'",
-  "abandoned_reason NOT LIKE '%No url_file_map entry matches%'",
-  "abandoned_reason NOT LIKE '%unverified placeholder field%'",
+  //
+  // NOT the "unverified placeholder field" case, deliberately: unlike a
+  // missing marker/mapping, that failure recurs identically FOREVER unless a
+  // human hand-edits the draft (trust-compliance.js files the finding
+  // precisely so they can) — no config change ever resolves it on its own.
+  // That IS the per-item "cannot be auto-completed" signal this cap exists to
+  // catch, so it counts.
+  `abandoned_reason NOT LIKE '%${NO_MARKERS_CONFIGURED_FRAGMENT}%'`,
+  `abandoned_reason NOT LIKE '%${NO_FILE_MAPPING_FRAGMENT}%'`,
 ];
 
 export async function countFailedAttemptsByFinding(siteId) {

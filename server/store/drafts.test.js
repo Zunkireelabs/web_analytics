@@ -244,7 +244,17 @@ describe('countFailedAttemptsByFinding — what must never count as an item fail
     const sql = await sqlFor();
     assert.match(sql, /No markers configured/);
     assert.match(sql, /No url_file_map entry matches/);
-    assert.match(sql, /unverified placeholder field/);
+  });
+
+  // The opposite of the case above: this one recurs identically FOREVER
+  // unless a human hand-edits the draft (trust-compliance.js files the
+  // finding specifically so they can) — no config change ever resolves it on
+  // its own. That IS the per-item "cannot be auto-completed" signal the
+  // convergence cap exists to catch, so — unlike the two config gaps above —
+  // it counts.
+  test('an unverified-placeholder failure DOES count — nothing resolves it automatically', async () => {
+    const sql = await sqlFor();
+    assert.doesNotMatch(sql, /unverified placeholder field/);
   });
 
   test('human decisions and bookkeeping are excluded — neither is a verdict on the item', async () => {
