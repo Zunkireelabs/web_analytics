@@ -116,3 +116,21 @@ describe('recommendationPageKey — content-integrity-repair keys by fixType too
     assert.equal(keyA, keyB);
   });
 });
+
+// blog-image (agents/blog-image.js) has no live URL — the detector finds a
+// post by its real repo path via a repo-tree scan, not a URL crawl — so it
+// keys on filePath directly rather than the generic params.page fallback.
+describe('recommendationPageKey — blog-image keys by filePath, not page', () => {
+  test('two distinct posts produce distinct keys', () => {
+    const keyA = recommendationPageKey({ generatorId: 'blog-image', params: { filePath: 'src/blog/a.md' } });
+    const keyB = recommendationPageKey({ generatorId: 'blog-image', params: { filePath: 'src/blog/b.md' } });
+    assert.notEqual(keyA, keyB);
+  });
+
+  test('the same filePath produces the same key (real dedup preserved)', () => {
+    const params = { filePath: 'src/blog/a.md' };
+    const keyA = recommendationPageKey({ generatorId: 'blog-image', params });
+    const keyB = recommendationPageKey({ generatorId: 'blog-image', params: { ...params } });
+    assert.equal(keyA, keyB);
+  });
+});

@@ -1082,6 +1082,7 @@ const GENERATOR_EFFORT = {
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
   'content-integrity-repair': 'Low',
+  'blog-image': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
