@@ -5,6 +5,7 @@ import { knownDomain, resolveOwnDomain } from './lib/site-domain.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
 import { collectSiteTrackerFacts, trackerAbsenceIsProvable } from './lib/site-trackers.js';
 import { callLLM } from '../llm.js';
+import { componentTemplateVerification } from '../implementers/lib/design-drift.js';
 
 export const meta = {
   id: 'trust-compliance',
@@ -89,6 +90,51 @@ async function resolveLinkStatus(href, homepageUrl, homepageTitle, homepageBodyT
   return { ok: true, href: absoluteUrl };
 }
 
+// A compliance page whose homepage LINK resolves fine (status 'ok' above)
+// can still be visually inconsistent with the rest of the site — it was
+// generated/hand-written before this site's design profile/contentWrapper
+// template existed, or before either was verified against the site's real
+// CSS. Nothing before this proactively re-checked an already-shipped
+// compliance page once its link stopped being the problem — this is the
+// gap: a visual/structural drift detector for compliance pages specifically
+// (spec: "if they already exist, determine whether they visually belong to
+// the tenant's website").
+//
+// Deliberately reuses componentTemplateVerification (design-drift.js) —
+// the SAME verdict routes/action-center.js's generateDraft gate already
+// computes to decide whether regenerating this action type right now would
+// produce real, site-styled markup or a bare fallback — rather than a new
+// vision/screenshot pass. A site-wide verdict, not a per-page one: this
+// site's compliance pages all share the one 'content-wrapper' template
+// (design-drift.js's COMPONENT_TEMPLATE_KEY), so one check covers every
+// resolved page. When it's already ok, there's nothing to flag — this
+// function never invents a defect a real check didn't find.
+export function buildComplianceDesignDriftFindings(resolvedPages, wrapperVerification, trackerFacts, homepageUrl) {
+  if (wrapperVerification?.ok || !resolvedPages.length) return [];
+  return resolvedPages.map(({ check, href }) => makeFinding({
+    id: `trust-compliance:${check.key}:design-drift`,
+    evidence: {
+      page: href || homepageUrl,
+      wrapperVerification: { ok: wrapperVerification.ok, reason: wrapperVerification.reason },
+    },
+    whyItMatters: `The ${check.label} page is linked and reachable, but this site's real content template (the wrapper that gives generated pages the site's own typography/spacing) is ${wrapperVerification.reason === 'missing' ? 'not derived yet' : 'not yet verified against the live site'} — this page may be rendering with generic or unstyled markup instead of looking like the rest of the site.`,
+    priority: 'low',
+    recommendedAction: {
+      label: `Regenerate ${check.label} to match the site's current design`,
+      generatorId: check.key,
+      params: {
+        siteName: trackerFacts.siteName,
+        domain: trackerFacts.domain,
+        cookiesObserved: trackerFacts.cookiesObserved,
+        trackersDetected: trackerFacts.trackersDetected,
+        page: href || null,
+      },
+      effort: effortForGenerator(check.key),
+    },
+    expectedImpact: { label: impactFromPriority('low'), basis: 'computed', value: 0 },
+  }));
+}
+
 export async function run({ siteId, start, end }) {
   const site = await getSiteById(siteId);
   const domain = knownDomain(site) || (await resolveOwnDomain(site, siteId, start, end));
@@ -120,7 +166,7 @@ export async function run({ siteId, start, end }) {
     if (!match) return { check, status: 'missing' };
     const linkStatus = await resolveLinkStatus(match.href, homepageUrl, homepageTitle, homepageBodyText);
     return linkStatus.ok
-      ? { check, status: 'ok' }
+      ? { check, status: 'ok', href: linkStatus.href }
       : { check, status: 'broken', reason: linkStatus.reason, href: linkStatus.href };
   }));
 
@@ -164,6 +210,12 @@ export async function run({ siteId, start, end }) {
       expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
     });
   });
+
+  // Design/visual drift on the compliance pages that ARE correctly linked —
+  // see buildComplianceDesignDriftFindings above.
+  const resolvedCompliancePages = checkResults.filter((r) => r.status === 'ok').map((r) => ({ check: r.check, href: r.href }));
+  const wrapperVerification = componentTemplateVerification(site, 'content-wrapper');
+  findings.push(...buildComplianceDesignDriftFindings(resolvedCompliancePages, wrapperVerification, trackerFacts, homepageUrl));
 
   // Analytics/Pixel install checks — real detections from site-trackers.js,
   // just never surfaced as their own finding before (only as evidence

@@ -2,6 +2,7 @@ import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { buildFontSizeOverrideRemoved } from '../agents/lib/font-consistency-analysis.js';
 import { getSiteById } from '../store/read.js';
 import { projectTable } from '../design-agent/lib/design-profile.js';
+import { buildTableHtml } from './lib/markdown-table-render.js';
 
 // Repairs the five defect shapes content-integrity.js/font-consistency.js
 // detect — broken/empty table markup, comparison content shipped as raw
@@ -28,33 +29,14 @@ export const meta = {
   recommendationTags: [],
 };
 
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 // Deterministic transform of rows ALREADY extracted verbatim from the raw
 // text (page-content.js's parsePipeRow) — first row is the header, same
 // convention as the markdown-table shape this content came from.
 //
-// `styles` is design-profile.js's projectTable() output — this site's own
-// real table pattern when one exists, or one composed from its own real
-// typography/color tokens when it doesn't (see projectTable's own comment).
-// null (no site, or no profile at all) falls back to bare unstyled markup —
-// a real <table> is still a strictly better outcome than the raw pipe text
-// it replaces, even with no styling to apply, same "recoverable, never
-// worse" floor design-drift.js's own null-projection paths keep elsewhere.
-// A horizontal-scroll wrapper is always added regardless of styles found —
-// the one structural rule that holds for every tenant, not a style choice.
-function buildTableHtml(rows, styles = null) {
-  const [header, ...body] = rows;
-  const headHtml = `<tr>${header.map((c) => `<th${attr(styles?.headerCellClass)}>${escapeHtml(c)}</th>`).join('')}</tr>`;
-  const bodyHtml = body.map((r) => `<tr${attr(styles?.rowClass)}>${r.map((c) => `<td${attr(styles?.cellClass)}>${escapeHtml(c)}</td>`).join('')}</tr>`).join('');
-  return `<div class="overflow-x-auto"><table${attr(styles?.tableClass)}><thead>${headHtml}</thead><tbody>${bodyHtml}</tbody></table></div>`;
-}
-
-function attr(cls) {
-  return cls ? ` class="${escapeHtml(cls)}"` : '';
-}
+// buildTableHtml now lives in generators/lib/markdown-table-render.js —
+// shared with newpage-render.js's projectMarkdownTablesInBody so a table
+// repaired here and a table inside a freshly generated blog post go through
+// the exact same rendering call, not two implementations that can drift.
 
 // Deterministic transform of {question, answer} pairs already extracted
 // verbatim from the real visible accordion (page-content.js's

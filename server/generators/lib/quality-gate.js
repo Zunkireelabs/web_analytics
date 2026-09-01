@@ -6,6 +6,8 @@ import { checkPositioning } from './positioning-guard.js';
 import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
 import { checkDesignConsistency } from './design-consistency-gate.js';
 import { checkPlaceholders } from './placeholder-guard.js';
+import { findCompetitorLinks } from './outbound-link-guard.js';
+import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
@@ -95,6 +97,21 @@ export async function runQualityGate(content, generatorId, siteId) {
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
     ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),
     ...(needsDesignConsistencyCheck ? checkDesignConsistency(content).issues : []),
+    // Applies to EVERY generator, same "not scoped to an allow-list"
+    // discipline as checkPlaceholders above — any generator could in
+    // principle emit an outbound link, and the whole point of this being a
+    // final safety net (rather than per-generator opt-in) is that a future
+    // generator gets it for free. See outbound-link-guard.js.
+    ...(await findCompetitorLinks(content, siteId)).issues,
+    // Same DESIGN_CONTEXT_GENERATOR_IDS scope as withDesignContext (design-
+    // drift.js) — a generator with no design surface has nothing for this to
+    // check. See design-integrity-guard.js for the log-only -> enforce
+    // rollout this implements (DESIGN_INTEGRITY_ENFORCE).
+    ...(needsDesignConsistencyCheck ? (await findDesignIntegrityIssues(generatorId, siteId)).issues : []),
   ];
-  return { clean: issues.length === 0, issues };
+  // An issue with `blocking: false` (design-integrity-guard.js's log-only
+  // mode) is deliberately still visible in `issues` — it just doesn't fail
+  // the gate. Every other check never sets `blocking`, so `undefined` reads
+  // as blocking (the pre-existing behavior for every issue shape here).
+  return { clean: !issues.some((issue) => issue.blocking !== false), issues };
 }

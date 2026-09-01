@@ -351,3 +351,47 @@ describe('net-new content never publishes editorial scaffolding', () => {
     assert.equal(renderBlogOutlineBody(bare, {}), renderBlogOutlineBody(withSuggestions, {}));
   });
 });
+
+// A markdown table inside a freshly generated blog post must go through the
+// same tenant-aware projectTable() call content-integrity-repair.js already
+// uses to rebuild a broken table on an EXISTING page — see
+// generators/lib/markdown-table-render.js. Before this, a new blog's table
+// shipped as raw, unstyled `| --- |` markdown while a REPAIRED table on an
+// old page got the site's real classes: two pipelines for the same problem.
+describe('a markdown table inside generated content is projected through the tenant\'s table pattern', () => {
+  const PROFILE = {
+    version: DESIGN_PROFILE_VERSION,
+    typography: { heading: { item: 'text-lg font-medium' }, body: 'text-gray-600' },
+    layout: { prose: 'prose' },
+    color: { border: 'border-gray-200' },
+  };
+  const siteWithProfile = { url_file_map: { siteRoot: { designProfile: PROFILE } } };
+
+  const withTable = {
+    title: 'Boiler brands compared',
+    sections: [{
+      heading: 'Comparison',
+      body: 'Here is how they stack up:\n\n| Brand | Price |\n| --- | --- |\n| Worcester | £2000 |\n| Vaillant | £1800 |\n',
+    }],
+  };
+
+  test('a real <table> using the site\'s own classes replaces the raw markdown table', () => {
+    const out = renderBlogOutlineBody(withTable, siteWithProfile);
+    assert.match(out, /<table class="w-full border-collapse">/);
+    assert.match(out, /<th class="text-lg font-medium text-left">Brand<\/th>/);
+    assert.match(out, /<td class="text-gray-600 text-left">Worcester<\/td>/);
+    assert.doesNotMatch(out, /\| --- \| --- \|/, 'raw markdown table syntax must not reach the shipped page');
+  });
+
+  test('REGRESSION: a site with no design profile still gets a real (unstyled) table, not raw markdown', () => {
+    const out = renderBlogOutlineBody(withTable, {});
+    assert.match(out, /<table>/);
+    assert.doesNotMatch(out, /\| --- \| --- \|/);
+  });
+
+  test('body content with no table is unaffected', () => {
+    const noTable = { title: 'x', sections: [{ heading: 'H', body: 'Plain prose, no table here.' }] };
+    const out = renderBlogOutlineBody(noTable, siteWithProfile);
+    assert.match(out, /Plain prose, no table here\./);
+  });
+});

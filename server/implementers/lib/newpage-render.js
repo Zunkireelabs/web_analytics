@@ -1,4 +1,5 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
+import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -229,6 +230,14 @@ function fillContentWrapper(wrapper, body) {
 // the plain markdown body exactly as before, so nothing regresses for a site
 // that hasn't been through the Design Agent yet.
 function wrapInSiteProse(body, site) {
+  // Any real markdown table in the generated body goes through the same
+  // projectTable() call content-integrity-repair.js already uses to rebuild
+  // a broken/raw-text table on an EXISTING page — one table pipeline for
+  // both repair and net-new generation, not a generic markdown-table render
+  // here and a tenant-aware one there. Runs before the prose wrapper below
+  // so the projected <table> lands inside it, same as any other block.
+  const tableProjected = projectMarkdownTablesInBody(body, site?.url_file_map?.siteRoot?.designProfile);
+
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new
   // pages were the last renderers still shipping unstyled headings and
@@ -240,7 +249,7 @@ function wrapInSiteProse(body, site) {
   const wrapper = configured?.includes('{{BODY}}')
     ? configured
     : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);
-  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, body) : body;
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, tableProjected) : tableProjected;
 }
 
 function designProfileOf(site) {
