@@ -19,13 +19,33 @@ mock.module(resolve('../github/client.js'), {
   },
 });
 mock.module(resolve('../generators/lib/pexels-client.js'), {
-  namedExports: { configured: () => pexelsConfigured },
+  namedExports: {
+    configured: () => pexelsConfigured,
+    // Real implementation (not a stub) — this is exactly what the agent
+    // uses to group posts by photo id, so a fake here would defeat the
+    // duplicate-detection tests below.
+    pexelsPhotoIdFromUrl: (url) => {
+      const m = /\/photos\/(\d+)\//.exec(url || '');
+      return m ? Number(m[1]) : null;
+    },
+  },
 });
 
 const { run, meta } = await import('./blog-image.js');
 
-function post(title, { image = false } = {}) {
-  return `---\ntitle: "${title}"\n${image ? 'featuredImage: "/x.jpg"\n' : ''}---\n\nBody.`;
+// `image` true/false: no image field vs. a real, remote non-Pexels image
+// (never a duplicate match, always assumed to exist — a remote URL can't be
+// verified without a network call). `photoId`: a real Pexels photo id, for
+// the duplicate-detection tests, which two posts can share on purpose.
+// `localAsset`: a local repo-relative path, for the broken-asset tests —
+// caller decides whether that exact path is also added to treeFiles.
+function post(title, { image = false, photoId, localAsset } = {}) {
+  let url;
+  if (photoId != null) url = `https://images.pexels.com/photos/${photoId}/x.jpeg`;
+  else if (localAsset) url = localAsset;
+  else if (image) url = 'https://example.com/real-image.jpg';
+  const imageLine = url ? `featuredImage: "${url}"\n` : '';
+  return `---\ntitle: "${title}"\n${imageLine}---\n\nBody.`;
 }
 
 beforeEach(() => {
@@ -114,5 +134,79 @@ describe('blog-image agent', () => {
     assert.equal(result.facts.findings.length, 2);
     const filePaths = result.facts.findings.map((f) => f.recommendedAction.params.filePath).sort();
     assert.deepEqual(filePaths, ['src/blog/a.md', 'src/blog/b.md']);
+  });
+
+  describe('duplicate-photo detection', () => {
+    test('flags every post after the first sharing a real Pexels photo id, keeping the first untouched', async () => {
+      treeFiles = ['src/blog/a.md', 'src/blog/b.md', 'src/blog/c.md'];
+      filesByPath = {
+        'src/blog/a.md': post('Post A', { photoId: 4604607 }),
+        'src/blog/b.md': post('Post B', { photoId: 4604607 }),
+        'src/blog/c.md': post('Post C', { photoId: 4604607 }),
+      };
+      const result = await run({ siteId: 1 });
+      const filePaths = result.facts.findings.map((f) => f.recommendedAction.params.filePath).sort();
+      assert.deepEqual(filePaths, ['src/blog/b.md', 'src/blog/c.md'], 'the first occurrence keeps its image untouched');
+      for (const f of result.facts.findings) {
+        assert.equal(f.recommendedAction.params.mode, 'duplicate');
+      }
+    });
+
+    test('never flags posts whose images are genuinely different photo ids', async () => {
+      treeFiles = ['src/blog/a.md', 'src/blog/b.md'];
+      filesByPath = {
+        'src/blog/a.md': post('Post A', { photoId: 111 }),
+        'src/blog/b.md': post('Post B', { photoId: 222 }),
+      };
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings.length, 0);
+    });
+
+    test('never flags a shared non-Pexels image as a duplicate — nothing here can safely judge that a match', async () => {
+      treeFiles = ['src/blog/a.md', 'src/blog/b.md'];
+      filesByPath = {
+        'src/blog/a.md': post('Post A', { image: true }),
+        'src/blog/b.md': post('Post B', { image: true }),
+      };
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings.length, 0);
+    });
+
+    test('missing-image findings and duplicate findings can both appear in the same run', async () => {
+      treeFiles = ['src/blog/no-image.md', 'src/blog/dup-a.md', 'src/blog/dup-b.md'];
+      filesByPath = {
+        'src/blog/no-image.md': post('No Image'),
+        'src/blog/dup-a.md': post('Dup A', { photoId: 999 }),
+        'src/blog/dup-b.md': post('Dup B', { photoId: 999 }),
+      };
+      const result = await run({ siteId: 1 });
+      const modes = result.facts.findings.map((f) => f.recommendedAction.params.mode ?? 'missing').sort();
+      assert.deepEqual(modes, ['duplicate', 'missing']);
+    });
+  });
+
+  describe('broken local-asset detection', () => {
+    test('flags a post whose featuredImage names a local file that was never committed', async () => {
+      treeFiles = ['src/blog/a.md']; // note: the asset itself is NOT in the tree
+      filesByPath = { 'src/blog/a.md': post('Post A', { localAsset: '/assets/images/blog/missing.jpg' }) };
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings.length, 1);
+      assert.equal(result.facts.findings[0].recommendedAction.params.mode, 'broken');
+      assert.equal(result.facts.findings[0].recommendedAction.params.filePath, 'src/blog/a.md');
+    });
+
+    test('never flags a local asset path that really is in the repo tree', async () => {
+      treeFiles = ['src/blog/a.md', 'assets/images/blog/real.jpg'];
+      filesByPath = { 'src/blog/a.md': post('Post A', { localAsset: '/assets/images/blog/real.jpg' }) };
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings.length, 0);
+    });
+
+    test('never flags a remote URL as broken — nothing here can verify it without a network call', async () => {
+      treeFiles = ['src/blog/a.md'];
+      filesByPath = { 'src/blog/a.md': post('Post A', { image: true }) };
+      const result = await run({ siteId: 1 });
+      assert.equal(result.facts.findings.length, 0);
+    });
   });
 });

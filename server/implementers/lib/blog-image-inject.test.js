@@ -76,6 +76,26 @@ describe('computeBlogImageMerge', () => {
     assert.equal(merged.ok, false);
     assert.equal(merged.reason, 'conflict-markers');
   });
+
+  describe('mode: duplicate', () => {
+    const DUP_CONTENT = { ...FULL_CONTENT, mode: 'duplicate' };
+
+    test('replaces the existing image fields in place, never leaving a stale credit line', async () => {
+      fileFixture = '---\ntitle: "A Real Post"\nfeaturedImage: "https://old.example/a.jpg"\nfeaturedImageCredit: "Photo by Old Photographer"\n---\n\nBody.';
+      const merged = await computeBlogImageMerge(SITE, draftWith(DUP_CONTENT));
+      assert.equal(merged.ok, true);
+      assert.equal((merged.newContent.match(/featuredImage:/g) || []).length, 1, 'must not leave two featuredImage lines');
+      assert.match(merged.newContent, /featuredImage: "https:\/\/images\.example\/a\.jpg"/);
+      assert.ok(!merged.newContent.includes('Old Photographer'), 'stale credit for the replaced photo must not survive');
+    });
+
+    test('refuses when the live file no longer has an image to replace — re-verified fresh, not trusted from generation time', async () => {
+      fileFixture = '---\ntitle: "A Real Post"\n---\n\nBody.';
+      const merged = await computeBlogImageMerge(SITE, draftWith(DUP_CONTENT));
+      assert.equal(merged.ok, false);
+      assert.equal(merged.reason, 'no-longer-duplicate');
+    });
+  });
 });
 
 describe('pushBlogImageBranch', () => {

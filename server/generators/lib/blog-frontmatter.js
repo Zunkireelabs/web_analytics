@@ -66,16 +66,37 @@ function escapeYaml(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-// Inserts fields right after the closing `title`/`description` block if
-// present, else right before the closing `---` — position doesn't matter to
-// any parser here, but keeping new fields near the top instead of always
-// last keeps the diff readable next to how newpage-render.js already orders
-// them. Never touches anything outside the front-matter block — the body is
+// Upserts fields into the front-matter block: a key already present gets its
+// value replaced in place (or the line removed, for a null/empty value);
+// a key not yet present is appended, skipped entirely for a null/empty
+// value. The replace half is what lets blog-image's duplicate-photo repair
+// swap an existing featuredImage/Alt/Credit trio for a new one without
+// leaving a stale, now-mismatched credit line behind — the original
+// insert-only version could only add fields to a post with none at all.
+// Never touches anything outside the front-matter block — the body is
 // always byte-identical before and after.
 export function insertFrontMatterFields(raw, fields) {
-  const lines = fields
-    .filter(([, v]) => v != null && v !== '')
-    .map(([k, v]) => `${k}: "${escapeYaml(v)}"`);
-  if (!lines.length) return raw;
-  return raw.replace(FRONT_MATTER, (whole, body) => `---\n${body}\n${lines.join('\n')}\n---`);
+  const relevant = fields.filter(([k]) => typeof k === 'string' && k);
+  if (!relevant.length) return raw;
+  const m = FRONT_MATTER.exec(raw || '');
+  if (!m) return raw;
+  const lines = m[1].split('\n');
+  let changed = false;
+  for (const [k, v] of relevant) {
+    const idx = lines.findIndex((l) => new RegExp(`^${k}\\s*:`).test(l));
+    if (v == null || v === '') {
+      if (idx !== -1) { lines.splice(idx, 1); changed = true; }
+      continue;
+    }
+    const valueLine = `${k}: "${escapeYaml(v)}"`;
+    if (idx !== -1) {
+      if (lines[idx] !== valueLine) { lines[idx] = valueLine; changed = true; }
+    } else {
+      lines.push(valueLine);
+      changed = true;
+    }
+  }
+  if (!changed) return raw;
+  const body = lines.join('\n');
+  return raw.replace(FRONT_MATTER, () => `---\n${body}\n---`);
 }
