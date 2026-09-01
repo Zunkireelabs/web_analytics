@@ -1300,12 +1300,28 @@ export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APP
     // Same strand-and-hide concern finalizeBatchPr's own comment describes —
     // nothing in pendingIds actually reached a real PR, so revert every one
     // of them rather than silently reporting them as shipped.
-    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pendingIds.length} item(s) reverted to failed.`);
-    await Promise.all(pendingIds.map((id) =>
-      markDraftAbandoned(siteId, id, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
-        console.error(`[action-center] could not abandon draft ${id} after batch push/PR failure:`, err.message);
-      })
-    ));
+    //
+    // TRANSIENT disposition, matching executeSafeFixes and auto-remediation's
+    // own batch-finalize handling — this is the third copy of that same
+    // one-shared-push-fails-everyone shape, and until now it was the one
+    // copy this PR's rate-limit fix never reached. Unconditionally abandoning
+    // here reproduces, in "Approve All Pending" specifically, the exact
+    // 2026-09-01 data loss (113/54 drafts destroyed by one exhausted GitHub
+    // budget) this PR exists to fix — recordMergeFailure leaves a transient
+    // failure retryable instead.
+    const transient = finalization.rateLimited === true;
+    const disposition = transient
+      ? `${pendingIds.length} item(s) left re-attemptable for the next run`
+      : `${pendingIds.length} item(s) reverted to failed`;
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
+    await Promise.all(pendingIds.map((id) => {
+      const record = transient
+        ? recordMergeFailure(siteId, id, finalization.error)
+        : markDraftAbandoned(siteId, id, `Batch push/PR failed: ${finalization.error}`, null);
+      return record.catch((err) => {
+        console.error(`[action-center] could not ${transient ? 'mark retryable' : 'abandon'} draft ${id} after batch push/PR failure:`, err.message);
+      });
+    }));
     shipped -= pendingIds.length;
     failed += pendingIds.length;
   } else if (pendingIds.length > 0) {

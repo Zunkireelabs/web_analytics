@@ -24,6 +24,9 @@ mock.module(resolve('./lib/pexels-client.js'), {
     buildImageQueries: ({ title }) => [title],
   },
 });
+mock.module(resolve('./lib/blog-image-usage.js'), {
+  namedExports: { usedPhotoIds: async () => new Set() },
+});
 
 const { generate, meta } = await import('./blog-image.js');
 

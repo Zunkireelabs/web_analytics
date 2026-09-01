@@ -57,11 +57,44 @@ const SOFT_404_BAILOUT_RATIO = 0.5;
 // requests than the phantom pages it saves. The TTL is deliberately shorter
 // than a day so a site that fixes its catch-all isn't held to a stale verdict.
 const SOFT_404_CACHE_TTL_MS = 15 * 60 * 1000;
-const softNotFoundCache = new Map(); // siteId -> { at, fingerprint, verdicts: Map<url, boolean> }
+// orchestrator.js runs a site's page-level agents concurrently via
+// Promise.all (agents/orchestrator.js:92); every one of them calls
+// selectCandidatePages for the same siteId in the same tick. Caching only the
+// RESOLVED fingerprint/verdict (not the Promise) let every concurrent caller
+// see `undefined` before the first fetch settled and each issue its own
+// duplicate request — the exact redundant-request cost this cache exists to
+// prevent, defeated by the concurrency pattern already used to reach it.
+// createPageCache() (fetch-cache.js) already solved this correctly for page
+// fetches: cache the in-flight Promise itself, synchronously, before any
+// await — every concurrent caller then awaits the SAME promise instead of
+// starting a new fetch. Reused here rather than reinvented.
+const softNotFoundCache = new Map(); // siteId -> { at, fingerprint: Promise, verdicts: Map<url, Promise<boolean>> }
+
+// Sites are added here on every real call and never removed on their own —
+// left unbounded, a growing multi-tenant fleet with site churn accumulates
+// one entry per site ever scanned for the life of the process. Piggybacks
+// eviction on the read path (a per-site TTL check already runs on every
+// call) rather than a separate timer, and only when the map has actually
+// grown past a real fleet's size — so this costs nothing on every call, only
+// once every SWEEP_INTERVAL calls once there's something worth sweeping.
+const MAX_TRACKED_SITES = 500;
+const SWEEP_INTERVAL_CALLS = 50;
+let callsSinceSweep = 0;
+
+function sweepExpiredEntries() {
+  const now = Date.now();
+  for (const [siteId, entry] of softNotFoundCache) {
+    if (now - entry.at >= SOFT_404_CACHE_TTL_MS) softNotFoundCache.delete(siteId);
+  }
+}
 
 function cacheFor(siteId) {
   const hit = softNotFoundCache.get(siteId);
   if (hit && Date.now() - hit.at < SOFT_404_CACHE_TTL_MS) return hit;
+  if (softNotFoundCache.size >= MAX_TRACKED_SITES && ++callsSinceSweep >= SWEEP_INTERVAL_CALLS) {
+    callsSinceSweep = 0;
+    sweepExpiredEntries();
+  }
   const fresh = { at: Date.now(), fingerprint: undefined, verdicts: new Map() };
   softNotFoundCache.set(siteId, fresh);
   return fresh;
@@ -87,11 +120,16 @@ export async function filterSoftNotFoundPages(siteId, pages, {
   if (!origin) return { pages, dropped: [] };
 
   const cache = cacheFor(siteId);
-  if (cache.fingerprint === undefined) cache.fingerprint = await fetchFingerprint(origin);
-  if (!cache.fingerprint) return { pages, dropped: [] };
+  // Store the PROMISE synchronously, before any await — every caller in this
+  // tick (the ~12 agents Promise.all-ed together per site) sees the same
+  // in-flight promise and awaits it, instead of each racing to start its own
+  // fetch. See createPageCache (fetch-cache.js) for the identical pattern.
+  if (cache.fingerprint === undefined) cache.fingerprint = fetchFingerprint(origin);
+  const fingerprint = await cache.fingerprint;
+  if (!fingerprint) return { pages, dropped: [] };
 
-  const verdicts = await Promise.all(pages.map(async (url) => {
-    if (!cache.verdicts.has(url)) cache.verdicts.set(url, await checkSoftNotFound(url, cache.fingerprint));
+  const verdicts = await Promise.all(pages.map((url) => {
+    if (!cache.verdicts.has(url)) cache.verdicts.set(url, checkSoftNotFound(url, fingerprint));
     return cache.verdicts.get(url);
   }));
 

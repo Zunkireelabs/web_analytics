@@ -2,6 +2,7 @@ import { getSiteById } from '../store/read.js';
 import { getFileContent, defaultBranchName } from '../github/client.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { extractTitle, hasImageField } from './lib/blog-frontmatter.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
 
 // The repair half of agents/blog-image.js's detection: re-fetches the ONE
 // post the detector already identified (by its real repo path, not a
@@ -55,7 +56,8 @@ export async function generate({ siteId, params }) {
     );
   }
 
-  const image = await searchImage(buildImageQueries({ title }));
+  const excludePhotoIds = await usedPhotoIds(site);
+  const image = await searchImage(buildImageQueries({ title }), { excludePhotoIds });
   if (!image) {
     throw Object.assign(
       new Error(`No relevant real image was found for "${title}" — a wrong photo is worse than none, so this is left for manual review rather than forcing a weak match.`),

@@ -250,6 +250,28 @@ describe('rate limiting', () => {
     }
   });
 
+  // Review finding: retrying blindly sleeps up to RATE_LIMIT_MAX_RETRIES *
+  // RATE_LIMIT_MAX_WAIT_MS through a wait the header ALREADY proves can't
+  // succeed — a reset 40 minutes out can never be reached by 2 retries
+  // clamped to 60s each, so every one of those seconds is wasted before the
+  // identical throw. This must fail on the FIRST attempt instead.
+  test('a reset far in the future fails fast instead of sleeping through retries that cannot help', async () => {
+    let attempts = 0;
+    const farFuture = String(Math.floor(Date.now() / 1000) + 60 * 40); // 40 minutes out
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { attempts++; return limitedResponse({ reset: farFuture }); };
+    try {
+      const start = Date.now();
+      const err = await getBranchSha(site, 'main').then(() => null, (e) => e);
+      assert.ok(err, 'should have thrown');
+      assert.equal(err.rateLimited, true);
+      assert.equal(attempts, 1, 'must not retry a wait the header already ruled out');
+      assert.ok(Date.now() - start < 5_000, 'must not sleep before failing');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   // The distinction that makes retrying safe at all: a 403 meaning "this
   // token cannot write to this repo" is permanent, and retrying it would
   // just add latency to a failure that is already certain.

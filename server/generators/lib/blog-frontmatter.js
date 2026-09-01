@@ -37,6 +37,31 @@ export function hasImageField(raw) {
   return IMAGE_FIELD_ALIASES.some((k) => keys.has(k));
 }
 
+// The real image URL already on a post, under whichever alias it was written
+// with — used to build the "images already in use on this site" set (see
+// lib/blog-image-usage.js) so a new/repaired post never gets handed a photo
+// another post already has.
+export function extractImageUrl(raw) {
+  const m = FRONT_MATTER.exec(raw || '');
+  if (!m) return null;
+  for (const key of IMAGE_FIELD_ALIASES) {
+    const v = new RegExp(`^${key}\\s*:\\s*"?(.*?)"?\\s*$`, 'm').exec(m[1]);
+    if (v) return v[1].trim();
+  }
+  return null;
+}
+
+// Real blog-post file paths under a site's configured blog directory,
+// filtered to actual posts (skips directory data files, the directory
+// index, and anything with the wrong extension) — shared by
+// agents/blog-image.js's detection scan and lib/blog-image-usage.js's
+// used-image scan so the two never disagree about what counts as "a post".
+export function listPostPaths(files, target) {
+  const prefix = target.dir.endsWith('/') ? target.dir : `${target.dir}/`;
+  return files.filter((p) => p.startsWith(prefix) && p.endsWith(target.extension || '.md')
+    && !p.slice(prefix.length).includes('/') && !p.split('/').pop().startsWith('_') && !/^index\./i.test(p.split('/').pop()));
+}
+
 function escapeYaml(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }

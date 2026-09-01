@@ -163,12 +163,17 @@ async function rateLimitWaitMs(res) {
     if (!/rate limit|secondary rate|abuse detection/i.test(body)) return null;
   }
 
-  const waitMs = hasRetryAfter
+  const trueWaitMs = hasRetryAfter
     ? retryAfter * 1000
     : (reset === null ? RATE_LIMIT_MAX_WAIT_MS : reset * 1000 - Date.now());
-  // Clamped at both ends: never a busy-loop on a stale/absent reset, never
-  // longer than one cron pass can afford to sit still.
-  return Math.min(Math.max(waitMs, 1_000), RATE_LIMIT_MAX_WAIT_MS);
+  // `waitMs` is what's actually safe to sleep for — clamped at both ends:
+  // never a busy-loop on a stale/absent reset, never longer than one cron
+  // pass can afford to sit still. `trueWaitMs` (unclamped) is kept alongside
+  // it so a caller who already knows the real reset is, say, 40 minutes out
+  // can tell "the header already proves 2 retries can't reach this" from
+  // "the wait is short enough that retrying might actually work" — clamping
+  // it away here would erase exactly the evidence that distinction needs.
+  return { waitMs: Math.min(Math.max(trueWaitMs, 1_000), RATE_LIMIT_MAX_WAIT_MS), trueWaitMs };
 }
 
 // Typed so callers can tell a wait-and-it-works failure from a permanent one
@@ -198,9 +203,19 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     });
     recordRateLimitHeaders(res, { forSearch });
 
-    const waitMs = await rateLimitWaitMs(res);
-    if (waitMs == null) return res;
-    if (attempt >= RATE_LIMIT_MAX_RETRIES) throw rateLimitError(path, waitMs);
+    const rateLimit = await rateLimitWaitMs(res);
+    if (rateLimit == null) return res;
+    const { waitMs, trueWaitMs } = rateLimit;
+    const attemptsLeft = RATE_LIMIT_MAX_RETRIES - attempt;
+    // Fail fast when the header already proves retrying is futile — e.g. an
+    // hourly reset 40 minutes out, which 2 retries at a 60s clamp each could
+    // never reach regardless of how long this loop sleeps. Sleeping up to
+    // RATE_LIMIT_MAX_RETRIES * RATE_LIMIT_MAX_WAIT_MS through a wait the data
+    // already ruled out wastes wall-clock a cron pass can't spare, for no
+    // chance of succeeding — the eventual throw was never in doubt.
+    if (attempt >= RATE_LIMIT_MAX_RETRIES || trueWaitMs > attemptsLeft * RATE_LIMIT_MAX_WAIT_MS) {
+      throw rateLimitError(path, waitMs);
+    }
 
     console.warn(`[github] rate limited on ${method} ${path}; waiting ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})`);
     await sleep(waitMs);

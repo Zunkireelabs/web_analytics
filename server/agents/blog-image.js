@@ -1,7 +1,7 @@
 import { getSiteById } from '../store/read.js';
 import { getRepoTree, getFileContent, defaultBranchName } from '../github/client.js';
 import { configured as imagesConfigured } from '../generators/lib/pexels-client.js';
-import { extractTitle, hasImageField } from '../generators/lib/blog-frontmatter.js';
+import { extractTitle, hasImageField, listPostPaths } from '../generators/lib/blog-frontmatter.js';
 import { makeFinding } from './lib/findings.js';
 import { effortForGenerator } from './lib/page-content.js';
 
@@ -33,9 +33,7 @@ export const meta = {
 async function defaultFindPostsWithoutImage(site, target) {
   const ref = defaultBranchName(site);
   const { files } = await getRepoTree(site, ref);
-  const prefix = target.dir.endsWith('/') ? target.dir : `${target.dir}/`;
-  const paths = files.filter((p) => p.startsWith(prefix) && p.endsWith(target.extension || '.md')
-    && !p.slice(prefix.length).includes('/') && !p.split('/').pop().startsWith('_') && !/^index\./i.test(p.split('/').pop()));
+  const paths = listPostPaths(files, target);
 
   const out = [];
   for (const filePath of paths) {
