@@ -43,6 +43,35 @@ describe('schema-repair generator — remove-duplicate (no LLM call, determinist
   });
 });
 
+// Second half of the fabrication fix, and deliberately redundant with
+// page-content.js's skip: an empty `originalRaw` is not merely a useless
+// exact-match anchor, it is a prompt with NOTHING to repair. The model
+// answered that by inventing schema wholesale, and findSchemaIssues cannot
+// catch it — invented schema is structurally valid. Refuse before the model
+// is ever called.
+describe('schema-repair generator — an empty malformed block is never "repaired"', () => {
+  test('refuses outright rather than asking a model to invent schema from nothing', async () => {
+    const restore = stubFetchHtml(
+      '<html><head><title>T</title>'
+      // Two tags of the SAME type so the duplicate branch is what would
+      // otherwise run; the empty one is what must be refused.
+      + '<script type="application/ld+json"></script>'
+      + '</head><body><p>Real page content, long enough to look like a normal page.</p></body></html>',
+    );
+    try {
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: 'https://example.com/empty-schema' } }),
+        (err) => {
+          // Either refusal is correct — what must NEVER happen is a draft
+          // containing invented schema.
+          assert.match(err.message, /empty|no malformed or duplicate structured data/i);
+          return true;
+        },
+      );
+    } finally { restore(); }
+  });
+});
+
 describe('schema-repair generator — nothing to fix', () => {
   test('refuses when the page has neither malformed nor duplicate schema', async () => {
     const restore = stubFetchHtml('<html><head><title>T</title></head><body><p>Clean page.</p></body></html>');

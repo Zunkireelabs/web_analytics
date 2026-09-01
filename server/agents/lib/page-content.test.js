@@ -447,6 +447,26 @@ describe('analyzePage — duplicate/invalid structured data (Phase 3 technical c
     assert.deepEqual(a.duplicateSchemaTypes, []);
   });
 
+  // The fabrication loop, cut at its source. This app's own
+  // schema-repair-inject.js writes `<script type="application/ld+json"></script>`
+  // when it removes a duplicate. `JSON.parse('')` throws, so this function
+  // recorded every one of those as MALFORMED — manufacturing findings against
+  // the app's own output. schema-repair.js then fed the empty string to an LLM
+  // that, with nothing to repair, invented schema outright ("John Doe",
+  // johndoe@example.com, "123 Main St, Anytown"). An empty JSON-LD tag is
+  // inert; it is not malformed.
+  test('an EMPTY json-ld tag is inert, not malformed — it must never become a repair candidate', () => {
+    const html = `<html><body>
+      <script type="application/ld+json"></script>
+      <script type="application/ld+json">   </script>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Real"}</script>
+    </body></html>`;
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.malformedJsonLdBlocks, 0, 'an empty tag is not a defect to repair');
+    assert.deepEqual(a.malformedSchemaBlocks, [], 'and must never reach schema-repair as an anchor');
+    assert.ok(a.schemaTypes.includes('Organization'), 'the real block beside it is still read normally');
+  });
+
   test('malformed JSON-LD is counted, not thrown, and does not poison other blocks', () => {
     const html = `<html><body>
       <script type="application/ld+json">{ not valid json </script>

@@ -10,9 +10,24 @@ import { applyExactMatchPatches, describePatchFailure } from './exact-match-patc
 // duplicate block's content (leaving an inert `<script
 // type="application/ld+json"></script>` rather than trying to also strip
 // the surrounding tag, since only the block's inner text — not its exact
-// tag/attributes — was ever captured as the anchor; an empty JSON-LD script
-// is silently ignored by every real consumer, so this is a safe, if not
-// maximally tidy, fix). Both anchor on the EXACT raw text page-content.js
+// tag/attributes — was ever captured as the anchor).
+//
+// That empty tag was long justified here as "silently ignored by every real
+// consumer". It was not: agents/lib/page-content.js is a consumer, and
+// `JSON.parse('')` throws, so it recorded every one of these as a MALFORMED
+// schema block. The app was manufacturing its own findings — a closed loop
+// that ran from 2026-08-23, fed an empty string to the LLM as the thing to
+// repair, and got invented schema back ("John Doe", johndoe@example.com).
+// Nothing fabricated ever shipped, but only because the empty anchor failed
+// to apply, which is luck rather than design.
+//
+// The loop is now cut at both ends — page-content.js skips empty tags, and
+// schema-repair.js refuses an empty originalRaw before calling the model —
+// so leaving an inert tag here is once again genuinely safe. The empty tags
+// this already wrote are still live in the site repo (/about/,
+// /blog/top-tech-companies-nepal-2026/ and two others) and are inert; they
+// no longer generate findings.
+// Both edits anchor on the EXACT raw text page-content.js
 // captured at detection time — see exact-match-patch.js for why that's the
 // only safe way to patch arbitrary existing template source.
 function buildEdit(content) {

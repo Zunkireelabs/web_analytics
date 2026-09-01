@@ -208,6 +208,18 @@ export function analyzePage(html, pageUrl) {
   const schemaScriptBlocks = [];
   $('script[type="application/ld+json"]').each((_, el) => {
     const raw = $(el).text();
+    // An EMPTY tag is inert, not malformed. `JSON.parse('')` throws, so
+    // without this it lands in malformedSchemaBlocks with `raw === ''` — and
+    // this app writes exactly that shape itself: schema-repair-inject.js
+    // leaves `<script type="application/ld+json"></script>` behind, on the
+    // stated assumption that an empty JSON-LD script "is silently ignored by
+    // every real consumer". This function IS a consumer, and it was not
+    // ignoring it — closing a loop where the app manufactured its own
+    // malformed-schema findings, then fed the empty string to an LLM that,
+    // with nothing to repair, invented schema wholesale (real drafts stored
+    // "John Doe", johndoe@example.com, "123 Main St, Anytown"). Running
+    // undetected since 2026-08-23; see schema-repair.js's matching guard.
+    if (!raw.trim()) return;
     try {
       const data = JSON.parse(raw);
       const items = Array.isArray(data) ? data : [data];

@@ -41,6 +41,22 @@ export async function generate({ siteId, params }) {
   // duplicate (both blocks are individually valid, just redundant).
   if (malformedSchemaBlocks?.length) {
     const originalRaw = malformedSchemaBlocks[0];
+    // The same emptiness guard the duplicate branch below already has, and
+    // the second half of the fabrication fix (page-content.js is the first).
+    // Defense in depth on purpose: an empty `originalRaw` is not merely
+    // unusable as an exact-match anchor, it is a prompt with NOTHING to
+    // repair — and the model answered that by inventing schema outright
+    // ("John Doe", johndoe@example.com, "123 Main St, Anytown", two
+    // different fabrications across drafts 242 and 279). findSchemaIssues
+    // cannot catch it: invented schema is structurally valid. Refuse before
+    // the model is ever called, rather than paying for a fabrication and
+    // discovering it only when the empty anchor fails to apply.
+    if (!originalRaw?.trim()) {
+      throw Object.assign(
+        new Error(`The malformed JSON-LD block on ${page} is empty — there is nothing to repair, and generating one would mean inventing it. Remove the empty <script type="application/ld+json"> tag instead.`),
+        { status: 400, userFacing: true },
+      );
+    }
     let jsonLd;
     try {
       jsonLd = await callLLMForJson(SYSTEM, originalRaw, { maxTokens: 700, generatorId: meta.id, siteId });
