@@ -202,3 +202,37 @@ describe('shouldRetry', () => {
     assert.equal(shouldRetry(deployment, 1), false, 'a broken deployment is never retried into working');
   });
 });
+
+// GitHub's rate limit is the one failure here that is purely a function of
+// timing — the identical request succeeds an hour later, untouched. It has to
+// classify as EXTERNAL_SERVICE (the only RETRYABLE class), because the
+// callers that abandon work on a non-recoverable failure read exactly that
+// flag: on 2026-09-01 an hour of exhausted quota permanently destroyed 113
+// Quality-Gate-passed drafts that a retry would have shipped.
+describe('GitHub rate limits', () => {
+  test('a rate-limited error is EXTERNAL_SERVICE and recoverable', () => {
+    const result = classifyFailure({ stage: 'github_api', err: Object.assign(new Error('...'), { rateLimited: true }) });
+
+    assert.equal(result.failureClass, FAILURE_CLASS.EXTERNAL_SERVICE);
+    assert.equal(result.errorCode, 'GITHUB_RATE_LIMITED');
+    assert.equal(result.recoverable, true, 'the whole point: this one IS worth retrying');
+  });
+
+  test('it is recognised at any stage, since a rate limit can strike wherever GitHub is touched', () => {
+    const result = classifyFailure({ stage: 'repo_checkout', err: Object.assign(new Error('...'), { rateLimited: true }) });
+
+    assert.equal(result.errorCode, 'GITHUB_RATE_LIMITED');
+    assert.equal(result.recoverable, true, 'must not fall through to repo_checkout\'s non-retryable CLIENT_REPO');
+  });
+
+  // Keyed off github/client.js's typed flag rather than the 403 body, because
+  // GitHub's wording differs between its primary and secondary limits and
+  // changes without notice — a prose matcher quietly stops recognising the
+  // thing it was written for.
+  test('an ordinary GitHub failure without the flag is NOT treated as retryable', () => {
+    const result = classifyFailure({ stage: 'github_api', err: new Error('403 Resource not accessible by personal access token') });
+
+    assert.notEqual(result.errorCode, 'GITHUB_RATE_LIMITED');
+    assert.equal(result.recoverable, false, 'a permission failure must never be retried as if it were transient');
+  });
+});

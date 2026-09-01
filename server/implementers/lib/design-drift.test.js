@@ -985,8 +985,15 @@ describe('observedClassesByRole / checkTypographyRole / verifyProfileRoles — r
   });
 
   test('a class never observed in ANY role is class-unobserved, not role-mismatch — weaker evidence, does not block', () => {
+    // The capture DOES record body copy here (just a different class than the
+    // profile names) — which is what makes this the thin-sample case rather
+    // than the no-evidence-at-all case covered separately below.
+    const thinSample = {
+      typography: { body: 'text-lg italic' },
+      pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'btn'), item('body', 'text-base text-gray-700')] }])],
+    };
     const result = checkTypographyRole(
-      { typography: { body: 'text-lg italic' }, pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'btn')] }])] },
+      thinSample,
       { field: 'typography.body', roles: ['body'], get: (p) => p.typography.body },
     );
     assert.equal(result.ok, false);
@@ -995,8 +1002,47 @@ describe('observedClassesByRole / checkTypographyRole / verifyProfileRoles — r
     // verifyProfileRoles only blocks on a CONFIRMED mismatch — this weaker
     // case must pass through as ok, so a thin 8-page sample doesn't
     // permanently flag a real, correctly-assigned site.
-    const gate = verifyProfileRoles({ typography: { body: 'text-lg italic' }, pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'btn')] }])] });
-    assert.equal(gate.ok, true);
+    assert.equal(verifyProfileRoles(thinSample).ok, true);
+  });
+
+  // The live defect this check had against EVERY site, found on 2026-09-01
+  // while auditing why 54/54 recorded verdicts failed. capture.js emits only
+  // four roles — heading, body, cta, subheading — so typography.link's
+  // accepted role set (['link']) matches nothing on any site, ever. And
+  // because an inline link's classes are genuinely captured under 'cta', the
+  // field fell through to the `actual` branch and was reported as a
+  // CONFIRMED role-mismatch: the one reason that blocks. Enabling
+  // DESIGN_INTEGRITY_ENFORCE as the rollout plan intended would therefore
+  // have blocked every visible-content draft for every tenant, permanently,
+  // on a defect none of them have.
+  test('a field whose accepted role the capture never emits is role-unobserved, not a confirmed mismatch', () => {
+    // Site 1's real shape: a plain inline-link style, captured under 'cta'
+    // because that is the only anchor-ish role capture.js has.
+    const profile = {
+      typography: { body: 'text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+      pages: [pageWith([
+        { role: 'hero', textHierarchy: [
+          item('cta', 'text-zunkiree-600 hover:underline'),
+          item('body', 'text-gray-600 leading-relaxed'),
+        ] },
+      ])],
+    };
+    const result = checkTypographyRole(profile, { field: 'typography.link', roles: ['link'], get: (p) => p.typography.link });
+
+    assert.equal(result.ok, false, 'still reported — never silently dropped');
+    assert.equal(result.reason, 'role-unobserved');
+    assert.match(result.error, /no link elements on any page/);
+
+    // The property that actually matters: it must not block. A field with no
+    // evidence base cannot honestly CONFIRM anything.
+    assert.equal(verifyProfileRoles(profile).ok, true);
+  });
+
+  // The other half of the same guarantee: relaxing the unverifiable field
+  // must not blunt the check where evidence DOES exist, or the incident this
+  // gate was built for walks straight through it.
+  test('a role the capture DOES emit still confirms and blocks', () => {
+    assert.equal(verifyProfileRoles(EYEBROW_AS_BODY_PROFILE).reason, 'role-mismatch');
   });
 
   test('a null typography field is an honest abstention, never a failure', () => {
@@ -1024,7 +1070,10 @@ describe('observedClassesByRole / checkTypographyRole / verifyProfileRoles — r
   test('typography.heading.section is checked too, not only heading.item', () => {
     const result = verifyProfileRoles({
       typography: { heading: { section: 'text-xs uppercase tracking-widest text-gray-500' } }, // really the eyebrow
-      pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'text-xs uppercase tracking-widest text-gray-500')] }])],
+      pages: [pageWith([{ role: 'hero', textHierarchy: [
+        item('cta', 'text-xs uppercase tracking-widest text-gray-500'),
+        item('heading', 'text-4xl font-bold'), // the site's real section heading — the evidence base this check needs
+      ] }])],
     });
     assert.equal(result.ok, false);
     assert.equal(result.field, 'typography.heading.section');
@@ -1067,7 +1116,14 @@ describe('checkDesignIntegrityGate', () => {
     version: DESIGN_PROFILE_VERSION,
     typography: { body: 'text-xs uppercase tracking-widest text-gray-500', heading: { item: 'text-2xl font-bold' } }, // body is really the eyebrow
     layout: { container: 'max-w-7xl mx-auto' },
-    pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'text-xs uppercase tracking-widest text-gray-500')] }])],
+    // The real body copy is captured too — without an observed 'body' role
+    // there would be no evidence base, and the finding would correctly
+    // downgrade to the non-blocking 'role-unobserved' (see
+    // checkTypographyRole). This fixture is specifically the CONFIRMED case.
+    pages: [pageWith([{ role: 'hero', textHierarchy: [
+      item('cta', 'text-xs uppercase tracking-widest text-gray-500'),
+      item('body', 'text-base leading-relaxed'),
+    ] }])],
   };
   const cleanProfile = {
     version: DESIGN_PROFILE_VERSION,

@@ -42,9 +42,18 @@ export function baseBranch(site) {
 // The id is an opaque correlation key, not sensitive — worker.js's job logs
 // already surface it the same way ("Job failed: … (ref: …)"). This keeps the two
 // consistent.
+// `rateLimited` is carried through deliberately, and is the ONE piece of the
+// original error that survives sanitization here. It has to: safeMessage
+// replaces the provider's text with a generic customer-safe string plus a
+// ref id, which is correct for display but erases the only evidence that a
+// failure was transient. Without this flag the caller cannot tell
+// "GitHub's budget refills in 40 minutes" from "this token can't write to
+// this repo" — and on 2026-09-01 that missing distinction abandoned 54
+// drafts in one call. A boolean leaks nothing: it says a rate limit
+// occurred, never who, where, or with what credential.
 function persistedFailure(context, err, fallback) {
   const { message, id } = safeMessage(context, err, fallback);
-  return { ok: false, reason: 'github-error', error: `${message} (ref: ${id})` };
+  return { ok: false, reason: 'github-error', error: `${message} (ref: ${id})`, rateLimited: err?.rateLimited === true };
 }
 
 export function batchBranchName(site, date = new Date()) {

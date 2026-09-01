@@ -1018,7 +1018,7 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false 
 // otherwise permanently hide its recommendation from future runs.
 export async function finalizeBatchPr(site, branchName, draftIds) {
   const pushResult = await endBatchPush(site, branchName);
-  if (!pushResult.ok) return { ok: false, error: pushResult.error };
+  if (!pushResult.ok) return { ok: false, error: pushResult.error, rateLimited: pushResult.rateLimited === true };
   if (pushResult.pushed === 0 || draftIds.length === 0) {
     return { ok: true, pushed: 0, prNumber: null, prUrl: null };
   }
@@ -1031,7 +1031,10 @@ export async function finalizeBatchPr(site, branchName, draftIds) {
     }
     return { ok: true, pushed: pushResult.pushed, prNumber, prUrl };
   } catch (err) {
-    return { ok: false, error: err.message };
+    // Both failure paths out of this function report `rateLimited`, so the
+    // batch's caller can decide between "leave these re-attemptable" and
+    // "abandon them" on evidence rather than on the error string.
+    return { ok: false, error: err.message, rateLimited: err.rateLimited === true };
   }
 }
 
@@ -1556,7 +1559,10 @@ export async function openDraftPr(siteId, draftId) {
   const result = await implementer.mergeToStage(site, draft);
   if (!result.ok) {
     await recordMergeFailure(siteId, draft.id, result.error);
-    throw httpError(422, result.error, { reason: result.reason });
+    // rateLimited rides along so finalizeBatchPr's catch can tell a
+    // wait-and-retry failure from a permanent one (see persistedFailure in
+    // implementers/lib/github-ops.js).
+    throw httpError(422, result.error, { reason: result.reason, rateLimited: result.rateLimited === true });
   }
   return markDraftPrOpened(siteId, draft.id, {
     prNumber: result.prNumber, prUrl: result.prUrl,

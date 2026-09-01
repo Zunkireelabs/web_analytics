@@ -1,5 +1,5 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType, markDraftAbandoned } from '../../store/drafts.js';
+import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr } from '../../routes/action-center.js';
@@ -9,6 +9,8 @@ import { classify as classifyForActionCenterCategory } from './recommendation-ta
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
+import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
+import { classifyFailure } from '../../lib/failure-classification.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -326,6 +328,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
       console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${budgeted.length - attempted} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
+    // Stop STARTING new items once GitHub's remaining budget is under the
+    // reserve. Deliberately a pre-check rather than only reacting to the
+    // first 403: an item that begins near the floor burns a generation call
+    // and several writes before failing at the push, so the cheapest place
+    // to notice is before the attempt. The items left here stay open and
+    // untouched for the next pass — nothing is consumed, so this costs one
+    // deferred day at worst, against the whole-run collapse it prevents.
+    if (getLastKnownRateLimit().low) {
+      stoppedReason = 'github-rate-limited';
+      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${budgeted.length - attempted} candidate(s) left untouched and still open; they will be re-attempted next run.`);
+      break;
+    }
     attempted++;
     try {
       // The one path from "we decided to fix this" to "a real branch/PR
@@ -377,6 +391,24 @@ export async function autoRemediateSafeRecommendations(siteId, {
       consecutiveFailures = 0;
       consecutiveRefusals = 0;
     } catch (err) {
+      // A RATE LIMIT is neither a fault nor a refusal — it is a statement
+      // about timing, and the identical attempt succeeds once the budget
+      // refills. Checked before both, and it stops the run rather than
+      // continuing: every remaining item shares the one exhausted token, so
+      // carrying on can only produce more of the same failure while spending
+      // a generation call on each.
+      //
+      // Critically, this item is NOT counted as failed and NOT abandoned.
+      // Counting it would trip CONSECUTIVE_FAILURE_LIMIT after five, which
+      // reports a systemic fault ("a revoked token, a moved default branch")
+      // for what is really a one-hour wait — and on 2026-09-01 that
+      // misreading is what turned an hour of exhausted quota into 113
+      // permanently abandoned drafts.
+      if (classifyFailure({ stage: 'github_api', err }).errorCode === 'GITHUB_RATE_LIMITED') {
+        stoppedReason = 'github-rate-limited';
+        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${budgeted.length - attempted} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        break;
+      }
       failed++;
       // A REFUSAL is not a fault, and must not feed the circuit breaker.
       //
@@ -467,14 +499,44 @@ export async function autoRemediateSafeRecommendations(siteId, {
   if (batching) {
     const finalization = await finalizeBatchPr(site, branchName, pending.map((p) => p.draft.id));
     if (!finalization.ok) {
+      // A TRANSIENT batch failure must not be terminal. This one call fails
+      // the whole batch at once by design — one shared push, one shared PR —
+      // so whatever it decides is applied to every pending item together.
+      // Abandoning unconditionally is what made 2026-09-01's one-hour PAT
+      // exhaustion cost 54 drafts in a single call: each had a real,
+      // Quality-Gate-passed commit already built, and every one was thrown
+      // away for a failure that would have succeeded on the next pass.
+      //
+      // recordMergeFailure is the existing retryable-in-place idiom for
+      // exactly this shape (store/drafts.js) — it records the error WITHOUT
+      // changing status, and an unresolved apply_error already excludes a
+      // draft from getDraftedFindingIds, so the underlying finding reopens
+      // for Recommendations and the next run re-attempts it. Nothing is
+      // counted as shipped that wasn't: these drafts' commits never reached
+      // GitHub (the batch overlay holds them locally until the push that
+      // just failed), and they stay visibly unshipped either way.
+      const transient = finalization.rateLimited === true;
       if (pending.length > 0) {
-        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+        const disposition = transient
+          ? `${pending.length} item(s) left re-attemptable for the next run`
+          : `${pending.length} item(s) reverted to failed`;
+        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
+      if (transient) stoppedReason = 'github-rate-limited';
       await Promise.all(pending.map(async ({ rec, draft }) => {
-        failed++;
-        recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: finalization.error }).catch(() => {});
-        await markDraftAbandoned(siteId, draft.id, `Batch push/PR failed: ${finalization.error}`, null).catch((abandonErr) => {
-          console.error(`[auto-remediation] could not abandon draft ${draft.id} after batch push/PR failure:`, abandonErr.message);
+        // A transient failure is not scored against the generator either:
+        // generator-learning.js reads these outcomes to decide what to trust,
+        // and a rate limit says nothing about whether this generator's output
+        // was any good.
+        if (!transient) {
+          failed++;
+          recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: finalization.error }).catch(() => {});
+        }
+        const record = transient
+          ? recordMergeFailure(siteId, draft.id, finalization.error)
+          : markDraftAbandoned(siteId, draft.id, `Batch push/PR failed: ${finalization.error}`, null);
+        await record.catch((recordErr) => {
+          console.error(`[auto-remediation] could not ${transient ? 'mark retryable' : 'abandon'} draft ${draft.id} after batch push/PR failure:`, recordErr.message);
         });
       }));
     } else if (pending.length > 0) {

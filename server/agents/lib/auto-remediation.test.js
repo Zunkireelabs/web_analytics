@@ -19,9 +19,11 @@ let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
+let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
+let rateLimitOn; // (recommendationType) => bool — simulates GitHub's rate limit striking mid-loop
 let applyFailureMessageOn; // (recommendationType) => string | null — simulates approveAndPublishDraftUnattended stopping short with no branch_name and this apply_error message
 let lastGeneratorId; // set by the generateDraft mock, read by the approveAndPublishDraftUnattended mock just below it — same single-item-at-a-time sequencing shipDraftForRecommendation itself relies on
 // (attemptNumber) => Error | null — full control over what generateDraft
@@ -49,8 +51,11 @@ function reset() {
   calls.findingOrigins = [];
   calls.batchFinalizeCalls = [];
   calls.abandoned = [];
+  calls.retryable = [];
   finalizeBatchFails = false;
+  finalizeBatchRateLimited = false;
   failOn = () => false;
+  rateLimitOn = () => false;
   refuseOn = () => false;
   staleOn = () => false;
   applyFailureMessageOn = () => null;
@@ -85,6 +90,11 @@ mock.module(resolve('../../store/drafts.js'), {
     submitDraftForApproval: async (siteId, draftId) => ({ id: draftId }),
     updateDraft: async () => null,
     markDraftAbandoned: async (siteId, draftId, reason) => { calls.abandoned.push({ draftId, reason }); },
+    // The retryable-in-place counterpart: records the failure without
+    // abandoning, so a transient batch failure leaves the draft for the next
+    // run. Tracked separately from `abandoned` precisely because the whole
+    // point of the distinction is that these two are NOT interchangeable.
+    recordMergeFailure: async (siteId, draftId, reason) => { calls.retryable.push({ draftId, reason }); },
   },
 });
 const realRead = await import(resolve('../../store/read.js'));
@@ -127,6 +137,11 @@ mock.module(resolve('../../routes/action-center.js'), {
       if (refuseOn(generatorId)) {
         throw Object.assign(new Error(`refusing to draft ${generatorId} — no real data`), { status: 400, userFacing: true });
       }
+      // github/client.js's typed rate-limit error, as it reaches this loop
+      // after propagating up through the implementer's apply().
+      if (rateLimitOn(generatorId)) {
+        throw Object.assign(new Error('GitHub rate limit reached'), { rateLimited: true });
+      }
       if (failOn(generatorId)) throw new Error(`simulated generate failure for ${generatorId}`);
       calls.generated.push(findingId);
       return { id: `d-${findingId}`, status: 'draft', content: {} };
@@ -159,7 +174,7 @@ mock.module(resolve('../../routes/action-center.js'), {
     // the batch's one shared push/PR failing instead.
     finalizeBatchPr: async (site, branchName, draftIds) => {
       calls.batchFinalizeCalls.push({ branchName, draftIds });
-      if (finalizeBatchFails) return { ok: false, error: 'simulated batch push/PR failure' };
+      if (finalizeBatchFails) return { ok: false, error: 'simulated batch push/PR failure', rateLimited: finalizeBatchRateLimited };
       calls.prsOpened.push(...draftIds);
       return { ok: true, pushed: draftIds.length, prNumber: 1, prUrl: 'https://github.com/acme/site/pull/1' };
     },
@@ -427,6 +442,24 @@ describe('auto-remediation — circuit breaker', () => {
     assert.equal(result.failed, 3);
     assert.equal(result.attempted, 6, 'every candidate was still attempted');
   });
+
+  // The breaker exists for faults where every later attempt is also doomed.
+  // A rate limit is the opposite: the identical attempt succeeds once the
+  // budget refills. Counting it as a fault reports "revoked token / moved
+  // default branch" for what is really a one-hour wait — the exact
+  // misreading behind 2026-09-01's abandoned drafts.
+  test('a rate limit stops the run WITHOUT counting as a failure or tripping the breaker', async () => {
+    recommendations = [rec(1, { type: 'limited' }), rec(2), rec(3)];
+    rateLimitOn = (type) => type === 'limited';
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, 'github-rate-limited');
+    assert.notEqual(result.stoppedReason, 'circuit-breaker', 'never reported as a systemic fault');
+    assert.equal(result.failed, 0, 'the limited item is not scored as a failure');
+    assert.equal(result.attempted, 1, 'stops immediately — the rest share the same exhausted token');
+    assert.deepEqual(calls.abandoned, [], 'nothing is abandoned; every candidate stays open for the next run');
+  });
 });
 
 
@@ -475,6 +508,42 @@ describe('batched PR opening', () => {
     assert.equal(result.failed, 2);
     assert.deepEqual(calls.prsOpened, [], 'no PR was opened');
     assert.deepEqual(calls.abandoned.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'], 'both drafts are abandoned so they are re-attempted on a future run, not silently stuck at branch_pushed');
+  });
+
+  // The 2026-09-01 outage in miniature. This one call fails the whole batch
+  // at once by design (one shared push, one shared PR), so whatever it
+  // decides applies to every pending item together — which is exactly why
+  // deciding "abandon" on a transient failure was so expensive: an hour of
+  // exhausted GitHub quota destroyed 54 Quality-Gate-passed drafts in a
+  // single call, each of which would have shipped on the next pass.
+  test('a RATE-LIMITED batch failure leaves every pending item re-attemptable instead of abandoning it', async () => {
+    finalizeBatchFails = true;
+    finalizeBatchRateLimited = true;
+    recommendations = [rec(1), rec(2)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 0, 'still nothing actually reached GitHub');
+    assert.equal(result.failed, 0, 'a rate limit is a statement about timing, not a fault of these items');
+    assert.deepEqual(calls.abandoned, [], 'nothing is abandoned for a failure that resolves itself');
+    assert.deepEqual(
+      calls.retryable.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'],
+      'both drafts record the failure in place (apply_error), which reopens their finding for the next run',
+    );
+    assert.equal(result.stoppedReason, 'github-rate-limited', 'reported as its own reason, never as a circuit-breaker fault');
+  });
+
+  // The counterpart: transience must be established from evidence, not
+  // assumed. A genuine fault still ends in abandonment, or a broken repo
+  // would retry the same doomed work forever.
+  test('a non-transient batch failure still abandons, so a real fault is never retried forever', async () => {
+    finalizeBatchFails = true;
+    finalizeBatchRateLimited = false;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.failed, 1);
+    assert.deepEqual(calls.retryable, []);
+    assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1']);
   });
 });
 
