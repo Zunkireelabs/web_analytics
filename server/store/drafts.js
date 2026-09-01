@@ -720,21 +720,39 @@ export async function getDraftedFindingIds(siteId) {
 // across 6 findings). Every cycle spends an LLM generation plus a handful of
 // GitHub calls to reach the identical failure.
 //
-// Two reasons are excluded, because neither is evidence the item is
-// unfixable:
+// Only ITEM-SPECIFIC failures count. Everything excluded below is a property
+// of the infrastructure or of a human decision, and counting any of it would
+// retire findings that have nothing wrong with them — the exact opposite of
+// the goal:
 //   - 'pr_closed_without_merge' / 'superseded': a human closed the PR or the
 //     work was replaced. The draft was fine; the decision was elsewhere.
 //     (This is the single largest bucket — 176 drafts from one closed PR.)
-//   - anything naming a rate limit: transient by definition, and the whole
-//     point of the retryable-in-place handling added alongside this.
+//   - anything naming a rate limit: transient by definition.
+//   - 'Batch push/PR failed%': the batch's ONE shared push/PR failed, which
+//     fails every pending item at once regardless of their content. On
+//     2026-09-01 that abandoned 54 drafts in a single call — and crucially
+//     their text is sanitized ("This pull request could not be opened right
+//     now — our team has been notified. (ref: …)"), so it does NOT match the
+//     rate-limit filter above even when a rate limit was the true cause.
+//     Without this line the cap would hold precisely the findings this work
+//     exists to rescue.
+//   - 'Stuck at "…"%': the draft-state reset (lib/draft-ship-state.js), which
+//     is a bookkeeping action taken to allow a clean retry, not a verdict on
+//     whether the item can be fixed.
+//
+// Windowed to 30 days so a finding that failed repeatedly months ago, under
+// long-since-changed code, is not retired forever on that evidence.
 export async function countFailedAttemptsByFinding(siteId) {
   const { rows } = await query(
     `SELECT finding_id, COUNT(*)::int AS attempts
        FROM drafts
       WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
         AND abandoned_reason IS NOT NULL
+        AND abandoned_at > now() - interval '30 days'
         AND abandoned_reason NOT IN ('pr_closed_without_merge', 'superseded')
         AND abandoned_reason NOT ILIKE '%rate limit%'
+        AND abandoned_reason NOT LIKE 'Batch push/PR failed%'
+        AND abandoned_reason NOT LIKE 'Stuck at "%'
       GROUP BY finding_id`,
     [siteId]
   );

@@ -32,13 +32,42 @@ describe('draftShipState', () => {
   // Calling this "shipped" is what left a real commit with no PR: the draft
   // was never added to the batch's pending list, so finalizeBatchPr never
   // covered it.
-  test("a draft at 'branch_pushed' has a real commit still awaiting its PR", () => {
-    assert.equal(draftShipState({ status: 'branch_pushed' }), SHIP_STATE.AWAITING_PR);
+  test("a 'branch_pushed' draft on THIS run's branch is awaiting its PR", () => {
+    assert.equal(
+      draftShipState({ status: 'branch_pushed', branch_name: 'batch-today' }, { currentBatchBranch: 'batch-today' }),
+      SHIP_STATE.AWAITING_PR,
+    );
   });
 
-  test('a draft awaiting human revision is stranded — no automatic step can advance it', () => {
-    assert.equal(draftShipState({ status: 'revision_requested' }), SHIP_STATE.STRANDED);
-    assert.equal(draftShipState({ status: 'submitted_for_approval' }), SHIP_STATE.STRANDED);
+  // The commit a stale 'branch_pushed' draft refers to is a ghost — either on
+  // a prior day's date-keyed branch, or never pushed at all because
+  // endBatchPush cleared the chain without moving the ref. Queueing one would
+  // have finalizeBatchPr mark it pr_opened against a PR that does not contain
+  // its change: shipped-but-not-really, the worst possible report.
+  test("a 'branch_pushed' draft from a PRIOR day's branch is stranded, not queued", () => {
+    assert.equal(
+      draftShipState({ status: 'branch_pushed', branch_name: 'batch-yesterday' }, { currentBatchBranch: 'batch-today' }),
+      SHIP_STATE.STRANDED,
+    );
+  });
+
+  test("a 'branch_pushed' draft carrying an apply_error is stranded — its commit was never pushed", () => {
+    assert.equal(
+      draftShipState({ status: 'branch_pushed', branch_name: 'batch-today', apply_error: 'push failed' }, { currentBatchBranch: 'batch-today' }),
+      SHIP_STATE.STRANDED,
+    );
+  });
+
+  test('with no batch branch given, a branch_pushed draft is never assumed live', () => {
+    assert.equal(draftShipState({ status: 'branch_pushed', branch_name: 'batch-today' }), SHIP_STATE.STRANDED);
+  });
+
+  // generateDraft is idempotent per finding, so an unattended run gets back
+  // exactly the draft a person is in the middle of reviewing. Resetting it
+  // would destroy their work between opening the tab and clicking approve.
+  test('a draft a human is reviewing is HUMAN_OWNED — never shipped, and never reset', () => {
+    assert.equal(draftShipState({ status: 'submitted_for_approval' }), SHIP_STATE.HUMAN_OWNED);
+    assert.equal(draftShipState({ status: 'revision_requested' }), SHIP_STATE.HUMAN_OWNED);
   });
 
   // Unrecognized reads as stranded, never as shipped: the caller's response to

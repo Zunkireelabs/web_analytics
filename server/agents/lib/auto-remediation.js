@@ -329,6 +329,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // DESIGN_AGENT_WAIT_MS.
         waitForDesignAgent: true,
         deferPr: true,
+        // Lets draftShipState tell a live commit on THIS run's branch from a
+        // ghost on a prior day's (see lib/draft-ship-state.js).
+        batchBranch: branchName,
       });
 
       // deferPr means approved.pr_number is never set here (see
@@ -343,6 +346,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // this item, independent of whether the batch's one shared push
       // later succeeds or fails (that's a systemic outcome affecting every
       // pending item equally, not a signal about any one of them).
+      // An already-finished draft (its PR is open, or already merged) must
+      // never join `pending`: finalizeBatchPr feeds pending[0] to
+      // openDraftPr, which hard-requires 'branch_pushed' and throws 404 for
+      // anything else — one finished sibling would fail the whole batch and
+      // abandon every genuinely new draft in it. Count it and move on.
+      if (approved.alreadyShipped) {
+        shipped++;
+        recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
+        consecutiveFailures = 0;
+        consecutiveRefusals = 0;
+        continue;
+      }
       pending.push({ rec, draft: approved });
       //
       // shipped++ and recordOutcome('shipped', ...) now happen after this
@@ -545,7 +560,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false }) {
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null }) {
   const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
@@ -578,23 +593,40 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     // start over. This is the same recovery the UI already offers by hand,
     // reusing that exact function rather than a second implementation.
     const current = await getDraft(siteId, draft.id);
-    const state = draftShipState(current);
+    const state = draftShipState(current, { currentBatchBranch: batchBranch });
     if (state === SHIP_STATE.RESUME_APPLY) {
       // Re-run apply() — the step that actually failed. The content is
       // already generated, Quality-Gated and approved; regenerating it would
       // spend another model call to arrive at the same draft.
       return await pushDraftBranch(siteId, draft.id);
     }
-    // Already applied (AWAITING_PR), or genuinely finished (SHIPPED) — either
-    // way nothing here should redo it. The caller's finalizeBatchPr opens the
-    // one shared PR for whatever is pending.
-    if (state === SHIP_STATE.AWAITING_PR || state === SHIP_STATE.SHIPPED) return current;
-    // Any other non-submittable state is a genuinely stuck row, and the
-    // repo's own recorded lesson for this code applies: never leave a
-    // partially-failed draft sitting in a non-terminal status. Abandon it so
-    // the next run generates a clean one, and report a REFUSAL rather than a
-    // failure — this is one item's state problem, not evidence the pipeline
-    // is broken, and must not trip the circuit breaker.
+    if (state === SHIP_STATE.AWAITING_PR) {
+      // A real commit on THIS run's branch, still needing the shared PR the
+      // caller opens once for the whole batch. Safe to queue.
+      return current;
+    }
+    if (state === SHIP_STATE.SHIPPED) {
+      // Already merged or already has its PR. It must NOT join the batch's
+      // pending list: finalizeBatchPr feeds pending[0] to openDraftPr, which
+      // hard-requires 'branch_pushed' and throws 404 otherwise — one finished
+      // sibling would fail the whole batch and abandon every genuinely new
+      // draft in it. Flagged so the caller counts it and moves on.
+      return { ...current, alreadyShipped: true };
+    }
+    if (state === SHIP_STATE.HUMAN_OWNED) {
+      // Someone is reviewing this right now. Leave it exactly as it is — no
+      // ship, and emphatically no abandon.
+      const err = new Error(`Draft #${draft.id} is awaiting human review ("${current.status}") — left untouched.`);
+      err.refusal = true;
+      err.reason = 'awaiting-human-review';
+      throw err;
+    }
+    // STRANDED: a genuinely stuck row, and the repo's own recorded lesson for
+    // this code applies — never leave a partially-failed draft sitting in a
+    // non-terminal status. Abandon it so the next run generates a clean one,
+    // and report a REFUSAL rather than a failure: this is one item's state
+    // problem, not evidence the pipeline is broken, and must not trip the
+    // circuit breaker.
     await markDraftAbandoned(siteId, draft.id, `Stuck at "${current?.status || 'unknown'}" and not resumable — abandoned so a fresh draft can be generated.`, null)
       .catch((err) => console.error(`[auto-remediation] could not abandon unresumable draft ${draft.id}:`, err.message));
     const err = new Error(`Draft was stuck at "${current?.status || 'unknown'}" and has been reset for a fresh attempt.`);

@@ -913,7 +913,7 @@ export function autoSelectMetaTitle(generatorId, content) {
   return { ...content, selectedTitle: content.titles[0] };
 }
 
-async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false }) {
+async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false, batchBranch = null }) {
   const jobRec = await addJobRecommendation(jobId, rec.id);
   try {
     const draft = await generateDraft(siteId, {
@@ -939,7 +939,13 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false 
     // apply() has no branch and no PR; calling that shipped is the one
     // outcome worse than calling it failed. See lib/draft-ship-state.js for
     // the measured case (8 expand-content drafts stuck since 2026-08-28).
-    const shipState = draftShipState(draft);
+    const shipState = draftShipState(draft, { currentBatchBranch: batchBranch });
+    if (shipState === SHIP_STATE.HUMAN_OWNED) {
+      // A person submitted this and is reviewing it. Never ship it out from
+      // under them, and never reset it — just report it honestly and leave it.
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: `Draft #${draft.id} is awaiting human review ("${draft.status}") — left untouched.` });
+      return { ok: false };
+    }
     if (shipState === SHIP_STATE.SHIPPED) {
       await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
       await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
@@ -1105,8 +1111,15 @@ export const SAFE_FIX_BATCH_LIMIT = 60;
 // doesn't stop the rest; the job's final branch/PR reflect whatever the
 // last successful item produced (they all share the same batch branch/PR).
 export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
+  // Over-fetch, THEN trim, then take `limit`. Selecting exactly `limit` rows
+  // first and pacing them afterwards means every held item silently consumes
+  // a slot: a site whose top 60 contain 28 blog-outline candidates would ship
+  // 33 fixes instead of 60, and the operator would see only that fewer things
+  // shipped. auto-remediation.js applies both rules BEFORE its daily budget
+  // for exactly this reason. 4x covers a batch that is overwhelmingly one
+  // paced generator while keeping the query bounded.
   const [selected, site, pendingDraftFilePaths] = await Promise.all([
-    listOpenSafeRecommendations(siteId, limit),
+    listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
   ]);
@@ -1125,13 +1138,16 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   // can see exactly what was deferred and why — the same discipline the
   // daily budget's own truncation already follows.
   const { paced, notes: pacingNotes } = await applyPacing(site, selected);
-  const { converged: recs, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
   for (const note of [...pacingNotes, ...convergenceNotes]) await appendJobLog(job.id, note);
+  // `limit` is applied last, so it bounds what actually SHIPS rather than what
+  // was merely considered.
+  const recs = converged.slice(0, limit);
 
   if (recs.length === 0) {
     return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
   }
-  const heldCount = selected.length - recs.length;
+  const heldCount = Math.min(selected.length, limit) - recs.length;
   await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution${heldCount > 0 ? ` (${heldCount} held by pacing/convergence rules)` : ''}.`);
 
   // Batch the git push: every item below runs with deferPr, so its commit
@@ -1160,7 +1176,7 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
       failed++;
       continue;
     }
-    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true });
+    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true, batchBranch: branchName });
     if (result.ok) {
       shipped++;
       lastSuccess = result.draft;

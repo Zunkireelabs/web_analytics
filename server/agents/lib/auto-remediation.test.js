@@ -22,6 +22,9 @@ const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingO
 // outside 'draft'/'edited') and getDraft reports this status — the shape a
 // draft left stranded by an earlier failed apply() actually has.
 let stuckDraftStatus;
+// The branch a stranded draft claims its commit is on. Only a draft on THIS
+// run's batch branch has a live commit — see lib/draft-ship-state.js.
+let stuckDraftBranch;
 let failedAttempts; // Map(finding_id -> prior failed attempts), for the convergence cap
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
@@ -59,6 +62,7 @@ function reset() {
   calls.retryable = [];
   calls.branchPushRetries = [];
   stuckDraftStatus = null;
+  stuckDraftBranch = null;
   failedAttempts = new Map();
   finalizeBatchFails = false;
   finalizeBatchRateLimited = false;
@@ -96,7 +100,7 @@ mock.module(resolve('../../store/drafts.js'), {
     countDraftsBySourceToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => (stuckDraftStatus ? null : { id: draftId }),
-    getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft' }),
+    getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft', branch_name: stuckDraftBranch }),
     updateDraft: async () => null,
     markDraftAbandoned: async (siteId, draftId, reason) => { calls.abandoned.push({ draftId, reason }); },
     // The retryable-in-place counterpart: records the failure without
@@ -773,8 +777,10 @@ describe('autoRemediateSafeRecommendations — resuming a stranded draft', () =>
     assert.equal(result.failed, 0, 'and is never counted as a failure that could trip the breaker');
   });
 
-  test("a draft already at 'branch_pushed' needs no work — the batch PR step covers it", async () => {
+  test("a draft already at 'branch_pushed' on THIS run's branch needs no work — the batch PR step covers it", async () => {
     stuckDraftStatus = 'branch_pushed';
+    // Same shape batchBranchName(site) produces for site 1 today.
+    stuckDraftBranch = `action-center/batch-1-${new Date().toISOString().slice(0, 10)}`;
     recommendations = [rec(1)];
 
     const result = await autoRemediateSafeRecommendations(1);
@@ -785,8 +791,34 @@ describe('autoRemediateSafeRecommendations — resuming a stranded draft', () =>
 
   // The repo's own recorded lesson for this file: never leave a
   // partially-failed draft sitting in a non-terminal status.
+  // A commit on a PRIOR day's branch is a ghost: queueing it would have the
+  // batch mark it pr_opened against a PR that does not contain its change.
+  test("a 'branch_pushed' draft from an older branch is reset, never queued as if it had shipped", async () => {
+    stuckDraftStatus = 'branch_pushed';
+    stuckDraftBranch = 'action-center/batch-1-2020-01-01';
+    recommendations = [rec(1)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1']);
+    assert.equal(result.shipped, 0, 'nothing is reported as shipped for a commit that is not on the branch');
+  });
+
+  // generateDraft is idempotent per finding, so the cron gets back exactly the
+  // draft a person is reviewing. Resetting it would destroy their work.
+  test('a draft awaiting human review is left completely untouched — not shipped, not abandoned', async () => {
+    stuckDraftStatus = 'submitted_for_approval';
+    recommendations = [rec(1)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.abandoned, [], "a human's in-flight draft is never destroyed by the loop");
+    assert.equal(result.shipped, 0);
+    assert.equal(result.refused, 1);
+  });
+
   test('any other stuck state is abandoned for a clean retry, and reported as a refusal not a failure', async () => {
-    stuckDraftStatus = 'revision_requested';
+    stuckDraftStatus = 'some-unrecognized-state';
     recommendations = [rec(1)];
 
     const result = await autoRemediateSafeRecommendations(1);
@@ -800,7 +832,7 @@ describe('autoRemediateSafeRecommendations — resuming a stranded draft', () =>
   });
 
   test('a stranded draft does not trip the circuit breaker, however many there are', async () => {
-    stuckDraftStatus = 'revision_requested';
+    stuckDraftStatus = 'some-unrecognized-state';
     recommendations = [rec(1), rec(2), rec(3), rec(4), rec(5), rec(6), rec(7)];
 
     const result = await autoRemediateSafeRecommendations(1);

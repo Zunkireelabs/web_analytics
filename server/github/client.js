@@ -81,6 +81,21 @@ export const RATE_LIMIT_RESERVE = 100;
 // process — never treated as "plenty left".
 let lastRateLimit = { remaining: null, reset: null, at: null };
 
+// `res.headers.get()` returns null for a header that isn't there, and
+// `Number(null)` is 0 — NOT NaN. A `Number.isFinite` guard therefore does
+// NOT catch a missing header; it records "0 requests left" and latches the
+// budget to permanently-exhausted for the life of the process, stopping
+// every site's run without a single real rate limit. Same trap in
+// rateLimitWaitMs, where it would make `isPrimary` true for any 403 lacking
+// the header — misreporting a permanent "not accessible by this token" 403
+// as retryable forever. Read through this helper, never Number() directly.
+function headerNumber(res, name) {
+  const raw = res.headers.get(name);
+  if (raw === null || raw.trim() === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 /**
  * @returns {{remaining: number|null, reset: Date|null, at: Date|null, low: boolean}}
  * `low` is the caller-facing question — "should I stop starting new work?" —
@@ -89,19 +104,37 @@ let lastRateLimit = { remaining: null, reset: null, at: null };
  * value under the reserve does.
  */
 export function getLastKnownRateLimit() {
+  // `low` MUST expire. The budget refills at `reset`, but nothing re-reads it
+  // on its own: auto-remediation's pre-check breaks the loop BEFORE making any
+  // GitHub call, so a run that starts low makes zero requests, learns nothing,
+  // and leaves this state stale for the next run to trip over identically.
+  // Once latched, the autonomous loop could never recover from within itself.
+  // A reset that has already passed means the observation is simply out of
+  // date — report not-low and let the next real response say what's true.
+  const expired = lastRateLimit.reset != null && lastRateLimit.reset.getTime() <= Date.now();
   return {
     ...lastRateLimit,
-    low: lastRateLimit.remaining != null && lastRateLimit.remaining < RATE_LIMIT_RESERVE,
+    low: !expired && lastRateLimit.remaining != null && lastRateLimit.remaining < RATE_LIMIT_RESERVE,
   };
 }
 
-function recordRateLimitHeaders(res) {
-  const remaining = Number(res.headers.get('x-ratelimit-remaining'));
-  const reset = Number(res.headers.get('x-ratelimit-reset'));
-  if (!Number.isFinite(remaining)) return;
+// `forSearch` responses are deliberately NOT recorded. GitHub's rate limits
+// are per-RESOURCE, and /search/code has its own budget of about 30 per
+// minute against core's 5,000 per hour. Recording a search response's
+// `x-ratelimit-remaining: 29` as though it described the core budget puts it
+// instantly under RATE_LIMIT_RESERVE (100) — and since searchCodeForString
+// sits directly on the ship path (backend.js's marker discovery,
+// discover-file-mapping.js's auto-heal), the very first item of a run would
+// leave every subsequent item's pre-check reading "low" and halt the run
+// after one ship. Tracking core only keeps this state meaning one thing.
+function recordRateLimitHeaders(res, { forSearch = false } = {}) {
+  if (forSearch) return;
+  const remaining = headerNumber(res, 'x-ratelimit-remaining');
+  if (remaining === null) return;
+  const reset = headerNumber(res, 'x-ratelimit-reset');
   lastRateLimit = {
     remaining,
-    reset: Number.isFinite(reset) ? new Date(reset * 1000) : null,
+    reset: reset === null ? null : new Date(reset * 1000),
     at: new Date(),
   };
 }
@@ -114,17 +147,17 @@ function recordRateLimitHeaders(res) {
 async function rateLimitWaitMs(res) {
   if (res.status !== 403 && res.status !== 429) return null;
 
-  const retryAfter = Number(res.headers.get('retry-after'));
-  const remaining = Number(res.headers.get('x-ratelimit-remaining'));
-  const reset = Number(res.headers.get('x-ratelimit-reset'));
+  const retryAfter = headerNumber(res, 'retry-after');
+  const remaining = headerNumber(res, 'x-ratelimit-remaining');
+  const reset = headerNumber(res, 'x-ratelimit-reset');
 
   // Header evidence first — it is unambiguous and costs nothing. A 403 with
   // neither signal is checked against the body, because a secondary limit
   // can arrive with no rate-limit header at all; a 403 that is genuinely
   // "this token cannot write to this repo" must NOT be retried, and the body
   // is the only thing that separates the two.
-  const isPrimary = Number.isFinite(remaining) && remaining === 0;
-  const hasRetryAfter = Number.isFinite(retryAfter) && retryAfter > 0;
+  const isPrimary = remaining === 0;
+  const hasRetryAfter = retryAfter !== null && retryAfter > 0;
   if (!isPrimary && !hasRetryAfter) {
     const body = await res.clone().text().catch(() => '');
     if (!/rate limit|secondary rate|abuse detection/i.test(body)) return null;
@@ -132,7 +165,7 @@ async function rateLimitWaitMs(res) {
 
   const waitMs = hasRetryAfter
     ? retryAfter * 1000
-    : (Number.isFinite(reset) ? reset * 1000 - Date.now() : RATE_LIMIT_MAX_WAIT_MS);
+    : (reset === null ? RATE_LIMIT_MAX_WAIT_MS : reset * 1000 - Date.now());
   // Clamped at both ends: never a busy-loop on a stale/absent reset, never
   // longer than one cron pass can afford to sit still.
   return Math.min(Math.max(waitMs, 1_000), RATE_LIMIT_MAX_WAIT_MS);
@@ -163,7 +196,7 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
       headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    recordRateLimitHeaders(res);
+    recordRateLimitHeaders(res, { forSearch });
 
     const waitMs = await rateLimitWaitMs(res);
     if (waitMs == null) return res;
