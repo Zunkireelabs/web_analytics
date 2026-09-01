@@ -568,6 +568,21 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // not a systemic fault, so it must not trip the breaker either.
       err.refusal = true;
       err.reason = 'no-file-mapping';
+    } else if (/uses classes this site only ever uses for its/.test(message)) {
+      // design-drift.js's checkDesignIntegrityGate: THIS recommendation's
+      // styled markup failed automated role verification (a confirmed
+      // role-mismatch — the zunkireelabs.com incident class). Exactly the
+      // per-item, non-systemic case the two patterns above already close
+      // for, and critically must be handled the same way here: since the
+      // check runs against the site's one shared profile, a real defect in
+      // that profile would otherwise fail several consecutive
+      // recommendations identically and trip CONSECUTIVE_FAILURE_LIMIT,
+      // silently halting every OTHER valid recommendation's shipping for
+      // the rest of this run — recreating, via the circuit breaker, the
+      // exact whole-site blocking behavior removing the human sign-off gate
+      // was meant to end.
+      err.refusal = true;
+      err.reason = 'design-integrity-failed';
     }
     throw err;
   }

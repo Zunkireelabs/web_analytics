@@ -11,6 +11,18 @@ import { DESIGN_PROFILE_VERSION } from '../design-agent/live-analysis/schema.js'
 // sites.auto_remediation_enabled was readable in exactly one place and
 // writable nowhere — which is the actual reason the unattended loop had never
 // run for any site (see migration 101's own note).
+//
+// migration 132's human design-review sign-off used to ALSO be required here
+// (the design-integrity-gate proposal's change 04) — removed after it
+// produced a real zero-PR cron day: design_review_at is null for every
+// pre-existing site (no backfill ever ran), so every one of them read as
+// permanently 'unreviewed' and the entire unattended pipeline never
+// attempted a single recommendation. The role-mismatch check that gate was
+// protecting against (verifyProfileRoles) still runs — automatically, per
+// draft, at ship time (design-drift.js's checkDesignIntegrityGate, see
+// backend.test.js/frontend.test.js) — it is just no longer a whole-site
+// precondition to enabling autonomy at all. `auto_remediation_enabled` is
+// the sole authorization switch this function guards.
 
 // A minimal usable profile (isProfileUsable's floor: typography.body,
 // typography.heading.item, layout.container-or-prose) — enough for
@@ -27,18 +39,15 @@ const SAMPLE_PROFILE = {
 const withRepo = { repo_owner: 'Zunkireelabs', repo_name: 'zunkireelabs-web' };
 const withoutRepo = { repo_owner: null, repo_name: null };
 
-// A site with a repo AND a CURRENT, staff-approved design review — the state
-// every "enabling should succeed" fixture below now needs, since the
-// design-integrity gate folded into validateAutoRemediationRequest requires
-// both. design_review_fingerprint is computed from the SAME profile the site
-// carries, so designReviewState reads it as current, never stale.
+// A site with a repo and a design review on file — used to prove review
+// state (present, absent, or stale) no longer changes the outcome.
 function withReviewedDesign(overrides = {}) {
   const base = { ...withRepo, url_file_map: { siteRoot: { designProfile: SAMPLE_PROFILE } }, ...overrides };
   return { ...base, design_review_at: '2026-08-01T00:00:00Z', design_review_fingerprint: designReviewFingerprint(SAMPLE_PROFILE) };
 }
 
 describe('validateAutoRemediationRequest — enabling', () => {
-  test('accepts enabling a site that has a repo connected AND a current, approved design review', () => {
+  test('accepts enabling a site that has a repo connected and a current, approved design review', () => {
     assert.equal(validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site: withReviewedDesign() }), null);
   });
 
@@ -46,8 +55,6 @@ describe('validateAutoRemediationRequest — enabling', () => {
     // Live at the time of writing: 3 of 4 real client sites had no repo at
     // all. Without this the toggle would appear to work and then fail per
     // item every morning, burning the daily budget on a misconfiguration.
-    // The repo check fires before the design-review check below, so an
-    // unreviewed design never masks this specific, more fundamental error.
     const err = validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site: withoutRepo });
     assert.match(err, /no GitHub repository connected/i);
   });
@@ -57,21 +64,20 @@ describe('validateAutoRemediationRequest — enabling', () => {
     assert.match(err, /no GitHub repository connected/i);
   });
 
-  // The design-integrity gate (design-integrity-gate proposal): a wrong-role
-  // design profile shipped real classes in the wrong slots, verified only
-  // against class EXISTENCE, with no human checkpoint anywhere in the chain.
-  // A repo connection alone is no longer sufficient to enable the unattended
-  // pipeline — the design must ALSO have been reviewed and signed off.
-  test('REFUSES enabling a site with a repo but an UNREVIEWED design', () => {
-    const err = validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site: withRepo });
-    assert.match(err, /design has not been reviewed/i);
+  // The regression this file exists to guard: `design_review_at` is null for
+  // every site connected before migration 132 (no backfill ever ran), so
+  // "unreviewed blocks enabling" meant no pre-existing site could EVER be
+  // enabled without someone finding and using a review screen that, per the
+  // gate's own commit, had "no staff-facing entry point" at the time it
+  // shipped. That is exactly what produced a real zero-PR cron day.
+  test('a repo-connected site with a NEVER-reviewed design (design_review_at null) can still be enabled', () => {
+    assert.equal(validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site: withRepo }), null);
   });
 
-  test('REFUSES enabling a site whose design review is STALE — re-derived since it was approved', () => {
+  test('a repo-connected site whose design review is STALE (re-derived since approval) can still be enabled', () => {
     const rescanned = { ...SAMPLE_PROFILE, typography: { ...SAMPLE_PROFILE.typography, body: 'text-lg leading-loose' } };
     const site = withReviewedDesign({ url_file_map: { siteRoot: { designProfile: rescanned } } }); // approved fingerprint is for SAMPLE_PROFILE, not this one
-    const err = validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site });
-    assert.match(err, /re-analyzed since it was last reviewed/i);
+    assert.equal(validateAutoRemediationRequest({ enabled: true, dailyLimit: 30, site }), null);
   });
 });
 
@@ -111,10 +117,6 @@ describe('validateAutoRemediationRequest — enabled flag', () => {
 // silently reversing a human's later decision to turn it off. Fixtures use
 // generic ids/names throughout — this must behave identically for any tenant.
 describe('shouldAutoEnableOnConnect', () => {
-  // Realistic only when design was reviewed BEFORE this repo connection —
-  // the design-integrity gate now folded into validateAutoRemediationRequest
-  // requires both. The far more common real order (repo first, design
-  // second) is covered by shouldAutoEnableOnDesignReviewApproval below.
   test('a brand-new site connecting its repo for the first time, with an already-reviewed design, is granted autonomy', () => {
     const existing = { id: 1, name: 'Any Client', repo_owner: null, repo_name: null };
     const site = withReviewedDesign({
@@ -123,14 +125,13 @@ describe('shouldAutoEnableOnConnect', () => {
     assert.equal(shouldAutoEnableOnConnect({ existing, site }), true);
   });
 
-  // The behavior change this whole gate exists for: repo connection ALONE —
-  // the only requirement before the design-integrity gate existed — is no
-  // longer sufficient. autonomy stays off until a human has also reviewed
-  // the design (see the design-review-approve mirror, shouldAutoEnableOnDesignReviewApproval).
-  test('a brand-new site connecting its repo with an UNREVIEWED design is NOT granted autonomy', () => {
+  // Repo connection ALONE is sufficient again (as it was before migration
+  // 132) — `auto_remediation_enabled` no longer depends on a human having
+  // reviewed the design first.
+  test('a brand-new site connecting its repo with an UNREVIEWED design is ALSO granted autonomy', () => {
     const existing = { id: 1, name: 'Any Client', repo_owner: null, repo_name: null };
     const site = { id: 1, name: 'Any Client', repo_owner: 'anyone', repo_name: 'anyone-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
-    assert.equal(shouldAutoEnableOnConnect({ existing, site }), false);
+    assert.equal(shouldAutoEnableOnConnect({ existing, site }), true);
   });
 
   test('re-saving an already-connected repo\'s config never re-grants — respects whatever the current value already is', () => {
@@ -160,18 +161,16 @@ describe('shouldAutoEnableOnConnect', () => {
   test('generic across tenants — no name/id-based special-casing', () => {
     for (const name of ['Zunkiree', 'Acme Corp', 'Some Other Client', 'client-42']) {
       const existing = { id: 99, name, repo_owner: null, repo_name: null };
-      const site = withReviewedDesign({ id: 99, name, repo_owner: 'x', repo_name: 'x-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 });
+      const site = { id: 99, name, repo_owner: 'x', repo_name: 'x-web', auto_remediation_enabled: false, auto_remediation_daily_limit: 60 };
       assert.equal(shouldAutoEnableOnConnect({ existing, site }), true, `must grant autonomy identically regardless of tenant name (${name})`);
     }
   });
 });
 
-// The design-review-approve mirror of shouldAutoEnableOnConnect: the far
-// more common real order of events (repo connected first — which, with the
-// design-integrity gate now in place, can no longer auto-grant on its own —
-// design reviewed second). Without this, EVERY site would need a THIRD,
-// separate manual click on the /auto-remediation switch after an otherwise-
-// complete setup.
+// The design-review-approve mirror of shouldAutoEnableOnConnect — still
+// exercised even though a review is no longer required, because the review
+// screen itself is still optional-but-supported, and this must keep
+// behaving correctly for a site that arrives via that path.
 describe('shouldAutoEnableOnDesignReviewApproval', () => {
   test('a site\'s first-ever design review approval, with a repo already connected, is granted autonomy', () => {
     const existing = { id: 1, repo_owner: 'anyone', repo_name: 'anyone-web', design_review_at: null, auto_remediation_enabled: false };
