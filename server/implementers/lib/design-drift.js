@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { safeMessage } from '../../lib/errors.js';
 import { updateSiteRepoConfig } from '../../db.js';
 import { recordAuditEvent } from '../../store/admin/audit-log.js';
+import { recordDesignIntegrityVerdict } from '../../store/design-integrity-verdicts.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { FRONTEND_ACTION_TYPES } from '../frontend.js';
 import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesignProfileJob, getLatestDesignAgentJob, getDesignAgentJobById, DESIGN_PROFILE_JOB_KEY } from '../../store/execution-jobs.js';
@@ -636,6 +637,40 @@ export function designReviewState(site) {
   const currentFingerprint = designReviewFingerprint(getDesignProfile(site));
   if (currentFingerprint !== site.design_review_fingerprint) return { ok: false, reason: 'stale' };
   return { ok: true };
+}
+
+// The ACTUAL ship-time gate (replaces designReviewState above in that role —
+// designReviewState/the review screen still exist for a human who wants to
+// look, but are no longer a shipping prerequisite). Runs verifyProfileRoles
+// against this site's real, currently-derived profile: a CONFIRMED
+// role-mismatch (the zunkireelabs.com incident class — real classes,
+// demonstrably used for a different role) fails; a profile with no observed
+// mismatch, or no usable profile at all, passes.
+//
+// Every call is logged to design_integrity_verdicts regardless of mode, so
+// the false-positive rate can be checked against real profiles before
+// DESIGN_INTEGRITY_ENFORCE is turned on. In log-only mode (the default) a
+// failing verdict is still recorded but never blocks — see that env var's
+// own comment for why enforcement is a separate, later flip rather than
+// bundled into this same change.
+//
+// Deliberately scoped to ONE recommendation's apply call, not the whole
+// site: unlike the human sign-off it replaces, a failure here quarantines
+// only the draft being applied right now. The caller's loop (
+// auto-remediation.js's per-recommendation attempt) moves on to the next
+// recommendation regardless, so one bad draft can never zero out a site's
+// whole run the way the old gate did.
+export async function checkDesignIntegrityGate(site, { actionType = null, findingId = null } = {}) {
+  const profile = getDesignProfile(site);
+  if (!isProfileUsable(profile)) return { ok: true, reason: 'no-profile' };
+
+  const verdict = verifyProfileRoles(profile);
+  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+
+  await recordDesignIntegrityVerdict({ siteId: site.id, findingId, actionType, verdict, enforced });
+
+  if (!enforced) return { ok: true, reason: 'log-only', observed: verdict };
+  return verdict;
 }
 
 export async function verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, fetchPage, fetchStylesheet } = {}) {

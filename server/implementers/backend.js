@@ -9,7 +9,7 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, designReviewState } from './lib/design-drift.js';
+import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
@@ -819,21 +819,18 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // site.url_file_map.siteRoot.designProfile (buildMergeValues' own
   // templateFor fallback: `configured || projectComponentTemplate(...) ||
   // fallback`, marker-merge.js). BOTH paths trace back to the same captured
-  // profile, so this gates on "does a usable profile exist and is it
-  // unreviewed" — not on whether a componentTemplates entry happens to be
-  // configured. A site with NO configured entry at all was exactly as
-  // exposed to the wrong-role incident as one with a stale entry: it just
-  // silently fell through to the live projection instead, with the
-  // template-stale check above never even running (`if (mode === 'visible'
-  // && templateEntry)` skips when templateEntry is undefined).
+  // profile, so this gates on "does a usable profile exist and does it pass
+  // automated role verification" — not on whether a componentTemplates entry
+  // happens to be configured, and no longer on human sign-off (see
+  // checkDesignIntegrityGate's own comment: verifyProfileRoles catches the
+  // real incident class — a confirmed role-mismatch — automatically, and a
+  // failure here quarantines only THIS draft, never the whole site).
   if (mode === 'visible' && siteHasUsableDesignProfile(site)) {
-    const review = designReviewState(site);
-    if (!review.ok) {
+    const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
+    if (!gate.ok) {
       return {
-        ok: false, reason: 'design-unreviewed',
-        error: review.reason === 'stale'
-          ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before styled content can ship again."
-          : "This site's design has not been reviewed yet — review and approve it (Clients → this site → Review this site's design) before styled content can ship.",
+        ok: false, reason: 'design-integrity-failed',
+        error: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
       };
     }
   }

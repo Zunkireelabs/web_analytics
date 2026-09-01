@@ -3,7 +3,7 @@ import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/ne
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
-import { siteHasUsableDesignProfile, designReviewState } from './lib/design-drift.js';
+import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 
 export const meta = {
   id: 'frontend',
@@ -208,21 +208,19 @@ export async function apply(site, draft) {
   // schema-only mode here the way marker-merge.js's content types have — and
   // newpage-render.js's wrapInSiteProse falls through to a live
   // projectPageWrapper(designProfile) projection whenever no repo-verified
-  // contentWrapper is configured, same "on-the-fly, unstamped, unreviewed"
-  // exposure computeMarkerMerge's own gate closes. Simpler than trying to
+  // contentWrapper is configured, same "on-the-fly, unstamped" exposure
+  // checkDesignIntegrityGate closes automatically (verifyProfileRoles,
+  // design-drift.js) rather than via human sign-off. Simpler than trying to
   // detect whether THIS specific draft's wrapper actually came from the
   // profile (which would mean re-deriving wrapInSiteProse's own branching
-  // here and risking the two drifting apart) — a usable-but-unreviewed
-  // profile blocks every net-new page on the site until reviewed, never a
-  // silent per-page guess.
+  // here and risking the two drifting apart) — a confirmed role-mismatch
+  // quarantines this one draft, never the whole site's other pages.
   if (siteHasUsableDesignProfile(site)) {
-    const review = designReviewState(site);
-    if (!review.ok) {
+    const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
+    if (!gate.ok) {
       return {
-        ok: false, reason: 'design-unreviewed',
-        error: review.reason === 'stale'
-          ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before styled content can ship again."
-          : "This site's design has not been reviewed yet — review and approve it (Clients → this site → Review this site's design) before styled content can ship.",
+        ok: false, reason: 'design-integrity-failed',
+        error: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
       };
     }
   }

@@ -4,7 +4,7 @@ import { requireAuth, requirePlatformRole } from './login.js';
 
 import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import {
-  getDesignProfile, siteHasUsableDesignProfile, designReviewState, designReviewFingerprint,
+  getDesignProfile, siteHasUsableDesignProfile, designReviewFingerprint,
   verifyProfileRoles, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE, observedClassesByRole,
 } from '../implementers/lib/design-drift.js';
 import { projectAllComponentTemplates } from '../design-agent/lib/design-profile.js';
@@ -617,15 +617,14 @@ export function shouldAutoEnableOnConnect({ existing, site }) {
   return !invalid;
 }
 
-// The design-review-approve mirror of shouldAutoEnableOnConnect above, for
-// the far more common real order of events: repo connected first (which,
-// with the design-integrity gate now folded into validateAutoRemediationRequest,
-// can no longer auto-grant on its own), design reviewed second. Without this,
-// EVERY site would need a THIRD, separate manual click on the
-// /auto-remediation switch after an otherwise-complete setup — staff connect
-// GSC/GA4/the repo, review and approve the design, and autonomy should turn
-// on right there, the same "one combined setup action" shouldAutoEnableOnConnect
-// already promised before this gate existed.
+// The design-review-approve mirror of shouldAutoEnableOnConnect above.
+// validateAutoRemediationRequest no longer requires a design review at all
+// (see its own comment — that gate is now automated per-draft at ship time,
+// not a whole-site precondition), so shouldAutoEnableOnConnect above already
+// auto-grants on a first repo connection in the common case. This stays as a
+// second, harmless auto-grant path for a site that connected its repo before
+// a passing check existed, or was manually left disabled, and then has its
+// design reviewed by a human choosing to use the optional review screen.
 //
 // `existing` is the site row from BEFORE this approval saved (`site` is the
 // row after updateSiteDesignReview saved it) — scoped to a genuinely FIRST
@@ -653,21 +652,13 @@ export function validateAutoRemediationRequest({ enabled, dailyLimit, site }) {
   if (enabled && !(site?.repo_owner && site?.repo_name)) {
     return 'This site has no GitHub repository connected, so autonomous fixes would have nowhere to open a pull request. Connect a repo first, then enable autonomy.';
   }
-  // The design-integrity gate: a site whose design has never been reviewed
-  // — or was reviewed against a profile the weekly rescan has since replaced
-  // — must never enter the unattended pipeline. This is the single place
-  // both entry points below (a genuinely first repo connection, and staff
-  // explicitly flipping the switch) share, so neither can drift out of sync
-  // with the other on what "safe to enable" means. See design-drift.js's
-  // designReviewState for what makes a site's review current vs stale.
-  if (enabled) {
-    const review = designReviewState(site);
-    if (!review.ok) {
-      return review.reason === 'stale'
-        ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before autonomy can be enabled."
-        : 'This site\'s design has not been reviewed yet — review and approve it (from the design profile the agent captured) before autonomy can be enabled.';
-    }
-  }
+  // Human design sign-off is no longer a prerequisite here — a confirmed
+  // role-mismatch (design-drift.js's verifyProfileRoles, the same check that
+  // catches the zunkireelabs.com incident class) is now validated
+  // automatically, per draft, at ship time (checkDesignIntegrityGate in
+  // backend.js/frontend.js), not as a whole-site precondition to enabling
+  // autonomy at all. A staff review screen still exists (design-review.js) for
+  // a human who wants to look, but approving it is optional, not required.
   return null;
 }
 
