@@ -121,6 +121,11 @@ function titleFor(item) {
     const path = pagePathFor(item.params.page);
     if (path) return `${item.tag} — ${path}`;
   }
+  // blog-image (agents/blog-image.js) has no page URL at all — it keys on
+  // the post's real repo path instead (recommendationPageKey), so there is
+  // nothing for pagePathFor's URL parse to work with. The raw path is still
+  // a real, specific, reviewer-useful identifier on its own.
+  if (item.params?.filePath) return `${item.tag} — ${item.params.filePath}`;
   return item.tag;
 }
 
@@ -952,7 +957,7 @@ export default function ActionCenter() {
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
                           <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
-                            {d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}
+                            {d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || ''}
                           </div>
                         </div>
                       </button>
@@ -993,7 +998,7 @@ export default function ActionCenter() {
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-black text-slate-800 leading-snug">{meta.label}</div>
                           <div className="text-[9.5px] font-mono text-slate-400 truncate mt-0.5">
-                            {d.input?.page || d.input?.topic || d.input?.market || d.input?.city || ''}
+                            {d.input?.page || d.input?.filePath || d.input?.topic || d.input?.market || d.input?.city || ''}
                           </div>
                         </div>
                       </button>
@@ -1092,6 +1097,18 @@ export default function ActionCenter() {
                           <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Affected Page URL</div>
                           <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[10.5px] text-indigo-650 truncate max-w-full">
                             {selectedRecommendation.params.page}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* blog-image (agents/blog-image.js) keys on the post's real repo
+                          path, not a page URL — a distinct label so a raw path is never
+                          shown as though it were a live URL. */}
+                      {selectedRecommendation.params.filePath && (
+                        <div>
+                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Affected File</div>
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[10.5px] text-indigo-650 truncate max-w-full">
+                            {selectedRecommendation.params.filePath}
                           </div>
                         </div>
                       )}
@@ -1210,7 +1227,7 @@ export default function ActionCenter() {
                       <div>
                         <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Target Element</div>
                         <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3.5 text-xs text-slate-700 leading-relaxed font-mono truncate max-w-full">
-                          {selectedDraftItem.input?.page || selectedDraftItem.input?.topic || selectedDraftItem.input?.market || selectedDraftItem.input?.city || 'Root Context'}
+                          {selectedDraftItem.input?.page || selectedDraftItem.input?.filePath || selectedDraftItem.input?.topic || selectedDraftItem.input?.market || selectedDraftItem.input?.city || 'Root Context'}
                         </div>
                       </div>
 
