@@ -18,6 +18,7 @@ let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
+let failedAttempts; // Map(finding_id -> prior failed attempts), for the convergence cap
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
 let failOn; // (recommendationType) => boolean — simulates a step throwing
@@ -52,6 +53,7 @@ function reset() {
   calls.batchFinalizeCalls = [];
   calls.abandoned = [];
   calls.retryable = [];
+  failedAttempts = new Map();
   finalizeBatchFails = false;
   finalizeBatchRateLimited = false;
   failOn = () => false;
@@ -95,6 +97,9 @@ mock.module(resolve('../../store/drafts.js'), {
     // run. Tracked separately from `abandoned` precisely because the whole
     // point of the distinction is that these two are NOT interchangeable.
     recordMergeFailure: async (siteId, draftId, reason) => { calls.retryable.push({ draftId, reason }); },
+    // Feeds ship-pacing.js's convergence cap: finding_id -> how many times it
+    // has already been drafted and abandoned for an item-specific reason.
+    countFailedAttemptsByFinding: async () => failedAttempts,
   },
 });
 const realRead = await import(resolve('../../store/read.js'));
@@ -726,6 +731,33 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
 // Publishing cadence for net-new content (sites.blog_min_gap_days, migration
 // 107). The daily budget can't express this on its own: 28 open blog-outline
 // recommendations are 28 legitimate candidates as far as it is concerned.
+// Proves the cap is actually WIRED into the run, not merely unit-tested in
+// ship-pacing.js: without this, a correct rule that nothing calls would look
+// exactly like a working one.
+describe('autoRemediateSafeRecommendations — convergence cap', () => {
+  beforeEach(reset);
+
+  test('stops re-drafting a finding that has already failed the cap number of times', async () => {
+    failedAttempts = new Map([['f2', 3]]);
+    recommendations = [rec(1), rec(2), rec(3)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.generated, ['f1', 'f3'], 'the repeat-offender costs no generation call at all');
+    assert.equal(result.shipped, 2);
+  });
+
+  test('a capped finding is held, never closed — it stays open for a human', async () => {
+    failedAttempts = new Map([['f1', 9]]);
+    recommendations = [rec(1)];
+
+    await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.generated, []);
+    assert.deepEqual(calls.closed, [], 'holding is not the same as deciding the issue is resolved');
+  });
+});
+
 describe('autoRemediateSafeRecommendations — blog pacing', () => {
   beforeEach(reset);
 

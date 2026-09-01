@@ -706,6 +706,41 @@ export async function getDraftedFindingIds(siteId) {
   return new Set(rows.map((r) => r.finding_id));
 }
 
+// How many times each finding has already been drafted and then abandoned
+// for a reason that says the item itself cannot be shipped — the input to
+// the convergence cap (agents/lib/ship-pacing.js).
+//
+// The churn this measures is a direct consequence of getDraftedFindingIds
+// above: abandoning a draft deliberately un-hides its finding so it can be
+// retried. That is right for a transient failure and wrong for a permanent
+// one, and nothing distinguished them. Measured on site 1 over three days:
+// 623 drafts for 496 distinct findings, with single findings redrafted up to
+// TEN times — `trust-compliance:facebook-pixel:missing` (10x), a geo-signals
+// question-headings item (9x), "already has an FAQPage schema" (24 attempts
+// across 6 findings). Every cycle spends an LLM generation plus a handful of
+// GitHub calls to reach the identical failure.
+//
+// Two reasons are excluded, because neither is evidence the item is
+// unfixable:
+//   - 'pr_closed_without_merge' / 'superseded': a human closed the PR or the
+//     work was replaced. The draft was fine; the decision was elsewhere.
+//     (This is the single largest bucket — 176 drafts from one closed PR.)
+//   - anything naming a rate limit: transient by definition, and the whole
+//     point of the retryable-in-place handling added alongside this.
+export async function countFailedAttemptsByFinding(siteId) {
+  const { rows } = await query(
+    `SELECT finding_id, COUNT(*)::int AS attempts
+       FROM drafts
+      WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
+        AND abandoned_reason IS NOT NULL
+        AND abandoned_reason NOT IN ('pr_closed_without_merge', 'superseded')
+        AND abandoned_reason NOT ILIKE '%rate limit%'
+      GROUP BY finding_id`,
+    [siteId]
+  );
+  return new Map(rows.map((r) => [r.finding_id, r.attempts]));
+}
+
 // The file-level sibling to getDraftedFindingIds above: that function stops
 // the SAME finding_id from being redrafted, but says nothing about a
 // DIFFERENT finding targeting the same physical file while an earlier

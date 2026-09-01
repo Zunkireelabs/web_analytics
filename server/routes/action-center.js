@@ -6,6 +6,9 @@ import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
+// Its own module, not auto-remediation.js's export, because this file and
+// auto-remediation.js already import each other — see ship-pacing.js.
+import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
@@ -1070,16 +1073,34 @@ export const SAFE_FIX_BATCH_LIMIT = 60;
 // doesn't stop the rest; the job's final branch/PR reflect whatever the
 // last successful item produced (they all share the same batch branch/PR).
 export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
-  const [recs, site, pendingDraftFilePaths] = await Promise.all([
+  const [selected, site, pendingDraftFilePaths] = await Promise.all([
     listOpenSafeRecommendations(siteId, limit),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
   ]);
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
+
+  // The same two candidate rules the unattended path applies (ship-pacing.js).
+  // Both were missing here, and this is the path that actually carries the
+  // volume: three bulk runs on 2026-09-01 drafted 61 blog-outlines and opened
+  // one PR with 42 net-new blog posts, while the cron path beside it was
+  // correctly taking one per run. Clicking "Execute Safe Fixes" is a request
+  // to ship a batch of FIXES — it was never a decision to publish that much
+  // net-new content at once, nor to re-attempt findings that have already
+  // failed the same way three times.
+  //
+  // Held items are logged to the job, not silently dropped, so the operator
+  // can see exactly what was deferred and why — the same discipline the
+  // daily budget's own truncation already follows.
+  const { paced, notes: pacingNotes } = await applyPacing(site, selected);
+  const { converged: recs, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  for (const note of [...pacingNotes, ...convergenceNotes]) await appendJobLog(job.id, note);
+
   if (recs.length === 0) {
     return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
   }
-  await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution.`);
+  const heldCount = selected.length - recs.length;
+  await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution${heldCount > 0 ? ` (${heldCount} held by pacing/convergence rules)` : ''}.`);
 
   // Batch the git push: every item below runs with deferPr, so its commit
   // is created but the branch ref doesn't move and no PR opens per item —
@@ -1124,12 +1145,24 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
     // failure, so this isn't silently reported as shipped work that never
     // landed (the same strand-and-hide risk finalizeBatchPr's own comment
     // describes).
-    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+    // Transient failures must not be terminal here either. This is the path
+    // that actually lost work on 2026-09-01: one exhausted GitHub budget
+    // abandoned 54 Quality-Gate-passed drafts in this single call. Same
+    // disposition as auto-remediation.js's batch finalize — recordMergeFailure
+    // records the error WITHOUT changing status, and an unresolved apply_error
+    // already reopens the finding, so the work is re-attemptable instead of
+    // destroyed. Nothing is misreported as shipped either way: the job-rec
+    // status still reverts to 'failed' and the counts still move.
+    const transient = finalization.rateLimited === true;
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) ${transient ? 'left re-attemptable (transient)' : 'reverted to failed'}.`);
     await Promise.all(pending.map(async (p) => {
       await updateJobRecommendationStatus(p.jobRecId, 'failed', { error: finalization.error });
       await setRecommendationExecutionState(p.recId, { executionJobId: job.id, executionStatus: 'failed' });
-      await markDraftAbandoned(siteId, p.draftId, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
-        console.error(`[action-center] could not abandon draft ${p.draftId} after batch push/PR failure:`, err.message);
+      const record = transient
+        ? recordMergeFailure(siteId, p.draftId, finalization.error)
+        : markDraftAbandoned(siteId, p.draftId, `Batch push/PR failed: ${finalization.error}`, null);
+      await record.catch((err) => {
+        console.error(`[action-center] could not ${transient ? 'mark retryable' : 'abandon'} draft ${p.draftId} after batch push/PR failure:`, err.message);
       });
     }));
     shipped -= pending.length;
