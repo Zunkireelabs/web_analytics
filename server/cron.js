@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runVisualQualityIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runBackfillBlogImagesForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runFontConsistencyIfDueForAllSites, runVisualQualityIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -43,19 +43,15 @@ export function startCron() {
         console.error('[cron] template-capability repair run error:', err.message);
       }
 
-      // Same reasoning as the block above: a cheap, independent repair pass
-      // in the same morning chain, not gated behind detection finding
-      // anything. Backfills a featured image onto any existing blog post
-      // published with none — opens its own PR, direct, never auto-merged.
-      console.log(`[cron] blog-image backfill run started ${new Date().toISOString()}`);
-      try {
-        const results = await runBackfillBlogImagesForAllSites();
-        const imaged = results.reduce((n, r) => n + (r.imaged || 0), 0);
-        const prsOpened = results.filter((r) => r.prCreated).length;
-        console.log(`[cron] blog-image backfill run finished — ${imaged} image(s) added, ${prsOpened} PR(s) opened across ${results.length} site(s)`);
-      } catch (err) {
-        console.error('[cron] blog-image backfill run error:', err.message);
-      }
+      // Blog-image backfill used to run here as its own direct-PR pass
+      // (runBackfillBlogImagesForAllSites), bypassing the Action Center
+      // entirely. Replaced 2026-09-01 by agents/blog-image.js (detection) +
+      // generators/blog-image.js (repair) — an ordinary safe-tier
+      // recommendation now, detected in the DAILY_AGENT_IDS pass below (via
+      // runDailyAgentAnalysisForSite, RECOMMENDATION_AGENT_IDS) and shipped
+      // by the same autonomous shipping run every other safe-tier fix goes
+      // through, with a real Action Center row a human can also review
+      // first. No separate cron step needed any more.
 
       // Role correction FIRST, content repair SECOND — content-repair reads
       // each site's stored componentTemplates, so it must run after any

@@ -111,6 +111,11 @@ export function recommendationPageKey(item) {
   if (item.generatorId === 'content-integrity-repair') {
     return `${item.params?.page || ''}::${item.params?.fixType || ''}`;
   }
+  // blog-image (agents/blog-image.js) has no live URL to key on — the
+  // detector found this post by its real repo path, which is already
+  // unambiguous ground truth, so keying on it directly avoids re-deriving a
+  // URL from a title/slug guess that could drift from the real one.
+  if (item.generatorId === 'blog-image') return `blog-image::${item.params?.filePath || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
 }

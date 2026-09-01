@@ -315,6 +315,58 @@ export function projectCard(profile, { heading, body, headingLevel = 2 } = {}) {
   return parts.join('\n');
 }
 
+// A table STRUCTURE — never a fixed cross-tenant look. Two tiers, in order:
+//
+// 1. IMITATE: this site already has a real <table> somewhere (captured by
+//    live-analysis/capture.js's tableLike/tableClasses) — its own observed
+//    wrapper/header/row/cell classes are used verbatim, same "real markup
+//    wins" rule projectCard/projectCta already follow.
+//
+// 2. COMPOSE, don't invent: most tenant sites have never shipped a
+//    comparison table, so tier 1 has nothing to imitate — this is the gap
+//    that made a real client's own table repair a one-off hand-tuned script
+//    instead of something every tenant could get. Rather than leave every
+//    such tenant permanently unrepairable, this tier builds a plain,
+//    semantic table SKELETON (real <table>/<thead>/<tbody>, left-aligned
+//    text columns, a horizontal-scroll wrapper for narrow viewports — the
+//    same structural rules regardless of tenant) and fills it with ONLY
+//    classes this profile already recorded as real — typography.body for
+//    cell text, typography.heading.item for header-cell weight,
+//    color.border for row dividers, color.surface for header-row
+//    separation. Nothing here is a color, font, radius or shadow invented
+//    for this function; every token is one `checkTypographyRole` (or an
+//    equivalent role check, once one exists for color/spacing) can already
+//    trace back to real evidence on THIS site. Two sites with identical
+//    typography/color tokens get the identical table; two sites with
+//    different tokens get visibly different tables — the point.
+//
+// Returns null only when there is neither a real table nor the base
+// typography.body token every other projection also requires — the same
+// abstention checkTypographyRole's 'not-set' already models: no evidence is
+// an honest null, not a guess.
+export function projectTable(profile) {
+  const real = profile?.components?.table;
+  if (real?.wrapper) {
+    return {
+      tableClass: real.wrapper,
+      headerCellClass: real.headerCell || '',
+      rowClass: real.row || '',
+      cellClass: real.cell || real.headerCell || '',
+    };
+  }
+
+  const body = profile?.typography?.body;
+  if (!body) return null;
+
+  const border = profile?.color?.border;
+  return {
+    tableClass: cx('w-full border-collapse'),
+    headerCellClass: cx(profile?.typography?.heading?.item || body, profile?.color?.surface, 'text-left'),
+    rowClass: cx(border && 'border-b', border),
+    cellClass: cx(body, 'text-left'),
+  };
+}
+
 // The wrapper a whole net-new page's body is placed inside. Deliberately the
 // SAME projection content-wrapper templates are built from, so a page rendered
 // through this route and a compliance page rendered through the component

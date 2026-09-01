@@ -29,7 +29,8 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
     "card": { "wrapper": string|null, "body": string|null } | null,
     "list": { "wrapper": string|null, "item": string|null, "divider": string|null } | null,
     "button": { "primary": string|null, "secondary": string|null } | null,
-    "articleBody": { "wrapper": string|null } | null
+    "articleBody": { "wrapper": string|null } | null,
+    "table": { "wrapper": string|null, "headerCell": string|null, "row": string|null, "cell": string|null } | null
   },
   "responsive": { "breakpoints": string[] },
   "navigation": {

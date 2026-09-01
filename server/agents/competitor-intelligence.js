@@ -1,6 +1,6 @@
 import { getCompetitorRankingDates, getCompetitorRankingsOn, getSearchPerformanceRange } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
-import { runCompetitorDiscovery, normalizeCompetitorDomain } from './lib/competitor-analysis.js';
+import { runCompetitorDiscovery, normalizeCompetitorDomain, isKnownPlatformDomain } from './lib/competitor-analysis.js';
 import { buildBacklinkComparison } from './lib/competitor-backlinks.js';
 import { upsertCompetitorProfile, insertCompetitorStructuralSnapshot } from '../store/competitor-profiles.js';
 import { getCompetitorProvider, competitorProviderConfigured } from '../ingest/competitor-providers/index.js';
@@ -64,8 +64,12 @@ export async function run({ siteId, start, end, params }) {
   // equality instead of a time-window heuristic (see its comment).
   const runAt = new Date();
   await Promise.all(reached.map((c) =>
-    upsertCompetitorProfile(siteId, c.domain, { ...c.comparison, ownScore: c.ownScore, competitorScore: c.competitorScore, discoverySource: c.discoverySource, queryOverlap: c.queryOverlap }, runAt)
-      .catch((err) => console.error(`[agents] competitor-intelligence: failed to save profile for ${c.domain}:`, err.message))
+    upsertCompetitorProfile(
+      siteId, c.domain,
+      { ...c.comparison, ownScore: c.ownScore, competitorScore: c.competitorScore, discoverySource: c.discoverySource, queryOverlap: c.queryOverlap },
+      runAt,
+      isKnownPlatformDomain(c.domain) ? 'platform' : null,
+    ).catch((err) => console.error(`[agents] competitor-intelligence: failed to save profile for ${c.domain}:`, err.message))
   ));
   // Real, insert-only history alongside the overwrite-per-domain profile
   // above — same run, same scores, just appended instead of overwritten

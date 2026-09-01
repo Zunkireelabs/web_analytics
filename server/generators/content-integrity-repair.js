@@ -1,5 +1,8 @@
 import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { buildFontSizeOverrideRemoved } from '../agents/lib/font-consistency-analysis.js';
+import { getSiteById } from '../store/read.js';
+import { projectTable } from '../design-agent/lib/design-profile.js';
+import { buildTableHtml } from './lib/markdown-table-render.js';
 
 // Repairs the five defect shapes content-integrity.js/font-consistency.js
 // detect — broken/empty table markup, comparison content shipped as raw
@@ -26,19 +29,14 @@ export const meta = {
   recommendationTags: [],
 };
 
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 // Deterministic transform of rows ALREADY extracted verbatim from the raw
 // text (page-content.js's parsePipeRow) — first row is the header, same
 // convention as the markdown-table shape this content came from.
-function buildTableHtml(rows) {
-  const [header, ...body] = rows;
-  const headHtml = `<tr>${header.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
-  const bodyHtml = body.map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>`).join('');
-  return `<table><thead>${headHtml}</thead><tbody>${bodyHtml}</tbody></table>`;
-}
+//
+// buildTableHtml now lives in generators/lib/markdown-table-render.js —
+// shared with newpage-render.js's projectMarkdownTablesInBody so a table
+// repaired here and a table inside a freshly generated blog post go through
+// the exact same rendering call, not two implementations that can drift.
 
 // Deterministic transform of {question, answer} pairs already extracted
 // verbatim from the real visible accordion (page-content.js's
@@ -58,7 +56,7 @@ function buildFaqSchema(items) {
 }
 
 // params: { page: string, fixType: 'malformed-table'|'raw-text-table'|'faq-schema-mismatch'|'duplicate-faq' }
-export async function generate({ params }) {
+export async function generate({ siteId, params }) {
   const { page, fixType } = params || {};
   if (!page || !fixType) throw Object.assign(new Error('page and fixType are required'), { status: 400 });
 
@@ -114,7 +112,10 @@ export async function generate({ params }) {
         { status: 400, userFacing: true },
       );
     }
-    const replacement = `<${target.tag}>${buildTableHtml(target.rows)}</${target.tag}>`;
+    const site = await getSiteById(siteId).catch(() => null);
+    const profile = site?.url_file_map?.siteRoot?.designProfile || null;
+    const styles = projectTable(profile);
+    const replacement = `<${target.tag}>${buildTableHtml(target.rows, styles)}</${target.tag}>`;
     return {
       content: { page, fixType, anchorHtml: target.anchorHtml, replacement, rows: target.rows },
       summary: `Convert raw-text comparison content into a real table on ${page}`,

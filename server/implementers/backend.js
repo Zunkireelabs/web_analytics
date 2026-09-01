@@ -9,7 +9,7 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, designReviewState } from './lib/design-drift.js';
+import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
@@ -18,6 +18,7 @@ import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, appl
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
+import { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } from './lib/blog-image-inject.js';
 import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, removeArrayItemByField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 
@@ -25,7 +26,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -819,21 +820,18 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // site.url_file_map.siteRoot.designProfile (buildMergeValues' own
   // templateFor fallback: `configured || projectComponentTemplate(...) ||
   // fallback`, marker-merge.js). BOTH paths trace back to the same captured
-  // profile, so this gates on "does a usable profile exist and is it
-  // unreviewed" — not on whether a componentTemplates entry happens to be
-  // configured. A site with NO configured entry at all was exactly as
-  // exposed to the wrong-role incident as one with a stale entry: it just
-  // silently fell through to the live projection instead, with the
-  // template-stale check above never even running (`if (mode === 'visible'
-  // && templateEntry)` skips when templateEntry is undefined).
+  // profile, so this gates on "does a usable profile exist and does it pass
+  // automated role verification" — not on whether a componentTemplates entry
+  // happens to be configured, and no longer on human sign-off (see
+  // checkDesignIntegrityGate's own comment: verifyProfileRoles catches the
+  // real incident class — a confirmed role-mismatch — automatically, and a
+  // failure here quarantines only THIS draft, never the whole site).
   if (mode === 'visible' && siteHasUsableDesignProfile(site)) {
-    const review = designReviewState(site);
-    if (!review.ok) {
+    const gate = await checkDesignIntegrityGate(site, { actionType: draft.action_type, findingId: draft.finding_id });
+    if (!gate.ok) {
       return {
-        ok: false, reason: 'design-unreviewed',
-        error: review.reason === 'stale'
-          ? "This site's design was re-analyzed since it was last reviewed — re-review and approve the current design before styled content can ship again."
-          : "This site's design has not been reviewed yet — review and approve it (Clients → this site → Review this site's design) before styled content can ship.",
+        ok: false, reason: 'design-integrity-failed',
+        error: gate.error || `${gate.field} uses classes this site only ever uses for its ${gate.observedAs}.`,
       };
     }
   }
@@ -941,6 +939,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return pushContentIntegrityBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'blog-image') return pushBlogImageBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'viewport') return pushViewportBranch(site, draft, batchInfo, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) {
@@ -991,6 +990,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
     if (draft.action_type === 'content-integrity-repair') return previewLiveContentIntegrity(site, draft);
     if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
+    if (draft.action_type === 'blog-image') return previewLiveBlogImage(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
     if (draft.action_type === 'viewport') return previewLiveViewport(site, draft);
     if (MARKER_MERGE_TYPES.has(draft.action_type)) return previewLiveMarkerContent(site, draft);
@@ -1021,6 +1021,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return computeContentIntegrityMerge(site, draft, beforeRef);
   if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
+  if (draft.action_type === 'blog-image') return computeBlogImageMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);
   if (draft.action_type === 'viewport') return computeViewportMerge(site, draft, beforeRef);
   if (MARKER_MERGE_TYPES.has(draft.action_type)) return computeMarkerMerge(site, draft, opts.renderModeOverride, beforeRef);

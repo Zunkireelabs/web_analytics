@@ -60,6 +60,13 @@ const SAFE_GENERATOR_IDS = new Set([
   // affect every other element using that class) never gets a
   // recommendedAction — see content-integrity.js/font-consistency.js.
   'content-integrity-repair',
+  // Added with agents/blog-image.js (2026-09-01) — same exact-match-or-
+  // refuse contract as schema-repair/content-integrity-repair above:
+  // implementers/lib/blog-image-inject.js re-fetches the post live and
+  // refuses if it already has an image field under any alias (picked up by
+  // a human, another agent, or an earlier day's own already-merged batch)
+  // rather than appending a second one.
+  'blog-image',
   // Re-confirmed with the user 2026-08-07: moved from implicitly-manual
   // (no SAFE_GENERATOR_IDS entry) now that implementers/lib/alt-text-inject.js
   // gives it the same exact-match-or-refuse auto-patch as schema-repair

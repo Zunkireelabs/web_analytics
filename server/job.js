@@ -976,31 +976,6 @@ export async function runTemplateCapabilityRepairForAllSites() {
   return results;
 }
 
-// Runs alongside runTemplateCapabilityRepairForAllSites, in the same 07:00
-// chain — a repo-tree read plus a handful of already-known post checks, cheap
-// enough to run every morning against every site rather than once on demand.
-// A site with nothing to backfill (the common case, most mornings) costs one
-// read and returns immediately. Per-site error isolation, same reasoning as
-// every other *ForAllSites here.
-export async function runBackfillBlogImagesForAllSites() {
-  const { backfillBlogImagesForSite } = await import('./scripts/backfill-blog-images.js');
-  const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
-  const results = [];
-  for (const site of sites) {
-    try {
-      const report = await backfillBlogImagesForSite(site.id);
-      if (report.prCreated) {
-        console.log(`[job] backfill-blog-images site ${site.id} "${site.name}": ${report.imaged} image(s) added, ${report.noMatch} post(s) with no good match, PR ${report.prCreated.url}`);
-      }
-      results.push(report);
-    } catch (err) {
-      console.error(`[job] backfill-blog-images failed for site ${site.id} "${site.name}":`, err.message);
-      results.push({ siteId: site.id, error: err.message });
-    }
-  }
-  return results;
-}
-
 // Runs the role-correction pass (server/scripts/repair-design-profile-roles.js)
 // against every site with a stored design profile, every morning — the
 // role-mismatch defect it fixes (a real, live class assigned to the wrong

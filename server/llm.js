@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { withAgentMemory } from './agent-memory.js';
 import { withDesignContext } from './implementers/lib/design-drift.js';
+import { withCompetitorContext } from './agents/lib/competitor-policy.js';
 
 // Shared LLM helper used by both the daily narrative and the weekly doc report.
 // Provider is chosen automatically: a real OPENAI_API_KEY → OpenAI, else Anthropic.
@@ -78,6 +79,11 @@ export async function callLLM(system, user, { model, maxTokens = 500, tier = 'da
   // no-op for generatorIds outside DESIGN_CONTEXT_GENERATOR_IDS (purely
   // technical output) and for any site without a usable Design Context yet.
   system = await withDesignContext(system, generatorId, siteId);
+  // Tenant-scoped competitor-domain policy — same automatic-by-generatorId
+  // shape as the two above, a no-op outside COMPETITOR_CONTEXT_GENERATOR_IDS
+  // or when this site has no active competitor data. See
+  // agents/lib/competitor-policy.js.
+  system = await withCompetitorContext(system, generatorId, siteId);
   const provider = pickProvider();
   const envVar = tier === 'monthly' ? 'REPORT_MODEL_MONTHLY' : 'REPORT_MODEL_DAILY';
   const resolvedModel = model || process.env[envVar] || MODEL_DEFAULTS[provider][tier];

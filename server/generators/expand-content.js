@@ -4,6 +4,7 @@ import { groundingProviderConfigured, searchGroundedSources } from '../ingest/se
 import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
 import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
+import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -12,6 +13,14 @@ import { hasAuthorProfile, authorByline, organizationByline } from './lib/author
 // deliberately never Google CSE or SerpApi, which stay reserved for real
 // SEO/SERP/keyword-demand intelligence in competitor-providers/.
 const CITATION_SEARCH_ENABLED = process.env.ENABLE_CONTENT_CITATION_SEARCH === 'true';
+
+// Final number of citation candidates handed to the model. Fetched count is
+// larger (capped at Tavily's own max of 10) so that filtering out this
+// site's configured competitors (see the external-citations branch below)
+// doesn't leave fewer than CITATION_COUNT legitimate sources when a
+// competitor happens to rank for the query.
+const CITATION_COUNT = 3;
+const CITATION_FETCH_COUNT = 8;
 
 export const meta = {
   id: 'expand-content',
@@ -185,7 +194,20 @@ export async function generate({ siteId, params }) {
     }
     let sources;
     try {
-      sources = await searchGroundedSources(query || fetched.analysis.title, 3);
+      // Fetch more than the final CITATION_COUNT so that removing this
+      // site's own configured competitors (below) doesn't starve the
+      // candidate list down to nothing — Tavily's adapter caps `num` at 10.
+      const rawSources = await searchGroundedSources(query || fetched.analysis.title, CITATION_FETCH_COUNT);
+      // Competitor URLs must never reach the model as citation candidates —
+      // filtered here, BEFORE the prompt is built, not left for the model to
+      // decide not to cite. Government/research/documentation/publication
+      // sources are untouched; only a host matching this site's own active
+      // competitor_profiles is removed. See agents/lib/competitor-policy.js.
+      const { allowed, removed } = await filterCompetitorCandidates(rawSources, siteId);
+      if (removed.length) {
+        console.warn(`[expand-content] filtered ${removed.length} competitor source(s) from citation candidates for site ${siteId}: ${removed.map((s) => s.url).join(', ')}`);
+      }
+      sources = allowed.slice(0, CITATION_COUNT);
     } catch (err) {
       // Honest failure, not a system fault: Tavily being unavailable/out of
       // quota is an external-dependency state, not a bug in this code, so

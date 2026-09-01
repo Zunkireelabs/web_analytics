@@ -138,6 +138,38 @@ export function normalizeCompetitorDomain(raw) {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) ? d : null;
 }
 
+// A small, generic, tenant-agnostic list of universal social/search/
+// developer/video platforms — not a business's real competitor, just a
+// domain that shows up in SERP results or LLM recall because it's a
+// platform everyone links to (a company's own Facebook page, a GitHub org,
+// a LinkedIn post about the industry). This is deliberately NOT a
+// per-client exclusion list: it applies identically to every tenant, the
+// same way excluding a site's own domain already does, and it never
+// contains a real operating company that could legitimately be someone's
+// competitor. Kept intentionally short — when in doubt, a domain is left
+// classified as a real competitor rather than guessed into this list; see
+// competitor_profiles.excluded_reason (migration 133) for how this is
+// persisted, and competitor-policy.js for how it's consumed.
+const KNOWN_PLATFORM_DOMAINS = new Set([
+  'facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com',
+  'youtube.com', 'tiktok.com', 'pinterest.com', 'reddit.com',
+  'github.com', 'gitlab.com', 'bitbucket.org', 'stackoverflow.com',
+  'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com',
+  'wikipedia.org', 'medium.com', 'amazon.com', 'apple.com', 'microsoft.com',
+]);
+
+// Matches the exact domain OR a subdomain of it (e.g. np.linkedin.com,
+// support.google.com) — a platform is still a platform on a regional or
+// product subdomain.
+export function isKnownPlatformDomain(domain) {
+  const d = normalizeCompetitorDomain(domain);
+  if (!d) return false;
+  for (const platform of KNOWN_PLATFORM_DOMAINS) {
+    if (d === platform || d.endsWith(`.${platform}`)) return true;
+  }
+  return false;
+}
+
 // Words that carry no topical signal, so a query made only of these can't
 // tell us anything about whether a candidate is really in the same market.
 const RELEVANCE_STOPWORDS = new Set([

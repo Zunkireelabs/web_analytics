@@ -14,6 +14,7 @@ mock.module(resolve('./lib/competitor-analysis.js'), {
   namedExports: {
     runCompetitorDiscovery: async () => discovery,
     normalizeCompetitorDomain: (d) => d || null,
+    isKnownPlatformDomain: () => false,
   },
 });
 mock.module(resolve('./lib/competitor-backlinks.js'), {

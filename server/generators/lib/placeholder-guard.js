@@ -59,7 +59,11 @@ const CHECKS = [
 // cells — the original incident lived entirely inside expand-content's
 // structured `table` rows, which no prose-level check would ever have looked
 // at, and a reviewer needs to be told which cell to look in.
-function collectStrings(value, path = '', out = []) {
+//
+// Exported so other content-shaped guards (outbound-link-guard.js) reuse the
+// exact same walk instead of re-implementing tree traversal over the
+// GeneratorOutput content shape.
+export function collectStrings(value, path = '', out = []) {
   if (typeof value === 'string') out.push({ path: path || 'content', text: value });
   else if (Array.isArray(value)) value.forEach((v, i) => collectStrings(v, `${path}[${i}]`, out));
   else if (value && typeof value === 'object') {

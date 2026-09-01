@@ -1,6 +1,20 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+
+// mock.module (Node 20.6+, --experimental-test-module-mocks — same
+// convention as auto-remediation.test.js) swaps out the real DB-writing
+// store module so checkDesignIntegrityGate's tests below exercise its own
+// control flow (no-profile passthrough, log-only vs. enforce, the verdict
+// shape) without a live Postgres connection.
+const resolve = (p) => new URL(p, import.meta.url).href;
+const recordedVerdicts = [];
+mock.module(resolve('../../store/design-integrity-verdicts.js'), {
+  namedExports: {
+    recordDesignIntegrityVerdict: async (args) => { recordedVerdicts.push(args); },
+  },
+});
+
+const {
   extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness,
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
@@ -9,9 +23,9 @@ import {
   contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
   bodySlotLooksLikeLabel,
   observedClassesByRole, checkTypographyRole, verifyProfileRoles,
-  designReviewFingerprint, designReviewState,
-} from './design-drift.js';
-import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
+  designReviewFingerprint, designReviewState, checkDesignIntegrityGate,
+} = await import('./design-drift.js');
+const { DESIGN_PROFILE_VERSION } = await import('../../design-agent/lib/design-profile.js');
 
 const VALID_FAQ = { wrapper: '<div class="faq">{{ROWS}}</div>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
 
@@ -1031,6 +1045,84 @@ describe('observedClassesByRole / checkTypographyRole / verifyProfileRoles — r
     assert.equal(result.ok, false);
     assert.equal(result.field, 'typography.link');
     assert.equal(result.observedAs, 'cta');
+  });
+});
+
+// checkDesignIntegrityGate replaces designReviewState as the actual
+// ship-time authorization check (see backend.js/frontend.js's apply paths,
+// and routes/auto-remediation-toggle.test.js for the removal of the human
+// sign-off precondition that used to live in validateAutoRemediationRequest).
+describe('checkDesignIntegrityGate', () => {
+  const originalEnforce = process.env.DESIGN_INTEGRITY_ENFORCE;
+  beforeEach(() => {
+    recordedVerdicts.length = 0;
+    delete process.env.DESIGN_INTEGRITY_ENFORCE;
+  });
+  afterEach(() => {
+    if (originalEnforce === undefined) delete process.env.DESIGN_INTEGRITY_ENFORCE;
+    else process.env.DESIGN_INTEGRITY_ENFORCE = originalEnforce;
+  });
+
+  const roleMismatchProfile = {
+    version: DESIGN_PROFILE_VERSION,
+    typography: { body: 'text-xs uppercase tracking-widest text-gray-500', heading: { item: 'text-2xl font-bold' } }, // body is really the eyebrow
+    layout: { container: 'max-w-7xl mx-auto' },
+    pages: [pageWith([{ role: 'hero', textHierarchy: [item('cta', 'text-xs uppercase tracking-widest text-gray-500')] }])],
+  };
+  const cleanProfile = {
+    version: DESIGN_PROFILE_VERSION,
+    typography: { body: 'text-base leading-relaxed', heading: { item: 'text-2xl font-bold' } },
+    layout: { container: 'max-w-7xl mx-auto' },
+    pages: [pageWith([{ role: 'content', textHierarchy: [item('body', 'text-base leading-relaxed')] }])],
+  };
+
+  test('a site with no usable design profile passes trivially — nothing to verify', async () => {
+    const gate = await checkDesignIntegrityGate({ id: 1, url_file_map: { siteRoot: {} } }, { actionType: 'faq' });
+    assert.equal(gate.ok, true);
+    assert.equal(gate.reason, 'no-profile');
+    assert.equal(recordedVerdicts.length, 0, 'nothing to log when there is no profile to check');
+  });
+
+  test('LOG-ONLY mode (the default): a confirmed role-mismatch is recorded but never blocks shipping', async () => {
+    const site = { id: 2, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
+    const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:1' });
+
+    assert.equal(gate.ok, true, 'log-only mode never blocks, even on a real defect');
+    assert.equal(gate.reason, 'log-only');
+    assert.equal(recordedVerdicts.length, 1);
+    assert.equal(recordedVerdicts[0].siteId, 2);
+    assert.equal(recordedVerdicts[0].findingId, 'faq:1');
+    assert.equal(recordedVerdicts[0].actionType, 'faq');
+    assert.equal(recordedVerdicts[0].enforced, false);
+    assert.equal(recordedVerdicts[0].verdict.ok, false, 'the real verdict is still recorded for later false-positive review, even though it did not block');
+    assert.equal(recordedVerdicts[0].verdict.field, 'typography.body');
+  });
+
+  test('LOG-ONLY mode: a clean profile passes and is recorded as passing', async () => {
+    const site = { id: 3, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
+    const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
+    assert.equal(gate.ok, true);
+    assert.equal(recordedVerdicts[0].verdict.ok, true);
+  });
+
+  test('ENFORCE mode: a confirmed role-mismatch blocks that draft, with the same evidence a human reviewer would have seen', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+    const site = { id: 4, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
+    const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:2' });
+
+    assert.equal(gate.ok, false);
+    assert.equal(gate.reason, 'role-mismatch');
+    assert.equal(gate.field, 'typography.body');
+    assert.equal(gate.observedAs, 'cta');
+    assert.match(gate.error, /uses classes this site only ever uses for its cta/);
+    assert.equal(recordedVerdicts[0].enforced, true);
+  });
+
+  test('ENFORCE mode: a clean profile still ships normally', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+    const site = { id: 5, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
+    const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
+    assert.equal(gate.ok, true);
   });
 });
 

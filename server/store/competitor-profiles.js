@@ -10,14 +10,21 @@ import { query } from '../db.js';
 // microseconds-apart-but-not-identical timestamp) — every domain from the
 // same run gets the exact same value, so listCompetitorProfiles below can
 // select "this run" by exact equality instead of guessing a time window.
-export async function upsertCompetitorProfile(siteId, domain, comparison, runAt) {
+//
+// `excludedReason` (migration 133) is null for a real, active competitor —
+// the default, and what every pre-migration row already means — or a short
+// tag (e.g. 'platform') when the caller has already determined this domain
+// isn't a genuine business rival (see competitor-analysis.js's
+// isKnownPlatformDomain). Never computed here: this function only persists
+// what the caller decided.
+export async function upsertCompetitorProfile(siteId, domain, comparison, runAt, excludedReason = null) {
   const { rows } = await query(
-    `INSERT INTO competitor_profiles (site_id, domain, last_analyzed_at, comparison)
-     VALUES ($1, $2, $4, $3)
+    `INSERT INTO competitor_profiles (site_id, domain, last_analyzed_at, comparison, excluded_reason)
+     VALUES ($1, $2, $4, $3, $5)
      ON CONFLICT (site_id, domain) DO UPDATE SET
-       last_analyzed_at = $4, comparison = EXCLUDED.comparison
+       last_analyzed_at = $4, comparison = EXCLUDED.comparison, excluded_reason = EXCLUDED.excluded_reason
      RETURNING *`,
-    [siteId, domain, JSON.stringify(comparison), runAt]
+    [siteId, domain, JSON.stringify(comparison), runAt, excludedReason]
   );
   return rows[0];
 }
@@ -39,6 +46,30 @@ export async function listCompetitorProfiles(siteId) {
          SELECT MAX(last_analyzed_at) FROM competitor_profiles WHERE site_id = $1
        )
      ORDER BY domain`,
+    [siteId]
+  );
+  return rows;
+}
+
+// Every domain ever discovered for a site, across EVERY run, not just the
+// most recent one — deliberately different scope from listCompetitorProfiles
+// above. That function exists for a leaderboard-style display ("this week's
+// competitors"), where a domain the latest LLM recall didn't happen to name
+// again should drop off. This function backs the competitor-domain SAFETY
+// policy (server/agents/lib/competitor-policy.js) instead: a domain
+// genuinely discovered as a competitor last month is still a real business
+// competitor today even if this week's non-deterministic LLM recall (capped
+// at MAX_COMPETITORS, see competitor-analysis.js) happened to name a
+// different 3-5 companies instead. Missing a real competitor because it
+// simply wasn't re-named this week is the wrong failure mode for a guard
+// whose whole purpose is to catch every configured competitor; a false
+// negative here is worse than a domain staying "active" a little longer
+// than a display-only leaderboard would show it.
+export async function listAllCompetitorDomains(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (domain) domain, excluded_reason FROM competitor_profiles
+      WHERE site_id = $1
+      ORDER BY domain, last_analyzed_at DESC NULLS LAST`,
     [siteId]
   );
   return rows;

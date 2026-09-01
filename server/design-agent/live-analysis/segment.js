@@ -79,6 +79,7 @@ function componentsOf(block) {
   if (block.cardLike) out.push({ type: 'card', classes: block.cardClasses });
   if (block.ctaText) out.push({ type: 'button', classes: block.ctaClasses });
   if (block.listClasses?.wrapper) out.push({ type: 'list', classes: block.listClasses });
+  if (block.tableLike) out.push({ type: 'table', classes: block.tableClasses });
   if (block.imageCount > 0) out.push({ type: 'imagery', classes: '' });
   return out;
 }

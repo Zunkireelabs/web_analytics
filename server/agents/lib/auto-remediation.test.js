@@ -623,6 +623,35 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
     assert.equal(result.refused, 0);
     assert.equal(result.attempted, 5);
   });
+
+  // The design-integrity gate's replacement for the human sign-off removed
+  // from validateAutoRemediationRequest (see routes/auto-remediation-toggle.
+  // test.js): design-drift.js's checkDesignIntegrityGate now runs
+  // automatically, per draft, inside backend.js/frontend.js's apply(). A
+  // confirmed role-mismatch surfaces here in the exact same
+  // no-branch-pushed/apply_error shape the two tests above already cover —
+  // and, like those, MUST be classified a refusal, not a fault. Without this
+  // classification, a real defect in a site's ONE shared design profile
+  // would fail several consecutive recommendations identically (they all
+  // check the same profile) and trip the circuit breaker, halting every
+  // OTHER, unrelated recommendation's shipping for the rest of the run —
+  // recreating, via the breaker, the exact whole-site blocking behavior
+  // removing the human sign-off gate was meant to end.
+  test('a design-integrity role-mismatch refuses that recommendation only, and does not trip the breaker', async () => {
+    applyFailureMessageOn = (type) => type === 'faq'
+      ? 'typography.body uses classes this site only ever uses for its eyebrow.'
+      : null;
+    recommendations = [
+      rec(1, { type: 'faq' }), rec(2, { type: 'faq' }), rec(3, { type: 'faq' }),
+      rec(4, { type: 'faq' }), rec(5, { type: 'faq' }), rec(6),
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, null, 'a confirmed role-mismatch is a known per-item condition, not a systemic fault');
+    assert.equal(result.refused, 5, 'all five design-invalid recommendations are refused individually');
+    assert.equal(result.shipped, 1, 'the one recommendation unaffected by the profile defect still ships and can still produce a PR');
+  });
 });
 
 // Publishing cadence for net-new content (sites.blog_min_gap_days, migration
