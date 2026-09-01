@@ -32,7 +32,18 @@ export const meta = {
   version: 1,
 };
 
-const MAX_PAGES = 20;
+// Cheap-wide half of the cost-conscious detection strategy: every check
+// below is one static fetch + cheerio parse per page (page-content.js's
+// analyzePageUrl), fully parallelized (Promise.all), with a single LLM call
+// per RUN (not per page — the narrative summary at the bottom of run()), so
+// raising this is nearly free. Was 20, which meant a full sweep of a
+// several-dozen-page blog inventory took many days via selectCandidatePages'
+// rotation — the confirmed root cause of "lots of blog posts still have
+// broken tables" (2026-09-01 audit): the detector existed and was correctly
+// wired into cron, it just could not reach most of the site in any
+// reasonable time. This is the cheap tier; visual-quality.js is the
+// expensive, narrower tier layered on top of it.
+const MAX_PAGES = 100;
 
 // Prefers a representative that's actually safe to auto-fix (so
 // recommendedAction has something real to act on), falling back to the

@@ -34,7 +34,7 @@ mock.module(resolve('./lib/recommendation-coordinator.js'), {
   },
 });
 
-const { run, meta } = await import('./visual-quality.js');
+const { run, meta, defaultCapture } = await import('./visual-quality.js');
 
 function page(url, screenshot = 'base64data') {
   return { url, pageType: 'homepage', title: 'T', blocks: [], screenshot };
@@ -47,11 +47,15 @@ describe('visual-quality agent', () => {
     assert.equal(meta.id, 'visual-quality');
   });
 
-  test('insufficient-data when the site has no configured domain', async () => {
+  // No configured domain (or nothing in page_inventory/GSC yet) means
+  // selectCandidatePages returns an empty batch — defaultCapture short-
+  // circuits to { pages: [] } without ever launching a browser, and this
+  // is exactly what a `capture` override returning no pages looks like.
+  test('insufficient-data when there are no candidate pages at all (e.g. no domain configured)', async () => {
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: null, gsc_property: null }),
-      capture: async () => { throw new Error('should not be called'); },
+      capture: async () => ({ pages: [] }),
+      analyzePage: async () => { throw new Error('should not be called'); },
     });
     assert.equal(result.status, 'insufficient-data');
   });
@@ -59,7 +63,6 @@ describe('visual-quality agent', () => {
   test('insufficient-data when no page captured a screenshot', async () => {
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [{ url: 'https://example.com/', blocks: [] }] }), // no .screenshot
     });
     assert.equal(result.status, 'insufficient-data');
@@ -69,7 +72,6 @@ describe('visual-quality agent', () => {
     visionResponse = [];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/')] }),
     });
     assert.equal(result.status, 'ok');
@@ -81,7 +83,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://not-captured.example.com/', fixType: 'duplicate-faq', description: 'x' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/')] }),
       analyzePage: async () => { throw new Error('should not be called for an ungrounded page'); },
     });
@@ -93,7 +94,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/', fixType: 'redesign-the-whole-page', description: 'x' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/')] }),
       analyzePage: async () => { throw new Error('should not be called'); },
     });
@@ -105,7 +105,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/faq', fixType: 'duplicate-faq', description: 'Two near-identical FAQ sections.' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/faq')] }),
       analyzePage: async () => ({ ok: true, analysis: { duplicateFaqRemovalHtml: '<section>dup</section>' } }),
     });
@@ -121,7 +120,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/pricing', fixType: 'malformed-table', description: 'Table looks broken.' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/pricing')] }),
       analyzePage: async () => ({ ok: true, analysis: { removableMalformedTables: [] } }), // real check disagrees
     });
@@ -136,7 +134,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/x', fixType: 'raw-text-table', description: 'y' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async () => { throw new Error('fetch failed'); },
     });
@@ -150,7 +147,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/x', fixType: 'raw-text-table', description: 'y' }];
     await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async () => ({ ok: true, analysis: { rawTextTableBlocks: [] } }),
     });
@@ -164,7 +160,6 @@ describe('visual-quality agent', () => {
     ];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async (url) => ({
         ok: true,
@@ -186,7 +181,6 @@ describe('visual-quality agent', () => {
     ];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async () => ({ ok: true, analysis: { duplicateFaqRemovalHtml: '<section>dup</section>' } }),
     });
@@ -200,7 +194,6 @@ describe('visual-quality agent', () => {
     ];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async () => ({ ok: true, analysis: {} }), // neither confirmed
     });
@@ -218,7 +211,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/pricing', fixType: 'malformed-table', description: 'Broken tables.' }];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/pricing')] }),
       analyzePage: async () => ({
         ok: true,
@@ -239,7 +231,6 @@ describe('visual-quality agent', () => {
     ];
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/a'), page('https://example.com/b')] }),
       analyzePage: async (url) => (url.endsWith('/a')
         ? { ok: true, analysis: { removableMalformedTables: [{}, {}, {}, {}, {}] } }
@@ -256,7 +247,6 @@ describe('visual-quality agent', () => {
     visionResponse = [{ page: 'https://example.com/x', fixType: 'raw-text-table', description: 'maybe a table' }];
     await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/x')] }),
       analyzePage: async () => ({ ok: true, analysis: { rawTextTableBlocks: [{ clean: false }] } }),
     });
@@ -267,12 +257,60 @@ describe('visual-quality agent', () => {
   test('a vision call failure degrades to zero candidates rather than throwing the whole agent run', async () => {
     const result = await run({
       siteId: 1,
-      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
       capture: async () => ({ pages: [page('https://example.com/')] }),
       // callLLMWithImages is mocked at module scope; simulate a bad/unparseable response instead
     });
     // visionResponse defaults to [] via beforeEach, and callLLMWithImages stringifies it -> extractJson parses []
     assert.equal(result.status, 'ok');
     assert.equal(result.facts.findings.length, 0);
+  });
+});
+
+// The actual bug fixed 2026-09-01: capture.js's discoverPages() re-crawls
+// the homepage's own links every run and deterministically picks the first
+// URL per page type, so this agent had been vision-auditing the exact same
+// ~8 pages forever — every other page on a site never got checked, no
+// matter how many days passed. defaultCapture (this file's `capture` seam's
+// real implementation) replaces that with the same rotation ledger
+// (agent_page_rotation) every other page-level agent already shares.
+describe('defaultCapture', () => {
+  test('selects THIS agent\'s own rotation candidates, under its own agentId, and passes them straight to capturePages', async () => {
+    const selectCalls = [];
+    const capturePageCalls = [];
+    await defaultCapture(7, {
+      start: '2026-08-01', end: '2026-08-31',
+      selectCandidates: async (siteId, agentId, opts) => {
+        selectCalls.push({ siteId, agentId, opts });
+        return { batch: ['https://example.com/a', 'https://example.com/b'], impressionsByPage: new Map() };
+      },
+      capturePages: async (urls, opts) => { capturePageCalls.push({ urls, opts }); return { pages: [page(urls[0])] }; },
+      mark: async () => {},
+    });
+    assert.equal(selectCalls.length, 1);
+    assert.equal(selectCalls[0].siteId, 7);
+    assert.equal(selectCalls[0].agentId, 'visual-quality', 'must rotate independently of content-integrity\'s own rotation position');
+    assert.equal(selectCalls[0].opts.start, '2026-08-01');
+    assert.deepEqual(capturePageCalls[0].urls, ['https://example.com/a', 'https://example.com/b']);
+  });
+
+  test('advances the rotation ledger for exactly the pages selected, so tomorrow\'s run picks up where today left off', async () => {
+    const markCalls = [];
+    await defaultCapture(7, {
+      selectCandidates: async () => ({ batch: ['https://example.com/a'], impressionsByPage: new Map() }),
+      capturePages: async () => ({ pages: [] }),
+      mark: async (siteId, agentId, batch) => markCalls.push({ siteId, agentId, batch }),
+    });
+    assert.deepEqual(markCalls, [{ siteId: 7, agentId: 'visual-quality', batch: ['https://example.com/a'] }]);
+  });
+
+  test('no candidate pages (empty rotation batch) short-circuits without ever launching a browser', async () => {
+    let captured = false;
+    const result = await defaultCapture(7, {
+      selectCandidates: async () => ({ batch: [], impressionsByPage: new Map() }),
+      capturePages: async () => { captured = true; return { pages: [] }; },
+      mark: async () => { throw new Error('must not mark an empty batch'); },
+    });
+    assert.deepEqual(result, { pages: [] });
+    assert.equal(captured, false);
   });
 });
