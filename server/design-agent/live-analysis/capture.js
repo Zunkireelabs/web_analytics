@@ -227,6 +227,19 @@ function extractBlocksInPage() {
     const cardInner = card?.querySelector(':scope > *') || null;
     const list = el.querySelector('ul, ol');
     const listItem = list?.querySelector('li') || null;
+    // A real <table> already on the tenant's own site — the one component
+    // capture.js never looked for before, which is why table repair had
+    // nothing tenant-specific to imitate and fell back to bare, unstyled
+    // markup (content-integrity-repair.js's old buildTableHtml). headerCell
+    // is read from <thead> when present, falling back to the first row's own
+    // cells (many real sites style their first row as the header without a
+    // literal <thead>). bodyRow prefers a <tbody> row over the header row so
+    // the two slots don't collapse into the same class string on a table
+    // whose header and body rows are actually styled differently.
+    const table = el.querySelector('table');
+    const tableHeaderCell = table?.querySelector('thead th, thead td, tr:first-child th, tr:first-child td') || null;
+    const tableBodyRow = table?.querySelector('tbody tr, tr:nth-child(2)') || null;
+    const tableBodyCell = tableBodyRow?.querySelector('td, th') || null;
     const cs = window.getComputedStyle(el);
     blocks.push({
       order: order++,
@@ -258,6 +271,11 @@ function extractBlocksInPage() {
       cardLike: !!card,
       cardClasses: { wrapper: classesOf(card), body: classesOf(cardInner) },
       listClasses: { wrapper: classesOf(list), item: classesOf(listItem) },
+      tableLike: !!table,
+      tableClasses: {
+        wrapper: classesOf(table), headerCell: classesOf(tableHeaderCell),
+        row: classesOf(tableBodyRow), cell: classesOf(tableBodyCell),
+      },
       linkClasses: classesOf(pickLink(el)),
     });
   }

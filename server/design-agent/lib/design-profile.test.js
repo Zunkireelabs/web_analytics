@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   validateDesignProfile, isProfileUsable, projectComponentTemplate,
   projectAllComponentTemplates, projectableActionTypes, stampDesignProfile,
-  projectCta, projectCard, projectPageWrapper,
+  projectCta, projectCard, projectTable, projectPageWrapper,
   DESIGN_PROFILE_VERSION,
 } from './design-profile.js';
 import { validatePlaceholders } from '../../implementers/lib/design-drift.js';
@@ -304,6 +304,69 @@ describe('content-block projections for markdown renderers', () => {
       // card, so it is the wrong fixture for the no-pattern case.
       assert.equal(projectCard(PLAIN_PROFILE, { heading: 'H', body: 'B' }), null);
       assert.equal(projectCard(null, { heading: 'H', body: 'B' }), null);
+    });
+  });
+
+  // The table-capture gap: no tenant site ever had its tables captured
+  // before this, so before projectTable existed, table repair had nothing
+  // per-tenant to draw from at all (server/generators/content-integrity-
+  // repair.js always emitted bare <table><thead><th>, no matter the site).
+  describe('projectTable', () => {
+    const WITH_REAL_TABLE = {
+      ...TAILWIND_PROFILE,
+      components: {
+        ...TAILWIND_PROFILE.components,
+        table: { wrapper: 'w-full acme-table', headerCell: 'acme-th', row: 'acme-row', cell: 'acme-td' },
+      },
+    };
+    const WITH_COLOR_TOKENS = {
+      ...TAILWIND_PROFILE,
+      color: { ...TAILWIND_PROFILE.color, border: 'border-gray-200', surface: 'bg-gray-50' },
+    };
+
+    test('imitates a REAL table pattern already captured on this site, verbatim', () => {
+      const styles = projectTable(WITH_REAL_TABLE);
+      assert.equal(styles.tableClass, 'w-full acme-table');
+      assert.equal(styles.headerCellClass, 'acme-th');
+      assert.equal(styles.rowClass, 'acme-row');
+      assert.equal(styles.cellClass, 'acme-td');
+    });
+
+    test('a real pattern always wins over token composition, even when both are present', () => {
+      const both = { ...WITH_REAL_TABLE, color: WITH_COLOR_TOKENS.color };
+      assert.equal(projectTable(both).tableClass, 'w-full acme-table');
+    });
+
+    test('with NO real table, composes a structural skeleton from this site\'s own typography/color tokens', () => {
+      const styles = projectTable(WITH_COLOR_TOKENS);
+      assert.match(styles.headerCellClass, /text-lg font-medium text-gray-900/, 'header cell uses the site\'s own item-heading typography');
+      assert.match(styles.headerCellClass, /bg-gray-50/, 'header row separated using the site\'s own real surface color');
+      assert.match(styles.cellClass, /text-gray-600 leading-relaxed/, 'body cells use the site\'s own real body typography');
+      assert.match(styles.rowClass, /border-b/);
+      assert.match(styles.rowClass, /border-gray-200/, 'row divider uses the site\'s own real border color');
+    });
+
+    test('two sites with different tokens get visibly different tables — never one shared cross-tenant look', () => {
+      const other = {
+        ...TAILWIND_PROFILE,
+        typography: { ...TAILWIND_PROFILE.typography, body: 'font-serif text-stone-800' },
+        color: { border: 'border-stone-300', surface: 'bg-stone-100' },
+      };
+      const a = projectTable(WITH_COLOR_TOKENS);
+      const b = projectTable(other);
+      assert.notEqual(a.cellClass, b.cellClass);
+      assert.notEqual(a.rowClass, b.rowClass);
+    });
+
+    test('with no border/surface tokens, still composes from whatever real tokens DO exist — no invented color', () => {
+      const styles = projectTable(TAILWIND_PROFILE); // no color.border/surface in this fixture
+      assert.equal(styles.rowClass, '', 'no border token observed means no border class — never a guessed one');
+      assert.doesNotMatch(styles.headerCellClass, /gray-50|bg-/, 'no surface token observed means none invented');
+    });
+
+    test('returns null with no base typography and no real table — nothing safe to build from', () => {
+      assert.equal(projectTable({ components: {} }), null);
+      assert.equal(projectTable(null), null);
     });
   });
 
