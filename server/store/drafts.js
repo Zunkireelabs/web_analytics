@@ -742,17 +742,53 @@ export async function getDraftedFindingIds(siteId) {
 //
 // Windowed to 30 days so a finding that failed repeatedly months ago, under
 // long-since-changed code, is not retired forever on that evidence.
+// Reasons that must NEVER count. Each is a real, observed abandon reason that
+// says nothing about whether the ITEM can be fixed — counting any of them
+// retires findings that have nothing wrong with them.
+//
+// The list is deliberately explicit rather than clever. It grew from a
+// concrete failure: on 2026-09-01 the two analytics findings were held at 15
+// and 12 attempts, having been fixed in the meantime — 19 of those 27 were
+// "No markers configured", a config gap a human had since closed. The cap
+// would have permanently suppressed the very work that was now ready to ship.
+const UNCOUNTED_ABANDON_REASONS = [
+  // A human closed the PR, or the work was replaced. The draft was fine; the
+  // decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
+  "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')",
+  // Transient by definition.
+  "abandoned_reason NOT ILIKE '%rate limit%'",
+  // The batch's ONE shared push/PR failed, which fails every pending item at
+  // once regardless of content. Its text is sanitized, so it does not match
+  // the rate-limit filter even when a rate limit was the true cause.
+  "abandoned_reason NOT LIKE 'Batch push/PR failed%'",
+  // Same-day batch branch diverged from the default branch — infrastructure,
+  // and self-healing: the branch is date-keyed, so tomorrow forks fresh.
+  "abandoned_reason NOT LIKE '%batch branch%diverged%'",
+  // Bookkeeping, not verdicts: a draft-state reset (lib/draft-ship-state.js)
+  // or a recovery script rescuing a stranded row.
+  "abandoned_reason NOT LIKE 'Stuck at \"%'",
+  "abandoned_reason NOT LIKE 'Recovered:%'",
+  // CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
+  // never "this item is unfixable" — and the moment that config lands, the
+  // item must become eligible again immediately rather than staying retired
+  // on the strength of failures whose cause is gone.
+  "abandoned_reason NOT LIKE '%No markers configured%'",
+  "abandoned_reason NOT LIKE '%No url_file_map entry matches%'",
+  "abandoned_reason NOT LIKE '%unverified placeholder field%'",
+];
+
 export async function countFailedAttemptsByFinding(siteId) {
+  // The first entry is an IN (…) exclusion, the rest are already-negated
+  // NOT LIKEs — assembled here so each reason keeps its own comment above.
+  const [inClause, ...notLikes] = UNCOUNTED_ABANDON_REASONS;
   const { rows } = await query(
     `SELECT finding_id, COUNT(*)::int AS attempts
        FROM drafts
       WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
         AND abandoned_reason IS NOT NULL
         AND abandoned_at > now() - interval '30 days'
-        AND abandoned_reason NOT IN ('pr_closed_without_merge', 'superseded')
-        AND abandoned_reason NOT ILIKE '%rate limit%'
-        AND abandoned_reason NOT LIKE 'Batch push/PR failed%'
-        AND abandoned_reason NOT LIKE 'Stuck at "%'
+        AND NOT (${inClause})
+        AND ${notLikes.join('\n        AND ')}
       GROUP BY finding_id`,
     [siteId]
   );
