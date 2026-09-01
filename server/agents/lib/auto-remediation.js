@@ -1,8 +1,8 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
+import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
-import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr } from '../../routes/action-center.js';
+import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
@@ -554,7 +554,53 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   }
 
   const submitted = await submitDraftForApproval(siteId, draft.id);
-  if (!submitted) throw new Error('Draft was not in a submittable state');
+  if (!submitted) {
+    // generateDraft is idempotent per finding (see its own comment): it
+    // returns the EXISTING draft rather than billing a second LLM call. That
+    // draft can legitimately be past 'draft'/'edited', and
+    // submitDraftForApproval only moves those two — so it returns null and
+    // this used to throw a generic failure.
+    //
+    // That failure was structural, not incidental. recordApplyFailure
+    // deliberately leaves a draft at 'approved' with an apply_error so the
+    // "Push Branch" button stays retryable, and getDraftedFindingIds
+    // deliberately treats an unresolved apply_error as "not handled" so the
+    // finding reopens. Together those two correct behaviors mean the
+    // unattended loop re-picks the finding every run, gets the same stuck
+    // draft back, fails to submit it, and reports a FAILURE that feeds
+    // CONSECUTIVE_FAILURE_LIMIT — five of those halt the site's whole run.
+    // Live on site 1: 8 expand-content drafts stuck at 'approved' since
+    // 2026-08-28, 19 recorded failures, and a retry path that could never
+    // converge because nothing ever re-ran apply().
+    //
+    // So resume from where the draft actually IS instead of insisting it
+    // start over. This is the same recovery the UI already offers by hand,
+    // reusing that exact function rather than a second implementation.
+    const current = await getDraft(siteId, draft.id);
+    if (current?.status === 'approved') {
+      // Re-run apply() — the step that actually failed. The content is
+      // already generated, Quality-Gated and approved; regenerating it would
+      // spend another model call to arrive at the same draft.
+      return await pushDraftBranch(siteId, draft.id);
+    }
+    if (current?.status === 'branch_pushed') {
+      // Already applied; only the shared PR step is outstanding, which the
+      // caller's finalizeBatchPr does for the whole batch. Nothing to redo.
+      return current;
+    }
+    // Any other non-submittable state is a genuinely stuck row, and the
+    // repo's own recorded lesson for this code applies: never leave a
+    // partially-failed draft sitting in a non-terminal status. Abandon it so
+    // the next run generates a clean one, and report a REFUSAL rather than a
+    // failure — this is one item's state problem, not evidence the pipeline
+    // is broken, and must not trip the circuit breaker.
+    await markDraftAbandoned(siteId, draft.id, `Stuck at "${current?.status || 'unknown'}" and not resumable — abandoned so a fresh draft can be generated.`, null)
+      .catch((err) => console.error(`[auto-remediation] could not abandon unresumable draft ${draft.id}:`, err.message));
+    const err = new Error(`Draft was stuck at "${current?.status || 'unknown'}" and has been reset for a fresh attempt.`);
+    err.refusal = true;
+    err.reason = 'draft-reset';
+    throw err;
+  }
 
   const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
   if (!approved.branch_name) {

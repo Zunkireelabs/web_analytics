@@ -18,6 +18,10 @@ let site;
 let spentToday;
 let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
+// When set, submitDraftForApproval refuses (as it really does for any status
+// outside 'draft'/'edited') and getDraft reports this status — the shape a
+// draft left stranded by an earlier failed apply() actually has.
+let stuckDraftStatus;
 let failedAttempts; // Map(finding_id -> prior failed attempts), for the convergence cap
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
@@ -53,6 +57,8 @@ function reset() {
   calls.batchFinalizeCalls = [];
   calls.abandoned = [];
   calls.retryable = [];
+  calls.branchPushRetries = [];
+  stuckDraftStatus = null;
   failedAttempts = new Map();
   finalizeBatchFails = false;
   finalizeBatchRateLimited = false;
@@ -89,7 +95,8 @@ mock.module(resolve('../../store/drafts.js'), {
     getPendingDraftFilePaths: async () => pendingDraftFilePaths,
     countDraftsBySourceToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
-    submitDraftForApproval: async (siteId, draftId) => ({ id: draftId }),
+    submitDraftForApproval: async (siteId, draftId) => (stuckDraftStatus ? null : { id: draftId }),
+    getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft' }),
     updateDraft: async () => null,
     markDraftAbandoned: async (siteId, draftId, reason) => { calls.abandoned.push({ draftId, reason }); },
     // The retryable-in-place counterpart: records the failure without
@@ -162,6 +169,12 @@ mock.module(resolve('../../routes/action-center.js'), {
       return approveOpensPr
         ? { id: draftId, branch_name: `auto/${draftId}`, pr_number: 47 }
         : { id: draftId, branch_name: `auto/${draftId}` };
+    },
+    // The manual "Push Branch" retry the unattended path now reuses to
+    // resume a draft stranded at 'approved' by a failed apply().
+    pushDraftBranch: async (siteId, draftId) => {
+      calls.branchPushRetries.push(draftId);
+      return { id: draftId, branch_name: `retry/${draftId}` };
     },
     openDraftPr: async (siteId, draftId) => {
       calls.prsOpened.push(draftId);
@@ -734,6 +747,69 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
 // Proves the cap is actually WIRED into the run, not merely unit-tested in
 // ship-pacing.js: without this, a correct rule that nothing calls would look
 // exactly like a working one.
+// The loop that could never converge, found while auditing why only ~32 of a
+// possible 60 ship per day.
+//
+// generateDraft is idempotent per finding, so a retry gets the EXISTING draft
+// back. recordApplyFailure deliberately parks a draft at 'approved' with an
+// apply_error so "Push Branch" stays retryable, and getDraftedFindingIds
+// deliberately treats an unresolved apply_error as "not handled" so the
+// finding reopens. Both are correct alone; together they meant the unattended
+// loop re-picked the finding every run, got the stuck draft, failed to submit
+// it, and recorded a FAILURE — five of which halt the site's entire run.
+// Live on site 1: 8 expand-content drafts stuck since 2026-08-28, 19 failures,
+// and nothing ever re-ran the apply() that had actually failed.
+describe('autoRemediateSafeRecommendations — resuming a stranded draft', () => {
+  beforeEach(reset);
+
+  test("a draft stranded at 'approved' resumes by re-running apply, not by regenerating", async () => {
+    stuckDraftStatus = 'approved';
+    recommendations = [rec(1)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.branchPushRetries, ['d-f1'], 'reuses the same retry the UI offers by hand');
+    assert.equal(result.shipped, 1, 'it ships — this is work that was being thrown away every run');
+    assert.equal(result.failed, 0, 'and is never counted as a failure that could trip the breaker');
+  });
+
+  test("a draft already at 'branch_pushed' needs no work — the batch PR step covers it", async () => {
+    stuckDraftStatus = 'branch_pushed';
+    recommendations = [rec(1)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.branchPushRetries, [], 'apply already succeeded; re-running it would be wasted work');
+    assert.equal(result.shipped, 1);
+  });
+
+  // The repo's own recorded lesson for this file: never leave a
+  // partially-failed draft sitting in a non-terminal status.
+  test('any other stuck state is abandoned for a clean retry, and reported as a refusal not a failure', async () => {
+    stuckDraftStatus = 'revision_requested';
+    recommendations = [rec(1)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1'], 'reset so the next run can generate a clean draft');
+    // Counted as a refusal, not a fault. (`failed` deliberately counts
+    // refusals too, so a run never overstates what landed — see
+    // "refusals are still counted in failed" above; what matters here is
+    // that it does NOT feed the circuit breaker.)
+    assert.equal(result.refused, 1, 'one item\'s state problem is not evidence the pipeline is broken');
+  });
+
+  test('a stranded draft does not trip the circuit breaker, however many there are', async () => {
+    stuckDraftStatus = 'revision_requested';
+    recommendations = [rec(1), rec(2), rec(3), rec(4), rec(5), rec(6), rec(7)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.notEqual(result.stoppedReason, 'circuit-breaker', 'seven stranded drafts must not look like a systemic fault');
+    assert.equal(result.refused, 7, 'every one is attempted and reset, none halts the run');
+  });
+});
+
 describe('autoRemediateSafeRecommendations — convergence cap', () => {
   beforeEach(reset);
 
