@@ -47,6 +47,24 @@ mock.module(resolve('../ingest/competitor-providers/serpapi.js'), {
   },
 });
 
+// Competitor filtering itself (real domain matching, tenant isolation) is
+// covered end-to-end against a real DB in agents/lib/competitor-policy.test.js
+// and generators/lib/outbound-link-guard.test.js. This file stays DB-free by
+// design (see the module comment above), so filterCompetitorCandidates is
+// mocked here — the point of the tests below is only to prove expand-
+// content.js actually CALLS the filter, BEFORE building the prompt, and
+// respects its result; not to re-prove the filter's own domain logic.
+let filterImpl = async (items) => ({ allowed: items, removed: [] }); // default: pass everything through
+let lastFilterCall = null;
+mock.module(resolve('../agents/lib/competitor-policy.js'), {
+  namedExports: {
+    filterCompetitorCandidates: async (items, siteId) => {
+      lastFilterCall = { items, siteId };
+      return filterImpl(items, siteId);
+    },
+  },
+});
+
 const { generate } = await import('./expand-content.js');
 const { _resetQuotaForTests } = await import('../ingest/search-grounding-providers/tavily.js');
 
@@ -215,6 +233,46 @@ describe('expand-content generator — external-citations, real path through Tav
         },
       );
     } finally { globalThis.fetch = original; }
+  });
+
+  test('competitor filtering runs BEFORE the model sees candidates: a filtered-out source never reaches the prompt, an allowed one does', async () => {
+    const original = globalThis.fetch;
+    _resetQuotaForTests();
+    lastLlmCall = null;
+    lastFilterCall = null;
+    // Simulate the filter removing one of Tavily's raw results as a
+    // configured competitor — the LLM must only ever see what the filter
+    // allowed through.
+    filterImpl = async (items) => ({
+      allowed: items.filter((i) => !i.url.includes('competitor-example.com')),
+      removed: items.filter((i) => i.url.includes('competitor-example.com')),
+    });
+    const { fn } = mockFetch({
+      tavilyBody: {
+        results: [
+          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real excerpt.' },
+          { title: 'Competitor Result', url: 'https://competitor-example.com/best-companies', content: 'A competing company profile.' },
+        ],
+      },
+    });
+    globalThis.fetch = fn;
+    try {
+      await generate({ siteId: 42, params: { page: PAGE_URL, query: 'renewable energy policy', focus: 'external-citations' } });
+
+      assert.ok(lastFilterCall, 'filterCompetitorCandidates must have been called');
+      assert.equal(lastFilterCall.siteId, 42, 'must filter using THIS generation call\'s siteId, never a hardcoded one');
+      assert.ok(
+        lastFilterCall.items.some((i) => i.url.includes('competitor-example.com')),
+        'the filter must see the competitor result too — filtering happens inside the call, not by never fetching it',
+      );
+
+      assert.ok(lastLlmCall, 'LLM must have been called');
+      assert.doesNotMatch(lastLlmCall.user, /competitor-example\.com/, 'a filtered-out competitor URL must never reach the model prompt');
+      assert.match(lastLlmCall.user, /real-source\.example\.com/, 'a non-competitor source must still reach the model prompt');
+    } finally {
+      globalThis.fetch = original;
+      filterImpl = async (items) => ({ allowed: items, removed: [] });
+    }
   });
 
   // The strict daily cap itself (TAVILY_MAX_QUERIES_PER_DAY) is a
