@@ -239,7 +239,12 @@ export async function run({ siteId, start, end }) {
   // in the real ID (see generators/analytics-install.js).
   const TRACKER_CHECKS = [
     { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', trackingId: site.ga4_measurement_id || null, whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
-    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
+    // Was hardcoded null until migration 135 gave it a column — which is why
+    // this check could never complete and became site 1's worst repeat
+    // offender (15 failed attempts). analytics-install validates the shape
+    // itself (/^\d{10,20}$/), so a wrong value refuses at the placeholder
+    // gate exactly as before rather than shipping a bad script.
+    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: site.facebook_pixel_id || null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
   ];
   // trackerAbsenceIsProvable gates the whole check: these two findings assert
   // a NEGATIVE ("no GA4 on this page"), and site-trackers.js can only read

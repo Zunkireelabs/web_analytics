@@ -1,0 +1,18 @@
+-- The site's real Meta/Facebook Pixel ID (a 10-20 digit number), the exact
+-- counterpart to ga4_measurement_id (migration 130) and needed for the same
+-- reason: analytics-install (server/generators/analytics-install.js) can only
+-- draft a real install script when it has the site's own tracking ID.
+--
+-- Without this column, agents/trust-compliance.js had to hardcode the Pixel
+-- check's trackingId to null, so every draft it produced carried an unfilled
+-- placeholder, refused at the placeholder gate, and reopened for the next run
+-- — making `trust-compliance:facebook-pixel:missing` site 1's single worst
+-- repeat offender at 15 failed attempts, each spending a generation call to
+-- reach the identical refusal.
+--
+-- Nullable with no default and no backfill, which is the honest state for
+-- every existing site: a Pixel ID cannot be derived or guessed, only supplied
+-- by whoever owns the ad account. trust-compliance.js files the missing-Pixel
+-- finding only once this is set (see trackerCheckIsActionable there), so a
+-- site that never fills it in is simply never nagged about it.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS facebook_pixel_id TEXT;
