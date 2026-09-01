@@ -41,6 +41,9 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2')) {
     return { rows: insertDraftConflict ? [insertDraftConflict] : [] };
   }
+  if (sql.startsWith('SELECT finding_id, COUNT(*)::int AS attempts')) {
+    return { rows: [{ finding_id: 'f1', attempts: 4 }] };
+  }
   throw new Error(`drafts.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -218,5 +221,64 @@ describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
     assert.doesNotMatch(q.sql, /status = 'implemented'/);
     assert.match(q.sql, /status <> 'abandoned'/);
     assert.match(q.sql, /rolled_back_at IS NULL/);
+  });
+});
+
+// The convergence cap must only count failures that mean "this ITEM cannot be
+// fixed". Counting anything else retires findings that have nothing wrong with
+// them — which happened for real: on 2026-09-01 the two analytics findings sat
+// at 15 and 12 attempts and were therefore held, even though both were by then
+// ready to ship. 19 of those 27 were "No markers configured", a config gap a
+// human had already closed. The cap would have permanently suppressed exactly
+// the work that had just been made possible.
+describe('countFailedAttemptsByFinding — what must never count as an item failure', () => {
+  beforeEach(() => { issued = []; });
+
+  const sqlFor = async () => {
+    const { countFailedAttemptsByFinding } = await import('./drafts.js');
+    await countFailedAttemptsByFinding(1);
+    return issued.at(-1).sql;
+  };
+
+  test('config gaps a human can close are excluded — the item becomes eligible the moment they do', async () => {
+    const sql = await sqlFor();
+    assert.match(sql, /No markers configured/);
+    assert.match(sql, /No url_file_map entry matches/);
+  });
+
+  // The opposite of the case above: this one recurs identically FOREVER
+  // unless a human hand-edits the draft (trust-compliance.js files the
+  // finding specifically so they can) — no config change ever resolves it on
+  // its own. That IS the per-item "cannot be auto-completed" signal the
+  // convergence cap exists to catch, so — unlike the two config gaps above —
+  // it counts.
+  test('an unverified-placeholder failure DOES count — nothing resolves it automatically', async () => {
+    const sql = await sqlFor();
+    assert.doesNotMatch(sql, /unverified placeholder field/);
+  });
+
+  test('human decisions and bookkeeping are excluded — neither is a verdict on the item', async () => {
+    const sql = await sqlFor();
+    assert.match(sql, /pr_closed_without_merge/);
+    assert.match(sql, /sent_back_to_recommendations/);
+    assert.match(sql, /Recovered:/);
+    assert.match(sql, /Stuck at/);
+  });
+
+  test('infrastructure failures that hit every pending item at once are excluded', async () => {
+    const sql = await sqlFor();
+    assert.match(sql, /rate limit/);
+    assert.match(sql, /Batch push\/PR failed/);
+    assert.match(sql, /batch branch.*diverged/);
+  });
+
+  test('the count is windowed, so long-dead failures under changed code do not retire a finding forever', async () => {
+    assert.match(await sqlFor(), /abandoned_at > now\(\) - interval '30 days'/);
+  });
+
+  test('returns a Map of finding_id -> attempts', async () => {
+    const { countFailedAttemptsByFinding } = await import('./drafts.js');
+    const m = await countFailedAttemptsByFinding(1);
+    assert.equal(m.get('f1'), 4);
   });
 });

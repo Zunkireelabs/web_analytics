@@ -326,6 +326,18 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
       // and findPortableRepairs' failed_reuse_count = 0 rule disqualifies it
       // from cross-client reuse after even one.
       console.warn(`[learned-repair] site ${siteId} could not apply memory #${chosen.id} to "${item.tag}", leaving it for the Action Center:`, err.message);
+      // ITEM-STATE refusals ('awaiting-human-review': a person is mid-review
+      // of this exact draft; 'draft-reset': a stranded row was reset for a
+      // clean retry — see auto-remediation.js's draftShipState handling) say
+      // nothing about whether this MEMORY's repair is portable. They are
+      // plumbing/state noise on the target site, not a defect in the
+      // borrowed pattern. Recording them as a genuine 'failure' would
+      // penalize a real, working repair for hitting someone else's mid-review
+      // draft — two of these flip the memory to flagged_for_review and
+      // disqualify it from further cross-client reuse for a reason that has
+      // nothing to do with the repair itself.
+      const isItemStateRefusal = err.reason === 'awaiting-human-review' || err.reason === 'draft-reset';
+      if (isItemStateRefusal) continue;
       // reuse_history is persisted (agent_fix_memory), not just logged — the
       // raw exception text stops at the console.warn above. sanitizeForCustomer
       // is the same persistence-boundary net server/lib/errors.js already

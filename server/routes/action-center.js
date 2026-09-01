@@ -6,6 +6,10 @@ import { buildRecommendations } from '../agents/lib/recommendations.js';
 import { repairSiteTemplates } from '../agents/lib/template-repair.js';
 import { syncFromGrounded, getRecommendations, recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation.js';
+// Its own module, not auto-remediation.js's export, because this file and
+// auto-remediation.js already import each other — see ship-pacing.js.
+import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
+import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
 import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
@@ -34,7 +38,7 @@ import { resolveImplementerForApply, resolveImplementerForMerge } from '../imple
 import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
-import { getFileContent, getPullRequest } from '../github/client.js';
+import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
 import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
@@ -909,7 +913,7 @@ export function autoSelectMetaTitle(generatorId, content) {
   return { ...content, selectedTitle: content.titles[0] };
 }
 
-async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false }) {
+async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false, batchBranch = null }) {
   const jobRec = await addJobRecommendation(jobId, rec.id);
   try {
     const draft = await generateDraft(siteId, {
@@ -929,10 +933,67 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false 
     // as success instead, and let the stale `recommendations` row close out
     // via its normal getDraftedFindingIds-based reopening rather than
     // retrying it every run.
-    if (draft.status !== 'draft' && draft.status !== 'edited') {
+    // ...but "not submittable" is not one condition, it is three, and
+    // collapsing them into "already shipped" reported work as landed that
+    // never reached GitHub. A draft stranded at 'approved' by a failed
+    // apply() has no branch and no PR; calling that shipped is the one
+    // outcome worse than calling it failed. See lib/draft-ship-state.js for
+    // the measured case (8 expand-content drafts stuck since 2026-08-28).
+    // A 'branch_pushed' draft's commit is live either on the given batch
+    // branch, OR — when this call is a single, non-batched ship
+    // (approveAndShipRecommendation's deferPr:false path, never wrapped in a
+    // beginBatchPush) — on the draft's OWN branch, since a non-batched
+    // apply() moves the real ref directly with no overlay involved. Without
+    // this, a single-click "approve and ship" resuming a genuinely-pushed
+    // draft saw currentBatchBranch: null, was misclassified STRANDED, and was
+    // abandoned — discarding real, already-shipped work.
+    const liveBranch = deferPr ? batchBranch : draft.branch_name;
+    const shipState = draftShipState(draft, { currentBatchBranch: liveBranch });
+    if (shipState === SHIP_STATE.HUMAN_OWNED) {
+      // A person submitted this and is reviewing it. Never ship it out from
+      // under them, and never reset it — just report it honestly and leave it.
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: `Draft #${draft.id} is awaiting human review ("${draft.status}") — left untouched.` });
+      return { ok: false };
+    }
+    if (shipState === SHIP_STATE.SHIPPED) {
       await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: draft.id });
       await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
       return { ok: true, draft, alreadyShipped: true };
+    }
+    if (shipState === SHIP_STATE.AWAITING_PR) {
+      if (!deferPr) {
+        // Non-batched single ship: no finalizeBatchPr call is ever coming for
+        // this one, so open its PR directly rather than marking it
+        // 'submitted' and leaving it waiting on a batch step that will never
+        // run — the exact "commit permanently PR-less" outcome this branch
+        // exists to avoid, just via a different route for the unbatched path.
+        const opened = await openDraftPr(siteId, draft.id);
+        await updateJobRecommendationStatus(jobRec.id, 'approved', { draftId: opened.id });
+        await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'shipped' });
+        return { ok: true, draft: opened, alreadyShipped: true };
+      }
+      // Batched: a real commit exists but its PR was never opened. Hand it to
+      // the batch's pending list so finalizeBatchPr covers it, instead of
+      // declaring it done and leaving the commit permanently PR-less.
+      await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: draft.id });
+      return { ok: true, draft, jobRecId: jobRec.id, pendingPr: deferPr };
+    }
+    if (shipState === SHIP_STATE.RESUME_APPLY) {
+      // Re-run only the step that failed. The content is already generated
+      // and Quality-Gated; regenerating would spend another model call to
+      // arrive at the same draft.
+      const pushed = await pushDraftBranch(siteId, draft.id);
+      await updateJobRecommendationStatus(jobRec.id, 'submitted', { draftId: pushed.id });
+      return { ok: true, draft: pushed, jobRecId: jobRec.id, pendingPr: deferPr };
+    }
+    if (shipState === SHIP_STATE.STRANDED) {
+      // Never leave a partially-failed draft in a non-terminal status (this
+      // repo's own recorded lesson for these paths). Reset it so the next run
+      // generates a clean one, and report an honest failure — not a ship.
+      await markDraftAbandoned(siteId, draft.id, `Stuck at "${draft.status}" and not resumable — abandoned so a fresh draft can be generated.`, null)
+        .catch((err) => console.error(`[action-center] could not abandon unresumable draft ${draft.id}:`, err.message));
+      await updateJobRecommendationStatus(jobRec.id, 'failed', { error: `Draft was stuck at "${draft.status}" and has been reset for a fresh attempt.` });
+      return { ok: false };
     }
 
     const autoSelected = autoSelectMetaTitle(rec.recommendation_type, draft.content);
@@ -1018,7 +1079,7 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false 
 // otherwise permanently hide its recommendation from future runs.
 export async function finalizeBatchPr(site, branchName, draftIds) {
   const pushResult = await endBatchPush(site, branchName);
-  if (!pushResult.ok) return { ok: false, error: pushResult.error };
+  if (!pushResult.ok) return { ok: false, error: pushResult.error, rateLimited: pushResult.rateLimited === true };
   if (pushResult.pushed === 0 || draftIds.length === 0) {
     return { ok: true, pushed: 0, prNumber: null, prUrl: null };
   }
@@ -1031,7 +1092,10 @@ export async function finalizeBatchPr(site, branchName, draftIds) {
     }
     return { ok: true, pushed: pushResult.pushed, prNumber, prUrl };
   } catch (err) {
-    return { ok: false, error: err.message };
+    // Both failure paths out of this function report `rateLimited`, so the
+    // batch's caller can decide between "leave these re-attemptable" and
+    // "abandon them" on evidence rather than on the error string.
+    return { ok: false, error: err.message, rateLimited: err.rateLimited === true };
   }
 }
 
@@ -1067,16 +1131,44 @@ export const SAFE_FIX_BATCH_LIMIT = 60;
 // doesn't stop the rest; the job's final branch/PR reflect whatever the
 // last successful item produced (they all share the same batch branch/PR).
 export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
-  const [recs, site, pendingDraftFilePaths] = await Promise.all([
-    listOpenSafeRecommendations(siteId, limit),
+  // Over-fetch, THEN trim, then take `limit`. Selecting exactly `limit` rows
+  // first and pacing them afterwards means every held item silently consumes
+  // a slot: a site whose top 60 contain 28 blog-outline candidates would ship
+  // 33 fixes instead of 60, and the operator would see only that fewer things
+  // shipped. auto-remediation.js applies both rules BEFORE its daily budget
+  // for exactly this reason. 4x covers a batch that is overwhelmingly one
+  // paced generator while keeping the query bounded.
+  const [selected, site, pendingDraftFilePaths] = await Promise.all([
+    listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
   ]);
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
+
+  // The same two candidate rules the unattended path applies (ship-pacing.js).
+  // Both were missing here, and this is the path that actually carries the
+  // volume: three bulk runs on 2026-09-01 drafted 61 blog-outlines and opened
+  // one PR with 42 net-new blog posts, while the cron path beside it was
+  // correctly taking one per run. Clicking "Execute Safe Fixes" is a request
+  // to ship a batch of FIXES — it was never a decision to publish that much
+  // net-new content at once, nor to re-attempt findings that have already
+  // failed the same way three times.
+  //
+  // Held items are logged to the job, not silently dropped, so the operator
+  // can see exactly what was deferred and why — the same discipline the
+  // daily budget's own truncation already follows.
+  const { paced, notes: pacingNotes } = await applyPacing(site, selected);
+  const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  for (const note of [...pacingNotes, ...convergenceNotes]) await appendJobLog(job.id, note);
+  // `limit` is applied last, so it bounds what actually SHIPS rather than what
+  // was merely considered.
+  const recs = converged.slice(0, limit);
+
   if (recs.length === 0) {
     return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
   }
-  await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution.`);
+  const heldCount = Math.min(selected.length, limit) - recs.length;
+  await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution${heldCount > 0 ? ` (${heldCount} held by pacing/convergence rules)` : ''}.`);
 
   // Batch the git push: every item below runs with deferPr, so its commit
   // is created but the branch ref doesn't move and no PR opens per item —
@@ -1092,6 +1184,18 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   let failed = 0;
   const pending = []; // { draftId, jobRecId, recId }
   for (const rec of recs) {
+    // Same rate-limit pre-check as auto-remediation.js's identical loop —
+    // this PR explicitly unified the sibling pacing/convergence rules between
+    // both ship paths on the grounds that THIS bulk path is where the real
+    // volume is, so it needs this stop just as much. Without it, "Execute
+    // Today's Safe Fixes" keeps spending a generateDraft LLM call per item
+    // and retrying through githubRequest's own backoff on each one, all the
+    // way down a 60-item batch, instead of stopping after the first item that
+    // proves the budget is gone.
+    if (getLastKnownRateLimit().low) {
+      await appendJobLog(job.id, `GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${recs.length - shipped - failed} item(s) left untouched; they will be re-attempted next run.`);
+      break;
+    }
     // Same file-level guard as auto-remediation.js's autonomous path (see
     // getPendingDraftFilePaths' comment, store/drafts.js): skip a
     // recommendation targeting a file that already has an earlier draft
@@ -1104,7 +1208,7 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
       failed++;
       continue;
     }
-    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true });
+    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true, batchBranch: branchName });
     if (result.ok) {
       shipped++;
       lastSuccess = result.draft;
@@ -1121,12 +1225,24 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
     // failure, so this isn't silently reported as shipped work that never
     // landed (the same strand-and-hide risk finalizeBatchPr's own comment
     // describes).
-    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+    // Transient failures must not be terminal here either. This is the path
+    // that actually lost work on 2026-09-01: one exhausted GitHub budget
+    // abandoned 54 Quality-Gate-passed drafts in this single call. Same
+    // disposition as auto-remediation.js's batch finalize — recordMergeFailure
+    // records the error WITHOUT changing status, and an unresolved apply_error
+    // already reopens the finding, so the work is re-attemptable instead of
+    // destroyed. Nothing is misreported as shipped either way: the job-rec
+    // status still reverts to 'failed' and the counts still move.
+    const transient = finalization.rateLimited === true;
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) ${transient ? 'left re-attemptable (transient)' : 'reverted to failed'}.`);
     await Promise.all(pending.map(async (p) => {
       await updateJobRecommendationStatus(p.jobRecId, 'failed', { error: finalization.error });
       await setRecommendationExecutionState(p.recId, { executionJobId: job.id, executionStatus: 'failed' });
-      await markDraftAbandoned(siteId, p.draftId, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
-        console.error(`[action-center] could not abandon draft ${p.draftId} after batch push/PR failure:`, err.message);
+      const record = transient
+        ? recordMergeFailure(siteId, p.draftId, finalization.error)
+        : markDraftAbandoned(siteId, p.draftId, `Batch push/PR failed: ${finalization.error}`, null);
+      await record.catch((err) => {
+        console.error(`[action-center] could not ${transient ? 'mark retryable' : 'abandon'} draft ${p.draftId} after batch push/PR failure:`, err.message);
       });
     }));
     shipped -= pending.length;
@@ -1216,12 +1332,28 @@ export async function bulkApproveDrafts(siteId, { userId, limit = DRAFT_BULK_APP
     // Same strand-and-hide concern finalizeBatchPr's own comment describes —
     // nothing in pendingIds actually reached a real PR, so revert every one
     // of them rather than silently reporting them as shipped.
-    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${pendingIds.length} item(s) reverted to failed.`);
-    await Promise.all(pendingIds.map((id) =>
-      markDraftAbandoned(siteId, id, `Batch push/PR failed: ${finalization.error}`, null).catch((err) => {
-        console.error(`[action-center] could not abandon draft ${id} after batch push/PR failure:`, err.message);
-      })
-    ));
+    //
+    // TRANSIENT disposition, matching executeSafeFixes and auto-remediation's
+    // own batch-finalize handling — this is the third copy of that same
+    // one-shared-push-fails-everyone shape, and until now it was the one
+    // copy this PR's rate-limit fix never reached. Unconditionally abandoning
+    // here reproduces, in "Approve All Pending" specifically, the exact
+    // 2026-09-01 data loss (113/54 drafts destroyed by one exhausted GitHub
+    // budget) this PR exists to fix — recordMergeFailure leaves a transient
+    // failure retryable instead.
+    const transient = finalization.rateLimited === true;
+    const disposition = transient
+      ? `${pendingIds.length} item(s) left re-attemptable for the next run`
+      : `${pendingIds.length} item(s) reverted to failed`;
+    await appendJobLog(job.id, `Batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
+    await Promise.all(pendingIds.map((id) => {
+      const record = transient
+        ? recordMergeFailure(siteId, id, finalization.error)
+        : markDraftAbandoned(siteId, id, `Batch push/PR failed: ${finalization.error}`, null);
+      return record.catch((err) => {
+        console.error(`[action-center] could not ${transient ? 'mark retryable' : 'abandon'} draft ${id} after batch push/PR failure:`, err.message);
+      });
+    }));
     shipped -= pendingIds.length;
     failed += pendingIds.length;
   } else if (pendingIds.length > 0) {
@@ -1556,7 +1688,10 @@ export async function openDraftPr(siteId, draftId) {
   const result = await implementer.mergeToStage(site, draft);
   if (!result.ok) {
     await recordMergeFailure(siteId, draft.id, result.error);
-    throw httpError(422, result.error, { reason: result.reason });
+    // rateLimited rides along so finalizeBatchPr's catch can tell a
+    // wait-and-retry failure from a permanent one (see persistedFailure in
+    // implementers/lib/github-ops.js).
+    throw httpError(422, result.error, { reason: result.reason, rateLimited: result.rateLimited === true });
   }
   return markDraftPrOpened(siteId, draft.id, {
     prNumber: result.prNumber, prUrl: result.prUrl,

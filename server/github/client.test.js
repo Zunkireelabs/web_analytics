@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
   createCommitObject, updateRef, commitFilesAtomic,
+  getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
 } from './client.js';
 
 // Real HTTP calls need a resolvable token — githubTokenEnvVar defaults to
@@ -170,6 +171,241 @@ describe('createCommitObject / updateRef split', () => {
       const result = await commitFilesAtomic(site, 'main', [{ path: 'a.txt', content: 'hi' }], 'msg');
       assert.deepEqual(result, { sha: 'commit-sha' });
       assert.deepEqual(methods, ['GET', 'GET', 'POST', 'POST', 'PATCH']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+// The 2026-09-01 outage: the 08:00 auto-remediation run created ~130 drafts
+// in one hour, exhausted the shared PAT's 5,000 req/hour budget, and every
+// write after that came back `403 API rate limit exceeded for user ID
+// 286862633`. Nothing here read GitHub's own rate-limit headers, so a
+// one-hour wait was indistinguishable from a permanent fault and 113 drafts
+// were abandoned for it.
+describe('rate limiting', () => {
+  // Both of GitHub's limits are covered, because they signal differently and
+  // a check written for one silently misses the other.
+  function limitedResponse({ remaining = '0', reset = null, retryAfter = null, body = '{"message":"API rate limit exceeded"}' } = {}) {
+    const headers = { 'content-type': 'application/json' };
+    if (remaining != null) headers['x-ratelimit-remaining'] = remaining;
+    if (reset != null) headers['x-ratelimit-reset'] = reset;
+    if (retryAfter != null) headers['retry-after'] = retryAfter;
+    return new Response(body, { status: 403, headers });
+  }
+
+  // A reset already in the past clamps the wait to the 1s floor, so these
+  // tests exercise the real retry loop without sleeping out a real window.
+  const pastReset = String(Math.floor(Date.now() / 1000) - 60);
+
+  test('retries a primary rate limit (x-ratelimit-remaining: 0) and succeeds once the budget refills', async () => {
+    let attempts = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => {
+      attempts++;
+      if (attempts === 1) return limitedResponse({ reset: pastReset });
+      return jsonResponse({ object: { sha: 'recovered-sha' } });
+    };
+    try {
+      assert.equal(await getBranchSha(site, 'main'), 'recovered-sha');
+      assert.equal(attempts, 2, 'should have retried exactly once');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // The secondary ("abuse"/content-creation) limit is what creating commits
+  // and PRs trips — it arrives with `retry-after` and can leave
+  // x-ratelimit-remaining well above zero, so a remaining-only check misses
+  // it entirely.
+  test('retries a secondary rate limit signalled by retry-after, not by a zero remaining', async () => {
+    let attempts = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => {
+      attempts++;
+      if (attempts === 1) return limitedResponse({ remaining: '4200', retryAfter: '0.001', body: '{"message":"You have exceeded a secondary rate limit"}' });
+      return jsonResponse({ object: { sha: 'recovered-sha' } });
+    };
+    try {
+      assert.equal(await getBranchSha(site, 'main'), 'recovered-sha');
+      assert.equal(attempts, 2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('a still-limited request throws a TYPED error, so callers never have to regex the provider message', async () => {
+    let attempts = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { attempts++; return limitedResponse({ reset: pastReset }); };
+    try {
+      const err = await getBranchSha(site, 'main').then(() => null, (e) => e);
+      assert.ok(err, 'should have thrown');
+      assert.equal(err.rateLimited, true);
+      // Bounded: this runs inside a cron pass with other sites to reach, so
+      // it must give up rather than sleep out a 50-minute window.
+      assert.equal(attempts, 3, 'initial attempt + 2 retries, then give up');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // Review finding: retrying blindly sleeps up to RATE_LIMIT_MAX_RETRIES *
+  // RATE_LIMIT_MAX_WAIT_MS through a wait the header ALREADY proves can't
+  // succeed — a reset 40 minutes out can never be reached by 2 retries
+  // clamped to 60s each, so every one of those seconds is wasted before the
+  // identical throw. This must fail on the FIRST attempt instead.
+  test('a reset far in the future fails fast instead of sleeping through retries that cannot help', async () => {
+    let attempts = 0;
+    const farFuture = String(Math.floor(Date.now() / 1000) + 60 * 40); // 40 minutes out
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => { attempts++; return limitedResponse({ reset: farFuture }); };
+    try {
+      const start = Date.now();
+      const err = await getBranchSha(site, 'main').then(() => null, (e) => e);
+      assert.ok(err, 'should have thrown');
+      assert.equal(err.rateLimited, true);
+      assert.equal(attempts, 1, 'must not retry a wait the header already ruled out');
+      assert.ok(Date.now() - start < 5_000, 'must not sleep before failing');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // The distinction that makes retrying safe at all: a 403 meaning "this
+  // token cannot write to this repo" is permanent, and retrying it would
+  // just add latency to a failure that is already certain.
+  test('a 403 that is NOT a rate limit is returned immediately, never retried', async () => {
+    let attempts = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => {
+      attempts++;
+      return new Response('{"message":"Resource not accessible by personal access token"}', {
+        status: 403, headers: { 'x-ratelimit-remaining': '4900' },
+      });
+    };
+    try {
+      const err = await getBranchSha(site, 'main').then(() => null, (e) => e);
+      assert.ok(err, 'should have thrown');
+      assert.notEqual(err.rateLimited, true, 'a permission failure must not be reported as a rate limit');
+      assert.equal(attempts, 1, 'no retries for a permanent failure');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // The pre-check side: callers stop STARTING new work near the floor,
+  // rather than each burning a generation call before failing at the push.
+  test('getLastKnownRateLimit reports `low` once the observed budget is under the reserve', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ object: { sha: 's' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'x-ratelimit-remaining': String(RATE_LIMIT_RESERVE - 1) },
+    });
+    try {
+      await getBranchSha(site, 'main');
+      const state = getLastKnownRateLimit();
+      assert.equal(state.remaining, RATE_LIMIT_RESERVE - 1);
+      assert.equal(state.low, true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('a healthy budget does not read as low', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ object: { sha: 's' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'x-ratelimit-remaining': '4900' },
+    });
+    try {
+      await getBranchSha(site, 'main');
+      assert.equal(getLastKnownRateLimit().low, false);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+// Three defects caught in review before this ever ran against a real site.
+// Each one alone would have halted every site's autonomous run — the opposite
+// of what the rate-limit handling was added to achieve.
+describe('rate-limit state — the ways it must NOT latch', () => {
+  const ok = (headers = {}) => new Response(JSON.stringify({ object: { sha: 's' } }), {
+    status: 200, headers: { 'content-type': 'application/json', ...headers },
+  });
+
+  // `res.headers.get()` returns null for an absent header and `Number(null)`
+  // is 0, NOT NaN — so a Number.isFinite guard does not catch it, and the
+  // intended "unknown" case silently recorded "0 requests left".
+  test('a response with NO rate-limit header leaves the budget unknown, never zero', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '4900' }); // seed a healthy value
+    try {
+      await getBranchSha(site, 'main');
+      globalThis.fetch = async () => ok(); // now a response with no headers at all
+      await getBranchSha(site, 'main');
+
+      const state = getLastKnownRateLimit();
+      assert.notEqual(state.remaining, 0, 'a missing header must not read as an exhausted budget');
+      assert.equal(state.low, false, 'and must not halt the run');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // GitHub's limits are per-RESOURCE. /search/code gets ~30/minute against
+  // core's 5,000/hour, and searchCodeForString sits directly on the ship path
+  // — so recording its headers as the core budget would put every run under
+  // the reserve after its first marker lookup.
+  test('a code-search response does not poison the core budget', async () => {
+    const originalSearch = process.env.GITHUB_SEARCH_PAT;
+    process.env.GITHUB_SEARCH_PAT = 'ghp_classic_test_token';
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '4900' });
+    try {
+      await getBranchSha(site, 'main');
+      globalThis.fetch = async () => new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-ratelimit-remaining': '3' }, // search's own tiny budget
+      });
+      await searchCodeForString(site, 'needle');
+
+      const state = getLastKnownRateLimit();
+      assert.equal(state.remaining, 4900, 'core state still reflects the last CORE response');
+      assert.equal(state.low, false, 'search exhaustion must not stop the ship path');
+    } finally {
+      globalThis.fetch = original;
+      if (originalSearch === undefined) delete process.env.GITHUB_SEARCH_PAT;
+      else process.env.GITHUB_SEARCH_PAT = originalSearch;
+    }
+  });
+
+  // auto-remediation's pre-check breaks the loop BEFORE making any GitHub
+  // call, so a run that starts low makes zero requests and learns nothing.
+  // Without expiry the state stays stale forever and the loop can never
+  // recover from within itself.
+  test('`low` expires once the reset time has passed', async () => {
+    const original = globalThis.fetch;
+    const past = String(Math.floor(Date.now() / 1000) - 60);
+    globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': past });
+    try {
+      await getBranchSha(site, 'main');
+      const state = getLastKnownRateLimit();
+      assert.equal(state.remaining, 3, 'the observation is still reported honestly');
+      assert.equal(state.low, false, 'but a budget that has already refilled must not keep halting runs');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('`low` still fires for a genuinely exhausted budget whose reset is ahead', async () => {
+    const original = globalThis.fetch;
+    const future = String(Math.floor(Date.now() / 1000) + 600);
+    globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': future });
+    try {
+      await getBranchSha(site, 'main');
+      assert.equal(getLastKnownRateLimit().low, true);
     } finally {
       globalThis.fetch = original;
     }

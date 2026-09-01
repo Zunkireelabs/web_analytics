@@ -24,6 +24,9 @@ mock.module(resolve('./lib/pexels-client.js'), {
     buildImageQueries: ({ title }) => [title],
   },
 });
+mock.module(resolve('./lib/blog-image-usage.js'), {
+  namedExports: { usedPhotoIds: async () => new Set() },
+});
 
 const { generate, meta } = await import('./blog-image.js');
 
@@ -90,5 +93,50 @@ describe('blog-image generator', () => {
     const { content } = await generate({ siteId: 1, params: { filePath: 'src/blog/a.md' } });
     assert.equal(content.imageAlt, 'A Real Post Title');
     assert.equal(content.imageCredit, null, 'no credit line invented when Pexels gives no photographer');
+  });
+
+  describe('mode: duplicate', () => {
+    beforeEach(() => {
+      fileFixture = '---\ntitle: "A Real Post Title"\nfeaturedImage: "https://images.pexels.com/photos/1/old.jpeg"\nfeaturedImageCredit: "Photo by Old Photographer"\n---\n\nBody.';
+    });
+
+    test('refuses a post with no image to replace — the recommendation is stale', async () => {
+      fileFixture = '---\ntitle: "A Real Post Title"\n---\n\nBody.';
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { filePath: 'src/blog/a.md', mode: 'duplicate' } }),
+        /no longer has a featured image to replace/i,
+      );
+    });
+
+    test('does NOT refuse a post that already has an image — that is the whole point of a replacement', async () => {
+      const { content } = await generate({ siteId: 1, params: { filePath: 'src/blog/a.md', mode: 'duplicate' } });
+      assert.equal(content.mode, 'duplicate');
+      assert.equal(content.imageUrl, 'https://images.example/a.jpg');
+    });
+
+    test('summary reflects a replacement, not an addition', async () => {
+      const { summary } = await generate({ siteId: 1, params: { filePath: 'src/blog/a.md', mode: 'duplicate' } });
+      assert.match(summary, /replace/i);
+    });
+  });
+
+  describe('mode: broken', () => {
+    beforeEach(() => {
+      fileFixture = '---\ntitle: "A Real Post Title"\nfeaturedImage: "/assets/images/blog/missing.jpg"\n---\n\nBody.';
+    });
+
+    test('does NOT refuse a post whose broken local asset counts as "already has an image"', async () => {
+      const { content } = await generate({ siteId: 1, params: { filePath: 'src/blog/a.md', mode: 'broken' } });
+      assert.equal(content.mode, 'broken');
+      assert.equal(content.imageUrl, 'https://images.example/a.jpg');
+    });
+
+    test('refuses a post with no image field at all — nothing to replace', async () => {
+      fileFixture = '---\ntitle: "A Real Post Title"\n---\n\nBody.';
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { filePath: 'src/blog/a.md', mode: 'broken' } }),
+        /no longer has a featured image to replace/i,
+      );
+    });
   });
 });

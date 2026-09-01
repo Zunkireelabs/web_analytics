@@ -2,6 +2,7 @@ import { getSiteById } from '../store/read.js';
 import { getFileContent, defaultBranchName } from '../github/client.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { extractTitle, hasImageField } from './lib/blog-frontmatter.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
 
 // The repair half of agents/blog-image.js's detection: re-fetches the ONE
 // post the detector already identified (by its real repo path, not a
@@ -18,14 +19,20 @@ import { extractTitle, hasImageField } from './lib/blog-frontmatter.js';
 export const meta = {
   id: 'blog-image',
   name: 'Blog Featured Image',
-  description: 'Adds a featured image to an existing blog post published with none, matched by relevance to the post\'s own real title.',
+  description: 'Adds a featured image to an existing blog post published with none, or replaces one that duplicates another post\'s image or points at a file that was never committed — matched by relevance to the post\'s own real title.',
   recommendationTags: [],
 };
 
-// params: { filePath: string } — the exact repo path agents/blog-image.js's
-// detection pass already found; no page URL involved.
+// params: { filePath: string, mode?: 'missing' | 'duplicate' | 'broken' } —
+// the exact repo path agents/blog-image.js's detection pass already found;
+// no page URL involved. 'missing' (the default, for old recommendations
+// with no mode field) requires no image field at all, same as this
+// generator's original behavior; 'duplicate'/'broken' both require the
+// opposite — a real image field already present — since either is replacing
+// one, not adding one; they differ only in the detector's reason and the
+// summary text below, not in what this generator does.
 export async function generate({ siteId, params }) {
-  const { filePath } = params || {};
+  const { filePath, mode = 'missing' } = params || {};
   if (!filePath) throw Object.assign(new Error('filePath is required'), { status: 400 });
 
   // Same gate every image-fetching path in this platform respects — refuses
@@ -40,9 +47,16 @@ export async function generate({ siteId, params }) {
   const raw = typeof file === 'string' ? file : file?.content;
   if (!raw) throw Object.assign(new Error(`Could not read ${filePath} from the repo.`), { status: 400 });
 
-  if (hasImageField(raw)) {
+  const hasImage = hasImageField(raw);
+  if (mode === 'missing' && hasImage) {
     throw Object.assign(
       new Error(`${filePath} already has a featured image — this recommendation is stale.`),
+      { status: 400, userFacing: true },
+    );
+  }
+  if (mode !== 'missing' && !hasImage) {
+    throw Object.assign(
+      new Error(`${filePath} no longer has a featured image to replace — this recommendation is stale.`),
       { status: 400, userFacing: true },
     );
   }
@@ -55,7 +69,13 @@ export async function generate({ siteId, params }) {
     );
   }
 
-  const image = await searchImage(buildImageQueries({ title }));
+  // Excludes every photo id already in use on the site, INCLUDING this
+  // post's own current one when mode is 'duplicate' — the whole point of a
+  // duplicate/broken repair is landing on a different, real photo, not
+  // re-confirming the same one (or, for 'broken', it has no photo id to
+  // exclude at all, so this is a no-op there).
+  const excludePhotoIds = await usedPhotoIds(site);
+  const image = await searchImage(buildImageQueries({ title }), { excludePhotoIds });
   if (!image) {
     throw Object.assign(
       new Error(`No relevant real image was found for "${title}" — a wrong photo is worse than none, so this is left for manual review rather than forcing a weak match.`),
@@ -66,11 +86,14 @@ export async function generate({ siteId, params }) {
   return {
     content: {
       filePath,
+      mode,
       title,
       imageUrl: image.url,
       imageAlt: image.alt || title,
       imageCredit: image.photographer ? `Photo by ${image.photographer} on Pexels` : null,
     },
-    summary: `Add a featured image to "${title}"`,
+    summary: mode === 'missing'
+      ? `Add a featured image to "${title}"`
+      : `Replace the ${mode === 'duplicate' ? 'duplicate' : 'broken'} featured image on "${title}"`,
   };
 }

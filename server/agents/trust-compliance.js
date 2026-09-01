@@ -227,7 +227,12 @@ export async function run({ siteId, start, end }) {
   // in the real ID (see generators/analytics-install.js).
   const TRACKER_CHECKS = [
     { label: 'Google Analytics (GA4)', id: 'analytics', provider: 'ga4', trackingId: site.ga4_measurement_id || null, whyItMatters: 'No Google Analytics (or equivalent) tracking script was detected on the homepage — without it, this site has no way to measure real visitor traffic, conversions, or which pages are actually working.' },
-    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
+    // Was hardcoded null until migration 135 gave it a column — which is why
+    // this check could never complete and became site 1's worst repeat
+    // offender (15 failed attempts). analytics-install validates the shape
+    // itself (/^\d{10,20}$/), so a wrong value refuses at the placeholder
+    // gate exactly as before rather than shipping a bad script.
+    { label: 'Meta/Facebook Pixel', id: 'facebook-pixel', provider: 'facebook-pixel', trackingId: site.facebook_pixel_id || null, whyItMatters: 'No Meta/Facebook Pixel was detected on the homepage — without it, ad conversions and retargeting audiences can\'t be tracked for any Facebook/Instagram ad campaigns run for this site.' },
   ];
   // trackerAbsenceIsProvable gates the whole check: these two findings assert
   // a NEGATIVE ("no GA4 on this page"), and site-trackers.js can only read
@@ -236,8 +241,37 @@ export async function run({ siteId, start, end }) {
   // anyway told every GTM-based tenant their live analytics was missing and
   // offered to install a second copy of it (double-counted pageviews). No
   // finding is the honest output there, not a hedged one.
+  // A missing tracker's finding is filed regardless of whether trackingId is
+  // known — that IS the intended, documented design above ("the draft ships
+  // with a placeholder blocking auto-publish until a human fills in the real
+  // ID"), and it is the ONLY way a human ever discovers a missing GA4/Pixel
+  // install at all, since nothing else in this app currently writes
+  // ga4_measurement_id or facebook_pixel_id (no UI or route sets either
+  // column — only a direct database write does).
+  //
+  // A prior version of this filter suppressed a tracker check entirely once
+  // it had no stored ID, on the reasoning that an unattended draft could
+  // never complete it. That reasoning was correct about the unattended loop
+  // and wrong about the fix: it also hid the finding from the ACTION CENTER,
+  // where a human generates the draft and edits the placeholder by hand —
+  // exactly the workflow the comment above describes. Confirmed live: no
+  // code anywhere in this repo ever sets sites.ga4_measurement_id, so that
+  // filter would have silently stopped filing the missing-GA4 finding for
+  // every site that doesn't have it set by hand in the database — a
+  // previously-working, unrelated check broken as a side effect of a fix
+  // meant only for Facebook Pixel's specific repeat-failure problem.
+  //
+  // That problem is real, but belongs at the layer that actually loops
+  // unattended: ship-pacing.js's convergence cap (which now counts an
+  // "unverified placeholder field" abandon toward MAX_FAILED_ATTEMPTS — see
+  // store/drafts.js) stops auto-remediation re-drafting this past 3 tries,
+  // while leaving the recommendation open and visible for a human to finish
+  // by hand at any time. See auto-remediation.js's isRefusal patterns for
+  // why an unattended attempt hitting this must never trip the circuit
+  // breaker either.
   const trackerFindings = (trackerAbsenceIsProvable(trackerFacts) ? TRACKER_CHECKS : [])
-    .filter((t) => !trackerFacts.trackersDetected.includes(t.label)).map((t) => makeFinding({
+    .filter((t) => !trackerFacts.trackersDetected.includes(t.label))
+    .map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
     whyItMatters: t.whyItMatters,

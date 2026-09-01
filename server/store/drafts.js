@@ -1,6 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
+import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT } from '../lib/draft-failure-phrases.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -704,6 +705,101 @@ export async function getDraftedFindingIds(siteId) {
     [siteId]
   );
   return new Set(rows.map((r) => r.finding_id));
+}
+
+// How many times each finding has already been drafted and then abandoned
+// for a reason that says the item itself cannot be shipped — the input to
+// the convergence cap (agents/lib/ship-pacing.js).
+//
+// The churn this measures is a direct consequence of getDraftedFindingIds
+// above: abandoning a draft deliberately un-hides its finding so it can be
+// retried. That is right for a transient failure and wrong for a permanent
+// one, and nothing distinguished them. Measured on site 1 over three days:
+// 623 drafts for 496 distinct findings, with single findings redrafted up to
+// TEN times — `trust-compliance:facebook-pixel:missing` (10x), a geo-signals
+// question-headings item (9x), "already has an FAQPage schema" (24 attempts
+// across 6 findings). Every cycle spends an LLM generation plus a handful of
+// GitHub calls to reach the identical failure.
+//
+// Only ITEM-SPECIFIC failures count. Everything excluded below is a property
+// of the infrastructure or of a human decision, and counting any of it would
+// retire findings that have nothing wrong with them — the exact opposite of
+// the goal:
+//   - 'pr_closed_without_merge' / 'superseded': a human closed the PR or the
+//     work was replaced. The draft was fine; the decision was elsewhere.
+//     (This is the single largest bucket — 176 drafts from one closed PR.)
+//   - anything naming a rate limit: transient by definition.
+//   - 'Batch push/PR failed%': the batch's ONE shared push/PR failed, which
+//     fails every pending item at once regardless of their content. On
+//     2026-09-01 that abandoned 54 drafts in a single call — and crucially
+//     their text is sanitized ("This pull request could not be opened right
+//     now — our team has been notified. (ref: …)"), so it does NOT match the
+//     rate-limit filter above even when a rate limit was the true cause.
+//     Without this line the cap would hold precisely the findings this work
+//     exists to rescue.
+//   - 'Stuck at "…"%': the draft-state reset (lib/draft-ship-state.js), which
+//     is a bookkeeping action taken to allow a clean retry, not a verdict on
+//     whether the item can be fixed.
+//
+// Windowed to 30 days so a finding that failed repeatedly months ago, under
+// long-since-changed code, is not retired forever on that evidence.
+// Reasons that must NEVER count. Each is a real, observed abandon reason that
+// says nothing about whether the ITEM can be fixed — counting any of them
+// retires findings that have nothing wrong with them.
+//
+// The list is deliberately explicit rather than clever. It grew from a
+// concrete failure: on 2026-09-01 the two analytics findings were held at 15
+// and 12 attempts, having been fixed in the meantime — 19 of those 27 were
+// "No markers configured", a config gap a human had since closed. The cap
+// would have permanently suppressed the very work that was now ready to ship.
+const UNCOUNTED_ABANDON_REASONS = [
+  // A human closed the PR, or the work was replaced. The draft was fine; the
+  // decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
+  "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')",
+  // Transient by definition.
+  "abandoned_reason NOT ILIKE '%rate limit%'",
+  // The batch's ONE shared push/PR failed, which fails every pending item at
+  // once regardless of content. Its text is sanitized, so it does not match
+  // the rate-limit filter even when a rate limit was the true cause.
+  "abandoned_reason NOT LIKE 'Batch push/PR failed%'",
+  // Same-day batch branch diverged from the default branch — infrastructure,
+  // and self-healing: the branch is date-keyed, so tomorrow forks fresh.
+  "abandoned_reason NOT LIKE '%batch branch%diverged%'",
+  // Bookkeeping, not verdicts: a draft-state reset (lib/draft-ship-state.js)
+  // or a recovery script rescuing a stranded row.
+  "abandoned_reason NOT LIKE 'Stuck at \"%'",
+  "abandoned_reason NOT LIKE 'Recovered:%'",
+  // CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
+  // never "this item is unfixable" — and the moment that config lands, the
+  // item must become eligible again immediately rather than staying retired
+  // on the strength of failures whose cause is gone.
+  //
+  // NOT the "unverified placeholder field" case, deliberately: unlike a
+  // missing marker/mapping, that failure recurs identically FOREVER unless a
+  // human hand-edits the draft (trust-compliance.js files the finding
+  // precisely so they can) — no config change ever resolves it on its own.
+  // That IS the per-item "cannot be auto-completed" signal this cap exists to
+  // catch, so it counts.
+  `abandoned_reason NOT LIKE '%${NO_MARKERS_CONFIGURED_FRAGMENT}%'`,
+  `abandoned_reason NOT LIKE '%${NO_FILE_MAPPING_FRAGMENT}%'`,
+];
+
+export async function countFailedAttemptsByFinding(siteId) {
+  // The first entry is an IN (…) exclusion, the rest are already-negated
+  // NOT LIKEs — assembled here so each reason keeps its own comment above.
+  const [inClause, ...notLikes] = UNCOUNTED_ABANDON_REASONS;
+  const { rows } = await query(
+    `SELECT finding_id, COUNT(*)::int AS attempts
+       FROM drafts
+      WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
+        AND abandoned_reason IS NOT NULL
+        AND abandoned_at > now() - interval '30 days'
+        AND NOT (${inClause})
+        AND ${notLikes.join('\n        AND ')}
+      GROUP BY finding_id`,
+    [siteId]
+  );
+  return new Map(rows.map((r) => [r.finding_id, r.attempts]));
 }
 
 // The file-level sibling to getDraftedFindingIds above: that function stops

@@ -64,6 +64,24 @@ const TRANSIENT_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENO
 export function classifyFailure({ stage, err, exitCode, timedOut } = {}) {
   const code = err?.code || null;
 
+  // Checked FIRST, ahead of every stage-keyed rule, because a rate limit can
+  // strike at any stage that touches GitHub and is the one failure here that
+  // is purely a function of timing — the identical request succeeds an hour
+  // later untouched. Keyed off github/client.js's typed `rateLimited` flag
+  // rather than the 403 body text: GitHub's wording ("API rate limit
+  // exceeded for user ID ...", "secondary rate limit", "abuse detection")
+  // varies by which of its two limits fired, and matching prose is how a
+  // classifier quietly stops recognising the thing it was written for.
+  //
+  // EXTERNAL_SERVICE is the only class RETRYABLE contains, which is exactly
+  // right here and is why this reuses that class instead of inventing one:
+  // on 2026-09-01 a one-hour PAT exhaustion permanently abandoned 113 drafts
+  // that a retry would have shipped.
+  if (err?.rateLimited === true) {
+    return build(FAILURE_CLASS.EXTERNAL_SERVICE, 'GITHUB_RATE_LIMITED', stage || 'github_api',
+      'GitHub’s API rate limit was reached; this will be retried automatically.', err);
+  }
+
   // A failed spawn at the interpreter/binary boundary is definitionally our
   // deployment: the code asked for an executable this environment doesn't
   // have. This is the exact ENOENT that stalled every design-profile job.

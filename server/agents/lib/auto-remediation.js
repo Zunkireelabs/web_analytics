@@ -1,14 +1,19 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, hasRecentDraftOfType, markDraftAbandoned } from '../../store/drafts.js';
+import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
-import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr } from '../../routes/action-center.js';
+import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
+import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
+import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
+import { classifyFailure } from '../../lib/failure-classification.js';
+import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
+import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -44,55 +49,6 @@ const CONSECUTIVE_FAILURE_LIMIT = 5;
 // operator those mean opposite things. One says the system is broken; this
 // one says the system is working and correctly has nothing to say.
 const CONSECUTIVE_REFUSAL_LIMIT = 8;
-
-// Generators that publish net-new content on a cadence rather than fixing an
-// existing page, and so are paced instead of merely budgeted. The daily
-// budget answers "how much work per day"; this answers "how often does this
-// KIND of work happen at all" — a distinction the budget alone can't make,
-// since 28 open blog-outline recommendations are 28 legitimate candidates as
-// far as it is concerned.
-//
-// Two rules per entry, both needed:
-//   - at most ONE per run, so a single day can't publish a burst; and
-//   - none at all if one was published inside the site's gap window.
-// The first without the second would still allow one blog every single day.
-//
-// Paced items are NOT given a separate allowance — the one that survives
-// competes for the same auto_remediation_daily_limit slot as every ordinary
-// fix, which is what keeps "30 a day" a single honest number.
-const PACED_GENERATORS = [
-  { generatorId: 'blog-outline', gapColumn: 'blog_min_gap_days', defaultGapDays: 3 },
-];
-
-// Drops paced candidates that this site isn't due for yet, and thins the rest
-// to one each. Returns the candidates in their original priority order, plus
-// the human-readable notes the caller logs — deferrals are never silent, the
-// same rule the daily budget's truncation already follows.
-export async function applyPacing(site, candidates, { recentDraftCheck = hasRecentDraftOfType } = {}) {
-  const timezone = site.timezone || 'UTC';
-  const notes = [];
-  const dropped = new Set();
-
-  for (const { generatorId, gapColumn, defaultGapDays } of PACED_GENERATORS) {
-    const matching = candidates.filter((r) => r.recommendation_type === generatorId);
-    if (matching.length === 0) continue;
-
-    const gapDays = site[gapColumn] ?? defaultGapDays;
-    if (await recentDraftCheck(site.id, generatorId, gapDays, timezone)) {
-      for (const r of matching) dropped.add(r.id);
-      notes.push(`${generatorId}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);
-      continue;
-    }
-    // Due: keep the highest-priority one (candidates arrive in
-    // listOpenRecommendations' order), defer the rest to future runs.
-    for (const r of matching.slice(1)) dropped.add(r.id);
-    if (matching.length > 1) {
-      notes.push(`${generatorId}: taking 1 of ${matching.length} open candidate(s); the rest wait for the next ${gapDays}-day slot.`);
-    }
-  }
-
-  return { paced: candidates.filter((r) => !dropped.has(r.id)), notes };
-}
 
 // Stage 3-4 of Generate -> Validate -> Auto-fix -> Validate again -> Action
 // Center: closes the loop risk-tiers.js opened. A 'safe'-tier recommendation
@@ -195,12 +151,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
     && !pendingDraftFilePaths.has(resolveFile(site, r.page)));
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
-  // can't consume budget slots it isn't due for. Only the unattended path
-  // paces itself — routes/action-center.js's executeSafeFixes is a human
-  // deliberately asking for a batch, and a human doesn't need the agent's
-  // sense of rhythm imposed on them.
-  const { paced: candidates, notes: pacingNotes } = await applyPacing(site, eligible);
+  // can't consume budget slots it isn't due for.
+  //
+  // This used to be the unattended path's alone, on the reasoning that a
+  // human clicking "Execute Safe Fixes" is deliberately asking for a batch
+  // and doesn't need the agent's sense of rhythm imposed on them. Real usage
+  // disproved that: three bulk runs on 2026-09-01 produced 61 blog-outline
+  // drafts and opened one PR carrying 42 net-new blog posts. The click asks
+  // for a batch of FIXES; it was never a decision to publish a quarter's
+  // worth of blog content at once. Both paths now share this via
+  // ship-pacing.js.
+  const { paced, notes: pacingNotes } = await applyPacing(site, eligible);
   for (const note of pacingNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+
+  // Convergence cap: a finding that has already failed this many times for an
+  // item-specific reason stops being auto-drafted. It stays open and fully
+  // visible — what stops is spending a model call per run to reach the same
+  // error. See ship-pacing.js for the measured churn this ends.
+  const { converged: candidates, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  for (const note of convergenceNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
@@ -326,6 +295,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
       console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${budgeted.length - attempted} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
+    // Stop STARTING new items once GitHub's remaining budget is under the
+    // reserve. Deliberately a pre-check rather than only reacting to the
+    // first 403: an item that begins near the floor burns a generation call
+    // and several writes before failing at the push, so the cheapest place
+    // to notice is before the attempt. The items left here stay open and
+    // untouched for the next pass — nothing is consumed, so this costs one
+    // deferred day at worst, against the whole-run collapse it prevents.
+    if (getLastKnownRateLimit().low) {
+      stoppedReason = 'github-rate-limited';
+      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${budgeted.length - attempted} candidate(s) left untouched and still open; they will be re-attempted next run.`);
+      break;
+    }
     attempted++;
     try {
       // The one path from "we decided to fix this" to "a real branch/PR
@@ -349,6 +330,9 @@ export async function autoRemediateSafeRecommendations(siteId, {
         // DESIGN_AGENT_WAIT_MS.
         waitForDesignAgent: true,
         deferPr: true,
+        // Lets draftShipState tell a live commit on THIS run's branch from a
+        // ghost on a prior day's (see lib/draft-ship-state.js).
+        batchBranch: branchName,
       });
 
       // deferPr means approved.pr_number is never set here (see
@@ -363,6 +347,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // this item, independent of whether the batch's one shared push
       // later succeeds or fails (that's a systemic outcome affecting every
       // pending item equally, not a signal about any one of them).
+      // An already-finished draft (its PR is open, or already merged) must
+      // never join `pending`: finalizeBatchPr feeds pending[0] to
+      // openDraftPr, which hard-requires 'branch_pushed' and throws 404 for
+      // anything else — one finished sibling would fail the whole batch and
+      // abandon every genuinely new draft in it. Count it and move on.
+      if (approved.alreadyShipped) {
+        shipped++;
+        recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
+        consecutiveFailures = 0;
+        consecutiveRefusals = 0;
+        continue;
+      }
       pending.push({ rec, draft: approved });
       //
       // shipped++ and recordOutcome('shipped', ...) now happen after this
@@ -377,6 +373,24 @@ export async function autoRemediateSafeRecommendations(siteId, {
       consecutiveFailures = 0;
       consecutiveRefusals = 0;
     } catch (err) {
+      // A RATE LIMIT is neither a fault nor a refusal — it is a statement
+      // about timing, and the identical attempt succeeds once the budget
+      // refills. Checked before both, and it stops the run rather than
+      // continuing: every remaining item shares the one exhausted token, so
+      // carrying on can only produce more of the same failure while spending
+      // a generation call on each.
+      //
+      // Critically, this item is NOT counted as failed and NOT abandoned.
+      // Counting it would trip CONSECUTIVE_FAILURE_LIMIT after five, which
+      // reports a systemic fault ("a revoked token, a moved default branch")
+      // for what is really a one-hour wait — and on 2026-09-01 that
+      // misreading is what turned an hour of exhausted quota into 113
+      // permanently abandoned drafts.
+      if (classifyFailure({ stage: 'github_api', err }).errorCode === 'GITHUB_RATE_LIMITED') {
+        stoppedReason = 'github-rate-limited';
+        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${budgeted.length - attempted} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        break;
+      }
       failed++;
       // A REFUSAL is not a fault, and must not feed the circuit breaker.
       //
@@ -467,14 +481,44 @@ export async function autoRemediateSafeRecommendations(siteId, {
   if (batching) {
     const finalization = await finalizeBatchPr(site, branchName, pending.map((p) => p.draft.id));
     if (!finalization.ok) {
+      // A TRANSIENT batch failure must not be terminal. This one call fails
+      // the whole batch at once by design — one shared push, one shared PR —
+      // so whatever it decides is applied to every pending item together.
+      // Abandoning unconditionally is what made 2026-09-01's one-hour PAT
+      // exhaustion cost 54 drafts in a single call: each had a real,
+      // Quality-Gate-passed commit already built, and every one was thrown
+      // away for a failure that would have succeeded on the next pass.
+      //
+      // recordMergeFailure is the existing retryable-in-place idiom for
+      // exactly this shape (store/drafts.js) — it records the error WITHOUT
+      // changing status, and an unresolved apply_error already excludes a
+      // draft from getDraftedFindingIds, so the underlying finding reopens
+      // for Recommendations and the next run re-attempts it. Nothing is
+      // counted as shipped that wasn't: these drafts' commits never reached
+      // GitHub (the batch overlay holds them locally until the push that
+      // just failed), and they stay visibly unshipped either way.
+      const transient = finalization.rateLimited === true;
       if (pending.length > 0) {
-        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${pending.length} item(s) reverted to failed.`);
+        const disposition = transient
+          ? `${pending.length} item(s) left re-attemptable for the next run`
+          : `${pending.length} item(s) reverted to failed`;
+        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
+      if (transient) stoppedReason = 'github-rate-limited';
       await Promise.all(pending.map(async ({ rec, draft }) => {
-        failed++;
-        recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: finalization.error }).catch(() => {});
-        await markDraftAbandoned(siteId, draft.id, `Batch push/PR failed: ${finalization.error}`, null).catch((abandonErr) => {
-          console.error(`[auto-remediation] could not abandon draft ${draft.id} after batch push/PR failure:`, abandonErr.message);
+        // A transient failure is not scored against the generator either:
+        // generator-learning.js reads these outcomes to decide what to trust,
+        // and a rate limit says nothing about whether this generator's output
+        // was any good.
+        if (!transient) {
+          failed++;
+          recordOutcome(siteId, rec.recommendation_type, 'failed', { recommendationId: rec.id, detail: finalization.error }).catch(() => {});
+        }
+        const record = transient
+          ? recordMergeFailure(siteId, draft.id, finalization.error)
+          : markDraftAbandoned(siteId, draft.id, `Batch push/PR failed: ${finalization.error}`, null);
+        await record.catch((recordErr) => {
+          console.error(`[auto-remediation] could not ${transient ? 'mark retryable' : 'abandon'} draft ${draft.id} after batch push/PR failure:`, recordErr.message);
         });
       }));
     } else if (pending.length > 0) {
@@ -517,7 +561,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 // Throws on any failure — callers decide what a failure means (auto-
 // remediation leaves the recommendation open; the learned-repair path also
 // records a failed reuse against the memory it borrowed).
-export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false }) {
+export async function shipDraftForRecommendation(siteId, { generatorId, params, findingId, source, findingOrigin = null, memoryRefId = null, waitForDesignAgent = false, deferPr = false, batchBranch = null }) {
   const draft = await generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId, waitForDesignAgent });
 
   const autoSelected = autoSelectMetaTitle(generatorId, draft.content);
@@ -527,7 +571,89 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   }
 
   const submitted = await submitDraftForApproval(siteId, draft.id);
-  if (!submitted) throw new Error('Draft was not in a submittable state');
+  if (!submitted) {
+    // generateDraft is idempotent per finding (see its own comment): it
+    // returns the EXISTING draft rather than billing a second LLM call. That
+    // draft can legitimately be past 'draft'/'edited', and
+    // submitDraftForApproval only moves those two — so it returns null and
+    // this used to throw a generic failure.
+    //
+    // That failure was structural, not incidental. recordApplyFailure
+    // deliberately leaves a draft at 'approved' with an apply_error so the
+    // "Push Branch" button stays retryable, and getDraftedFindingIds
+    // deliberately treats an unresolved apply_error as "not handled" so the
+    // finding reopens. Together those two correct behaviors mean the
+    // unattended loop re-picks the finding every run, gets the same stuck
+    // draft back, fails to submit it, and reports a FAILURE that feeds
+    // CONSECUTIVE_FAILURE_LIMIT — five of those halt the site's whole run.
+    // Live on site 1: 8 expand-content drafts stuck at 'approved' since
+    // 2026-08-28, 19 recorded failures, and a retry path that could never
+    // converge because nothing ever re-ran apply().
+    //
+    // So resume from where the draft actually IS instead of insisting it
+    // start over. This is the same recovery the UI already offers by hand,
+    // reusing that exact function rather than a second implementation.
+    const current = await getDraft(siteId, draft.id);
+    // A 'branch_pushed' draft's commit is live either on the given batch
+    // branch, OR — when this call isn't batched at all (deferPr false, e.g.
+    // learned-repair.js's single-item ship, never wrapped in a beginBatchPush)
+    // — on the draft's OWN branch, since a non-batched apply() moves the real
+    // ref directly with no overlay involved. Without this, every non-batched
+    // caller passed no batchBranch, currentBatchBranch was always null, and a
+    // draft that had genuinely pushed (only the PR-open step remaining) was
+    // misclassified STRANDED and abandoned — discarding real, already-shipped
+    // work and forcing a full, costly regeneration.
+    const liveBranch = deferPr ? batchBranch : current?.branch_name;
+    const state = draftShipState(current, { currentBatchBranch: liveBranch });
+    if (state === SHIP_STATE.RESUME_APPLY) {
+      // Re-run apply() — the step that actually failed. The content is
+      // already generated, Quality-Gated and approved; regenerating it would
+      // spend another model call to arrive at the same draft.
+      return await pushDraftBranch(siteId, draft.id);
+    }
+    if (state === SHIP_STATE.AWAITING_PR) {
+      if (!deferPr) {
+        // Non-batched (learned-repair.js's single-item ship): no batch
+        // finalize step is ever coming for this call, so open the PR
+        // directly rather than returning a branch_pushed draft with no PR
+        // and no caller left to open one — the same permanently-PR-less
+        // outcome fixed in routes/action-center.js's shipRecommendation,
+        // for this codepath's own non-batched caller.
+        return await openDraftPr(siteId, draft.id);
+      }
+      // Batched: a real commit on THIS run's branch, still needing the
+      // shared PR the caller opens once for the whole batch. Safe to queue.
+      return current;
+    }
+    if (state === SHIP_STATE.SHIPPED) {
+      // Already merged or already has its PR. It must NOT join the batch's
+      // pending list: finalizeBatchPr feeds pending[0] to openDraftPr, which
+      // hard-requires 'branch_pushed' and throws 404 otherwise — one finished
+      // sibling would fail the whole batch and abandon every genuinely new
+      // draft in it. Flagged so the caller counts it and moves on.
+      return { ...current, alreadyShipped: true };
+    }
+    if (state === SHIP_STATE.HUMAN_OWNED) {
+      // Someone is reviewing this right now. Leave it exactly as it is — no
+      // ship, and emphatically no abandon.
+      const err = new Error(`Draft #${draft.id} is awaiting human review ("${current.status}") — left untouched.`);
+      err.refusal = true;
+      err.reason = 'awaiting-human-review';
+      throw err;
+    }
+    // STRANDED: a genuinely stuck row, and the repo's own recorded lesson for
+    // this code applies — never leave a partially-failed draft sitting in a
+    // non-terminal status. Abandon it so the next run generates a clean one,
+    // and report a REFUSAL rather than a failure: this is one item's state
+    // problem, not evidence the pipeline is broken, and must not trip the
+    // circuit breaker.
+    await markDraftAbandoned(siteId, draft.id, `Stuck at "${current?.status || 'unknown'}" and not resumable — abandoned so a fresh draft can be generated.`, null)
+      .catch((err) => console.error(`[auto-remediation] could not abandon unresumable draft ${draft.id}:`, err.message));
+    const err = new Error(`Draft was stuck at "${current?.status || 'unknown'}" and has been reset for a fresh attempt.`);
+    err.refusal = true;
+    err.reason = 'draft-reset';
+    throw err;
+  }
 
   const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
   if (!approved.branch_name) {
@@ -560,7 +686,7 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       err.refusal = true;
       err.stale = true;
       err.reason = 'source-anchor-not-found';
-    } else if (/^No url_file_map entry matches|^No markers configured for/.test(message)) {
+    } else if (message.startsWith(NO_FILE_MAPPING_FRAGMENT) || message.startsWith(NO_MARKERS_CONFIGURED_FRAGMENT)) {
       // url-file-map.js's 'no-file-mapping'/'no-insertion-marker': a page or
       // marker this site's operator hasn't onboarded yet (see
       // action-center-onboarding skill). Real and worth surfacing — left
@@ -568,6 +694,17 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // not a systemic fault, so it must not trip the breaker either.
       err.refusal = true;
       err.reason = 'no-file-mapping';
+    } else if (message.includes(UNVERIFIED_PLACEHOLDER_FRAGMENT)) {
+      // marker-merge.js / data-array-content.js: the generator could not
+      // confirm a real value for a field (analytics-install's trackingId is
+      // the recurring case — trust-compliance.js deliberately files that
+      // finding even with no stored ID, so a human can generate the draft
+      // and edit the placeholder by hand). This recurs identically on every
+      // unattended attempt until a human does that, exactly the same
+      // per-item, non-systemic shape as the two patterns above — it must
+      // not trip the breaker either.
+      err.refusal = true;
+      err.reason = 'unverified-placeholder-field';
     } else if (/uses classes this site only ever uses for its/.test(message)) {
       // design-drift.js's checkDesignIntegrityGate: THIS recommendation's
       // styled markup failed automated role verification (a confirmed

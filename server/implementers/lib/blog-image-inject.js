@@ -8,10 +8,14 @@ import { hasImageField, insertFrontMatterFields } from '../../generators/lib/blo
 // directly rather than resolving one from a `page` URL the way every other
 // backend.js merge does. Still the same exact-match-or-refuse safety
 // contract as schema-repair-inject.js/content-integrity-inject.js: content
-// is re-fetched live, right before patching, and a post that picked up an
-// image some other way since detection (a human edit, a different agent, or
-// simply having merged an earlier day's own batch PR) refuses rather than
-// appending a second one.
+// is re-fetched live, right before patching, and re-checks draft.content.mode
+// against the post's CURRENT state — 'missing' refuses if an image already
+// showed up some other way since detection (a human edit, a different
+// agent, or having merged an earlier day's own batch PR); 'duplicate'
+// refuses if the image it meant to replace is already gone.
+// insertFrontMatterFields upserts rather than only appends, so a
+// 'duplicate' repair replaces the existing featuredImage/Alt/Credit trio in
+// place instead of adding a second, conflicting one.
 export async function computeBlogImageMerge(site, draft, beforeRef = baseBranch(site)) {
   const filePath = draft.content?.filePath;
   if (!filePath) return { ok: false, reason: 'draft-not-ready', error: 'This draft has no target file path.' };
@@ -23,8 +27,13 @@ export async function computeBlogImageMerge(site, draft, beforeRef = baseBranch(
   const conflict = detectConflictMarkers(file.content);
   if (conflict) return conflict;
 
-  if (hasImageField(file.content)) {
+  const mode = draft.content?.mode || 'missing';
+  const hasImage = hasImageField(file.content);
+  if (mode === 'missing' && hasImage) {
     return { ok: false, reason: 'already-has-image', error: `${filePath} already has a featured image — this post may have been updated since this draft was generated.` };
+  }
+  if (mode !== 'missing' && !hasImage) {
+    return { ok: false, reason: 'no-longer-duplicate', error: `${filePath} no longer has a featured image to replace — this post may have been updated since this draft was generated.` };
   }
 
   const newContent = insertFrontMatterFields(file.content, [

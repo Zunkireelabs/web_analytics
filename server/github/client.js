@@ -39,13 +39,187 @@ function repoPath(site) {
   return `${site.repo_owner}/${site.repo_name}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// RATE LIMITING
+//
+// Nothing here read GitHub's rate-limit headers before this, which is how a
+// single busy morning took the whole autonomous chain down: on 2026-09-01 the
+// 08:00 run created ~130 drafts in one hour, exhausted the shared PAT's
+// 5,000 req/hour budget, and every subsequent write came back
+// `403 API rate limit exceeded for user ID 286862633`. 113 drafts were
+// permanently abandoned for what was, in substance, a one-hour wait.
+//
+// Two distinct GitHub limits are handled here, because they signal
+// differently and a check for one silently misses the other:
+//
+//  - the PRIMARY hourly limit: `x-ratelimit-remaining: 0`, with
+//    `x-ratelimit-reset` giving the epoch second the budget refills.
+//  - the SECONDARY ("abuse"/content-creation) limit: a 403 that can arrive
+//    with `x-ratelimit-remaining` still well above zero, carrying
+//    `retry-after` instead. Creating commits and PRs — exactly what the ship
+//    path does — is what trips this one.
+//
+// Waiting is bounded on purpose. This runs inside a cron pass that has other
+// sites to get to, so a limit that resets 50 minutes out must NOT be slept
+// through; after RATE_LIMIT_MAX_RETRIES the request throws a TYPED error and
+// the caller (auto-remediation.js) stops the run and leaves its drafts
+// re-attemptable for the next pass, rather than burning the rest of the
+// budget on writes that cannot succeed.
+const RATE_LIMIT_MAX_RETRIES = 2;
+const RATE_LIMIT_MAX_WAIT_MS = 60_000;
+
+// The floor at which callers should stop starting NEW work. Not enforced
+// here — a request already in flight is always allowed through, since
+// abandoning a half-finished batch mid-write is worse than spending the last
+// of the budget finishing it. See getLastKnownRateLimit below.
+export const RATE_LIMIT_RESERVE = 100;
+
+// Last rate-limit state GitHub reported, from whichever call saw it most
+// recently. Module-level because it is a property of the TOKEN's budget, not
+// of any one request, and every call in this file shares that budget.
+// `remaining: null` means no authenticated call has been made yet this
+// process — never treated as "plenty left".
+let lastRateLimit = { remaining: null, reset: null, at: null };
+
+// `res.headers.get()` returns null for a header that isn't there, and
+// `Number(null)` is 0 — NOT NaN. A `Number.isFinite` guard therefore does
+// NOT catch a missing header; it records "0 requests left" and latches the
+// budget to permanently-exhausted for the life of the process, stopping
+// every site's run without a single real rate limit. Same trap in
+// rateLimitWaitMs, where it would make `isPrimary` true for any 403 lacking
+// the header — misreporting a permanent "not accessible by this token" 403
+// as retryable forever. Read through this helper, never Number() directly.
+function headerNumber(res, name) {
+  const raw = res.headers.get(name);
+  if (raw === null || raw.trim() === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * @returns {{remaining: number|null, reset: Date|null, at: Date|null, low: boolean}}
+ * `low` is the caller-facing question — "should I stop starting new work?" —
+ * answered conservatively: unknown remaining reads as NOT low (nothing has
+ * failed yet, so don't pre-emptively halt a healthy run), but any observed
+ * value under the reserve does.
+ */
+export function getLastKnownRateLimit() {
+  // `low` MUST expire. The budget refills at `reset`, but nothing re-reads it
+  // on its own: auto-remediation's pre-check breaks the loop BEFORE making any
+  // GitHub call, so a run that starts low makes zero requests, learns nothing,
+  // and leaves this state stale for the next run to trip over identically.
+  // Once latched, the autonomous loop could never recover from within itself.
+  // A reset that has already passed means the observation is simply out of
+  // date — report not-low and let the next real response say what's true.
+  const expired = lastRateLimit.reset != null && lastRateLimit.reset.getTime() <= Date.now();
+  return {
+    ...lastRateLimit,
+    low: !expired && lastRateLimit.remaining != null && lastRateLimit.remaining < RATE_LIMIT_RESERVE,
+  };
+}
+
+// `forSearch` responses are deliberately NOT recorded. GitHub's rate limits
+// are per-RESOURCE, and /search/code has its own budget of about 30 per
+// minute against core's 5,000 per hour. Recording a search response's
+// `x-ratelimit-remaining: 29` as though it described the core budget puts it
+// instantly under RATE_LIMIT_RESERVE (100) — and since searchCodeForString
+// sits directly on the ship path (backend.js's marker discovery,
+// discover-file-mapping.js's auto-heal), the very first item of a run would
+// leave every subsequent item's pre-check reading "low" and halt the run
+// after one ship. Tracking core only keeps this state meaning one thing.
+function recordRateLimitHeaders(res, { forSearch = false } = {}) {
+  if (forSearch) return;
+  const remaining = headerNumber(res, 'x-ratelimit-remaining');
+  if (remaining === null) return;
+  const reset = headerNumber(res, 'x-ratelimit-reset');
+  lastRateLimit = {
+    remaining,
+    reset: reset === null ? null : new Date(reset * 1000),
+    at: new Date(),
+  };
+}
+
+// How long to wait before retrying, or null if this response is not a rate
+// limit at all. The body is read from a CLONE so the caller's own
+// `await res.text()` still works — every caller in this file reads the body
+// of a failed response to build its error message, and consuming it here
+// would turn a rate limit into an empty-message mystery.
+async function rateLimitWaitMs(res) {
+  if (res.status !== 403 && res.status !== 429) return null;
+
+  const retryAfter = headerNumber(res, 'retry-after');
+  const remaining = headerNumber(res, 'x-ratelimit-remaining');
+  const reset = headerNumber(res, 'x-ratelimit-reset');
+
+  // Header evidence first — it is unambiguous and costs nothing. A 403 with
+  // neither signal is checked against the body, because a secondary limit
+  // can arrive with no rate-limit header at all; a 403 that is genuinely
+  // "this token cannot write to this repo" must NOT be retried, and the body
+  // is the only thing that separates the two.
+  const isPrimary = remaining === 0;
+  const hasRetryAfter = retryAfter !== null && retryAfter > 0;
+  if (!isPrimary && !hasRetryAfter) {
+    const body = await res.clone().text().catch(() => '');
+    if (!/rate limit|secondary rate|abuse detection/i.test(body)) return null;
+  }
+
+  const trueWaitMs = hasRetryAfter
+    ? retryAfter * 1000
+    : (reset === null ? RATE_LIMIT_MAX_WAIT_MS : reset * 1000 - Date.now());
+  // `waitMs` is what's actually safe to sleep for — clamped at both ends:
+  // never a busy-loop on a stale/absent reset, never longer than one cron
+  // pass can afford to sit still. `trueWaitMs` (unclamped) is kept alongside
+  // it so a caller who already knows the real reset is, say, 40 minutes out
+  // can tell "the header already proves 2 retries can't reach this" from
+  // "the wait is short enough that retrying might actually work" — clamping
+  // it away here would erase exactly the evidence that distinction needs.
+  return { waitMs: Math.min(Math.max(trueWaitMs, 1_000), RATE_LIMIT_MAX_WAIT_MS), trueWaitMs };
+}
+
+// Typed so callers can tell a wait-and-it-works failure from a permanent one
+// WITHOUT regex-matching a provider message that changes without notice —
+// see lib/failure-classification.js, which maps `rateLimited` onto its
+// EXTERNAL_SERVICE class (the one class it treats as auto-retryable).
+function rateLimitError(path, waitMs) {
+  const reset = lastRateLimit.reset;
+  const err = new Error(
+    `GitHub rate limit reached for ${path}${reset ? ` (resets ${reset.toISOString()})` : ''} — `
+    + `retried ${RATE_LIMIT_MAX_RETRIES}x, still limited.`,
+  );
+  err.rateLimited = true;
+  err.retryAfterMs = waitMs;
+  err.rateLimitReset = reset;
+  return err;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function githubRequest(site, method, path, body, { forSearch = false } = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return res;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    recordRateLimitHeaders(res, { forSearch });
+
+    const rateLimit = await rateLimitWaitMs(res);
+    if (rateLimit == null) return res;
+    const { waitMs, trueWaitMs } = rateLimit;
+    const attemptsLeft = RATE_LIMIT_MAX_RETRIES - attempt;
+    // Fail fast when the header already proves retrying is futile — e.g. an
+    // hourly reset 40 minutes out, which 2 retries at a 60s clamp each could
+    // never reach regardless of how long this loop sleeps. Sleeping up to
+    // RATE_LIMIT_MAX_RETRIES * RATE_LIMIT_MAX_WAIT_MS through a wait the data
+    // already ruled out wastes wall-clock a cron pass can't spare, for no
+    // chance of succeeding — the eventual throw was never in doubt.
+    if (attempt >= RATE_LIMIT_MAX_RETRIES || trueWaitMs > attemptsLeft * RATE_LIMIT_MAX_WAIT_MS) {
+      throw rateLimitError(path, waitMs);
+    }
+
+    console.warn(`[github] rate limited on ${method} ${path}; waiting ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})`);
+    await sleep(waitMs);
+  }
 }
 
 // SHA of the tip of an arbitrary real branch.

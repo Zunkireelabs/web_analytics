@@ -39,3 +39,21 @@ describe('buildComplianceDesignDriftFindings', () => {
     assert.deepEqual(findings.map((f) => f.recommendedAction.generatorId), ['privacy-policy', 'terms-of-service']);
   });
 });
+
+// DESIGN NOTE (not independently unit-testable here): a missing-tracker
+// finding (TRACKER_CHECKS inside run(), no exported seam of its own) is filed
+// REGARDLESS of whether a trackingId is known — the draft ships with a
+// placeholder blocking auto-publish until a human fills in the real ID by
+// hand-editing it in the Action Center. An earlier version of this file
+// suppressed filing entirely once a tracker had no stored ID
+// (trackerCheckIsActionable, since removed), on the reasoning that an
+// unattended draft could never complete it — correct about the unattended
+// loop, wrong about the fix: it also hid the finding from the ONE place a
+// human could ever discover and fix it, since nothing in this app writes
+// ga4_measurement_id or facebook_pixel_id automatically (confirmed: no route
+// or script in this repo sets either column). The unattended-loop problem
+// (facebook-pixel:missing had 15 wasted auto-remediation attempts) now
+// belongs at ship-pacing.js's convergence cap instead, which holds a finding
+// after repeated identical failures while leaving it open and visible for a
+// human — see store/drafts.test.js and auto-remediation.test.js's
+// 'unverified placeholder field'/UNVERIFIED_PLACEHOLDER_FRAGMENT coverage.

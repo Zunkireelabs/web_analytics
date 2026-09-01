@@ -570,7 +570,43 @@ export function checkTypographyRole(profile, source, observed = observedClassesB
     return { ok: true, field: source.field };
   }
 
+  // Did the capture record ANY element in the role(s) this field is checked
+  // against? If not, there is no evidence base here at all, and a "mismatch"
+  // cannot honestly be confirmed against evidence that does not exist.
+  //
+  // This is not hypothetical. capture.js only ever emits four roles —
+  // heading, body, cta, subheading — and `link` is not among them, so
+  // typography.link's accepted role set (['link']) matches nothing on ANY
+  // site, ever. Worse, an ordinary inline link resembles a CTA closely enough
+  // that the same class string is genuinely captured under `cta`, which sent
+  // this field down the `actual` branch below and reported it as a CONFIRMED
+  // role-mismatch — the one reason that blocks.
+  //
+  // Site 1 shows the effect exactly: typography.link is
+  // "text-zunkiree-600 hover:underline" (a plain inline-link style; a real
+  // CTA on this site carries px-/py-/bg-/rounded-), and all 54 recorded
+  // verdicts failed on it — a 100% failure rate that is a property of the
+  // check, not of the site. Had DESIGN_INTEGRITY_ENFORCE been turned on as
+  // the rollout plan intended, it would have blocked every visible-content
+  // draft for every tenant, permanently, on a defect none of them have.
+  //
+  // Reported (never silently dropped) but non-blocking, which is the same
+  // call this module already makes for thin evidence via 'class-unobserved':
+  // verifyProfileRoles blocks on a confirmed 'role-mismatch' only. Fields
+  // whose role IS captured — body, heading, subheading — are unaffected and
+  // still confirm and block, so the incident this gate was built for (body
+  // copy set to an eyebrow style) is still caught.
+  const roleEvidenceExists = source.roles.some((r) => (observed.get(r)?.size || 0) > 0);
   const actual = roleThisClassActuallyPlays(observed, classes);
+  if (!roleEvidenceExists) {
+    return {
+      ok: false,
+      field: source.field, classes, observedAs: actual,
+      reason: 'role-unobserved',
+      error: `${source.field} could not be verified: the capture recorded no ${source.roles.join('/')} elements on any page, so there is no evidence to check it against.`,
+    };
+  }
+
   return {
     ok: false,
     field: source.field, classes, observedAs: actual,
@@ -593,7 +629,8 @@ export function checkTypographyRole(profile, source, observed = observedClassesB
 // already-derived profiles and shown to report true defects, not false
 // positives from a thin capture sample). Returns the first CONFIRMED
 // role-mismatch across every typography field, or ok:true — never blocks on
-// class-unobserved alone.
+// class-unobserved or role-unobserved alone (see checkTypographyRole: both
+// mean "not enough evidence to confirm", not "confirmed wrong").
 export function verifyProfileRoles(profile) {
   const observed = observedClassesByRole(profile);
   for (const source of TYPOGRAPHY_ROLE_SOURCE) {
