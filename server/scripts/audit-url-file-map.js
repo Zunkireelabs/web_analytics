@@ -2,7 +2,8 @@ import 'dotenv/config';
 import { pool, recordActionCenterConfigCheck } from '../db.js';
 import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
-import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile } from '../implementers/lib/url-file-map.js';
+import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
+import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
 import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
 import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
@@ -249,6 +250,46 @@ export async function auditSite(siteId) {
     console.log('  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.');
   }
 
+  // Author/org avatar aspect-ratio check (avatar-aspect-check.js) — catches
+  // the zunkireelabs-web incident shape (a wide wordmark logo declared as
+  // rendering inside a circular object-cover avatar frame, which crops it
+  // to an unrecognizable sliver) at onboarding time, before any blog post
+  // ships. Purely config-driven: a site with no siteRoot.authorAvatars
+  // declared has nothing to check here, same as every other optional
+  // section of this audit.
+  const authorAvatars = resolveAuthorAvatars(site);
+  const avatarAspectFatal = []; // { label, imagePath, reason }
+  const avatarAspectUnverified = []; // { label, imagePath, reason }
+  for (const avatar of authorAvatars) {
+    if (!avatar?.imagePath) continue;
+    let dimensions = null;
+    try {
+      const file = await getFileContent(site, avatar.imagePath, baseBranch(site));
+      if (!file) {
+        avatarAspectFatal.push({ label: avatar.label, imagePath: avatar.imagePath, reason: 'file not found in repo' });
+        continue;
+      }
+      if (avatar.imagePath.toLowerCase().endsWith('.svg')) dimensions = parseSvgDimensions(file.content);
+    } catch (err) {
+      console.warn(`  (could not check avatar ${avatar.imagePath}: ${err.message})`);
+      continue;
+    }
+    const gap = classifyAvatarAspectGap({ expectedFit: avatar.expectedFit, dimensions });
+    if (!gap) continue;
+    const entry = { label: avatar.label, imagePath: avatar.imagePath, reason: gap.reason };
+    if (gap.severity === 'fatal') avatarAspectFatal.push(entry);
+    else avatarAspectUnverified.push(entry);
+  }
+  console.log(`\n-- AUTHOR AVATAR ASPECT-RATIO GAPS (${avatarAspectFatal.length}) -- (a non-square logo/avatar declared as rendering inside a circular crop frame)`);
+  for (const { label, imagePath, reason } of avatarAspectFatal) console.log(`  ${label || imagePath} (${imagePath}): ${reason}`);
+  if (avatarAspectUnverified.length) {
+    console.log(`\n-- AUTHOR AVATAR ASPECT-RATIO, UNVERIFIED (${avatarAspectUnverified.length}) -- (declared circular-cover but this audit can't determine real dimensions — check by eye)`);
+    for (const { label, imagePath, reason } of avatarAspectUnverified) console.log(`  ${label || imagePath} (${imagePath}): ${reason}`);
+  }
+  if (authorAvatars.length && !avatarAspectFatal.length && !avatarAspectUnverified.length) {
+    console.log('  OK — every declared circular-cover avatar is square enough to survive the crop.');
+  }
+
   // Dedicated nginx security-headers marker check — a site-root marker, not
   // per-page, and the one marker type that can NEVER auto-create itself
   // (see the module comment above), so it gets checked and named explicitly
@@ -319,6 +360,7 @@ export async function auditSite(siteId) {
 
   const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
     && nginxMarkerOk !== false && analyticsInstallGap === null && renderCapabilityGaps.length === 0
+    && avatarAspectFatal.length === 0
     && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
   console.log(`\nSite #${siteId}: ${clean ? 'CLEAN — no gaps found.' : 'gaps found — see above.'}`);
 
@@ -326,6 +368,7 @@ export async function auditSite(siteId) {
     + (nginxMarkerOk === false ? 1 : 0)
     + (analyticsInstallGap !== null ? 1 : 0)
     + renderCapabilityGaps.length
+    + avatarAspectFatal.length
     + ACTION_TYPES.reduce((sum, t) => sum + noMarkers[t].length, 0);
   await recordActionCenterConfigCheck(siteId, gapCount);
 }
