@@ -30,6 +30,22 @@ describe('usedPhotoIds', () => {
     assert.deepEqual([...ids].sort(), [10, 20]);
   });
 
+  test('reads the id from featuredImageSource when the display field holds a local repo path', async () => {
+    filesFixture = ['src/blog/a.md', 'src/blog/b.md'];
+    contentByPath = {
+      // New-style post: local image path in the display field, real Pexels
+      // URL only in featuredImageSource (see newpage-render.js's
+      // renderBlogOutlineBody) — this is what a post looks like after this
+      // app started downloading and committing images instead of hotlinking.
+      'src/blog/a.md': '---\ntitle: "A"\nimage: "/images/blog/a.jpeg"\nfeaturedImageSource: "https://images.pexels.com/photos/30/x.jpeg"\n---\nbody',
+      // Old-style post from before the change: still detected via the
+      // display-field fallback.
+      'src/blog/b.md': '---\ntitle: "B"\nimage: "https://images.pexels.com/photos/40/y.jpeg"\n---\nbody',
+    };
+    const ids = await usedPhotoIds(SITE);
+    assert.deepEqual([...ids].sort(), [30, 40]);
+  });
+
   test('empty set when no blog directory is configured', async () => {
     const ids = await usedPhotoIds({});
     assert.equal(ids.size, 0);

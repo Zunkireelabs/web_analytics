@@ -1,9 +1,12 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveBlogImagePath } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { resolveBlogImageCommit } from './lib/blog-image-fetch.js';
+import { FIELD_ALIASES } from './lib/newcontent-contract.js';
+import { insertFrontMatterFields } from '../generators/lib/blog-frontmatter.js';
 
 export const meta = {
   id: 'frontend',
@@ -227,10 +230,38 @@ export async function apply(site, draft) {
 
   const batchInfo = await getOrInitBatchBranch(site);
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
-  return pushDraftBranch(site, draft, [{
-    path: resolved.filePath, content: resolved.body,
+
+  let body = resolved.body;
+  const files = [];
+
+  // blog-outline is the only FRONTEND_ACTION_TYPES type that ever carries a
+  // featuredImage — real download/commit happens HERE, not at generation
+  // time: this is the one step in the whole draft lifecycle that actually
+  // talks to GitHub, so it's the only place a real file can land in the same
+  // commit as the post (see blog-image-fetch.js's resolveBlogImageCommit for
+  // the retry/dedup and failure behavior).
+  if (draft.action_type === 'blog-outline') {
+    const content = draft.content || {};
+    const repoImagePath = resolveBlogImagePath(site, content.title || content.topic, content.featuredImage?.url);
+    const branch = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
+    const { file, imageFailed } = await resolveBlogImageCommit(site, branch, repoImagePath, content.featuredImage?.url, getFileContent);
+    if (file) files.push(file);
+    if (imageFailed) {
+      // The rendered body already optimistically references repoImagePath
+      // (newpage-render.js) — the download that would have made that real
+      // just failed, so strip it back out rather than ship a post whose
+      // featured image 404s. featuredImageSource is a bookkeeping-only field
+      // (see blog-frontmatter.js), stripped alongside the display aliases.
+      const allImageAliases = [...Object.values(FIELD_ALIASES).flat(), 'featuredImageSource'];
+      body = insertFrontMatterFields(body, allImageAliases.map((k) => [k, null]));
+    }
+  }
+
+  files.push({
+    path: resolved.filePath, content: body,
     contentFormat: resolved.contentFormat, actionType: draft.action_type,
-  }], batchInfo);
+  });
+  return pushDraftBranch(site, draft, files, batchInfo);
 }
 
 // branch_pushed -> PR opened into the site's default branch (human merges

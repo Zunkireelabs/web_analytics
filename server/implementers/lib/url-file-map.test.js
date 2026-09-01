@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
+  resolveBlogImageDir, resolveBlogImagePath,
 } from './url-file-map.js';
 
 // Regression coverage for a real report: zunkireelabs-web's `/compare/:slug`
@@ -11,6 +12,43 @@ import {
 // failed every time someone tried to apply it ("No url_file_map entry
 // matches..."). isPageMapped is the pre-check that lets
 // agents/lib/recommendations.js skip creating that recommendation at all.
+describe('resolveBlogImageDir / resolveBlogImagePath', () => {
+  test('defaults to a root-level images/blog when no imageDir is configured', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    assert.equal(resolveBlogImageDir(site), 'images/blog');
+  });
+
+  test('an explicit imageDir wins over the default', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md', imageDir: 'assets/blog-images' } } } };
+    assert.equal(resolveBlogImageDir(site), 'assets/blog-images');
+  });
+
+  test('null when blog-outline has no target configured at all — nowhere to commit the file', () => {
+    assert.equal(resolveBlogImageDir({ url_file_map: {} }), null);
+    assert.equal(resolveBlogImageDir({}), null);
+  });
+
+  test('resolveBlogImagePath combines the dir, the post\'s own slug, and the source url\'s real extension', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    assert.equal(
+      resolveBlogImagePath(site, 'Boiler Care Tips!', 'https://images.pexels.com/photos/1/x.jpeg?w=1260'),
+      'images/blog/boiler-care-tips.jpeg',
+    );
+  });
+
+  test('the same title always resolves to the same path — retries/reruns never create a duplicate', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    const first = resolveBlogImagePath(site, 'Boiler Care Tips', 'https://images.pexels.com/photos/1/x.jpeg');
+    const second = resolveBlogImagePath(site, 'Boiler Care Tips', 'https://images.pexels.com/photos/1/x.jpeg');
+    assert.equal(first, second);
+  });
+
+  test('null when there is no source image url', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+    assert.equal(resolveBlogImagePath(site, 'Boilers', null), null);
+  });
+});
+
 describe('isPageMapped', () => {
   const site = {
     url_file_map: {

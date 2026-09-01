@@ -65,6 +65,11 @@ describe('extractImageUrl', () => {
   test('null when no image field is present', () => {
     assert.equal(extractImageUrl(POST), null);
   });
+
+  test('featuredImageSource wins over the display field, which now holds a local repo path', () => {
+    const raw = '---\ntitle: "T"\nimage: "/images/blog/t.jpeg"\nfeaturedImageSource: "https://images.pexels.com/photos/9/x.jpeg"\n---\nbody';
+    assert.equal(extractImageUrl(raw), 'https://images.pexels.com/photos/9/x.jpeg');
+  });
 });
 
 describe('listPostPaths', () => {

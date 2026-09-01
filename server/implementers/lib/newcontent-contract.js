@@ -50,7 +50,11 @@ const MAX_SIBLINGS = 8;
 // renderer thinks in canonical fields; this maps them onto whatever the
 // target directory actually calls them. Order only breaks ties when a
 // directory somehow uses more than one.
-const FIELD_ALIASES = {
+// Exported so frontend.js's apply() can strip every possible alias of these
+// three fields back out of an already-rendered post when a real image
+// download ends up failing — it has to remove whichever alias this
+// directory's contract actually picked, not guess one hardcoded name.
+export const FIELD_ALIASES = {
   featuredImage: ['featuredImage', 'image', 'heroImage', 'cover', 'coverImage', 'thumbnail'],
   featuredImageAlt: ['featuredImageAlt', 'imageAlt', 'image_alt', 'coverAlt', 'alt'],
   featuredImageCredit: ['featuredImageCredit', 'imageCredit', 'image_credit', 'credit', 'photoCredit'],

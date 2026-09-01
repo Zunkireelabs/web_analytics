@@ -2,7 +2,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
-  createCommitObject, updateRef, commitFilesAtomic,
+  createCommitObject, createBlob, updateRef, commitFilesAtomic,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
 } from './client.js';
 
@@ -131,6 +131,59 @@ describe('createCommitObject / updateRef split', () => {
       assert.equal(sha, 'new-commit-sha');
       assert.ok(!calls.some((c) => c.url.includes('/git/refs/heads/')), 'createCommitObject must never touch a ref');
       assert.deepEqual(calls.map((c) => c.method), ['GET', 'POST', 'POST']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('createBlob posts base64-encoded bytes and returns the real blob sha', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ url: String(url), method: opts?.method, body: opts?.body ? JSON.parse(opts.body) : null });
+      return jsonResponse({ sha: 'blob-sha-1' });
+    };
+    try {
+      const sha = await createBlob(site, Buffer.from([0xff, 0xd8, 0xff]));
+      assert.equal(sha, 'blob-sha-1');
+      assert.equal(calls.length, 1);
+      assert.match(calls[0].url, /\/git\/blobs$/);
+      assert.equal(calls[0].body.encoding, 'base64');
+      assert.equal(calls[0].body.content, Buffer.from([0xff, 0xd8, 0xff]).toString('base64'));
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // A binary (contentBuffer) file needs a REAL blob sha in its tree entry —
+  // the tree API's inline `content` field always creates a UTF-8 text blob,
+  // which would mangle image bytes. A text (content) file must keep using
+  // the cheaper inline path unchanged.
+  test('createCommitObject creates a real blob for a contentBuffer file, and still inlines a text file', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      const body = opts?.body ? JSON.parse(opts.body) : null;
+      calls.push({ url: String(url), method: opts?.method, body });
+      if (String(url).includes('/git/commits/parent-sha')) return jsonResponse({ tree: { sha: 'base-tree-sha' } });
+      if (String(url).endsWith('/git/blobs')) return jsonResponse({ sha: 'image-blob-sha' });
+      if (String(url).endsWith('/git/trees')) return jsonResponse({ sha: 'new-tree-sha' });
+      if (String(url).endsWith('/git/commits')) return jsonResponse({ sha: 'new-commit-sha' });
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+    try {
+      const files = [
+        { path: 'src/blog/a.md', content: '---\ntitle: "A"\n---\n' },
+        { path: 'src/images/blog/a.jpg', contentBuffer: Buffer.from([0xff, 0xd8, 0xff]) },
+      ];
+      const sha = await createCommitObject(site, 'parent-sha', files, 'a commit');
+      assert.equal(sha, 'new-commit-sha');
+
+      const treeCall = calls.find((c) => c.url.endsWith('/git/trees'));
+      assert.deepEqual(treeCall.body.tree, [
+        { path: 'src/blog/a.md', mode: '100644', type: 'blob', content: '---\ntitle: "A"\n---\n' },
+        { path: 'src/images/blog/a.jpg', mode: '100644', type: 'blob', sha: 'image-blob-sha' },
+      ]);
     } finally {
       globalThis.fetch = original;
     }

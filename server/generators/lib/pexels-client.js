@@ -107,6 +107,17 @@ export function pexelsPhotoIdFromUrl(url) {
   return m ? Number(m[1]) : null;
 }
 
+// The real file extension a Pexels CDN URL ends in (".../pexels-photo-12345.jpeg"
+// -> ".jpeg") — used to name the local copy this app commits into a client's
+// own repo (see implementers/lib/blog-image-fetch.js) without having to
+// download the file first just to find out what format it is. ".jpg" is the
+// fallback for any URL shape this doesn't recognize, not a guess about what
+// Pexels actually serves today.
+export function imageExtensionFromUrl(url) {
+  const m = /\.([a-z0-9]{2,4})(?:\?|$)/i.exec(url || '');
+  return m ? `.${m[1].toLowerCase()}` : '.jpg';
+}
+
 // Best-effort: any failure (network, timeout, no results, bad key) returns
 // null rather than throwing — a missing featured image must never block a
 // blog draft that is otherwise complete (same reasoning as blog-outline.js's

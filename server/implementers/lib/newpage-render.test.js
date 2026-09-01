@@ -6,6 +6,49 @@ import {
 } from './newpage-render.js';
 import { DESIGN_PROFILE_VERSION } from '../../design-agent/lib/design-profile.js';
 
+describe('renderBlogOutlineBody featured image', () => {
+  const siteWithBlogTarget = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+  const content = {
+    title: 'Boiler Care Tips',
+    sections: [{ heading: 'Bleeding radiators', body: 'Turn the valve.' }],
+    featuredImage: { url: 'https://images.pexels.com/photos/12345/pexels-photo-12345.jpeg', alt: 'A radiator', photographer: 'Jane Doe' },
+  };
+
+  test('writes the LOCAL repo path, not the remote Pexels URL, in the display image field', () => {
+    const out = renderBlogOutlineBody(content, siteWithBlogTarget);
+    assert.match(out, /^image: "\/images\/blog\/boiler-care-tips\.jpeg"$/m);
+    assert.doesNotMatch(out, /^image: ".*pexels\.com.*"$/m);
+  });
+
+  test('keeps the original Pexels URL in featuredImageSource for dedup', () => {
+    const out = renderBlogOutlineBody(content, siteWithBlogTarget);
+    assert.match(out, /^featuredImageSource: "https:\/\/images\.pexels\.com\/photos\/12345\/pexels-photo-12345\.jpeg"$/m);
+  });
+
+  test('respects a per-site imageDir override', () => {
+    const site = { url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md', imageDir: 'assets/blog-images' } } } };
+    const out = renderBlogOutlineBody(content, site);
+    assert.match(out, /^image: "\/assets\/blog-images\/boiler-care-tips\.jpeg"$/m);
+  });
+
+  test('no image field at all when no blog-outline target is configured (nowhere to put the file)', () => {
+    const out = renderBlogOutlineBody(content, { url_file_map: {} });
+    assert.doesNotMatch(out, /^image:/m);
+    assert.doesNotMatch(out, /^featuredImageSource:/m);
+  });
+
+  test('no image field when the post has no featuredImage at all', () => {
+    const out = renderBlogOutlineBody({ title: 'Boilers', sections: [] }, siteWithBlogTarget);
+    assert.doesNotMatch(out, /^image:/m);
+    assert.doesNotMatch(out, /^featuredImageSource:/m);
+  });
+
+  test('honours a sibling-derived field alias for the image key', () => {
+    const out = renderBlogOutlineBody(content, siteWithBlogTarget, { fieldNames: { featuredImage: 'heroImage' } });
+    assert.match(out, /^heroImage: "\/images\/blog\/boiler-care-tips\.jpeg"$/m);
+  });
+});
+
 describe('renderCompliancePageBody', () => {
   const content = {
     headline: 'Privacy Policy',
