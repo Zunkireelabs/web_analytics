@@ -9,13 +9,21 @@ import { getCompetitorDomainSet, normalizeHost } from '../../agents/lib/competit
 // generator that produces outbound links is covered without any new
 // per-generator wiring.
 //
-// Scope: this reliably catches a LINKED competitor mention — the actual
-// pattern found live (zunkireelabs.com/blog/top-tech-companies-nepal-2026/
-// linked f1soft.com/verisk.com/logpoint.com/paailatechnology.com, each with
-// its own "**Website**:" link). A plain-text competitor name with no link
-// is not caught here — competitor_profiles only stores domains, not company
-// display names, and a fuzzy name-matcher would be its own source of false
-// positives. This is a known, deliberate limitation, not an oversight.
+// Scope: this catches a LINKED competitor mention — the actual pattern found
+// live (zunkireelabs.com/blog/top-tech-companies-nepal-2026/ linked
+// f1soft.com/verisk.com/logpoint.com/paailatechnology.com, each with its own
+// "**Website**:" link). An unlinked competitor mention is NOT this guard's
+// job and is no longer unguarded: competitor-prominence.js now measures
+// whether a competitor headlines or dominates the page, deriving each
+// competitor's display name from its configured domain label. The two are
+// deliberately separate checks — this one is about link authority leaving the
+// site, that one is about who the page is about.
+//
+// Note what this does not do: it does not ban naming a competitor. Comparison
+// content that names competitors, weighs their capabilities, and argues why
+// the client is the better fit is a wanted capability. What is blocked is the
+// dofollow link that hands a competitor ranking authority from the client's
+// own domain — a comparison can make its case without one.
 
 const MARKDOWN_LINK = /\[[^\]\n]{1,200}\]\((https?:\/\/[^\s)]+)\)/g;
 const RAW_URL = /https?:\/\/[^\s)"'<>]+/g;
