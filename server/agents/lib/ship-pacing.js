@@ -64,6 +64,23 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
     if (matching.length === 0) continue;
 
     const gapDays = site[gapColumn] ?? defaultGapDays;
+
+    // A blog someone explicitly asked for on the Analyst page ("write a blog
+    // on this keyword?") is a request, not the agent's own choice of what to
+    // publish next — so the cadence gap, which exists to stop the agent
+    // publishing on its own initiative too often, does not apply to it. What
+    // DOES still apply is the one-per-run rule below: a client clicking Yes on
+    // three keywords gets three blogs on three consecutive days, never three
+    // at once. Requested items also win the single slot outright, so a pending
+    // request is never postponed behind an agent-chosen topic.
+    const requested = matching.filter((r) => r.params?.clientRequested === true);
+    if (requested.length > 0) {
+      for (const r of matching) if (r.id !== requested[0].id) dropped.add(r.id);
+      const heldNote = matching.length > 1 ? ` ${matching.length - 1} other candidate(s) wait for a later run.` : '';
+      notes.push(`${generatorId}: shipping 1 explicitly requested topic ("${requested[0].params?.topic ?? 'unknown'}") — the ${gapColumn}=${gapDays} cadence gap does not apply to a requested blog.${heldNote}`);
+      continue;
+    }
+
     if (await recentDraftCheck(site.id, generatorId, gapDays, timezone)) {
       for (const r of matching) dropped.add(r.id);
       notes.push(`${generatorId}: ${matching.length} candidate(s) held — one was published within the last ${gapDays} day(s) (${gapColumn}=${gapDays}).`);

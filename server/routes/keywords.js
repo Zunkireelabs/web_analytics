@@ -134,6 +134,38 @@ router.put('/internal/keywords/:siteId/gaps/:gapId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// "Write a blog on this keyword?" — the Yes on the Analyst page's Grow for a
+// keyword box (web/src/components/AnalystGrowKeyword.jsx), answered right
+// after the keyword was added.
+//
+// Deliberately its own route rather than a flag on the PUT above, because it
+// means something different from staff approval even though both end in an
+// approved gap: staff approval drafts immediately (someone is waiting to look
+// at the result), whereas this queues ONE blog for the next daily run and
+// shows nothing now. Keeping them separate also keeps the PUT's contract
+// ('approved'/'rejected', round-trippable from GET .../gaps) unchanged.
+//
+// Idempotent by construction: the gap is matched by id, and
+// createActionCenterRecommendationForGap reuses an open recommendation for
+// the same topic instead of creating a second one (findOpenRecommendation),
+// so a double-click cannot queue two blogs on one keyword.
+router.post('/internal/keywords/:siteId/gaps/:gapId/request-blog', async (req, res, next) => {
+  try {
+    const updated = await updateKeywordGapStatus(req.params.siteId, req.params.gapId, 'approved');
+    if (!updated) {
+      const err = new Error('Keyword gap not found.');
+      err.status = 404;
+      throw err;
+    }
+
+    const actionCenter = await createActionCenterRecommendationForGap(req.params.siteId, updated, {
+      deferDraft: true,
+      clientRequested: true,
+    });
+    res.json({ ...updated, actionCenter });
+  } catch (e) { next(e); }
+});
+
 router.get('/internal/keywords/:siteId/profile', async (req, res, next) => {
   try {
     res.json(await getSiteProfile(req.params.siteId));
