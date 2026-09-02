@@ -10,6 +10,7 @@ import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js
 import { findOpenRecommendation, insertRecommendation, refreshRecommendationBlockState } from '../../store/recommendations.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { riskTierForGenerator } from './risk-tiers.js';
+import { impactFromPriority } from './findings.js';
 import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
@@ -278,6 +279,31 @@ export function gapDraftEligibility(gap) {
   };
 }
 
+// The eligibility gapDraftEligibility above would compute, overridden for one
+// specific case: a human answered "write a blog post on this topic?" with Yes.
+//
+// That question has already made the judgment gapDraftEligibility exists to
+// make, so its routing must not quietly override the answer. Left to itself it
+// would send a commercial topic to landing-page (MANUAL tier — the daily run
+// would never ship it), a comparison topic to the comparison-page pseudo-type
+// (no generator exists), a question about an already-covered page to faq (an
+// FAQ spliced into that page, not a blog post), or return null outright for a
+// topic it judges not worth acting on. Every one of those silently fails to
+// produce the blog the UI promised for tomorrow.
+//
+// Only the shape hint survives from the real classification — "this is a
+// question, lead with the answer" is good guidance for the article either way.
+export function requestedBlogEligibility(gap) {
+  if (!gap?.id || !gap?.topic) return null;
+  const classified = gapDraftEligibility(gap);
+  return {
+    eligible: true,
+    generatorId: 'blog-outline',
+    findingId: `keyword-gap:${gap.id}`,
+    shapeHint: classified?.shapeHint ?? null,
+  };
+}
+
 // Turns an approved keyword gap into a real, actionable Action Center
 // recommendation — Gate 1 only ("we should act on this"). It just queues a
 // recommendation row; drafting, validation, PR, and the human merge
@@ -287,7 +313,26 @@ export function gapDraftEligibility(gap) {
 // (server/routes/keywords.js) and the 'update_keyword_gap_status' MCP tool
 // (mcp-server/tools/ai-actions.js) — so approval behaves identically no
 // matter which one a caller used.
-export async function createActionCenterRecommendationForGap(siteId, gap) {
+//
+// OPTIONS, both used only by the Analyst page's "write a blog on this
+// keyword?" path (the `request-blog` route in server/routes/keywords.js):
+//   deferDraft      — skip the immediate generateDraft below and leave an
+//                     ordinary open recommendation for the next daily
+//                     auto-remediation run to draft and ship. Staff approval
+//                     keeps drafting on the spot (a staff member is sitting
+//                     there waiting to see the result); a client asking for a
+//                     blog is explicitly asking for tomorrow's run, not a
+//                     five-minute wait on their own page load.
+//   clientRequested — records params.clientRequested on the recommendation so
+//                     ship-pacing.js can tell an explicitly-requested blog
+//                     from one the agent chose itself. That flag is the ONLY
+//                     thing that lets a blog bypass blog_min_gap_days, and it
+//                     is still capped at one per run — see PACED_GENERATORS.
+//                     Safe to carry in params: recommendationPageKey keys
+//                     blog-outline on params.topic alone, so it can't split a
+//                     topic into two rows, and blog-outline.js destructures
+//                     only { topic, context }.
+export async function createActionCenterRecommendationForGap(siteId, gap, { deferDraft = false, clientRequested = false } = {}) {
   // Classification and the existing-page check both run once, on first
   // approval — in parallel, since neither depends on the other's result —
   // and never re-run once a value is already recorded (re-approval after a
@@ -322,7 +367,7 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
     }
   }
 
-  const eligibility = gapDraftEligibility(gap);
+  const eligibility = clientRequested ? requestedBlogEligibility(gap) : gapDraftEligibility(gap);
   if (!eligibility) return { eligible: false };
 
   const relatedQueries = await getRelatedQueriesForTopic(siteId, gap.topic);
@@ -357,6 +402,9 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
           priority: gap.priority,
           riskTier: 'manual',
           blockedReason: eligibility.note,
+          // label only, value left null — see the comment on the main insert
+          // below for why a real number is not invented here.
+          expectedImpact: { label: impactFromPriority(gap.priority), basis: 'estimate', value: null },
         })).id;
     return {
       eligible: true, created: !existing, recommendationId, draftId: null,
@@ -369,7 +417,11 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
   // faq.js), not the topic-only shape blog-outline/landing-page take.
   const params = eligibility.generatorId === 'faq'
     ? { page: eligibility.existingPage, query: gap.topic }
-    : { topic: gap.topic, context: eligibility.shapeHint ? `${reason} ${eligibility.shapeHint}` : reason };
+    : {
+        topic: gap.topic,
+        context: eligibility.shapeHint ? `${reason} ${eligibility.shapeHint}` : reason,
+        ...(clientRequested ? { clientRequested: true } : {}),
+      };
 
   const page = recommendationPageKey({ generatorId: eligibility.generatorId, params });
   const existing = await findOpenRecommendation(siteId, page, eligibility.generatorId);
@@ -416,6 +468,17 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
       priority: gap.priority,
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(eligibility.generatorId),
       blockedReason: gate.blockedReason,
+      // No agent here computes a real numeric estimate for a keyword gap
+      // (unlike technical-seo.js summing real GSC impressions) — inventing
+      // one would be exactly the fabricated-metric problem this codebase
+      // avoids elsewhere. label is real: impactFromPriority is the same
+      // shared rank->label mapping every other agent uses (findings.js),
+      // and it is the only part of expected_impact growth-scoring.js reads
+      // (see that module's note on why .value has no comparable unit across
+      // agents). Previously this path passed no expectedImpact at all, so
+      // every keyword-gap/analyst/growth-opportunity recommendation scored
+      // as if it had zero impact, regardless of real priority.
+      expectedImpact: { label: impactFromPriority(gap.priority), basis: 'estimate', value: null },
     })).id;
   }
 
@@ -425,6 +488,15 @@ export async function createActionCenterRecommendationForGap(siteId, gap) {
   // configuration it actually is.
   if (gate.blockedReason) {
     return { eligible: true, created: !existing, recommendationId, draftId: null, blockedReason: gate.blockedReason };
+  }
+
+  // Requested for a LATER run, deliberately: the recommendation row above is
+  // all tomorrow's auto-remediation pass needs to draft and ship this exactly
+  // like any other safe-tier item, on the same branch/PR, in the same format.
+  // Returned before the drafting block below rather than inside it so the
+  // caller can tell "queued for tomorrow" from "drafted now but empty".
+  if (deferDraft) {
+    return { eligible: true, created: !existing, recommendationId, draftId: null, deferred: true };
   }
 
   // Design Agent -> Implementation -> Validation, all BEFORE this reaches a
@@ -619,6 +691,9 @@ export async function syncAnalystInsightsToActionCenter(siteId, insights, { site
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
       confidence: action.confidence,
+      // See createActionCenterRecommendationForGap's comment on why label
+      // (not a fabricated value) is what's set here.
+      expectedImpact: { label: impactFromPriority(predicted ? 'medium' : 'high'), basis: 'estimate', value: null },
     });
     created++;
   }
@@ -675,6 +750,13 @@ export async function syncGrowthOpportunitiesToActionCenter(siteId, { site } = {
       priority: opp.severity || 'medium',
       riskTier: gate.blockedReason ? 'manual' : riskTierForGenerator(action.generatorId),
       blockedReason: gate.blockedReason,
+      // opp.opportunityScore (opportunity-scoring.js) is a real computed
+      // number, but on a different scale per opportunity TYPE (quick-win vs
+      // content-expansion use different underlying formulas) — not safely
+      // comparable across types as a raw value, same reasoning as the other
+      // three insert paths. label is derived from the same severity this row
+      // already stores.
+      expectedImpact: { label: impactFromPriority(opp.severity || 'medium'), basis: 'estimate', value: null },
     });
     created++;
   }

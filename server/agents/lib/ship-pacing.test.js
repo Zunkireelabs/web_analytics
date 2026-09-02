@@ -47,6 +47,39 @@ describe('applyPacing', () => {
 
     assert.deepEqual(paced.map((r) => r.id), [2]);
   });
+
+  // A blog someone asked for on the Analyst page is a request, not the agent
+  // choosing what to publish next — so the cadence gap (which exists to pace
+  // the agent's own initiative) doesn't apply, while the one-per-run rule,
+  // which is what actually stops a burst, still does.
+  test('an explicitly requested blog ships even inside the gap window', async () => {
+    const requested = { ...rec(1, { type: 'blog-outline' }), params: { topic: 'best travel insurance', clientRequested: true } };
+    const { paced, notes } = await applyPacing(site, [requested], { recentDraftCheck: async () => true });
+
+    assert.deepEqual(paced.map((r) => r.id), [1]);
+    assert.match(notes[0], /cadence gap does not apply/);
+  });
+
+  test('a requested blog wins the single slot over agent-chosen ones, and only one ships', async () => {
+    const candidates = [
+      rec(1, { type: 'blog-outline' }),
+      { ...rec(2, { type: 'blog-outline' }), params: { topic: 'best travel insurance', clientRequested: true } },
+      { ...rec(3, { type: 'blog-outline' }), params: { topic: 'cheap flights', clientRequested: true } },
+    ];
+    const { paced } = await applyPacing(site, candidates, { recentDraftCheck: never });
+
+    assert.deepEqual(paced.map((r) => r.id), [2], 'the first requested topic ships; the agent-chosen one and the second request wait');
+  });
+
+  test('two requested blogs never ship on the same run — the second waits for the next day', async () => {
+    const candidates = [
+      { ...rec(1, { type: 'blog-outline' }), params: { topic: 'a', clientRequested: true } },
+      { ...rec(2, { type: 'blog-outline' }), params: { topic: 'b', clientRequested: true } },
+    ];
+    const { paced } = await applyPacing(site, candidates, { recentDraftCheck: never });
+
+    assert.equal(paced.length, 1);
+  });
 });
 
 // The churn this ends, measured on site 1 over three days: 623 drafts for 496

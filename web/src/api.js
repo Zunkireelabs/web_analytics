@@ -236,6 +236,11 @@ export const api = {
       req(`/internal/keywords/${siteId}/gaps`, { method: 'POST', body: JSON.stringify({ topic }) }),
     updateGapStatus: (siteId, gapId, status) =>
       req(`/internal/keywords/${siteId}/gaps/${gapId}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+    // "Write a blog on this keyword?" — approves the gap AND queues exactly one
+    // blog for the next daily run, rather than drafting on the spot the way
+    // updateGapStatus('approved') does. See the route's own comment.
+    requestBlogForGap: (siteId, gapId) =>
+      req(`/internal/keywords/${siteId}/gaps/${gapId}/request-blog`, { method: 'POST' }),
     // Website-wide Growth Opportunities (Analyst page) — computed read-time
     // from real GSC query/page data + the keyword_gaps review queue, no
     // separate persistence. See server/agents/lib/growth-opportunities.js.

@@ -161,6 +161,47 @@ GitHub API — same `{ok, reason, error}` shape as the §1a config check — for
 any future caller that wants to gate on it (a merge-readiness badge, an
 "approved" guard) before treating a draft as genuinely safe.
 
+## 1c. Author/org avatar aspect-ratio declaration (optional, but a real recurring defect class)
+
+Real incident, zunkireelabs-web (2026-09): the "Zunkiree Labs Team" blog
+byline used the org's wide wordmark logo (SVG viewBox ~7.3:1) as an author
+avatar, but the template rendered it inside a circular `object-cover` frame
+sized for square headshots — `object-cover` crops to fill, so the wordmark
+got cropped down to an unrecognizable sliver on every post using that
+author (~72 posts, discovered by eye on a live page, not caught by
+anything in this app).
+
+If a site's author/team byline uses an image inside a fixed circular crop
+(`rounded-full` + `object-cover`, or equivalent), declare each such avatar
+in the same `url-file-map.json` passed to `connect-repo`:
+
+```json
+{
+  "siteRoot": {
+    "authorAvatars": [
+      { "label": "Jane Doe", "imagePath": "src/assets/team/jane.webp", "expectedFit": "circular-cover" },
+      { "label": "Acme Corp Team", "imagePath": "src/assets/acme-logo.svg", "expectedFit": "contain" }
+    ]
+  }
+}
+```
+
+`expectedFit` is the human-declared truth about how the template actually
+renders that image — `"circular-cover"` (crops to fill) or `"contain"`
+(natural aspect ratio preserved, no forced circle). Nothing auto-discovers
+these paths from the repo — same manual-declaration discipline as every
+other `url_file_map` field in this runbook — but once declared,
+`audit-url-file-map.js` (and `connect-repo`'s auto-run of it, see §1)
+fetches each image, checks its real SVG dimensions
+(`server/implementers/lib/avatar-aspect-check.js`), and reports a fatal
+"AUTHOR AVATAR ASPECT-RATIO GAP" if a non-square image is declared
+`circular-cover` — before any blog post ships it cropped. A personal
+headshot is virtually always safe to skip declaring (photos are already
+close to square); this is worth doing specifically for any org/team/brand
+logo used as a byline avatar, since a wordmark logo is the shape that
+actually breaks. Raster avatars (png/jpg/webp) are reported "unverified"
+rather than checked — only SVG viewBox/width+height is currently parsed.
+
 ## 2. One-time manual template bootstrap (nothing can safely automate these)
 
 These two anchors are sitewide layout concerns with no framework-agnostic
@@ -285,9 +326,10 @@ npm run audit-url-file-map -- --site-id <id>
 Should report `CLEAN — no gaps found.` (or only self-healing/non-fatal
 notes) — including a `RENDER CAPABILITY GAPS (0)` line with the "every
 configured newContentTargets extension has a recorded, markdown-safe
-renderCapabilities entry" confirmation (§1a). Also check Integration Health
-→ "GitHub (Action Center)" is `ok` with no `recoveryAction` warning
-attached.
+renderCapabilities entry" confirmation (§1a), and an `AUTHOR AVATAR
+ASPECT-RATIO GAPS (0)` line if any avatars were declared (§1c). Also check
+Integration Health → "GitHub (Action Center)" is `ok` with no
+`recoveryAction` warning attached.
 
 If it isn't clean, that's the actual list of what's still blocking — work
 through it here rather than discovering each gap one stuck draft at a time.

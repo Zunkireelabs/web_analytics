@@ -25,3 +25,14 @@
 export const NO_FILE_MAPPING_FRAGMENT = 'No url_file_map entry matches';
 export const NO_MARKERS_CONFIGURED_FRAGMENT = 'No markers configured for';
 export const UNVERIFIED_PLACEHOLDER_FRAGMENT = 'unverified placeholder field';
+
+// The human design-review sign-off gate this fragment came from was removed
+// entirely by commit 8a32037 ("Remove the human design-review gate; automate
+// it at ship time instead") — no code path produces this string any more.
+// Kept only as a convergence-cap exclusion (store/drafts.js): the abandoned
+// drafts it already produced before removal are still inside the 30-day
+// window and, left uncounted-for, permanently suppress auto-retry on
+// findings whose only real failure was a gate that no longer exists —
+// confirmed live on site 1, where 7 currently-capped findings owe their
+// entire failure count to this one dead reason.
+export const DESIGN_NOT_REVIEWED_FRAGMENT = "This site's design has not been reviewed yet";

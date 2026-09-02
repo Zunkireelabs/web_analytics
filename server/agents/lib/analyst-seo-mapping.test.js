@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility } from './analyst-seo-mapping.js';
+import { seoDraftEligibility, opportunityDraftEligibility, gapDraftEligibility, requestedBlogEligibility } from './analyst-seo-mapping.js';
 
 // Regression coverage for the audit finding this module had NO test file at
 // all — the one place a Node/Python drift in generator selection would
@@ -212,5 +212,44 @@ describe('gapDraftEligibility', () => {
   test('a question-shaped topic with no existing page carries a shapeHint for whichever generator was picked', () => {
     const action = gapDraftEligibility(gap({ topic: 'how does crm software work' }));
     assert.match(action.shapeHint, /QUESTION-phrased/);
+  });
+});
+
+// The Analyst page's "Write a blog post on this topic?" Yes. Every case below
+// is one gapDraftEligibility would route somewhere that never produces a blog
+// in tomorrow's run — the whole reason this override exists.
+describe('requestedBlogEligibility', () => {
+  const gap = (overrides = {}) => ({ id: 1, topic: 'best crm software', priority: 'medium', ...overrides });
+
+  test('a malformed gap is still not eligible — an explicit ask cannot conjure a topic', () => {
+    assert.equal(requestedBlogEligibility({ topic: 'x' }), null);
+    assert.equal(requestedBlogEligibility({ id: 1 }), null);
+  });
+
+  test('a commercial/direct topic becomes a blog, not the manual-tier landing-page the daily run would never ship', () => {
+    assert.equal(gapDraftEligibility(gap({ search_intent: 'commercial', product_relevance: 'direct' })).generatorId, 'landing-page');
+    assert.equal(requestedBlogEligibility(gap({ search_intent: 'commercial', product_relevance: 'direct' })).generatorId, 'blog-outline');
+  });
+
+  test('a comparison-shaped topic becomes a blog rather than the comparison-page type no generator can draft', () => {
+    const action = requestedBlogEligibility(gap({ topic: 'zunkiree vs competitor' }));
+    assert.equal(action.generatorId, 'blog-outline');
+    assert.ok(!action.requiresFutureInfrastructure);
+  });
+
+  test('a question about an already-covered page becomes a blog, not an FAQ spliced into that page', () => {
+    const covered = { topic: 'how does crm software work', existing_page_match: 'https://example.com/crm' };
+    assert.equal(gapDraftEligibility(gap(covered)).generatorId, 'faq');
+    assert.equal(requestedBlogEligibility(gap(covered)).generatorId, 'blog-outline');
+  });
+
+  test('a topic gapDraftEligibility would decline entirely still gets its blog — the human already decided', () => {
+    const declined = { product_relevance: 'unrelated', search_intent: 'informational', priority: 'low' };
+    assert.equal(gapDraftEligibility(gap(declined)), null);
+    assert.equal(requestedBlogEligibility(gap(declined)).generatorId, 'blog-outline');
+  });
+
+  test('the question shapeHint survives the override — it is good guidance for the article either way', () => {
+    assert.match(requestedBlogEligibility(gap({ topic: 'how does crm software work' })).shapeHint, /QUESTION-phrased/);
   });
 });

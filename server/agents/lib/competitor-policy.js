@@ -112,11 +112,17 @@ export async function withCompetitorContext(system, generatorId, siteId) {
   const domains = await getCompetitorDomainSet(siteId);
   if (!domains.size) return system;
 
-  return `${system}\n\nThis site's real, configured business competitors: ${[...domains].join(', ')}. ` +
-    'Do not intentionally promote, recommend, profile, or link to these specific companies in normal ' +
-    'informational content — write as if they are simply not mentioned. The only exception is content whose ' +
-    'explicit purpose is a comparison/alternatives section, where naming a real competitor is expected; even ' +
-    'then, do not add a promotional link to their site.';
+  return `${system}\n\nThis site's real, configured business competitors: ${[...domains].join(', ')}.\n` +
+    'You MAY name these companies, compare their capabilities honestly, and describe their strengths and ' +
+    'weaknesses — competitive comparison that establishes why this client is the better choice for the ' +
+    'reader\'s use case is wanted content, not something to avoid. What you must not do is turn the ' +
+    'client\'s own page into promotion for them:\n' +
+    '- Never link to a competitor\'s site. A comparison makes its case without handing them a backlink.\n' +
+    '- Never write a list, directory or roundup that profiles several competitors one after another.\n' +
+    '- Keep the client the subject: the client\'s brand must appear in the title, H1 and meta description, ' +
+    'and must be discussed at least as much as all competitors combined.\n' +
+    '- Describe a competitor only as far as the comparison needs; do not write a flattering standalone ' +
+    'profile of one, and always land on why the client is the better fit.';
 }
 
 // Splits a list of arbitrary items (e.g. Tavily search results, extracted
