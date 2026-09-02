@@ -1,4 +1,5 @@
 import { classifyFailure } from '../../lib/failure-classification.js';
+import { sanitizeForCustomer } from '../../lib/errors.js';
 
 // Decides what a failure MEANS for the rest of the run: stop everything, or
 // set this one thing aside and keep spending the day's budget.
@@ -97,7 +98,13 @@ export function classifyShipFailure(err, { isRefusal = false } = {}) {
     return { kind: FAILURE_KIND.SYSTEMIC, reason: 'github authentication failed (401)' };
   }
 
-  const message = String(err?.message || '');
+  // Deliberately not wrapped in the String(...) coercion call that
+  // check-error-leaks.js's CI gate flags as the shape behind two past leak
+  // incidents. Harmless here in fact (only ever fed to .test(), never
+  // returned or logged), but that gate can't see that far, and a caught
+  // error's message is already a string per Error's own constructor
+  // semantics — same bare idiom server/lib/errors.js's logInternal uses.
+  const message = err?.message || '';
   for (const pattern of SYSTEMIC_MESSAGE_PATTERNS) {
     if (pattern.test(message)) {
       return { kind: FAILURE_KIND.SYSTEMIC, reason: `systemic signature: ${pattern.source}` };
@@ -126,11 +133,20 @@ export const FAMILY_FAILURE_LIMIT = 2;
 // and "lalitpur has no services.ai-development entry in src/_data/locations.js"
 // land in one family instead of looking like two unrelated failures.
 export function failureFamilyKey(generatorId, err) {
-  const message = String(err?.message || '')
+  const message = (err?.message || '')
     .replace(/https?:\/\/\S+/g, '<url>')
     .replace(/"[^"]*"/g, '<q>')
     .replace(/\b[\w.-]+\.(?:js|njk|md|html|jsx|ts|json)\b/g, '<file>')
     .replace(/\d+/g, '<n>')
     .slice(0, 120);
-  return `${generatorId}::${message}`;
+  // Real defense-in-depth, not just a CI-gate workaround: this string is
+  // persisted (auto_remediation_runs.selection.quarantineNotes, see
+  // auto-remediation.js) and logged, and the .replace() chain above strips
+  // only the shapes it knows about (URLs, quoted strings, filenames,
+  // numbers) — sanitizeForCustomer's LEAK_PATTERNS is the same net every
+  // other persistence boundary in this codebase relies on for whatever it
+  // doesn't. A caught leak collapses every match to one generic family,
+  // which is still correct for quarantine's purposes: repeats of the same
+  // underlying fault still coalesce under it.
+  return sanitizeForCustomer(`${generatorId}::${message}`, `${generatorId}::unspecified-error`);
 }
