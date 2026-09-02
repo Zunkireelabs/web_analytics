@@ -7,6 +7,7 @@ import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
 import { checkDesignConsistency } from './design-consistency-gate.js';
 import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
+import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
@@ -103,6 +104,13 @@ export async function runQualityGate(content, generatorId, siteId) {
     // final safety net (rather than per-generator opt-in) is that a future
     // generator gets it for free. See outbound-link-guard.js.
     ...(await findCompetitorLinks(content, siteId)).issues,
+    // The other half of the competitor policy, and same always-on scope and
+    // reasoning as findCompetitorLinks above: that one catches a competitor
+    // LINK (authority leakage), this one catches a competitor becoming the
+    // page's SUBJECT (topical leakage) — the failure mode that shipped live on
+    // a post with no competitor links at all. Mentions and comparisons stay
+    // allowed; domination does not. See competitor-prominence.js.
+    ...(await findCompetitorProminenceIssues(content, siteId)).issues,
     // Same DESIGN_CONTEXT_GENERATOR_IDS scope as withDesignContext (design-
     // drift.js) — a generator with no design surface has nothing for this to
     // check. See design-integrity-guard.js for the log-only -> enforce
