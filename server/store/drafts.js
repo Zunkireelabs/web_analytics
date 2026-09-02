@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
-import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT } from '../lib/draft-failure-phrases.js';
+import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT } from '../lib/draft-failure-phrases.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -782,6 +782,13 @@ const UNCOUNTED_ABANDON_REASONS = [
   // catch, so it counts.
   `abandoned_reason NOT LIKE '%${NO_MARKERS_CONFIGURED_FRAGMENT}%'`,
   `abandoned_reason NOT LIKE '%${NO_FILE_MAPPING_FRAGMENT}%'`,
+  // A REMOVED gate, not a config gap — commit 8a32037 deleted the human
+  // design-review sign-off this reason came from, so nothing produces it any
+  // more. Its old abandons must not keep counting against findings whose one
+  // and only failure was a gate that no longer exists. Same shape as the two
+  // config-gap exclusions above, different cause: those wait on a human
+  // supplying a value; this one is just dead weight from before the fix.
+  `abandoned_reason NOT LIKE '%${DESIGN_NOT_REVIEWED_FRAGMENT}%'`,
 ];
 
 export async function countFailedAttemptsByFinding(siteId) {
