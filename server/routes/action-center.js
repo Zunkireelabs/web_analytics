@@ -257,16 +257,23 @@ router.get('/action-center/generators', async (req, res, next) => {
 // later verification outcome would then be credited to the wrong memory.
 // Every other caller omits it and gets today's behavior unchanged.
 // waitForDesignAgent: false (default) keeps today's fail-fast behavior — most
-// interactive callers (this file's own routes, analyst-seo-mapping.js, MCP)
-// want that, since a user's click should never hang for minutes waiting on a
-// repo analysis. `true` waits up to design-drift.js's full DESIGN_AGENT_WAIT_MS
-// (5 min) — only the unattended cron paths (auto-remediation.js,
-// learned-repair.js) use that, so a site's first-ever draft of a
-// design-sensitive type can ship in the same 07:00 pass that queued the
-// derivation instead of only unblocking the next day's run. A number is a
-// custom wait budget in ms — dataAnalyst.js's "Generate Content Draft" button
-// uses a short one so a mid-derivation click gets a real result instead of
-// an immediate "come back later", without hanging the request for minutes.
+// interactive callers (this file's single-item routes, analyst-seo-mapping.js,
+// MCP) want that, since a user's click should never hang for minutes waiting
+// on a repo analysis. `true` waits up to design-drift.js's full
+// DESIGN_AGENT_WAIT_MS (5 min) — the unattended cron path
+// (auto-remediation.js, learned-repair.js) uses that, so a site's first-ever
+// draft of a design-sensitive type can ship in the same 07:00 pass that
+// queued the derivation instead of only unblocking the next day's run.
+// shipRecommendation (below) does too, for the same reason: "Execute Today's
+// Safe Fixes" already runs as a background execution_job the client polls
+// rather than a request a user waits on synchronously (see
+// executeSafeFixes' own comment on REQUEST_TIMEOUT_MS) — a single item
+// waiting out a same-run derivation costs that job wall-clock it already
+// tolerates, not a hung click, so there is no reason it should refuse
+// first-of-type items the cron path would have shipped. A number is a custom
+// wait budget in ms — dataAnalyst.js's "Generate Content Draft" button uses a
+// short one so a mid-derivation click gets a real result instead of an
+// immediate "come back later", without hanging the request for minutes.
 export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
@@ -919,6 +926,12 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
     const draft = await generateDraft(siteId, {
       generatorId: rec.recommendation_type, params: rec.params, source: 'execution-engine', findingId: rec.finding_ids[0],
       findingOrigin: rec.detecting_agents?.[0] || null,
+      // See generateDraft's own comment on this flag: this bulk path already
+      // runs as a background execution_job, not a click a user waits on
+      // synchronously, so it can afford to wait out a same-run Design Agent
+      // derivation the way the cron path does instead of refusing a
+      // first-of-type item outright.
+      waitForDesignAgent: true,
     });
     await updateJobRecommendationStatus(jobRec.id, 'drafted', { draftId: draft.id });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'drafted' });
