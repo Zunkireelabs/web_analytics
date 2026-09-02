@@ -37,24 +37,13 @@ export function hasImageField(raw) {
   return IMAGE_FIELD_ALIASES.some((k) => keys.has(k));
 }
 
-// The real Pexels URL a post's image came from — used to build the "images
-// already in use on this site" set (see lib/blog-image-usage.js) so a
-// new/repaired post never gets handed a photo another post already has.
-//
-// `featuredImageSource` is checked FIRST: since the display image field now
-// holds a local repo path (blog-image-fetch.js's caller downloads and
-// commits the real file instead of hotlinking Pexels), the display field no
-// longer carries a Pexels URL to extract an id from at all. featuredImageSource
-// is a second, always-literal (never site-aliased — nothing renders it)
-// front-matter field written alongside it purely to keep that URL around for
-// this dedup check. IMAGE_FIELD_ALIASES stays the fallback so a post written
-// before this change (Pexels URL still in the display field, no
-// featuredImageSource) keeps being detected correctly during rollout.
+// The real image URL already on a post, under whichever alias it was written
+// with — used to build the "images already in use on this site" set (see
+// lib/blog-image-usage.js) so a new/repaired post never gets handed a photo
+// another post already has.
 export function extractImageUrl(raw) {
   const m = FRONT_MATTER.exec(raw || '');
   if (!m) return null;
-  const source = /^featuredImageSource\s*:\s*"?(.*?)"?\s*$/m.exec(m[1]);
-  if (source) return source[1].trim();
   for (const key of IMAGE_FIELD_ALIASES) {
     const v = new RegExp(`^${key}\\s*:\\s*"?(.*?)"?\\s*$`, 'm').exec(m[1]);
     if (v) return v[1].trim();

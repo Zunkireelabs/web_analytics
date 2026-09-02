@@ -1,18 +1,14 @@
-import { test, describe, mock, beforeEach, afterEach } from 'node:test';
+import { test, describe, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
-let fileFixture; // raw post-file content string, or null for "not found"
-let imageFileFixture; // truthy when the local image path is already committed on the branch
+let fileFixture; // raw file content string, or null for "not found"
 let pushCalls;
 
 mock.module(resolve('../../github/client.js'), {
   namedExports: {
-    getFileContent: async (site, path) => {
-      if (path.startsWith('images/blog/')) return imageFileFixture ? { content: 'x', sha: 'img-sha' } : null;
-      return fileFixture == null ? null : { content: fileFixture };
-    },
+    getFileContent: async () => (fileFixture == null ? null : { content: fileFixture }),
   },
 });
 mock.module(resolve('./github-ops.js'), {
@@ -27,44 +23,27 @@ mock.module(resolve('./github-ops.js'), {
 
 const { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } = await import('./blog-image-inject.js');
 
-// A configured blog-outline target is what makes a local image path
-// resolvable at all (url-file-map.js's resolveBlogImagePath) — a site with
-// none is covered separately below.
-const SITE = { id: 1, url_file_map: { newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } } } };
+const SITE = { id: 1 };
 function draftWith(content) {
   return { content };
 }
 
-const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200, 1)]);
-let originalFetch;
-
 beforeEach(() => {
   fileFixture = '---\ntitle: "A Real Post"\n---\n\nBody.';
-  imageFileFixture = false;
   pushCalls = [];
-  originalFetch = global.fetch;
-  global.fetch = async () => ({
-    ok: true,
-    headers: { get: () => null },
-    arrayBuffer: async () => JPEG_BYTES.buffer.slice(JPEG_BYTES.byteOffset, JPEG_BYTES.byteOffset + JPEG_BYTES.byteLength),
-  });
 });
 
-afterEach(() => { global.fetch = originalFetch; });
-
 describe('computeBlogImageMerge', () => {
-  const FULL_CONTENT = { filePath: 'src/blog/a.md', title: 'A Real Post', imageUrl: 'https://images.example/a.jpg', imageAlt: 'A field', imageCredit: 'Photo by Jane Doe on Pexels' };
+  const FULL_CONTENT = { filePath: 'src/blog/a.md', imageUrl: 'https://images.example/a.jpg', imageAlt: 'A field', imageCredit: 'Photo by Jane Doe on Pexels' };
 
-  test('splices the LOCAL repo path (not the remote url) into the live front matter, plus featuredImageSource for dedup', async () => {
+  test('splices real image fields into the live front matter', async () => {
     const merged = await computeBlogImageMerge(SITE, draftWith(FULL_CONTENT));
     assert.equal(merged.ok, true);
     assert.equal(merged.filePath, 'src/blog/a.md');
-    assert.match(merged.newContent, /featuredImage: "\/images\/blog\/a-real-post\.jpg"/);
+    assert.match(merged.newContent, /featuredImage: "https:\/\/images\.example\/a\.jpg"/);
     assert.match(merged.newContent, /featuredImageAlt: "A field"/);
     assert.match(merged.newContent, /featuredImageCredit: "Photo by Jane Doe on Pexels"/);
-    assert.match(merged.newContent, /featuredImageSource: "https:\/\/images\.example\/a\.jpg"/);
     assert.match(merged.newContent, /Body\./, 'body text preserved');
-    assert.equal(merged.repoImagePath, 'images/blog/a-real-post.jpg');
   });
 
   test('refuses when the draft has no filePath at all', async () => {
@@ -106,7 +85,7 @@ describe('computeBlogImageMerge', () => {
       const merged = await computeBlogImageMerge(SITE, draftWith(DUP_CONTENT));
       assert.equal(merged.ok, true);
       assert.equal((merged.newContent.match(/featuredImage:/g) || []).length, 1, 'must not leave two featuredImage lines');
-      assert.match(merged.newContent, /featuredImage: "\/images\/blog\/a-real-post\.jpg"/);
+      assert.match(merged.newContent, /featuredImage: "https:\/\/images\.example\/a\.jpg"/);
       assert.ok(!merged.newContent.includes('Old Photographer'), 'stale credit for the replaced photo must not survive');
     });
 
@@ -120,42 +99,18 @@ describe('computeBlogImageMerge', () => {
 });
 
 describe('pushBlogImageBranch', () => {
-  test('pushes the patched post AND the downloaded image, in the same commit', async () => {
-    const content = { filePath: 'src/blog/a.md', title: 'A Real Post', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
+  test('pushes the patched file when the merge succeeds', async () => {
+    const content = { filePath: 'src/blog/a.md', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
     const result = await pushBlogImageBranch(SITE, draftWith(content), { some: 'batch' }, 'main');
     assert.equal(result.ok, true);
     assert.equal(pushCalls.length, 1);
-    const [postFile, imageFile] = pushCalls[0].files;
-    assert.equal(postFile.path, 'src/blog/a.md');
-    assert.match(postFile.content, /featuredImage: "\/images\/blog\/a-real-post\.jpg"/);
-    assert.equal(imageFile.path, 'images/blog/a-real-post.jpg');
-    assert.ok(Buffer.isBuffer(imageFile.contentBuffer));
-  });
-
-  test('the image is already committed (a retry/rerun) — skipped, only the post file is pushed', async () => {
-    imageFileFixture = true;
-    let fetchCalled = false;
-    const passThrough = global.fetch;
-    global.fetch = async (...args) => { fetchCalled = true; return passThrough(...args); };
-    const content = { filePath: 'src/blog/a.md', title: 'A Real Post', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
-    const result = await pushBlogImageBranch(SITE, draftWith(content), {}, 'main');
-    assert.equal(result.ok, true);
-    assert.equal(pushCalls[0].files.length, 1, 'no duplicate image file pushed');
-    assert.equal(fetchCalled, false, 'never re-downloads an image already on the branch');
-  });
-
-  test('the download fails — nothing is pushed at all, since this draft only exists to add/replace an image', async () => {
-    global.fetch = async () => ({ ok: false, headers: { get: () => null }, arrayBuffer: async () => new ArrayBuffer(0) });
-    const content = { filePath: 'src/blog/a.md', title: 'A Real Post', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
-    const result = await pushBlogImageBranch(SITE, draftWith(content), {}, 'main');
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'image-download-failed');
-    assert.equal(pushCalls.length, 0);
+    assert.equal(pushCalls[0].files[0].path, 'src/blog/a.md');
+    assert.match(pushCalls[0].files[0].content, /featuredImage:/);
   });
 
   test('never pushes when the merge refuses', async () => {
     fileFixture = null;
-    const content = { filePath: 'src/blog/gone.md', title: 'Gone', imageUrl: 'x', imageAlt: 'x', imageCredit: null };
+    const content = { filePath: 'src/blog/gone.md', imageUrl: 'x', imageAlt: 'x', imageCredit: null };
     const result = await pushBlogImageBranch(SITE, draftWith(content), {}, 'main');
     assert.equal(result.ok, false);
     assert.equal(pushCalls.length, 0);
@@ -164,7 +119,7 @@ describe('pushBlogImageBranch', () => {
 
 describe('previewLiveBlogImage', () => {
   test('returns a real before/after diff, never pushing anything', async () => {
-    const content = { filePath: 'src/blog/a.md', title: 'A Real Post', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
+    const content = { filePath: 'src/blog/a.md', imageUrl: 'https://images.example/a.jpg', imageAlt: 'x', imageCredit: null };
     const result = await previewLiveBlogImage(SITE, draftWith(content));
     assert.equal(result.ok, true);
     assert.equal(result.live, true);

@@ -3,6 +3,7 @@ import { getFileContent, defaultBranchName } from '../github/client.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { extractTitle, hasImageField } from './lib/blog-frontmatter.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 // The repair half of agents/blog-image.js's detection: re-fetches the ONE
 // post the detector already identified (by its real repo path, not a
@@ -75,7 +76,23 @@ export async function generate({ siteId, params }) {
   // re-confirming the same one (or, for 'broken', it has no photo id to
   // exclude at all, so this is a no-op there).
   const excludePhotoIds = await usedPhotoIds(site);
-  const image = await searchImage(buildImageQueries({ title }), { excludePhotoIds });
+  // Both extra query terms are per-tenant, and both used to be missing: with
+  // no `topic` the list was [title, <fallback>], and the fallback was
+  // buildImageQueries' hardcoded default — 'artificial intelligence
+  // technology', which describes THIS repo's first tenant and no one else.
+  // A dental or booking tenant whose post title didn't clear
+  // MIN_RELEVANCE_SCORE fell through to an AI stock photo, and every such
+  // post on every tenant converged on the same handful of images.
+  const { topic, fallback } = await imageQueryContextFor(site);
+  const image = await searchImage(buildImageQueries({ title, topic, fallback }), {
+    excludePhotoIds,
+    // searchImage's default of 5 is enough for a one-off repair and far too
+    // few for a batch: every already-used photo is skipped, so a run of N
+    // posts sharing a query needs more than N candidates or the tail returns
+    // nothing and each post fails as "no relevant image". Widening the pool
+    // is what makes the exclusion set above usable rather than exhausting.
+    perPage: IMAGE_CANDIDATE_POOL,
+  });
   if (!image) {
     throw Object.assign(
       new Error(`No relevant real image was found for "${title}" — a wrong photo is worse than none, so this is left for manual review rather than forcing a weak match.`),

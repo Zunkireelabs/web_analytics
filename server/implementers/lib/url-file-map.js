@@ -5,7 +5,6 @@
 // failure (reason: 'no-file-mapping'), not attempt a fallback guess.
 
 import { knownDomain, hostnameOf } from '../../agents/lib/site-domain.js';
-import { imageExtensionFromUrl } from '../../generators/lib/pexels-client.js';
 
 // `pages`/`patterns` at the TOP of url_file_map are host-agnostic by
 // original design — every site used to have exactly one hostname, so a bare
@@ -277,10 +276,8 @@ export function resolveNewContentTarget(site, actionType, title) {
 
 // The single slug both the file path above and the public URL below derive
 // from — they must agree, or a page gets written to one place and declares
-// it lives at another. Exported so a blog post's local featured-image
-// filename (blog-image-fetch.js's caller) can be named after the exact same
-// slug as the post itself, instead of re-deriving its own.
-export function slugifyTitle(title) {
+// it lives at another.
+function slugifyTitle(title) {
   return String(title || 'untitled')
     .toLowerCase().trim()
     .replace(/[^a-z0-9]+/g, '-')
@@ -346,51 +343,6 @@ export function resolveNewContentTargetConfig(site, actionType) {
   return { dir: target.dir, extension: target.extension };
 }
 
-// Where a blog post's downloaded featured image is committed — a real repo
-// path for EVERY client, not just Zunkiree's. `newContentTargets['blog-outline'].imageDir`
-// is explicit per-site config (same pattern as dir/extension above).
-//
-// This ONE path has to be correct in two different ways at once: it's both
-// where the file is committed in the repo tree AND (as `/${imageDir}/...`)
-// the public URL the rendered post's <img> will request — those only agree
-// automatically for a directory the build passes through to its output root
-// unchanged (Eleventy's addPassthroughCopy("images"), Next's public/, etc).
-// A directory nested under a source root (e.g. "src/images") almost never
-// serves at that same nested path publicly, so guessing one from the blog
-// dir's own structure (as an earlier version of this function did — "src/blog"
-// -> "src/images/blog") would silently commit a file the live site can never
-// actually reach. "images/blog" is the fallback instead: the common
-// convention of a root-level passthrough directory, sibling to src/, is far
-// more likely to already satisfy both meanings than any path derived from
-// the blog directory would be — but it is still a GUESS, not a verified
-// convention the way newcontent-contract.js's sibling-derived fields are.
-// Whatever this resolves to, a site MUST have its build already serving that
-// exact directory at that exact public path — verified once, during
-// onboarding (same category as the nginx-marker/renderCapabilities steps
-// other generators already require — see the action-center-onboarding
-// skill), by setting imageDir explicitly if the default guess is wrong.
-export function resolveBlogImageDir(site) {
-  const target = site?.url_file_map?.newContentTargets?.['blog-outline'];
-  if (!target?.dir) return null;
-  return target.imageDir || 'images/blog';
-}
-
-// The one path a blog post's local image is known by everywhere: the repo
-// location it's committed at (frontend.js's apply()) IS the public path
-// referenced in the post's own front matter (newpage-render.js's
-// renderBlogOutlineBody), just with/without the leading "/" — see
-// resolveBlogImageDir's comment for why those have to be the same string.
-// No network call: the slug is the post's own (slugifyTitle, same as its
-// file path) and the extension comes from the source URL itself
-// (pexels-client.js's imageExtensionFromUrl), never from downloading first.
-// Returns null when there's no image to place (no imageDir configured, or no
-// source URL at all).
-export function resolveBlogImagePath(site, title, imageUrl) {
-  const imageDir = resolveBlogImageDir(site);
-  if (!imageDir || !imageUrl) return null;
-  return `${imageDir}/${slugifyTitle(title)}${imageExtensionFromUrl(imageUrl)}`;
-}
-
 export function resolveNewContentLayout(site, actionType) {
   const target = site?.url_file_map?.newContentTargets?.[actionType];
   // Explicit per-target config wins, including an explicit null/'' meaning
@@ -417,25 +369,6 @@ export function resolveNewContentUrl(site, actionType, title) {
 // Site-level (not per-page) targets — today only llms.txt/robots.txt.
 export function resolveSiteRootFile(site, key) {
   return site.url_file_map?.siteRoot?.[key] || null;
-}
-
-// Onboarding-declared author/org avatar assets — one entry per avatar image
-// a client site's own template renders, e.g.:
-//   siteRoot.authorAvatars: [
-//     { label: "Sadin Shrestha", imagePath: "src/assets/images/team/sadin-shrestha.webp", expectedFit: "circular-cover" },
-//     { label: "Zunkiree Labs Team", imagePath: "src/assets/images/zunkireelabs-logo-round.svg", expectedFit: "contain" },
-//   ]
-// expectedFit is the human-declared truth about how the template actually
-// renders it — 'circular-cover' (rounded-full + object-cover, or any other
-// crop-to-fill treatment) or 'contain' (natural aspect ratio preserved).
-// audit-url-file-map.js uses this list plus avatar-aspect-check.js to catch
-// a non-square image declared 'circular-cover' onboarding-time, instead of
-// it being discovered by eye on a live page (see avatar-aspect-check.js's
-// module comment for the real incident this exists to stop from repeating).
-// Nothing here auto-discovers avatar assets — same manual-declaration
-// discipline as every other siteRoot/newContentTargets field in this file.
-export function resolveAuthorAvatars(site) {
-  return site.url_file_map?.siteRoot?.authorAvatars || [];
 }
 
 // Common language name -> ISO 639-1 code, for targetLanguage values an LLM

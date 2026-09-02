@@ -1,7 +1,7 @@
 import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  searchImage, buildImageQueries, configured, pexelsPhotoIdFromUrl, imageExtensionFromUrl,
+  searchImage, buildImageQueries, configured, pexelsPhotoIdFromUrl,
 } from './pexels-client.js';
 
 const ORIG_ENV = { ...process.env };
@@ -176,20 +176,5 @@ describe('pexelsPhotoIdFromUrl', () => {
   test('null for a non-Pexels or malformed url', () => {
     assert.equal(pexelsPhotoIdFromUrl('https://example.com/a.jpg'), null);
     assert.equal(pexelsPhotoIdFromUrl(null), null);
-  });
-});
-
-describe('imageExtensionFromUrl', () => {
-  test('reads the real extension off a Pexels CDN url, query params and all', () => {
-    assert.equal(imageExtensionFromUrl('https://images.pexels.com/photos/12345/pexels-photo-12345.jpeg?auto=compress&w=1260'), '.jpeg');
-  });
-
-  test('reads the extension off a url with no query string', () => {
-    assert.equal(imageExtensionFromUrl('https://example.com/a.png'), '.png');
-  });
-
-  test('falls back to .jpg for a url with no recognizable extension', () => {
-    assert.equal(imageExtensionFromUrl('https://example.com/photo'), '.jpg');
-    assert.equal(imageExtensionFromUrl(null), '.jpg');
   });
 });

@@ -315,17 +315,11 @@ function getFileOverlay(site, branch) {
 
 // Records what a just-created (not-yet-pushed) batch commit actually wrote,
 // so a later read on the same branch sees it. `sha: null` is deliberate —
-// only putFile's create-vs-update check reads getFileSha's return, and
-// putFile is never used against an actively-batching branch (confirmed: no
-// call site in server/implementers/) — true for a binary (`contentBuffer`)
-// file exactly as much as a text one, even though createCommitObject
-// resolves a REAL blob sha for those before building the tree (see
-// createBlob above). A binary entry's `content` here is left `undefined`
-// (there was no text to record) — callers that only check "is this path
-// already present on the branch" (blog-image-fetch.js's
-// resolveBlogImageCommit, deciding whether a retry needs to re-download an
-// image) still get a correct answer from that alone; nothing in this batch
-// path ever reads a binary file's content back.
+// files here are always written via the tree API's inline `content` (see
+// createCommitObject below), which never needs a blob sha to build the NEXT
+// tree on top of it; only putFile's create-vs-update check reads
+// getFileSha's return, and putFile is never used against an actively-
+// batching branch (confirmed: no call site in server/implementers/).
 export function recordFileOverlayWrites(site, branch, files) {
   const overlay = getFileOverlay(site, branch);
   if (!overlay) return;
@@ -358,21 +352,6 @@ export async function getFileContent(site, path, ref) {
   if (!res.ok) throw new Error(`getFileContent failed (${res.status}): ${await res.text()}`);
   const data = await res.json();
   return { content: Buffer.from(data.content, 'base64').toString('utf8'), sha: data.sha };
-}
-
-// Creates a git blob from raw bytes and returns its sha — the one way to get
-// binary content (an image) into a tree entry. The tree API's inline
-// `content` field (createCommitObject below) always creates the blob as
-// UTF-8 text; handing it a JPEG's raw bytes through that field would mangle
-// them on the way in. Base64 is GitHub's own required encoding for this
-// endpoint, not a choice made here.
-export async function createBlob(site, buffer) {
-  const res = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/blobs`, {
-    content: buffer.toString('base64'),
-    encoding: 'base64',
-  });
-  if (!res.ok) throw new Error(`createBlob failed (${res.status}): ${await res.text()}`);
-  return (await res.json()).sha;
 }
 
 // Creates or updates one file on `branch`. `sha` must be the file's current
@@ -437,19 +416,9 @@ export async function createCommitObject(site, parentSha, files, message) {
   if (!commitRes.ok) throw new Error(`createCommitObject (read commit) failed (${commitRes.status}): ${await commitRes.text()}`);
   const baseTree = (await commitRes.json()).tree.sha;
 
-  // `contentBuffer` (binary files, e.g. a downloaded blog image) needs its
-  // own blob created first — the tree API's inline `content` field is
-  // text-only (see createBlob above). `content` (every existing text-file
-  // caller) still goes straight into the tree entry unchanged.
-  const entries = await Promise.all(files.map(async (f) => (
-    f.contentBuffer
-      ? { path: f.path, mode: '100644', type: 'blob', sha: await createBlob(site, f.contentBuffer) }
-      : { path: f.path, mode: '100644', type: 'blob', content: f.content }
-  )));
-
   const treeRes = await githubRequest(site, 'POST', `/repos/${repoPath(site)}/git/trees`, {
     base_tree: baseTree,
-    tree: entries,
+    tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.content })),
   });
   if (!treeRes.ok) throw new Error(`createCommitObject (create tree) failed (${treeRes.status}): ${await treeRes.text()}`);
   const newTree = (await treeRes.json()).sha;

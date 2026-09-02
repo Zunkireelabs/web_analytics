@@ -4,6 +4,7 @@ import { callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -159,11 +160,21 @@ export async function generate({ siteId, params }) {
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
   // complete blog draft — see lib/pexels-client.js's searchImage. Title first
-  // (most specific), then the raw topic, then a generic AI/tech fallback,
+  // (most specific), then this post's own topic, then the TENANT'S industry,
   // tried in order until one clears the relevance bar; excludePhotoIds keeps
-  // this post off every photo another post on the site already uses.
+  // this post off every photo another post on the site already uses,
+  // including photos claimed by other drafts in the same batch.
+  //
+  // The last-resort query is the site's own industry rather than
+  // buildImageQueries' hardcoded 'artificial intelligence technology'
+  // default — see lib/blog-image-query.js for why that default silently made
+  // every non-AI tenant's weak-title posts converge on AI stock photos.
   const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
-  const featuredImage = await searchImage(buildImageQueries({ title: parsed.title, topic }), { excludePhotoIds });
+  const { fallback } = await imageQueryContextFor(site);
+  const featuredImage = await searchImage(
+    buildImageQueries({ title: parsed.title, topic, fallback }),
+    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+  );
 
   const content = {
     topic,

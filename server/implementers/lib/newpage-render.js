@@ -1,6 +1,5 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
-import { resolveBlogImagePath } from './url-file-map.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -87,15 +86,6 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   const imageKey = fieldNames.featuredImage || 'image';
   const altKey = fieldNames.featuredImageAlt || 'image_alt';
   const creditKey = fieldNames.featuredImageCredit || 'image_credit';
-  // The LOCAL repo path this post's image will be committed at (see
-  // frontend.js's apply() / blog-image-fetch.js) — computed here with no
-  // network call, purely from the same slug the post's own file path uses
-  // (resolveNewContentTarget) plus the real extension the source URL itself
-  // declares (pexels-client.js's imageExtensionFromUrl). Never the remote
-  // Pexels URL: this app downloads and commits the file instead of the
-  // client's live post hotlinking Pexels' CDN forever.
-  const repoImagePath = resolveBlogImagePath(site, content.title || content.topic, content.featuredImage?.url);
-  const localImagePath = repoImagePath ? `/${repoImagePath}` : null;
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
@@ -105,20 +95,13 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
     // Optional — only present when blog-outline.js's Pexels search
     // (generators/lib/pexels-client.js) found a match; omitted otherwise via
     // frontMatter()'s existing null/empty skip, same as every other field
-    // here. apply() strips these back out if the real download/commit
-    // (frontend.js) ends up failing, so this never ships pointing at a file
-    // that was never actually written to the repo.
-    [imageKey, localImagePath],
-    [altKey, localImagePath ? (content.featuredImage?.alt || null) : null],
-    [creditKey, localImagePath && content.featuredImage?.photographer
+    // here. A remote URL in front matter, not a binary committed to the
+    // repo — the client's blog template is responsible for rendering it.
+    [imageKey, content.featuredImage?.url],
+    [altKey, content.featuredImage?.alt],
+    [creditKey, content.featuredImage?.photographer
       ? `Photo by ${content.featuredImage.photographer} on Pexels`
       : null],
-    // Always-literal, never site-aliased — no template reads this key. It
-    // exists purely so lib/blog-image-usage.js's usedPhotoIds() can still
-    // tell which Pexels photo a post used (and therefore exclude it from a
-    // later post's search) now that the display field holds a local path
-    // instead of that URL. See blog-frontmatter.js's extractImageUrl.
-    ['featuredImageSource', localImagePath ? content.featuredImage?.url : null],
   ], site);
   const parts = [];
   for (const s of content.sections || []) {
