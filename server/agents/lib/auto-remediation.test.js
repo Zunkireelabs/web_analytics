@@ -434,7 +434,13 @@ describe('auto-remediation — category-diverse selection', () => {
 describe('auto-remediation — circuit breaker', () => {
   beforeEach(reset);
 
-  test('five consecutive failures stop the run early, leaving the rest untouched and open', async () => {
+  // Replaces the old "5 consecutive failures of ANY kind halts the whole run"
+  // behavior: 5 identical 'bad' failures are an INDIVIDUAL-item pattern (a
+  // generic Error, no systemic signature), so they quarantine the 'bad'
+  // generator after FAMILY_FAILURE_LIMIT (2) — not after 5, and never as a
+  // whole-run breaker. The freed budget goes straight to the other,
+  // unrelated recommendations in the same run instead of being lost.
+  test('a repeating individual failure quarantines its generator after 2, not 5, and the run keeps going', async () => {
     recommendations = [
       rec(1, { type: 'bad' }), rec(2, { type: 'bad' }), rec(3, { type: 'bad' }),
       rec(4, { type: 'bad' }), rec(5, { type: 'bad' }), rec(6), rec(7),
@@ -443,14 +449,15 @@ describe('auto-remediation — circuit breaker', () => {
 
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.equal(result.failed, 5);
-    assert.equal(result.shipped, 0);
-    assert.equal(result.stoppedReason, 'circuit-breaker');
-    assert.equal(result.attempted, 5, 'must not keep trying past the breaker');
-    assert.equal(calls.generated.length, 0, 'none of the five succeeded');
+    assert.equal(result.failed, 2, 'only the two attempts it took to establish the pattern are counted as failed');
+    assert.equal(result.quarantined, 3, 'recommendations 3, 4 and 5 are quarantined without being attempted');
+    assert.equal(result.shipped, 2, 'the two unrelated, healthy recommendations still ship');
+    assert.equal(result.stoppedReason, null, 'an individual failure pattern is never reported as a run-stopping fault');
+    assert.equal(result.attempted, 4, '2 failed attempts + 2 successful ones; the quarantined 3 never call generateDraft');
+    assert.equal(calls.generated.length, 2);
   });
 
-  test('a success resets the streak, so scattered failures do not trip the breaker', async () => {
+  test('a success resets nothing that matters here — quarantine is per-generator, not a global streak', async () => {
     recommendations = [
       rec(1, { type: 'bad' }), rec(2), rec(3, { type: 'bad' }),
       rec(4), rec(5, { type: 'bad' }), rec(6),
@@ -459,10 +466,11 @@ describe('auto-remediation — circuit breaker', () => {
 
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.equal(result.stoppedReason, null, 'alternating failures are normal, not systemic');
-    assert.equal(result.shipped, 3);
-    assert.equal(result.failed, 3);
-    assert.equal(result.attempted, 6, 'every candidate was still attempted');
+    assert.equal(result.stoppedReason, null, 'individual failures never stop the run');
+    assert.equal(result.shipped, 3, 'every non-bad item still ships');
+    assert.equal(result.failed, 2, '\'bad\' quarantines itself after its 2nd failure (recs 1 and 3)');
+    assert.equal(result.quarantined, 1, 'rec 5 (also \'bad\') is skipped once quarantined');
+    assert.equal(result.attempted, 5, '2 failed bad + 3 successful others; rec 5 is never attempted');
   });
 
   // The breaker exists for faults where every later attempt is also doomed.
@@ -481,6 +489,26 @@ describe('auto-remediation — circuit breaker', () => {
     assert.equal(result.failed, 0, 'the limited item is not scored as a failure');
     assert.equal(result.attempted, 1, 'stops immediately — the rest share the same exhausted token');
     assert.deepEqual(calls.abandoned, [], 'nothing is abandoned; every candidate stays open for the next run');
+  });
+
+  // The other half of the redesign: real infrastructure faults must still
+  // stop the run, distinctly from the per-item quarantine above. Spread
+  // across three DIFFERENT generators (so family quarantine never gets a
+  // chance to fire first — each generator only fails once on its own) and a
+  // real systemic signature (401 = dead credentials), matching
+  // failure-policy.js's classifyShipFailure.
+  test('genuinely systemic failures (dead GitHub credentials) still stop the whole run', async () => {
+    recommendations = [
+      rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' }), rec(3, { type: 'alt-text' }), rec(4),
+    ];
+    generateError = () => Object.assign(new Error('Bad credentials'), { status: 401 });
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.stoppedReason, 'circuit-breaker-systemic', 'a real infra fault stops the run, unlike a per-item pattern');
+    assert.equal(result.attempted, 3, 'stops after SYSTEMIC_FAILURE_LIMIT (3) consecutive systemic failures');
+    assert.equal(result.shipped, 0);
+    assert.equal(result.quarantined, 0, 'nothing was quarantined — this was never treated as a per-item pattern');
   });
 });
 
@@ -598,7 +626,12 @@ describe('principled refusals vs systemic faults', () => {
     assert.equal(result.attempted, 5);
   });
 
-  test('five REAL faults in a row still trip the breaker', async () => {
+  // Five REAL (non-refusal) faults sharing one generator are exactly the
+  // individual-item pattern failure-policy.js's family quarantine exists for
+  // — not the systemic breaker (see the dedicated systemic test in the
+  // 'auto-remediation — circuit breaker' describe above for the case that
+  // still trips it).
+  test('five real faults sharing one generator quarantine it after 2, and unrelated work still ships', async () => {
     failOn = (type) => type === 'schema';
     recommendations = [
       rec(1, { type: 'schema' }), rec(2, { type: 'schema' }), rec(3, { type: 'schema' }),
@@ -607,9 +640,11 @@ describe('principled refusals vs systemic faults', () => {
 
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.equal(result.stoppedReason, 'circuit-breaker', 'a systemic fault must still stop the run');
+    assert.equal(result.stoppedReason, null, 'an individual-item pattern is never reported as a systemic fault');
     assert.equal(result.refused, 0);
-    assert.equal(result.shipped, 0);
+    assert.equal(result.failed, 2, 'only the two attempts that established the pattern');
+    assert.equal(result.quarantined, 3);
+    assert.equal(result.shipped, 2, 'the two unrelated candidates still ship');
   });
 
   test('a refusal resets the consecutive-fault count, so faults must be genuinely consecutive', async () => {
@@ -723,7 +758,11 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
     assert.deepEqual(calls.closed, [], 'the recommendation stays open — a human can still fix it by hand at any time');
   });
 
-  test('an apply failure with no recognized message shape is still a genuine failure and trips the breaker', async () => {
+  // An unrecognized apply-failure message shape is a genuine (non-refusal)
+  // failure, but repeating for the same generator is still an individual-item
+  // pattern, not proof of a systemic fault — quarantined after 2, same as
+  // every other repeating per-item failure shape.
+  test('an apply failure with no recognized message shape quarantines its generator after 2, not 5', async () => {
     applyFailureMessageOn = (type) => type === 'qa-content' ? 'upstream GitHub API returned 503' : null;
     recommendations = [
       rec(1, { type: 'qa-content' }), rec(2, { type: 'qa-content' }), rec(3, { type: 'qa-content' }),
@@ -732,9 +771,12 @@ describe('shipDraftForRecommendation apply-failure classification', () => {
 
     const result = await autoRemediateSafeRecommendations(1);
 
-    assert.equal(result.stoppedReason, 'circuit-breaker', 'an unrecognized apply failure must still be treated as a possible systemic fault');
+    assert.equal(result.stoppedReason, null, 'a repeating per-item shape is never reported as a systemic fault');
     assert.equal(result.refused, 0);
-    assert.equal(result.attempted, 5);
+    assert.equal(result.failed, 2);
+    assert.equal(result.quarantined, 3);
+    assert.equal(result.shipped, 1, 'the unrelated 6th recommendation still ships');
+    assert.equal(result.attempted, 3);
   });
 
   // The design-integrity gate's replacement for the human sign-off removed
@@ -958,7 +1000,13 @@ describe('autoRemediateSafeRecommendations — blog pacing', () => {
 
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.shipped, 2, 'the blog occupies one of the 2 slots — it does not get a third');
-    assert.deepEqual(calls.generated, ['f1', 'f2']);
+    // Order, not just membership, changed under growth-value selection: a
+    // real on-page fix (meta-title, tier 2) now correctly executes before a
+    // net-new blog (tier 4) within the same run, even though the blog
+    // survived pacing and holds one of the two slots. The daily budget's
+    // survivor set is unaffected (f3/faq is still the one left out) — only
+    // the ORDER f1/f2 ship in changed.
+    assert.deepEqual(calls.generated, ['f2', 'f1'], 'the on-page fix ships before the lower-tier blog');
   });
 
   test('blog_min_gap_days = 0 disables the gap but still holds the one-per-run cap', async () => {
@@ -1049,15 +1097,25 @@ describe('autoRemediateSafeRecommendations — refusal vs failure classification
     assert.equal(result.stoppedReason, null);
   });
 
-  test('a genuine 5xx with no refusal flag still trips the breaker', async () => {
-    // The other direction: an unflagged server error is exactly what the
-    // breaker is for, and must keep tripping at CONSECUTIVE_FAILURE_LIMIT.
+  // The other direction from the explicit-refusal-flag test above: an
+  // unflagged server error IS a genuine failure — but every rec() here
+  // defaults to the same generatorId ('meta-title'), so a repeat of it is an
+  // individual-item pattern (failure-policy.js), not proof of a systemic
+  // fault. Quarantined after 2; with no other generator present to backfill
+  // from, the run simply has nothing left to try and ends without a
+  // run-stopping stoppedReason. See the dedicated systemic-fault test in
+  // 'auto-remediation — circuit breaker' for a real infra fault, spread
+  // across different generators, which DOES still stop the run.
+  test('a genuine 5xx with no refusal flag quarantines its generator after 2, not 5', async () => {
     generateError = () => Object.assign(new Error('upstream exploded'), { status: 500 });
     recommendations = [1, 2, 3, 4, 5, 6, 7].map((i) => rec(i));
 
     const result = await autoRemediateSafeRecommendations(1);
-    assert.equal(result.stoppedReason, 'circuit-breaker');
-    assert.equal(result.attempted, 5);
+    assert.equal(result.stoppedReason, null);
+    assert.equal(result.attempted, 2, 'only the 2 attempts needed to establish and quarantine the pattern');
+    assert.equal(result.failed, 2);
+    assert.equal(result.quarantined, 5, 'every other candidate shares the same (only) generator and is quarantined too');
+    assert.equal(result.shipped, 0);
   });
 
   test('a long run of honest refusals stops the run, but not as a fault', async () => {
@@ -1152,16 +1210,21 @@ describe('impactConfidence (measured business impact) tempers ranking within a t
     assert.deepEqual(calls.generated, ['f1']);
   });
 
-  test('no impact history yet is treated as neutral (0.5), same convention as no technical confidence history', async () => {
+  test('no impact history yet is neutral, but a generator with a strong overall track record can still outrank it', async () => {
     recommendations = [
       { ...rec(1, { type: 'no-history' }), priority: 'high', expected_impact: { value: 10 } },
       { ...rec(2, { type: 'weak-impact-history' }), priority: 'high', expected_impact: { value: 10 } },
     ];
+    // weak-impact-history has a POOR measured business impact (0.1) but a
+    // PERFECT technical ship-success record (confidence: 1) — additive
+    // scoring (growth-scoring.js's confidenceScore) sums both swings around
+    // neutral rather than multiplying them, so its net (+15) still beats
+    // no-history's flat neutral (0): a generator that reliably ships is a
+    // real signal even where its measured GSC impact is still uncertain.
     learnedMap = new Map([['weak-impact-history', { confidence: 1, impactConfidence: 0.1 }]]);
 
     await autoRemediateSafeRecommendations(1);
 
-    // no-history's neutral 0.5 outranks weak-impact-history's real, worse 0.1.
-    assert.deepEqual(calls.generated, ['f1', 'f2']);
+    assert.deepEqual(calls.generated, ['f2', 'f1']);
   });
 });

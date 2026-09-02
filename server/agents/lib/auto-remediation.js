@@ -5,35 +5,33 @@ import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
-import { classify as classifyForActionCenterCategory } from './recommendation-taxonomy.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
 import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
-import { classifyFailure } from '../../lib/failure-classification.js';
+import { buildDailyQueue } from './daily-queue.js';
+import { buildPageMetrics } from './growth-scoring.js';
+import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
+import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
+import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
 
 const SOURCE = 'auto-remediation';
 
-// How many consecutive failures trip the breaker for the rest of this site's
-// run. Consecutive rather than cumulative on purpose: an occasional failure
-// mixed in with successes is normal (one bad page among many), whereas five
-// in a row is the signature of something systemic — a revoked GitHub token, a
-// url_file_map that stopped resolving, a repo whose default branch moved.
-// Without this, one such fault burns the entire daily budget on 60 identical
-// failures and buries the real cause in noise.
-//
-// Raised from 3 to 5 (2026-08-30): known non-systemic, per-item failures
-// (see isRefusal below — a stale exact-match anchor, or a genuinely missing
-// per-page url_file_map/marker entry) are now classified as refusals rather
-// than failures and no longer feed this counter at all, so 3 was only ever
-// being tripped by real config gaps, not by a systemic fault. 5 keeps a
-// slightly wider margin against the failure modes this breaker actually
-// exists for, now that those two known-recurring items are already
-// diverted to isRefusal.
-const CONSECUTIVE_FAILURE_LIMIT = 5;
+// The all-purpose "5 consecutive failures of ANY kind stop the whole run"
+// breaker this used to be lived here. Replaced by two narrower, correct
+// mechanisms in failure-policy.js:
+//   - SYSTEMIC_FAILURE_LIMIT (consecutive SYSTEMIC failures only — a revoked
+//     token, a dead database, a gone repo) still stops the run, because every
+//     later item genuinely shares that fault.
+//   - FAMILY_FAILURE_LIMIT quarantines one repeating INDIVIDUAL failure shape
+//     (e.g. "no services.X entry in locations.js") for the rest of the run,
+//     without touching anything else — the old breaker's real failure mode:
+//     a cluster of unrelated per-item config gaps sorting together by
+//     priority could halt a 60-item day at item five with ~55 shippable
+//     items untouched. See failure-policy.js for the reasoning in full.
 
 // The refusal counterpart, and deliberately much looser.
 //
@@ -78,7 +76,8 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 //      default 30), counted in the SITE'S timezone. Before this existed the
 //      loop had no cap at all and would have fired every open safe-tier
 //      recommendation in a single pass the first morning it was enabled.
-//   2. Circuit breaker — CONSECUTIVE_FAILURE_LIMIT below.
+//   2. Failure handling — SYSTEMIC_FAILURE_LIMIT / FAMILY_FAILURE_LIMIT, see
+//      failure-policy.js.
 //   3. Risk tier — only 'safe' generators, which now also excludes anything
 //      the design-verification gate blocked (those are demoted to 'manual').
 //
@@ -96,7 +95,22 @@ export async function autoRemediateSafeRecommendations(siteId, {
   onboardingAnalysisPending = isOnboardingAnalysisPending,
 } = {}) {
   const site = await getSiteById(siteId);
-  if (!site?.auto_remediation_enabled) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
+  // No site row to attribute a run log to (auto_remediation_runs.site_id is a
+  // real FK) — nothing to record, same 'disabled' outcome as the flag being off.
+  if (!site) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
+
+  const startedAt = new Date();
+  // Every exit below goes through this so `auto_remediation_runs` always has
+  // a row for what a console-only log used to be the only record of — see
+  // migration 136's own comment for the 2026-09-02 incident this answers.
+  const finish = (result) => {
+    // recordAutoRemediationRun already swallows its own errors — never blocks
+    // on the write finishing.
+    recordAutoRemediationRun(siteId, { startedAt, finishedAt: new Date(), ...result });
+    return result;
+  };
+
+  if (!site.auto_remediation_enabled) return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' });
 
   // Two-stage onboarding: a genuinely new tenant's repo connection queues
   // ONLY the whole-site analysis job (job.js's queueDesignAgentDerivationForSite)
@@ -105,7 +119,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // isOnboardingAnalysisPending's own comment for exactly what "pending"
   // means and why a site that predates this gate is never newly blocked.
   if (await onboardingAnalysisPending(site)) {
-    return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' };
+    return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' });
   }
 
   const [rows, draftedFindingIds, pendingDraftFilePaths, spentToday, learnedMap] = await Promise.all([
@@ -181,76 +195,49 @@ export async function autoRemediateSafeRecommendations(siteId, {
   if (remaining === 0) {
     const reason = spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached';
     console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
-    return { attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason };
+    return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
 
-  // Priority-aware selection (item 7b): listOpenRecommendations already
-  // orders by priority tier (high/medium/low) then recency — real, but
-  // coarse. Within the SAME tier, prefer higher real expected impact
-  // (recommendations.expected_impact.value, the same field health-score.js
-  // already reads) weighted by this generator's own learned success
-  // confidence (learnedMap, already fetched above) — both real,
-  // already-computed numbers, nothing new invented. A generator with no
-  // confidence history yet (no learnedMap entry) is treated as neutral
-  // (0.5), not penalized relative to a proven-bad one — only a MEASURED low
-  // confidence should demote within a tier.
+  // GROWTH-VALUE SELECTION. The day's queue is built, scored and ranked
+  // before a single item executes — see daily-queue.js for the passes and
+  // growth-scoring.js for what each factor is worth.
   //
-  // Also tempered by learnedMap's SEPARATE impactConfidence (fix-impact.js's
-  // measured real-world GSC outcome, see generator-learning.js) — same
-  // neutral-0.5 default when there's no history yet, same multiplicative,
-  // non-blocking role as `confidence` above. This is the one place measured
-  // business impact is allowed to influence action selection: it can only
-  // ever scale this generator's rank UP or DOWN within its priority tier,
-  // never remove its eligibility or block it outright (a generator with
-  // weak measured impact still ships, just later within the same tier) —
-  // deliberately not a hard "no impact -> never again" rule (SEO effects
-  // are delayed and noisy; see fix-impact.js's own caveat on its delta).
-  const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
-  const rankScore = (rec) => {
-    const impact = typeof rec.expected_impact?.value === 'number' ? rec.expected_impact.value : 0;
-    const learned = learnedMap.get(rec.recommendation_type);
-    const confidence = learned?.confidence;
-    const impactConfidence = learned?.impactConfidence;
-    return impact
-      * (typeof confidence === 'number' ? confidence : 0.5)
-      * (typeof impactConfidence === 'number' ? impactConfidence : 0.5);
-  };
-  const ranked = [...candidates].sort((a, b) => {
-    const tierDiff = (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3);
-    return tierDiff !== 0 ? tierDiff : rankScore(b) - rankScore(a);
-  });
+  // Replaces a sort on `priority` then `expected_impact.value`. Both inputs
+  // were unsound: `priority` is assigned by priorityByRank as thirds within
+  // ONE agent's own run (so two agents' 'high' are not the same claim), and
+  // `expected_impact.value` carries a different unit per agent — impressions
+  // here, an affected-item count there, a percentage elsewhere — so
+  // multiplying it across generators compared unlike quantities. The
+  // 5-per-category cap it fed is gone too: it thinned by Action Center
+  // display category, which is a UI grouping, and three real sources
+  // (growth-opportunities, analyst-insights, analyst-keyword-gaps) match no
+  // taxonomy key at all and so shared one cap between them.
+  //
+  // Real GSC metrics are fetched per run and keyed by page. Failure is not
+  // fatal: an empty map simply means every item scores on severity, breadth
+  // and confidence alone, which is already the case for the ~80% of pages
+  // that have no measured demand (see growth-scoring.js's thin-data note).
+  const metricsEnd = new Date();
+  const metricsStart = new Date(metricsEnd.getTime() - 28 * 24 * 60 * 60 * 1000);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const pageMetrics = await getQueryPageMetrics(siteId, iso(metricsStart), iso(metricsEnd), { minImpressions: 1 })
+    .then(buildPageMetrics)
+    .catch((err) => {
+      console.warn(`[auto-remediation] site ${siteId}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
+      return new Map();
+    });
 
-  // Category-diverse selection: without this, a category with sheer volume
-  // (e.g. 139 GEO Signals) fills the whole day's budget and a category with
-  // only 1-3 open items (Blog Opportunities, FAQ Opportunities) never gets a
-  // look-in. Take at most PER_CATEGORY_DAILY_CAP items per Action Center
-  // category first — still priority-ordered within and across categories
-  // since `ranked` already is — then fill any budget left over with the
-  // next-highest-priority items regardless of category. A category with
-  // fewer than PER_CATEGORY_DAILY_CAP eligible items just contributes what it
-  // has; the shortfall is absorbed by the top-up pass rather than left
-  // unused. Categories come from the same recommendation-taxonomy.js the
-  // Action Center UI itself groups by, so this can't drift from what the
-  // dashboard shows as "5 per topic".
-  const PER_CATEGORY_DAILY_CAP = 5;
-  const perCategoryCount = new Map();
-  const picked = [];
-  const leftover = [];
-  for (const rec of ranked) {
-    const { category } = classifyForActionCenterCategory({ source: rec.detecting_agents?.[0], generatorId: rec.recommendation_type });
-    const count = perCategoryCount.get(category) || 0;
-    if (count < PER_CATEGORY_DAILY_CAP && picked.length < remaining) {
-      picked.push(rec);
-      perCategoryCount.set(category, count + 1);
-    } else {
-      leftover.push(rec);
-    }
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap });
+  const budgeted = queue.map((item) => item.rec);
+  const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
+  for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  console.log(
+    `[auto-remediation] site ${siteId}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
+    + `By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
+  );
+  for (const top of selection.topSelected.slice(0, 5)) {
+    console.log(`[auto-remediation] site ${siteId}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
   }
-  for (const rec of leftover) {
-    if (picked.length >= remaining) break;
-    picked.push(rec);
-  }
-  const budgeted = picked;
   // Never silently truncate: a run that ships 30 of 41 open issues must say
   // so, or the Action Center looks like it simply found fewer problems.
   if (budgeted.length < candidates.length) {
@@ -262,10 +249,36 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // Refusals are a SUBSET of `failed` — reported separately so a run that
   // declined three items honestly is not read as three things going wrong.
   let refused = 0;
-  let consecutiveFailures = 0;
+  let quarantined = 0;
+  let consecutiveSystemicFailures = 0;
   let consecutiveRefusals = 0;
   let stoppedReason = null;
   let attempted = 0;
+
+  // FAILURE HANDLING. Two independent mechanisms, not one all-purpose
+  // breaker — see failure-policy.js for why the old single counter conflated
+  // them:
+  //
+  //   1. SYSTEMIC breaker: consecutive SYSTEMIC failures (GitHub auth dead,
+  //      DB unreachable, repo gone) stop the whole run — every later item
+  //      shares the same fault, so stopping is correct and cheap.
+  //   2. FAMILY quarantine: an individual failure shape that repeats
+  //      (locations.js missing an entry, a malformed draft) never stops
+  //      anything. Once a (generator, normalized-error) family has failed
+  //      FAMILY_FAILURE_LIMIT times, that GENERATOR is quarantined for the
+  //      rest of THIS run and the freed budget slot is backfilled from the
+  //      next-best deferred candidate instead. Quarantining by generator
+  //      rather than the exact family text is a deliberate, coarser choice:
+  //      a not-yet-attempted item's failure shape can't be known in advance,
+  //      so the only way to actually stop retrying a known-bad pattern
+  //      without prescience is to treat two matching failures from the same
+  //      generator as evidence about that generator's remaining candidates
+  //      this run — reversed every run (a fresh Map/Set below), so a
+  //      generator quarantined today is tried again tomorrow once whatever
+  //      broke it is fixed.
+  const familyFailureCounts = new Map(); // familyKey -> count, this run only
+  const quarantinedGenerators = new Map(); // generatorId -> reason, this run only
+  const quarantineNotes = [];
 
   // Batch the git push the same way routes/action-center.js's
   // executeSafeFixes does: every item below ships with deferPr, so its
@@ -280,19 +293,60 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // dangling for the rest of this process's life, silently deferring any
   // later single-click push to this same branch that never gets flushed.
   const branchName = batchBranchName(site);
-  const batching = budgeted.length > 0;
+  // BACKFILL. `queue` already holds up to `remaining` items, but a
+  // quarantined generator's slots would otherwise go unused even though
+  // `deferred` may hold plenty of eligible, different-generator work — which
+  // is exactly the "60 slots, only 45 attempted" shortfall this redesign
+  // exists to close. `backfillPool` is every scored-but-not-selected
+  // candidate, best first; consumed only when quarantine frees a slot.
+  const backfillPool = [...selectionDeferred].sort((a, b) => b.score - a.score);
+  let backfillCursor = 0;
+  const attemptedOrQueuedIds = new Set(queue.map((item) => item.rec.id));
+  const nextBackfillCandidate = () => {
+    while (backfillCursor < backfillPool.length) {
+      const candidate = backfillPool[backfillCursor++];
+      if (attemptedOrQueuedIds.has(candidate.rec.id)) continue;
+      if (quarantinedGenerators.has(candidate.rec.recommendation_type)) continue;
+      attemptedOrQueuedIds.add(candidate.rec.id);
+      return candidate;
+    }
+    return null;
+  };
+
+  const batching = queue.length > 0 || backfillPool.length > 0;
   if (batching) beginBatchPush(site, branchName);
   const pending = []; // { rec, draft }
+  let prUrl = null;
+  // A mutable work queue: quarantine backfilling appends to it in place, so
+  // the loop below stays a single straightforward pass over `workQueue`
+  // rather than needing its own nested retry logic.
+  const workQueue = [...queue];
 
-  for (const rec of budgeted) {
-    if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
-      stoppedReason = 'circuit-breaker';
-      console.error(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_FAILURE_LIMIT} consecutive failures — stopping this site's run early to avoid burning the daily budget on a systemic fault. ${budgeted.length - attempted} candidate(s) left untouched and still open.`);
+  for (let cursor = 0; cursor < workQueue.length; cursor++) {
+    const rec = workQueue[cursor].rec;
+
+    // Known-bad generator, established earlier THIS run — skip without
+    // spending an attempt, and immediately backfill the freed slot from the
+    // next-best deferred candidate so "up to 60" still means 60 whenever
+    // enough eligible work exists. Not counted as failed (it never ran) and
+    // does not touch either streak counter.
+    if (quarantinedGenerators.has(rec.recommendation_type)) {
+      quarantined++;
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+
+    if (consecutiveSystemicFailures >= SYSTEMIC_FAILURE_LIMIT) {
+      stoppedReason = 'circuit-breaker-systemic';
+      console.error(`[auto-remediation] site ${siteId}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
       break;
     }
     if (consecutiveRefusals >= CONSECUTIVE_REFUSAL_LIMIT) {
       stoppedReason = 'refusal-streak';
-      console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${budgeted.length - attempted} candidate(s) left untouched and still open. This is not a fault.`);
+      console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
     // Stop STARTING new items once GitHub's remaining budget is under the
@@ -304,9 +358,10 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // deferred day at worst, against the whole-run collapse it prevents.
     if (getLastKnownRateLimit().low) {
       stoppedReason = 'github-rate-limited';
-      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${budgeted.length - attempted} candidate(s) left untouched and still open; they will be re-attempted next run.`);
+      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
       break;
     }
+    if (attempted >= remaining) break; // backfill can grow workQueue past the budget's raw length
     attempted++;
     try {
       // The one path from "we decided to fix this" to "a real branch/PR
@@ -355,7 +410,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       if (approved.alreadyShipped) {
         shipped++;
         recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: approved.id }).catch(() => {});
-        consecutiveFailures = 0;
+        consecutiveSystemicFailures = 0;
         consecutiveRefusals = 0;
         continue;
       }
@@ -370,44 +425,34 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // Both streaks reset: a success is evidence against a systemic fault AND
       // against "this site has nothing it can honestly ship", so neither
       // counter should carry across it.
-      consecutiveFailures = 0;
+      consecutiveSystemicFailures = 0;
       consecutiveRefusals = 0;
     } catch (err) {
       // A RATE LIMIT is neither a fault nor a refusal — it is a statement
       // about timing, and the identical attempt succeeds once the budget
-      // refills. Checked before both, and it stops the run rather than
-      // continuing: every remaining item shares the one exhausted token, so
-      // carrying on can only produce more of the same failure while spending
-      // a generation call on each.
+      // refills. Checked before everything else below, and it stops the run
+      // rather than continuing: every remaining item shares the one
+      // exhausted token, so carrying on can only produce more of the same
+      // failure while spending a generation call on each.
       //
-      // Critically, this item is NOT counted as failed and NOT abandoned.
-      // Counting it would trip CONSECUTIVE_FAILURE_LIMIT after five, which
-      // reports a systemic fault ("a revoked token, a moved default branch")
-      // for what is really a one-hour wait — and on 2026-09-01 that
-      // misreading is what turned an hour of exhausted quota into 113
-      // permanently abandoned drafts.
-      if (classifyFailure({ stage: 'github_api', err }).errorCode === 'GITHUB_RATE_LIMITED') {
+      // Critically, this item is NOT counted as failed and NOT abandoned —
+      // on 2026-09-01, counting rate limits as ordinary failures is what
+      // turned an hour of exhausted quota into 113 permanently abandoned
+      // drafts.
+      const shipFailure = classifyShipFailure(err, { isRefusal: false });
+      if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
-        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${budgeted.length - attempted} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
         break;
       }
       failed++;
-      // A REFUSAL is not a fault, and must not feed the circuit breaker.
+      // A REFUSAL is not a fault, and must not feed the systemic breaker.
       //
       // Generators deliberately throw { status: 4xx, userFacing: true } when a
       // specific item cannot be drafted honestly — "Review schema had no real
       // data on the page", "external citations require real search grounding".
       // That is the no-fabrication policy working, and it says nothing about
-      // whether the system is healthy. The breaker exists for the opposite
-      // thing: a revoked token, a moved default branch, a conflicted batch
-      // branch — faults where every subsequent attempt is also doomed.
-      //
-      // Counting refusals broke that distinction badly. Site 1's three
-      // permanently-unfixable items sort to positions 1, 2 and 3 (two are
-      // high-priority), so tomorrow's run would have refused three times,
-      // tripped the breaker, and halted with 0 shipped and 35 shippable
-      // candidates untouched — every day, silently, while the machinery was
-      // working exactly as designed.
+      // whether the system is healthy.
       //
       // Two ways to be a refusal, in priority order. The explicit `refusal`
       // flag is the one a thrower should set, because it says what it means;
@@ -421,7 +466,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         || (err?.userFacing === true && err?.status >= 400 && err?.status < 500);
       if (isRefusal) {
         refused++;
-        consecutiveFailures = 0;
+        consecutiveSystemicFailures = 0;
         consecutiveRefusals++;
         // 'refused' is logged too, but scored as neither success nor
         // failure — see generator-learning.js's POSITIVE/NEGATIVE sets. It
@@ -455,7 +500,6 @@ export async function autoRemediateSafeRecommendations(siteId, {
           closeRecommendation(rec.id).catch(() => {});
         }
       } else {
-        consecutiveFailures++;
         consecutiveRefusals = 0;
         // detail is err.message, which every generator on this path is
         // already required to keep customer-safe (UserFacingError/
@@ -464,6 +508,31 @@ export async function autoRemediateSafeRecommendations(siteId, {
         maybeEscalateToCodeRepair({ generatorId: rec.recommendation_type, reason: String(err.message || '').slice(0, 500), errorMessage: err.message, siteId }).catch((escErr) => {
           console.error(`[auto-remediation] code self-repair escalation check failed for ${rec.recommendation_type}:`, escErr.message);
         });
+
+        if (shipFailure.kind === FAILURE_KIND.SYSTEMIC) {
+          consecutiveSystemicFailures++;
+          console.error(`[auto-remediation] site ${siteId}: SYSTEMIC failure on recommendation ${rec.id} (${rec.recommendation_type}) — ${shipFailure.reason} (${consecutiveSystemicFailures}/${SYSTEMIC_FAILURE_LIMIT} consecutive).`);
+        } else {
+          // An INDIVIDUAL item failure never touches the systemic streak —
+          // a bad locations.js entry says nothing about GitHub or the
+          // database, and must not count toward the breaker that exists for
+          // those. Instead it feeds this generator's OWN family tally: two
+          // failures sharing a normalized shape quarantine the generator for
+          // the rest of this run (not the finding — that's the separate,
+          // cross-run convergence cap in ship-pacing.js) and free its slot
+          // for backfill, so ~15 locations.js items sorting together cost
+          // this run at most 2 attempts, not the whole remaining budget.
+          consecutiveSystemicFailures = 0;
+          const familyKey = failureFamilyKey(rec.recommendation_type, err);
+          const count = (familyFailureCounts.get(familyKey) || 0) + 1;
+          familyFailureCounts.set(familyKey, count);
+          if (count >= FAMILY_FAILURE_LIMIT && !quarantinedGenerators.has(rec.recommendation_type)) {
+            quarantinedGenerators.set(rec.recommendation_type, familyKey);
+            const note = `${rec.recommendation_type}: quarantined for the rest of this run after ${count} failures matching "${familyKey}" — other generators keep using the remaining budget; retried next run.`;
+            quarantineNotes.push(note);
+            console.warn(`[auto-remediation] site ${siteId}: ${note}`);
+          }
+        }
       }
       console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }
@@ -522,6 +591,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         });
       }));
     } else if (pending.length > 0) {
+      prUrl = finalization.prUrl;
       for (const { rec, draft } of pending) {
         shipped++;
         // Phase 5: best-effort, never awaited into the failure path — a
@@ -533,11 +603,30 @@ export async function autoRemediateSafeRecommendations(siteId, {
     }
   }
 
-  return {
-    attempted, shipped, failed, refused,
+  if (quarantineNotes.length) {
+    console.log(`[auto-remediation] site ${siteId}: ${quarantineNotes.length} generator(s) quarantined this run: ${[...quarantinedGenerators.keys()].join(', ')}.`);
+  }
+  console.log(
+    `[auto-remediation] site ${siteId}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
+    + `refused ${refused}, quarantined ${quarantined}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+  );
+
+  return finish({
+    attempted, shipped, failed, refused, quarantined,
     skipped: candidates.length - attempted,
-    spentToday, dailyLimit, stoppedReason,
-  };
+    spentToday, dailyLimit, stoppedReason, prUrl,
+    // Full selection reasoning — eligible/selected/skipped counts, per-tier
+    // and per-generator distribution, the top-ranked items with their score
+    // factors, and why each deferred item lost. Persisted on the run row
+    // (auto_remediation_runs.selection, migration 137) so "why was X
+    // selected instead of Y" is answerable after the fact, not only from a
+    // console log that scrolled away.
+    selection: {
+      ...selection,
+      quarantinedGenerators: Object.fromEntries(quarantinedGenerators),
+      quarantineNotes,
+    },
+  });
 }
 
 // The one path from "we decided to fix this" to "a real branch exists",
@@ -584,9 +673,10 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     // deliberately treats an unresolved apply_error as "not handled" so the
     // finding reopens. Together those two correct behaviors mean the
     // unattended loop re-picks the finding every run, gets the same stuck
-    // draft back, fails to submit it, and reports a FAILURE that feeds
-    // CONSECUTIVE_FAILURE_LIMIT — five of those halt the site's whole run.
-    // Live on site 1: 8 expand-content drafts stuck at 'approved' since
+    // draft back, fails to submit it, and reports a FAILURE that feeds this
+    // generator's family-quarantine tally (failure-policy.js) — a repeat of
+    // the same stuck-draft shape quarantines expand-content for the rest of
+    // the run. Live on site 1: 8 expand-content drafts stuck at 'approved' since
     // 2026-08-28, 19 recorded failures, and a retry path that could never
     // converge because nothing ever re-ran apply().
     //
@@ -669,11 +759,12 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     //
     // Both patterns below are known-recurring, non-systemic, per-ITEM
     // conditions — not evidence of the "revoked token / moved branch" class
-    // of systemic fault CONSECUTIVE_FAILURE_LIMIT exists to catch — so they
-    // must not feed that counter. Confirmed live on site 1: 2 schema-repair
-    // items and 3 analytics-install/qa-content items failed identically on
-    // every run since Aug 25-26, each time contributing to (and some days
-    // tripping) the circuit breaker and halting the rest of that day's
+    // of systemic fault the SYSTEMIC breaker (failure-policy.js) exists to
+    // catch — so marked as refusals here rather than left to become ordinary
+    // failures. Confirmed live on site 1: 2 schema-repair items and 3
+    // analytics-install/qa-content items failed identically on every run
+    // since Aug 25-26, each time contributing to (and some days tripping)
+    // the old all-purpose circuit breaker and halting the rest of that day's
     // budgeted work.
     if (/anchor\(s\) no longer found verbatim|anchor\(s\) appear more than once/.test(message)) {
       // exact-match-patch.js's describePatchFailure: the page's live source
@@ -713,11 +804,10 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
       // for, and critically must be handled the same way here: since the
       // check runs against the site's one shared profile, a real defect in
       // that profile would otherwise fail several consecutive
-      // recommendations identically and trip CONSECUTIVE_FAILURE_LIMIT,
-      // silently halting every OTHER valid recommendation's shipping for
-      // the rest of this run — recreating, via the circuit breaker, the
-      // exact whole-site blocking behavior removing the human sign-off gate
-      // was meant to end.
+      // recommendations identically and, left as an ordinary failure, would
+      // both quarantine this generator needlessly and risk tripping the
+      // systemic breaker — recreating the exact whole-site blocking behavior
+      // removing the human sign-off gate was meant to end.
       err.refusal = true;
       err.reason = 'design-integrity-failed';
     }
