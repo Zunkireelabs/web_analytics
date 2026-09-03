@@ -194,13 +194,40 @@ function rateLimitError(path, waitMs) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Every other outbound fetch in this codebase (page-content.js's fetchHtml,
+// fetchResponseHeaders, fetchFinalUrl) wraps its call in an AbortController
+// with a real deadline. This one never did — so a single GitHub connection
+// that opens but never responds (no error, no rate-limit header, nothing to
+// retry against) blocks this call, and everything awaiting it, forever.
+// Confirmed root cause of the 2026-09-03 stuck daily run: blog-image.js's
+// detection agent (new that day) calls getFileContent in a plain sequential
+// loop with no per-call try/catch, so one hung request here silently froze
+// the entire morning pipeline — no error logged, 0% CPU, no completion,
+// because nothing ever threw. 30s (vs. page-content's 5s) because a
+// recursive git/trees fetch on a large repo, or a big file's content, can
+// legitimately take longer than an ordinary page load.
+const GITHUB_REQUEST_TIMEOUT_MS = 30_000;
+
 async function githubRequest(site, method, path, body, { forSearch = false } = {}) {
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${API_BASE}${path}`, {
-      method,
-      headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GITHUB_REQUEST_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        method,
+        headers: { ...(await authHeaders(site, { forSearch })), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error(`GitHub request timed out after ${GITHUB_REQUEST_TIMEOUT_MS}ms: ${method} ${path}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
     recordRateLimitHeaders(res, { forSearch });
 
     const rateLimit = await rateLimitWaitMs(res);
