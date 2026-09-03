@@ -11,7 +11,9 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
-import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState } from '../store/recommendations.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation } from '../store/recommendations.js';
+import { recordAttempt } from '../store/recommendation-attempts.js';
+import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
 import { agenticOrchestrationEnabled, runAgenticLoop } from '../agents/lib/agentic-orchestrator.js';
@@ -922,8 +924,13 @@ export function autoSelectMetaTitle(generatorId, content) {
 
 async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false, batchBranch = null }) {
   const jobRec = await addJobRecommendation(jobId, rec.id);
+  // Hoisted out of the try purely so the catch can attribute a failed attempt
+  // to the draft it actually failed on (recordAttempt below). Stays null when
+  // generateDraft itself is what threw, which is a real and distinct case —
+  // the attempt is still recorded, just with no draft to point at.
+  let draft = null;
   try {
-    const draft = await generateDraft(siteId, {
+    draft = await generateDraft(siteId, {
       generatorId: rec.recommendation_type, params: rec.params, source: 'execution-engine', findingId: rec.finding_ids[0],
       findingOrigin: rec.detecting_agents?.[0] || null,
       // See generateDraft's own comment on this flag: this bulk path already
@@ -1068,6 +1075,19 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
     await updateJobRecommendationStatus(jobRec.id, 'failed', { error: message });
     await setRecommendationExecutionState(rec.id, { executionJobId: jobId, executionStatus: 'failed' });
     await appendJobLog(jobId, `Recommendation #${rec.id} (${rec.recommendation_type} @ "${rec.page || '(site-wide)'}") failed: ${message}`);
+    // Record the attempt where it happened, with the reason that actually
+    // caused it. Everything downstream — the card's "tried 3 times, last
+    // failure was X", the reconciler's decision to block or close, the
+    // eventual convergence cap — reads this instead of re-deriving a verdict
+    // from prose written for a human. Best-effort: an attempt row failing to
+    // write must never turn a recoverable ship failure into an unhandled one.
+    await recordAttempt(siteId, {
+      recommendationId: rec.id,
+      findingId: rec.finding_ids?.[0] ?? null,
+      draftId: draft?.id ?? null,
+      outcome: 'failed',
+      reason: message,
+    }).catch((err) => console.error(`[action-center] could not record attempt for rec ${rec.id}:`, err.message));
     return { ok: false, error: message };
   }
 }
@@ -1905,6 +1925,11 @@ export async function checkDraftPrStatus(siteId, draftId) {
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');
     notifyGscBestEffort(site, draft);
+    // The one outcome that ends a recommendation's life successfully. Recorded
+    // so the card's history reads as a completed story rather than going
+    // silent at the last step, and so a finding that regresses later shows
+    // "shipped once, came back" instead of looking brand new.
+    await recordAttemptForDraft(siteId, draft, { outcome: 'shipped', reason: `Merged in ${draft.pr_url || `PR #${draft.pr_number}`}.` });
     return finalizeImplemented(siteId, draft.id, site);
   }
   if (pr.state === 'closed') {
@@ -1914,9 +1939,76 @@ export async function checkDraftPrStatus(siteId, draftId) {
     // resurface as a fresh Recommendation instead of staying stuck at
     // 'pr_opened' forever with no way back into the pipeline.
     await recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
-    return markDraftAbandoned(siteId, draft.id, 'pr_closed_without_merge');
+    const abandoned = await markDraftAbandoned(siteId, draft.id, 'pr_closed_without_merge');
+    // Releasing the lock is necessary but not sufficient: it only lets the
+    // issue resurface IF a detector happens to raise it again. When the
+    // recommendation row is still there — the overwhelmingly common case,
+    // since closing a PR doesn't fix anything — put that same row back on
+    // the board directly, with this attempt attached. The user asked for
+    // exactly this: a closed PR returns its work to the Action Center,
+    // reusing the card it already had rather than waiting for a
+    // re-detection that mints a second one.
+    await returnFindingToBoard(siteId, draft, {
+      outcome: 'failed',
+      reason: 'pr_closed_without_merge',
+    });
+    return abandoned;
   }
   return recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+}
+
+// Finds the recommendation a draft belongs to, by the finding they share.
+// Prefers a live card over a closed one — the same rule the reconciler uses
+// (lib/action-center-reconciler.js), kept identical on purpose so a PR
+// closing and a stall reclaiming land on the same row.
+async function recommendationForDraft(siteId, draft) {
+  if (!draft?.finding_id) return null;
+  const { rows } = await pgQuery(
+    `SELECT id, status FROM recommendations
+      WHERE site_id = $1 AND $2 = ANY(finding_ids)
+      ORDER BY (status = 'open') DESC, updated_at DESC
+      LIMIT 1`,
+    [siteId, draft.finding_id],
+  );
+  return rows[0] || null;
+}
+
+// Records an attempt against whatever recommendation a draft belongs to.
+// Best-effort throughout: PR-status reconciliation is driven by a webhook and
+// an hourly poll, and neither should fail over a history write.
+async function recordAttemptForDraft(siteId, draft, { outcome, reason, retryPolicy }) {
+  try {
+    const rec = await recommendationForDraft(siteId, draft);
+    await recordAttempt(siteId, {
+      recommendationId: rec?.id ?? null,
+      findingId: draft.finding_id ?? null,
+      draftId: draft.id,
+      outcome,
+      retryPolicy,
+      reason,
+    });
+    return rec;
+  } catch (err) {
+    console.error(`[action-center] could not record attempt for draft ${draft.id}:`, err.message);
+    return null;
+  }
+}
+
+// Records the attempt AND puts the existing recommendation back on the board.
+// Never creates one — reopenRecommendation only ever flips a row that is
+// already there, and reports a conflict rather than inserting when another
+// open row already covers the same issue.
+async function returnFindingToBoard(siteId, draft, { outcome, reason, retryPolicy }) {
+  const rec = await recordAttemptForDraft(siteId, draft, { outcome, reason, retryPolicy });
+  if (!rec) return;
+  try {
+    const { reopened, conflictId } = await reopenRecommendation(rec.id);
+    if (!reopened) {
+      console.log(`[action-center] rec ${rec.id} left closed; open row ${conflictId} already covers it`);
+    }
+  } catch (err) {
+    console.error(`[action-center] could not return rec ${rec.id} to the board:`, err.message);
+  }
 }
 
 router.post('/action-center/drafts/:id/check-pr-status', async (req, res, next) => {

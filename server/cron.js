@@ -4,6 +4,7 @@ import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
+import { reconcileAllSites } from './lib/action-center-reconciler.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -387,6 +388,26 @@ export function startCron() {
     }
   }, { timezone: tz });
   console.log('[cron] pr-status poll scheduled (fires at :20 each hour)');
+
+  // Action Center reconciliation — returns recommendations whose attempt
+  // stopped moving to the board, on the row they already had.
+  //
+  // Runs at :35, deliberately AFTER the :20 PR poll above. That poll is what
+  // resolves every draft whose PR actually reached a verdict, so by the time
+  // this runs the only drafts left without a PR are ones that genuinely have
+  // none. The other order would have the reconciler judging drafts as stalled
+  // in the same hour the poll was about to mark them merged.
+  cron.schedule('35 * * * *', async () => {
+    try {
+      const { totals } = await reconcileAllSites();
+      if (totals.reclaimed || totals.classified) {
+        console.log(`[cron] action-center reconcile: reclaimed ${totals.reclaimed}, reopened ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}`);
+      }
+    } catch (err) {
+      console.error('[cron] action-center reconcile error:', err.message);
+    }
+  }, { timezone: tz });
+  console.log('[cron] action-center reconcile scheduled (fires at :35 each hour)');
 
   // Analyst -> Action Center sync. Ordering is the whole point of the hour
   // chosen here, and it is easy to get wrong because the two halves of this

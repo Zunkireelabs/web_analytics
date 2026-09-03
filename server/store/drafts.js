@@ -707,6 +707,35 @@ export async function getDraftedFindingIds(siteId) {
   return new Set(rows.map((r) => r.finding_id));
 }
 
+// The live draft behind each finding, for the Action Center's lifecycle
+// derivation (agents/lib/recommendation-coordinator.js's getRecommendations).
+//
+// getDraftedFindingIds above answers a yes/no question — "is this finding
+// spoken for" — and that was all the Action Center used to need, because a
+// spoken-for recommendation was simply hidden. Hiding is what made a stalled
+// draft equivalent to a finished one: both vanished, and only one of them was
+// ever coming back. Telling them apart needs the draft's actual state, not a
+// membership test, so the card can say "in progress, PR #123" for one and
+// come back as retryable work for the other.
+//
+// DISTINCT ON keeps the newest non-abandoned draft per finding. There is at
+// most one by construction — the partial unique index from migration 121
+// (site_id, finding_id) WHERE status <> 'abandoned' — but ordering explicitly
+// means this returns the right row rather than an arbitrary one if that
+// invariant is ever weakened, instead of failing silently and intermittently.
+export async function getLiveDraftsByFindingId(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (finding_id)
+            finding_id, id, status, pr_number, pr_url, pr_state,
+            rolled_back_at, apply_error, updated_at
+       FROM drafts
+      WHERE site_id = $1 AND finding_id IS NOT NULL AND status <> 'abandoned'
+      ORDER BY finding_id, updated_at DESC`,
+    [siteId]
+  );
+  return new Map(rows.map((r) => [r.finding_id, r]));
+}
+
 // How many times each finding has already been drafted and then abandoned
 // for a reason that says the item itself cannot be shipped — the input to
 // the convergence cap (agents/lib/ship-pacing.js).

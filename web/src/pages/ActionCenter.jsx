@@ -161,6 +161,35 @@ function blockedMetaFor(item) {
   return BLOCKED_KIND_META[item?.blockedKind] || BLOCKED_KIND_META['our-config'];
 }
 
+// Where a recommendation is in its life (server: recommendation-coordinator.js's
+// deriveLifecycle). One card now persists through the whole lifecycle instead
+// of vanishing the moment a draft exists and reappearing later as a brand-new
+// entry — so the card has to say which part of that life it's in, or the list
+// just looks like it grew duplicates.
+//
+// 'new' deliberately has no chip. Most of the list is new most of the time,
+// and a badge on nearly every row is noise that makes the rows that DO carry
+// state (in progress, retrying) harder to pick out. 'fixed' never reaches the
+// UI — the server filters it off the active board.
+const LIFECYCLE_META = {
+  in_progress: { icon: GitPullRequest, label: 'In progress', className: 'bg-violet-50 border-violet-100 text-violet-600' },
+  retry: { icon: RefreshCw, label: 'Retry', className: 'bg-orange-50 border-orange-100 text-orange-600' },
+};
+
+// What the last failure means for what happens next, in the user's terms.
+// Mirrors lib/attempt-classification.js's RETRY_POLICY: the difference
+// between "we'll pick this up again on our own" and "this is waiting on you"
+// is the single most useful thing a returning card can say, and it's exactly
+// what the old UI could not express — a reappearing card looked identical
+// whether the system was still trying or had quietly given up.
+const RETRY_POLICY_COPY = {
+  retry: 'A temporary problem stopped the last attempt. This will be tried again automatically.',
+  needs_human: 'The last attempt needs something from you before it can succeed.',
+  already_resolved: 'Something else already fixed this — it should drop off shortly.',
+  item_defect: "The last attempt couldn't be applied cleanly to this page.",
+  never: 'The last pull request was closed without merging, so this came back for another decision.',
+};
+
 const DRAFT_STATUS_LABEL = {
   draft: 'draft', edited: 'edited', submitted_for_approval: 'pending approval',
   approved: 'approved', branch_pushed: 'branch pushed', merged_to_stage: 'merged to stage',
@@ -915,7 +944,21 @@ export default function ActionCenter() {
                                   see blockedMetaFor/the action-button logic below — but even it
                                   still isn't risk-tier 'safe', so this exclusion is harmless for
                                   it too). The reason itself is stated in the detail panel. */}
-                              {item.blockedReason ? (() => {
+                              {/* Lifecycle first: a card with work actually in flight, or one
+                                  that has come back after a failed attempt, is describing its
+                                  own state more usefully than the risk tier can. Blocked still
+                                  wins over both — it's the one state where nothing is going to
+                                  happen without someone acting. */}
+                              {LIFECYCLE_META[item.lifecycle] && !item.blockedReason ? (() => {
+                                const meta = LIFECYCLE_META[item.lifecycle];
+                                const LifecycleIcon = meta.icon;
+                                return (
+                                  <span className={`shrink-0 flex items-center gap-0.5 text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full border ${meta.className}`}>
+                                    <LifecycleIcon size={8} /> {meta.label}
+                                    {item.lifecycle === 'retry' && item.attemptCount > 1 ? ` ${item.attemptCount}×` : ''}
+                                  </span>
+                                );
+                              })() : item.blockedReason ? (() => {
                                 const meta = blockedMetaFor(item);
                                 const BlockedIcon = meta.icon;
                                 return (
@@ -1121,6 +1164,65 @@ export default function ActionCenter() {
                     </div>
 
                     <div className="p-6 space-y-4">
+                      {/* Work in flight. Names the PR so "in progress" is a claim the
+                          user can click on and verify, rather than one they have to
+                          trust — this card used to disappear entirely at this point,
+                          which is how a draft stalled at 'branch_pushed' for three days
+                          stayed invisible. */}
+                      {selectedRecommendation.draft && selectedRecommendation.lifecycle === 'in_progress' && (
+                        <div className="rounded-2xl border border-violet-100 bg-violet-50/50 px-4 py-3">
+                          <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-violet-700">
+                            <GitPullRequest size={11} />
+                            {selectedRecommendation.draft.awaitingReview ? 'Waiting on your review' : 'Being worked on now'}
+                          </p>
+                          <p className="text-xs font-medium text-violet-900/85 mt-1.5 leading-relaxed">
+                            A fix for this is at{' '}
+                            <span className="font-bold">{DRAFT_STATUS_LABEL[selectedRecommendation.draft.status] || selectedRecommendation.draft.status}</span>.
+                            {selectedRecommendation.draft.awaitingReview
+                              ? ' It needs someone to approve it before it can ship.'
+                              : ' Nothing to do — it will finish on its own.'}
+                          </p>
+                          {selectedRecommendation.draft.prUrl && (
+                            <a
+                              href={selectedRecommendation.draft.prUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-[11px] font-bold text-violet-700 hover:text-violet-900 underline mt-2"
+                            >
+                              View pull request #{selectedRecommendation.draft.prNumber} <ArrowRight size={10} />
+                            </a>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Why this is back. A recommendation that has been attempted
+                          before and returned is a different thing from a brand-new one,
+                          and the user is owed the difference — including whether the
+                          system intends to try again by itself. */}
+                      {selectedRecommendation.attemptCount > 0 && selectedRecommendation.lifecycle !== 'in_progress' && (
+                        <div className="rounded-2xl border border-orange-100 bg-orange-50/40 px-4 py-3">
+                          <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-orange-700">
+                            <History size={11} />
+                            Tried {selectedRecommendation.attemptCount}{selectedRecommendation.attemptCount === 1 ? ' time' : ' times'} before
+                            {selectedRecommendation.lastAttemptAt ? ` · last ${timeAgo(selectedRecommendation.lastAttemptAt)}` : ''}
+                          </p>
+                          {RETRY_POLICY_COPY[selectedRecommendation.lastFailurePolicy] && (
+                            <p className="text-xs font-medium text-orange-900/85 mt-1.5 leading-relaxed">
+                              {RETRY_POLICY_COPY[selectedRecommendation.lastFailurePolicy]}
+                            </p>
+                          )}
+                          {/* The raw reason is already customer-safe by the time it is
+                              stored (every writer passes it through lib/errors.js or an
+                              author-written constant), and it is the one detail that
+                              makes a repeat failure diagnosable rather than mysterious. */}
+                          {selectedRecommendation.lastFailureReason && (
+                            <p className="text-[11px] font-medium text-orange-900/70 mt-1.5 leading-relaxed break-words">
+                              Last outcome: {selectedRecommendation.lastFailureReason}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
                       {/* The server already refuses to draft this (422 in
                           routes/action-center.js) — this states WHY, and what to do
                           about it, instead of leaving the user to discover it by
