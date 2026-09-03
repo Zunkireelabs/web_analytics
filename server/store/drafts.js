@@ -752,10 +752,14 @@ export async function getDraftedFindingIds(siteId) {
 // and 12 attempts, having been fixed in the meantime — 19 of those 27 were
 // "No markers configured", a config gap a human had since closed. The cap
 // would have permanently suppressed the very work that was now ready to ship.
-const UNCOUNTED_ABANDON_REASONS = [
-  // A human closed the PR, or the work was replaced. The draft was fine; the
-  // decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
-  "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')",
+// A human closed the PR, or the work was replaced. The draft was fine; the
+// decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
+const UNCOUNTED_ABANDON_IN_CLAUSE = "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')";
+
+// Literal, author-controlled NOT LIKE/NOT ILIKE exclusions — safe to inline
+// directly since every one of these is a fixed string written right here,
+// with no single quote in any of them.
+const UNCOUNTED_ABANDON_STATIC_NOT_LIKES = [
   // Transient by definition.
   "abandoned_reason NOT ILIKE '%rate limit%'",
   // The batch's ONE shared push/PR failed, which fails every pending item at
@@ -769,42 +773,54 @@ const UNCOUNTED_ABANDON_REASONS = [
   // or a recovery script rescuing a stranded row.
   "abandoned_reason NOT LIKE 'Stuck at \"%'",
   "abandoned_reason NOT LIKE 'Recovered:%'",
-  // CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
-  // never "this item is unfixable" — and the moment that config lands, the
-  // item must become eligible again immediately rather than staying retired
-  // on the strength of failures whose cause is gone.
-  //
-  // NOT the "unverified placeholder field" case, deliberately: unlike a
-  // missing marker/mapping, that failure recurs identically FOREVER unless a
-  // human hand-edits the draft (trust-compliance.js files the finding
-  // precisely so they can) — no config change ever resolves it on its own.
-  // That IS the per-item "cannot be auto-completed" signal this cap exists to
-  // catch, so it counts.
-  `abandoned_reason NOT LIKE '%${NO_MARKERS_CONFIGURED_FRAGMENT}%'`,
-  `abandoned_reason NOT LIKE '%${NO_FILE_MAPPING_FRAGMENT}%'`,
-  // A REMOVED gate, not a config gap — commit 8a32037 deleted the human
-  // design-review sign-off this reason came from, so nothing produces it any
-  // more. Its old abandons must not keep counting against findings whose one
-  // and only failure was a gate that no longer exists. Same shape as the two
-  // config-gap exclusions above, different cause: those wait on a human
-  // supplying a value; this one is just dead weight from before the fix.
-  `abandoned_reason NOT LIKE '%${DESIGN_NOT_REVIEWED_FRAGMENT}%'`,
 ];
 
+// CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
+// never "this item is unfixable" — and the moment that config lands, the
+// item must become eligible again immediately rather than staying retired
+// on the strength of failures whose cause is gone.
+//
+// NOT the "unverified placeholder field" case, deliberately: unlike a
+// missing marker/mapping, that failure recurs identically FOREVER unless a
+// human hand-edits the draft (trust-compliance.js files the finding
+// precisely so they can) — no config change ever resolves it on its own.
+// That IS the per-item "cannot be auto-completed" signal this cap exists to
+// catch, so it counts.
+//
+// DESIGN_NOT_REVIEWED_FRAGMENT is a REMOVED gate, not a config gap — commit
+// 8a32037 deleted the human design-review sign-off this reason came from, so
+// nothing produces it any more. Its old abandons must not keep counting
+// against findings whose one and only failure was a gate that no longer
+// exists.
+//
+// Unlike the static list above, these come from imported constants — real
+// English sentences, not SQL written by this file's own author — and one of
+// them CAN contain a single quote: DESIGN_NOT_REVIEWED_FRAGMENT is "This
+// site's design has not been reviewed yet". Inlining it via template
+// literal the way the static list above does breaks the query the moment
+// that apostrophe closes the LIKE pattern's string literal early —
+// confirmed live, 2026-09-03: this produced `syntax error at or near "s"`
+// and silently failed every autonomous shipping run's failed-attempt count.
+// Passed as bind parameters instead, so no fragment's exact wording — this
+// one's or any future one's — can ever break the query again.
+const UNCOUNTED_ABANDON_FRAGMENTS = [NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT];
+
 export async function countFailedAttemptsByFinding(siteId) {
-  // The first entry is an IN (…) exclusion, the rest are already-negated
-  // NOT LIKEs — assembled here so each reason keeps its own comment above.
-  const [inClause, ...notLikes] = UNCOUNTED_ABANDON_REASONS;
+  const staticNotLikes = UNCOUNTED_ABANDON_STATIC_NOT_LIKES.join('\n        AND ');
+  const fragmentNotLikes = UNCOUNTED_ABANDON_FRAGMENTS
+    .map((_, i) => `abandoned_reason NOT LIKE '%' || $${i + 2} || '%'`)
+    .join('\n        AND ');
   const { rows } = await query(
     `SELECT finding_id, COUNT(*)::int AS attempts
        FROM drafts
       WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
         AND abandoned_reason IS NOT NULL
         AND abandoned_at > now() - interval '30 days'
-        AND NOT (${inClause})
-        AND ${notLikes.join('\n        AND ')}
+        AND NOT (${UNCOUNTED_ABANDON_IN_CLAUSE})
+        AND ${staticNotLikes}
+        AND ${fragmentNotLikes}
       GROUP BY finding_id`,
-    [siteId]
+    [siteId, ...UNCOUNTED_ABANDON_FRAGMENTS]
   );
   return new Map(rows.map((r) => [r.finding_id, r.attempts]));
 }
