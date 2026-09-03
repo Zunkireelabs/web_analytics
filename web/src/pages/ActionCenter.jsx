@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, daysAgo, timeAgo } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
@@ -233,6 +233,13 @@ export default function ActionCenter() {
   // abandoned — the work itself is still fine, so this must never read as an
   // error state (see executeSafeFixes' catch).
   const [recoveringExecution, setRecoveringExecution] = useState(false);
+  // True while executionResult reflects an in-progress job (server still
+  // shipping items) rather than a finished one — lets the banner below show
+  // "shipping…" instead of a premature "done" the instant the POST above
+  // responds, now that the route responds as soon as selection finishes
+  // rather than after the whole batch ships (see the route's own comment).
+  const [isRunningExecution, setIsRunningExecution] = useState(false);
+  const executionPollRef = useRef(null);
   const [loadingExecutionJobDetail, setLoadingExecutionJobDetail] = useState(false);
   const [shippingId, setShippingId] = useState(null);
   const [recheckingId, setRecheckingId] = useState(null);
@@ -352,47 +359,96 @@ export default function ActionCenter() {
   // the same number back via todayStats.batchLimit purely to label the button.
   // Passing one from here is what let the UI promise 15 while the server was
   // free to ship a different number.
+  // Stops an in-flight poll (a fresh run superseding it, or the component
+  // unmounting) so two intervals never race on the same jobId.
+  const stopExecutionPoll = () => {
+    if (executionPollRef.current) {
+      clearInterval(executionPollRef.current);
+      executionPollRef.current = null;
+    }
+  };
+  useEffect(() => stopExecutionPoll, []);
+
+  // Polls one execution_jobs row every 4s until it leaves 'preparing'/
+  // 'executing', updating the banner with live shipped/failed counts each
+  // tick. Split out from executeSafeFixes below so both the fresh-run path
+  // and the timed-out-POST recovery path (which also lands on a possibly
+  // still-running job) drive the same loop.
+  const pollExecutionJob = (jobId) => {
+    stopExecutionPoll();
+    setIsRunningExecution(true);
+    const tick = async () => {
+      try {
+        const job = await api.actionCenter.getExecutionJob(jobId, siteId);
+        const shipped = job.items.filter((i) => i.status === 'approved').length;
+        const failed = job.items.filter((i) => i.status === 'failed').length;
+        setExecutionResult({ job, shipped, failed });
+        if (job.status !== 'preparing' && job.status !== 'executing') {
+          stopExecutionPoll();
+          setIsRunningExecution(false);
+          setExecutingSafeFixes(false);
+          loadRecs();
+          loadDrafts();
+          loadTodayStats();
+        }
+      } catch {
+        // A transient poll failure (network blip) isn't the run failing —
+        // just skip this tick and try again on the next one.
+      }
+    };
+    tick();
+    executionPollRef.current = setInterval(tick, 4000);
+  };
+
   const executeSafeFixes = async () => {
     setExecutingSafeFixes(true);
     setError(null);
     setExecutionResult(null);
     setExecutionJobDetail(null);
     try {
+      // The route now responds as soon as candidate selection finishes (a few
+      // DB reads, never an LLM call or git push) — not after the whole batch
+      // ships — so this normally resolves in well under a second even for a
+      // full 60-item run. What follows is deciding whether there's a
+      // background job to watch.
       const result = await api.actionCenter.executeSafeFixes(undefined, siteId);
-      setExecutionResult(result);
-      loadRecs();
-      loadDrafts();
-      loadTodayStats();
+      if (!result.job || result.job.status === 'completed' || result.job.status === 'failed') {
+        // Nothing to ship (already-drafted/paced down to zero) — done already.
+        setExecutionResult(result);
+        setExecutingSafeFixes(false);
+        loadRecs();
+        loadDrafts();
+        loadTodayStats();
+      } else {
+        pollExecutionJob(result.job.id);
+      }
     } catch (e) {
-      // A batch big enough to outrun web/src/api.js's 5-minute fetch ceiling
-      // aborts HERE while the server keeps going and finishes the job — so
-      // this is not a failure, and reporting it as one would hide the very
-      // per-item PR failures this banner exists to show. Recover by asking
-      // for the run we already started (it's the site's latest bulk job) and
-      // rendering its real, persisted result instead.
+      // Only reachable now if the fast prepare step itself times out or the
+      // request never lands — the shipping loop itself can no longer strand
+      // the browser, since the response comes back before it starts. Recover
+      // by asking for the run we already started (it's the site's latest
+      // bulk job) and picking up its poll instead of reporting a failure.
       const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
       if (timedOut) {
         setRecoveringExecution(true);
         try {
           const recovered = await api.actionCenter.latestExecutionJob(siteId);
           if (recovered.job) {
-            setExecutionResult(recovered);
-            loadRecs();
-            loadDrafts();
-            loadTodayStats();
+            pollExecutionJob(recovered.job.id);
           } else {
             setError('The safe-fix run is still going. It will finish on the server — reload in a few minutes to see the result.');
+            setExecutingSafeFixes(false);
           }
         } catch {
           setError('The safe-fix run is still going on the server. Reload in a few minutes to see which fixes shipped and which failed.');
+          setExecutingSafeFixes(false);
         } finally {
           setRecoveringExecution(false);
         }
       } else {
         setError(e.message || 'Execute Safe Fixes failed');
+        setExecutingSafeFixes(false);
       }
-    } finally {
-      setExecutingSafeFixes(false);
     }
   };
 
@@ -557,12 +613,16 @@ export default function ActionCenter() {
       )}
 
       {executionResult && (
-        <div className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-2xl px-4 py-3 leading-relaxed">
+        <div className={`text-xs font-semibold rounded-2xl px-4 py-3 leading-relaxed border ${isRunningExecution ? 'text-slate-600 bg-slate-50 border-slate-200' : 'text-emerald-700 bg-emerald-50 border-emerald-100'}`}>
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-2">
-              <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />
+              {isRunningExecution
+                ? <Zap size={14} className="text-slate-400 shrink-0 animate-pulse" />
+                : <CheckCircle2 size={14} className="text-emerald-550 shrink-0" />}
               <span>
-                Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.
+                {isRunningExecution
+                  ? `Shipping… ${executionResult.shipped + executionResult.failed} of ${executionResult.job?.items?.length ?? '?'} processed so far (${executionResult.shipped} shipped${executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''}).`
+                  : <>Shipped {executionResult.shipped}{executionResult.failed > 0 ? `, ${executionResult.failed} failed` : ''} — committed to one branch{executionResult.job?.pr_url ? ', one PR opened' : ''}.</>}
               </span>
             </span>
             <span className="flex items-center gap-2 shrink-0">
