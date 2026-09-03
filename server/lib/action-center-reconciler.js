@@ -41,6 +41,7 @@ import { markDraftAbandoned } from '../store/drafts.js';
 import { reopenRecommendation, blockRecommendation, closeRecommendation } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
 import { classifyAbandonReason, RETRY_POLICY } from './attempt-classification.js';
+import { logInternal } from './errors.js';
 
 // How long a draft may sit without progress before its recommendation is
 // taken back. Long enough that nothing in flight is disturbed — a normal
@@ -230,7 +231,14 @@ export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply 
       // this is a multi-tenant janitor, and a single tenant's bad row
       // silently costing every other tenant their reconciliation is exactly
       // the shape of outage this file exists to prevent.
-      log?.(`[reconciler] site ${site.id} failed: ${err.message}`);
+      //
+      // The exception itself goes to the internal log, where full detail is
+      // allowed; `log` receives only a correlation id. It defaults to
+      // console.log but is caller-supplied and can route anywhere — this
+      // module's CLI prints it to stdout, and a future caller could store it
+      // on an execution_job — so it must never carry raw exception text.
+      const id = logInternal(`action-center-reconciler site ${site.id}`, err);
+      log?.(`[reconciler] site ${site.id} failed (ref: ${id})`);
     }
   }
   const totals = results.reduce((acc, r) => ({
