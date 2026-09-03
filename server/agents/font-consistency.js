@@ -5,6 +5,8 @@ import { effortForGenerator } from './lib/page-content.js';
 import { captureFontSamples } from './lib/font-consistency-capture.js';
 import { findFontSizeOutliers, hasInlineFontSizeOverride } from './lib/font-consistency-analysis.js';
 import { callLLM } from '../llm.js';
+import { checkBrowserAvailable } from './lib/browser-preflight.js';
+import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 
 // Checks whether the SAME real role of element (an h1, an h2, body
 // paragraph text) renders at the same real, computed font-size across a
@@ -15,9 +17,11 @@ import { callLLM } from '../llm.js';
 // reliably, so this reuses the Design Agent's real headless-browser
 // plumbing (font-consistency-capture.js) instead of page-content.js's
 // cheerio-based analyzePage. That's real cost (a live browser launch per
-// run, not a cheap fetch), so this agent is throttled (see job.js's
-// THROTTLED_AGENT_IDS), not run daily like the rest of content-integrity's
-// checks.
+// run, not a cheap fetch) — bounded by this agent's own page sample size,
+// not by starving it of runs. It ran monthly until 2026-09-03 and that
+// throttle is gone (see job.js's THROTTLED_AGENT_IDS for why): typography
+// regressions ship in a single deploy, and a monthly agent that fails looks
+// exactly like a monthly agent that isn't due.
 //
 // Only ONE outlier shape has a safe automatic fix: an element whose
 // font-size differs because IT SPECIFICALLY carries an inline
@@ -39,7 +43,16 @@ export const meta = {
   ],
 };
 
-export async function run({ siteId, capture = captureFontSamples, fetchSite = getSiteById }) {
+// Kept at the same size as the discovered baseline, not larger — the
+// baseline has to stay the majority for "expected font-size" to mean
+// anything (see font-consistency-capture.js).
+const ROTATION_BATCH_SIZE = 8;
+
+export async function run({
+  siteId, start, end, capture = captureFontSamples, fetchSite = getSiteById,
+  checkBrowser = checkBrowserAvailable, selectCandidates = selectCandidatePages,
+  markChecked = markPagesChecked,
+}) {
   const site = await fetchSite(siteId);
   const homepageUrl = sitePageUrl(site);
   if (!homepageUrl) {
@@ -50,20 +63,59 @@ export async function run({ siteId, capture = captureFontSamples, fetchSite = ge
     };
   }
 
-  // Deliberately not caught here — a live-capture failure (browser launch,
-  // navigation timeout, etc.) propagates to runner.js's own try/catch,
-  // which already routes it through safeMessage before persisting/emitting
-  // anything customer-facing. Catching it here to build a custom error
-  // string would mean interpolating err.message directly into
+  // "The browser isn't installed here" and "the browser ran and every
+  // navigation failed" are different problems with different owners, and
+  // until 2026-09-03 both surfaced as the same redacted error. See
+  // lib/browser-preflight.js.
+  const browserCheck = await checkBrowser();
+  if (!browserCheck.ok) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: browserCheck.reason,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  // Rotation slice, added to capture's own stable discovered baseline — see
+  // font-consistency-capture.js's extraUrls comment for why the two are kept
+  // distinct rather than merged. A rotation failure must not cost the run its
+  // baseline check: the discovered pages are still capturable without it,
+  // which is exactly how this agent behaved before rotation existed.
+  const { batch } = await selectCandidates(siteId, meta.id, { start, end, batchSize: ROTATION_BATCH_SIZE })
+    .catch((err) => {
+      console.warn(`[font-consistency] rotation selection failed for site ${siteId}, falling back to the discovered baseline only: ${err.message}`);
+      return { batch: [] };
+    });
+
+  // Deliberately not caught here — a live-capture failure (navigation
+  // timeout, a context that dies mid-run) propagates to runner.js's own
+  // try/catch, which already routes it through safeMessage before
+  // persisting/emitting anything customer-facing. Catching it here to build a
+  // custom error string would mean interpolating err.message directly into
   // customer-facing text, the exact raw-exception-leak pattern
   // server/lib/errors.js exists to prevent (see its own header comment).
-  const pages = await capture(homepageUrl);
+  // Browser-launch failure specifically is handled by the preflight above,
+  // which is a diagnosable state rather than an exception.
+  const pages = await capture(homepageUrl, { extraUrls: batch });
   if (!pages?.length) {
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
       message: 'Could not capture any real pages for this site (all navigations failed).',
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  // Advance the rotation only for pages this run genuinely captured. Marking
+  // the whole selected batch would let a page that failed to navigate count
+  // as checked and drop to the back of the queue for another full cycle —
+  // the page most likely to be broken becoming the one least likely to be
+  // looked at again.
+  const capturedUrls = new Set(pages.map((p) => p.url));
+  const rotationChecked = batch.filter((u) => capturedUrls.has(u));
+  if (rotationChecked.length) {
+    await markChecked(siteId, meta.id, rotationChecked).catch((err) => {
+      console.error(`[font-consistency] could not advance rotation for site ${siteId}:`, err.message);
+    });
   }
 
   const outliers = findFontSizeOutliers(pages);
@@ -84,6 +136,23 @@ export async function run({ siteId, capture = captureFontSamples, fetchSite = ge
       params: { page: safeOutlier.url, fixType: 'font-size-override', outerHtml: safeOutlier.sample.outerHtml },
       effort: effortForGenerator('content-integrity-repair'),
     } : null,
+    // No safe automatic fix, but a real, measured defect — so it goes to the
+    // Action Center as a read-only row rather than being dropped, which is
+    // what happened to every one of these until 2026-09-03 (see this file's
+    // header: "Those stay visible, manual-only" was the intent all along,
+    // and buildRecommendations' `if (!action?.generatorId) continue` was
+    // quietly discarding them).
+    //
+    // `page` is the worst outlier's own page, not a sitewide '': it gives the
+    // row somewhere real to point, and it is the page a human should open
+    // first. The dedup key is (page, kind), so a second genuinely different
+    // page's outlier gets its own row instead of overwriting this one.
+    reportOnly: safeOutlier ? null : {
+      kind: 'font-size-inconsistency',
+      label: 'Text renders at an inconsistent size',
+      page: outliers[0].url,
+      whyBlocked: 'This font-size comes from a shared CSS class, not from a per-element override, so there is no single-element fix — changing the class would move every other element on the site that uses it too. Someone needs to decide which size is the correct one.',
+    },
     expectedImpact: { label: outliers.length >= 3 ? 'High' : 'Medium', basis: 'computed', value: outliers.length },
   }) : null;
 

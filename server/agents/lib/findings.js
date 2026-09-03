@@ -43,8 +43,11 @@ export function effortFromDifficulty(difficulty) {
 const PRIORITY_TO_IMPACT_LABEL = { high: 'High', medium: 'Medium', low: 'Low' };
 export const impactFromPriority = (priority) => PRIORITY_TO_IMPACT_LABEL[priority] || 'Low';
 
-export function makeFinding({ id, evidence, whyItMatters, priority, recommendedAction = null, expectedImpact }) {
-  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact };
+export function makeFinding({
+  id, evidence, whyItMatters, priority, recommendedAction = null, expectedImpact,
+  reportOnly = null,
+}) {
+  return { id, evidence, whyItMatters, priority, recommendedAction, expectedImpact, reportOnly };
 }
 
 // For a check whose failure is usually one shared, sitewide root cause (a

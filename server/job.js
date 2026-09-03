@@ -63,7 +63,19 @@ import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_J
 // DAILY_AGENT_IDS automatically unless it's added to THROTTLED_AGENT_IDS
 // below or given its own WEEKLY_ONLY_AGENT_ID-style exclusion — pick the
 // cadence deliberately, don't leave it to default.
-const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation', 'font-consistency', 'visual-quality']);
+//
+// font-consistency and visual-quality were both throttled here until
+// 2026-09-03 (monthly and weekly respectively), on a cost argument that
+// turned out to be measuring the wrong thing. What the throttle actually
+// bought was four runs of each, ever, on the only real site — and all eight
+// of them errored, which nothing noticed for a month precisely BECAUSE a
+// monthly agent failing looks identical to a monthly agent not being due.
+// A design regression is also not a slow-moving signal the way a backlink
+// profile is: it lands in one deploy and is visible to every visitor from
+// that moment. Both are daily now, and the real per-run cost is bounded
+// where it belongs — in each agent's own page batch size — rather than by
+// starving the agent of runs.
+const THROTTLED_AGENT_IDS = new Set(['competitor-intelligence', 'authority', 'ai-recommendation']);
 const WEEKLY_ONLY_AGENT_IDS = new Set(['content-gap', 'growth-queries']);
 const DAILY_AGENT_IDS = RECOMMENDATION_AGENT_IDS.filter((id) => !THROTTLED_AGENT_IDS.has(id) && !WEEKLY_ONLY_AGENT_IDS.has(id));
 
@@ -521,21 +533,12 @@ export const runCompetitorIntelligenceIfDueForAllSites = () => runAgentIfDueForA
 export const runAuthorityIfDue = (site) => runAgentIfDue(site, 'authority');
 export const runAuthorityIfDueForAllSites = () => runAgentIfDueForAllSites('authority');
 
-// Font Consistency — a real Playwright browser launch + page-type-diverse
-// capture per site (see font-consistency-capture.js), materially heavier
-// than every other checked-often agent's cheap static fetch; a site's real
-// typography doesn't meaningfully drift week to week either, so monthly
-// matches both the underlying signal and keeps the browser-launch cost
-// negligible, same reasoning as competitor-intelligence/authority above.
-export const runFontConsistencyIfDue = (site) => runAgentIfDue(site, 'font-consistency');
-export const runFontConsistencyIfDueForAllSites = () => runAgentIfDueForAllSites('font-consistency');
-
-// Weekly, not the default monthly throttle — a real Playwright browser
-// launch + one vision-capable LLM call per site (see agents/visual-quality.js),
-// same real-cost reasoning as font-consistency's own throttle above, but a
-// broken table/duplicate FAQ is worth catching sooner than once a month.
-export const runVisualQualityIfDue = (site) => runAgentIfDue(site, 'visual-quality', { cadence: 'week' });
-export const runVisualQualityIfDueForAllSites = () => runAgentIfDueForAllSites('visual-quality', { cadence: 'week' });
+// font-consistency and visual-quality had their own runAgentIfDue wrappers
+// here (monthly and weekly). Both are ordinary DAILY_AGENT_IDS members as of
+// 2026-09-03 — see THROTTLED_AGENT_IDS above for why — so they now run
+// through runDailyAgentAnalysisForSite like every other detection agent, and
+// these wrappers plus their weekly cron.js callers are gone rather than left
+// as no-ops that would silently re-skip on the throttle threshold.
 
 // AI Recommendation — real AI prompt probes have a real per-call cost that
 // multiplies with every additional configured provider (see
