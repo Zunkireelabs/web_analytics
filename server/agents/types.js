@@ -74,6 +74,36 @@
  *                                               never a fixed constant
  * @property {RecommendedAction|null} recommendedAction
  * @property {ExpectedImpact} expectedImpact
+ * @property {ReportOnly|null} reportOnly
+ */
+
+/**
+ * @typedef {Object} ReportOnly
+ * Set by an agent that has found a REAL, confirmed problem it has no safe
+ * automatic fix for, and wants it shown in the Action Center anyway as a
+ * read-only row (no Generate/Fix affordance).
+ *
+ * Opt-in, deliberately. A `recommendedAction: null` finding is NOT enough on
+ * its own: several agents (query-intelligence, device-intelligence) emit
+ * evidence-only findings that are context for a human reading a report, not
+ * problems anyone is expected to act on, and surfacing all of them would bury
+ * the actionable list. So an agent has to say "this one is a defect, I just
+ * can't fix it" — which is a different claim from "here is a number".
+ *
+ * Added 2026-09-03. Before it, font-consistency.js's own header promised
+ * class-based font outliers would "stay visible, manual-only" — but a null
+ * recommendedAction was silently dropped by buildRecommendations, so the one
+ * outlier shape with no safe fix was also the one nobody could ever see.
+ *
+ * @property {string} kind      short slug, unique per agent — becomes the row's
+ *                               recommendation_type, so it is also the dedup key
+ *                               alongside `page`. Never a real generator id.
+ * @property {string} label     the row's title in the Action Center
+ * @property {string} page      the page the row points at ('' for sitewide)
+ * @property {string} whyBlocked  plain-English reason there is no automatic fix.
+ *                                 Written for the site owner, and classified into
+ *                                 blocked_kind by store/recommendations.js's
+ *                                 classifyBlockedKind — check what yours maps to.
  */
 
 /**

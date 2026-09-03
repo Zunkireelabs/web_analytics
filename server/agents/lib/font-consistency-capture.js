@@ -49,9 +49,29 @@ export async function captureFontSamplePage(browserPage, url) {
 // page-type-diverse set of real URLs (same bounded, non-exhaustive approach
 // as the Design Agent's own captureSite), then sample each one's real
 // rendered heading/paragraph font sizes.
+//
+// `extraUrls` is the rotation slice (font-consistency.js passes the same
+// selectCandidatePages batch visual-quality.js uses). It exists because
+// discoverPages alone re-crawls the SAME ~8 homepage-reachable pages every
+// single run — deterministic by construction, since a homepage's own link
+// order doesn't change — so before 2026-09-03 every other page on the site
+// had never once had its typography checked. On a 177-page site that is 8
+// pages of real coverage and 169 pages of none.
+//
+// The two sets are deliberately NOT interchangeable. findFontSizeOutliers
+// derives "expected" from the majority size per element group across
+// whatever it is given, so a pure rotation would move the baseline every
+// day: the same page could read as the outlier on Monday and as the norm on
+// Tuesday, purely from which other pages happened to be in that morning's
+// slice. The discovered set stays in every run as the stable baseline that
+// defines what "the rest of this site" looks like, and the rotating slice is
+// measured against it. Anchors therefore need to outnumber any single day's
+// rotation for the majority to stay meaningful — keep that in mind before
+// raising the rotation size much past DEFAULT_MAX_PAGES.
 export async function captureFontSamples(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
+  extraUrls = [],
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -59,8 +79,16 @@ export async function captureFontSamples(homepageUrl, {
     const page = await context.newPage();
     const targets = await discoverPages(page, homepageUrl, { maxPages });
 
+    // Anchors first, then the rotation slice with anchors removed — a URL in
+    // both sets must be captured once, not twice: a duplicated page would
+    // count twice toward the majority and quietly weight the baseline toward
+    // whichever pages happen to be in today's rotation.
+    const anchorUrls = targets.map((t) => t.url);
+    const seen = new Set(anchorUrls);
+    const urls = [...anchorUrls, ...extraUrls.filter((u) => !seen.has(u) && (seen.add(u), true))];
+
     const pages = [];
-    for (const { url } of targets) {
+    for (const url of urls) {
       // eslint-disable-next-line no-await-in-loop
       const captured = await captureFontSamplePage(page, url).catch((err) => {
         console.warn(`[font-consistency/capture] could not capture ${url}: ${err.message}`);

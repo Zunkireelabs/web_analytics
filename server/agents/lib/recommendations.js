@@ -116,7 +116,46 @@ export async function buildRecommendations(siteId) {
     }
     for (const f of run.findings) {
       const action = f.recommendedAction;
-      if (!action?.generatorId) continue;
+      if (!action?.generatorId) {
+        // A finding with no generator is usually evidence, not a defect
+        // (query-intelligence's "your top query moved", device-intelligence's
+        // split) — those stay out of the Action Center, same as always. A
+        // finding that explicitly declares `reportOnly` is making the
+        // stronger claim: this IS a defect, it is confirmed, and there is no
+        // safe automatic fix. Those become read-only rows. See
+        // agents/types.js's ReportOnly for why this is opt-in rather than
+        // "anything without a generatorId".
+        //
+        // No gates.evaluate call: every gate answers "can we safely DRAFT
+        // this?", and the row exists precisely because nothing will be
+        // drafted. Running them would mean asking a url_file_map/design
+        // question about a fix that does not exist, and a 'drop' verdict from
+        // one of them would delete a real finding for the wrong reason.
+        const ro = f.reportOnly;
+        if (!ro?.kind) continue;
+        const page = ro.page || '';
+        detectedKeys.add(`${ro.kind}::${recommendationPageKey({ generatorId: ro.kind, params: { page } })}`);
+        // Not skipped on draftedFindingIds the way an actionable finding is:
+        // there is no draft path for this row, so a finding id here can never
+        // be "already drafted" — and checking would be a silent no-op that
+        // reads as intentional.
+        const { bucket, category } = classify({ source: run.agentId, generatorId: ro.kind });
+        items.push({
+          id: f.id, source: run.agentId,
+          agentName: catByAgent.get(run.agentId)?.name || run.agentId,
+          tag: ro.label, generatorId: ro.kind,
+          reason: f.whyItMatters, params: { page }, priority: f.priority,
+          expectedImpact: f.expectedImpact, bucket, category,
+          // Carrying a blockedReason is what demotes this to the manual risk
+          // tier (blockedRiskTier in recommendation-coordinator.js) and hides
+          // every Generate/Fix affordance in ActionCenter.jsx — the two
+          // properties this row needs. It also satisfies the
+          // recommendations_blocked_is_manual CHECK, which requires exactly
+          // that pairing.
+          blockedReason: ro.whyBlocked,
+        });
+        continue;
+      }
       // Every gate — net-new target, url_file_map (with healing), soft-404,
       // file-exists, adapter-data, design verification — in one call, shared
       // with the other writers to this table. See recommendation-gates.js for

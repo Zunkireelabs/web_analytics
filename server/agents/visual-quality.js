@@ -6,6 +6,7 @@ import { makeFinding, priorityByRank, impactFromPriority } from './lib/findings.
 import { findOpenRecommendation, insertRecommendation } from '../store/recommendations.js';
 import { recommendationPageKey } from './lib/recommendation-coordinator.js';
 import { callLLMWithImages, extractJson } from '../llm.js';
+import { checkBrowserAvailable } from './lib/browser-preflight.js';
 
 // Expensive, narrow tier of the cost-conscious detection strategy —
 // content-integrity.js is the cheap-wide tier this layers on top of.
@@ -200,7 +201,10 @@ function summarizeBlocksForPrompt(page) {
   };
 }
 
-export async function run({ siteId, start, end, capture = defaultCapture, analyzePage = analyzePageUrl }) {
+export async function run({
+  siteId, start, end, capture = defaultCapture, analyzePage = analyzePageUrl,
+  checkBrowser = checkBrowserAvailable,
+}) {
   // Same "propagate to runner.js's own try/catch" discipline as font-
   // consistency.js — a live-capture failure is a real infrastructure error,
   // not a customer-facing string to hand-build here. Covers both "nothing to
@@ -208,6 +212,19 @@ export async function run({ siteId, start, end, capture = defaultCapture, analyz
   // configured, or nothing in page_inventory/GSC yet — selectCandidatePages'
   // own concern) and every real navigation failing, since both end the same
   // way — no screenshot to show a reviewer or a vision call.
+  // Separates "the browser itself isn't available here" from "the browser
+  // ran and found nothing" — see lib/browser-preflight.js. Without this both
+  // report as the same opaque failure, which is how this agent went a month
+  // erroring on every run without it being diagnosable.
+  const browserCheck = await checkBrowser();
+  if (!browserCheck.ok) {
+    return {
+      meta, status: 'insufficient-data', facts: null, narrative: null,
+      message: browserCheck.reason,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
   const { pages } = await capture(siteId, { start, end, screenshots: true });
   const withScreenshots = (pages || []).filter((p) => p.screenshot);
   if (!withScreenshots.length) {
