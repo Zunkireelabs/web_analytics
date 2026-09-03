@@ -234,6 +234,85 @@ export async function dismissRecommendation(id) {
   await query(`UPDATE recommendations SET status = 'dismissed', updated_at = now() WHERE id = $1`, [id]);
 }
 
+// Puts an EXISTING recommendation back on the board after an attempt against
+// it was reclaimed (lib/action-center-reconciler.js). Never inserts — that is
+// the whole point. The alternative the reconciler must not take is letting
+// detection re-raise the issue as a fresh row: that produces a second card
+// for an issue the user has already seen, with an attempt history of zero,
+// which is precisely the duplication this work exists to end.
+//
+// Clearing execution_job_id/execution_status matters as much as the status
+// flip. listOpenSafeRecommendations excludes any row with a non-null
+// execution_job_id so a recommendation already claimed by a job is never
+// picked up twice — correct while the job is live, but a row whose job died
+// stranded stays permanently invisible to the unattended path unless the
+// claim is released here.
+//
+// Returns { reopened, conflictId }. A conflict is not an error: the partial
+// unique index (recommendations_dedup_key, status='open') means another OPEN
+// row already holds this exact (site, page, type) key — the issue is already
+// represented by a live card, so leaving this one closed is the correct
+// outcome and still satisfies one-issue-one-card. Reported rather than
+// swallowed so the caller can log which row absorbed it.
+export async function reopenRecommendation(id) {
+  try {
+    const { rows } = await query(
+      `UPDATE recommendations
+          SET status = 'open', execution_job_id = NULL, execution_status = NULL, updated_at = now()
+        WHERE id = $1 AND status <> 'open'
+        RETURNING *`,
+      [id]
+    );
+    // No row updated means it was already open — the common case when an
+    // attempt is reclaimed against a recommendation that was never closed.
+    // Still a success: the card is on the board, which is all the caller
+    // asked for. Release the execution claim regardless.
+    if (!rows[0]) {
+      await query(
+        `UPDATE recommendations SET execution_job_id = NULL, execution_status = NULL, updated_at = now()
+          WHERE id = $1 AND status = 'open'`,
+        [id]
+      );
+    }
+    return { reopened: true, conflictId: null };
+  } catch (err) {
+    if (err?.code !== '23505') throw err;
+    const { rows } = await query(
+      `SELECT r2.id FROM recommendations r1
+         JOIN recommendations r2
+           ON r2.site_id = r1.site_id AND r2.page = r1.page
+          AND r2.recommendation_type = r1.recommendation_type
+          AND r2.status = 'open' AND r2.id <> r1.id
+        WHERE r1.id = $1`,
+      [id]
+    );
+    return { reopened: false, conflictId: rows[0]?.id ?? null };
+  }
+}
+
+// Marks an OPEN recommendation as waiting on a person, with the reason shown
+// on the card. Used when an attempt fails with a NEEDS_HUMAN policy
+// (lib/attempt-classification.js) — a missing url_file_map entry, an expired
+// PAT. The row stays open and visible on purpose: an issue we detected but
+// cannot currently fix must never silently vanish (that lesson is why
+// blocked_reason exists at all — see migration 100).
+//
+// risk_tier is forced to 'manual' in the same statement, not as a separate
+// call. Migration 108 makes a blocked row with risk_tier='safe' a CHECK
+// violation, precisely because an unguarded backfill once re-promoted 45
+// blocked rows into the unattended path on site 1.
+export async function blockRecommendation(id, reason) {
+  const { rows } = await query(
+    `UPDATE recommendations
+        SET blocked_reason = $2, blocked_kind = $3, risk_tier = 'manual',
+            blocked_since = COALESCE(blocked_since, now()), updated_at = now()
+      WHERE id = $1 AND status = 'open'
+      RETURNING *`,
+    [id, reason, classifyBlockedKind(reason)]
+  );
+  return rows[0] || null;
+}
+
 // risk_tier is not currently exposed on execution_job_id's caller, but every
 // safe-tier recommendation not already claimed by an in-flight job is a
 // candidate for executeSafeFixes (agents/lib/execution-engine.js) —

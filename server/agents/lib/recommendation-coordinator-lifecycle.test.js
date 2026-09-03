@@ -25,7 +25,16 @@ mock.module(resolve('../../store/recommendations.js'), {
     closeRecommendation: async () => {},
   },
 });
-mock.module(resolve('../../store/drafts.js'), { namedExports: { getDraftedFindingIds: async () => new Set() } });
+mock.module(resolve('../../store/drafts.js'), { namedExports: {
+  getDraftedFindingIds: async () => new Set(),
+  // getRecommendations now derives each card's lifecycle from its live
+  // draft rather than only asking whether one exists, so the mock has to
+  // supply this too. Empty map = no drafts, which is what these tests mean.
+  getLiveDraftsByFindingId: async () => new Map(),
+} });
+mock.module(resolve('../../store/recommendation-attempts.js'), { namedExports: {
+  attemptSummaryByFinding: async () => new Map(),
+} });
 mock.module(resolve('./command-center.js'), { namedExports: { categoryByAgentId: async () => new Map() } });
 mock.module(resolve('../runner.js'), { namedExports: { runAgent: async () => { throw new Error('must not be reached by syncFromGrounded'); } } });
 mock.module(resolve('./recommendation-gates.js'), { namedExports: { createRecommendationGates: () => { throw new Error('must not be reached by syncFromGrounded'); } } });

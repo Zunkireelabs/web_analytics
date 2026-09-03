@@ -1,5 +1,6 @@
 import { findOpenRecommendation, insertRecommendation, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenRecommendations, listOpenBlockedRecommendations, closeStaleRecommendations, markRecommendationsUnfixable, getRecommendationById, closeRecommendation } from '../../store/recommendations.js';
-import { getDraftedFindingIds } from '../../store/drafts.js';
+import { getLiveDraftsByFindingId } from '../../store/drafts.js';
+import { attemptSummaryByFinding } from '../../store/recommendation-attempts.js';
 import { categoryByAgentId } from './command-center.js';
 import { riskTierForGenerator } from './risk-tiers.js';
 import { createRecommendationGates } from './recommendation-gates.js';
@@ -118,6 +119,51 @@ export function recommendationPageKey(item) {
   if (item.generatorId === 'blog-image') return `blog-image::${item.params?.filePath || ''}`;
   if (SITE_LEVEL_GENERATOR_IDS.has(item.generatorId)) return '';
   return item.params?.page || '';
+}
+
+// Every generator whose recommendation identity is something OTHER than the
+// page alone, and the param that carries that identity.
+//
+// This is a coverage ledger, not a second implementation — recommendationPageKey
+// above remains the one that computes the key. What this adds is the thing
+// that function structurally cannot have: a list of which generators have
+// been THOUGHT ABOUT. Every entry above was added reactively, after a real
+// duplicate-card incident (GA4 colliding with Facebook Pixel on the homepage;
+// four distinct broken links showing as one card; a second blog topic
+// vanishing into the first one's finding_ids). The pattern in all of them is
+// identical: a generator whose params carry more identity than `page` does,
+// discovered only once a user reported seeing one card where there were
+// several.
+//
+// The accompanying test asserts every registered generator appears here, so
+// adding a generator forces the question "is `page` really this thing's
+// identity?" at the time it is written, rather than after someone notices
+// cards going missing. A generator whose identity genuinely IS its page (or
+// which is site-wide) says so explicitly by being listed as such.
+export const DEDUP_IDENTITY = {
+  // Keyed on a discriminating param — page alone would collide.
+  'analytics-install': 'provider',
+  'expand-content': 'focus',
+  'broken-link-fix': 'href',
+  'blog-outline': 'topic',
+  'landing-page': 'topic|city|market',
+  'comparison-page': 'topic',
+  'content-integrity-repair': 'fixType',
+  'blog-image': 'filePath',
+};
+
+// Generators with no page dimension at all — one row per site, whatever the
+// detector's `page` param happened to say this run (see the comment on
+// SITE_LEVEL_GENERATOR_IDS).
+export const SITE_LEVEL_IDENTITY = SITE_LEVEL_GENERATOR_IDS;
+
+// True when this generator has an explicit, considered dedup identity. The
+// test below is the only caller; it exists so the assertion reads as one
+// question rather than three set lookups.
+export function hasDeclaredDedupIdentity(generatorId, pageKeyedIds) {
+  return Object.hasOwn(DEDUP_IDENTITY, generatorId)
+    || SITE_LEVEL_IDENTITY.has(generatorId)
+    || pageKeyedIds.has(generatorId);
 }
 
 // grounded = buildRecommendations()'s { items, lastAnalyzedAt, detectedKeys }
@@ -332,23 +378,92 @@ export async function recheckRecommendation(siteId, recommendationId) {
 // render the Action Center's actual recommendation list (see
 // routes/action-center.js) — same { items, lastAnalyzedAt } shape, sourced
 // from the persisted, deduplicated table instead of a live recompute.
+// Draft states that mean the work is FINISHED. A recommendation whose draft
+// reached one of these is resolved, and drops off the active board — the
+// "Fixed / already applied" end of the lifecycle. Verification
+// (store/fix-verifications.js) is what re-opens it if the fix didn't hold.
+const RESOLVED_DRAFT_STATUSES = new Set(['implemented', 'merged_to_stage']);
+
+// Draft states that are waiting on a PERSON, not on the system. These stay
+// visible as 'blocked' rather than reading as in-flight progress that will
+// complete on its own — the distinction lib/draft-ship-state.js draws as
+// HUMAN_OWNED, surfaced to the user instead of only to the shipping loop.
+const HUMAN_OWNED_DRAFT_STATUSES = new Set(['submitted_for_approval', 'revision_requested']);
+
+// One recommendation, one identity, for its whole life.
+//
+// Derived on read rather than stored in a column, on purpose. The truth about
+// where a recommendation stands lives in three places that each already have
+// an owner — the row's own status/blocked_reason, its draft's status and PR
+// state, and its attempt history — and a stored lifecycle column would be a
+// fourth copy that has to be written correctly by every one of those owners
+// or go quietly stale. The bug this whole change exists to fix was caused by
+// exactly that kind of drift: a draft that stopped moving while the thing
+// deciding what the user sees never heard about it.
+export function deriveLifecycle(rec, draft, attempts) {
+  if (draft && RESOLVED_DRAFT_STATUSES.has(draft.status)) return 'fixed';
+  if (draft && HUMAN_OWNED_DRAFT_STATUSES.has(draft.status)) return 'blocked';
+  // A draft carrying an apply_error or a rollback is not in flight — it is a
+  // failed attempt that hasn't been reclaimed yet (the reconciler will
+  // abandon it on its next pass). Reporting it as 'in progress' is the
+  // specific lie that made stalled work look healthy, so it reads as a
+  // retry now and the card stays actionable in the meantime.
+  if (draft && !draft.apply_error && !draft.rolled_back_at) return 'in_progress';
+  if (rec.blocked_reason) return 'blocked';
+  if (attempts?.attempts > 0) return 'retry';
+  return 'new';
+}
+
 export async function getRecommendations(siteId) {
-  const [rows, draftedFindingIds, catByAgent] = await Promise.all([
+  const [rows, liveDrafts, attemptsByFinding, catByAgent] = await Promise.all([
     listOpenRecommendations(siteId),
-    getDraftedFindingIds(siteId),
+    getLiveDraftsByFindingId(siteId),
+    attemptSummaryByFinding(siteId),
     categoryByAgentId(),
   ]);
   // A single draft's generator params already cover the whole merged
   // recommendation (mergeIntoRecommendation refreshes `params` to the
-  // latest evidence across all finding_ids), so shipping it resolves the
-  // recommendation entirely — hide as soon as ANY finding_id is drafted,
-  // not only once every one of them individually has a draft row. Without
-  // this, shipRecommendation only ever drafts finding_ids[0]
-  // (routes/action-center.js), so a recommendation merged from multiple
-  // findings would never disappear from Recs after being shipped.
+  // latest evidence across all finding_ids), so ANY finding_id's draft
+  // speaks for the whole recommendation — shipRecommendation only ever
+  // drafts finding_ids[0] (routes/action-center.js), so keying off all of
+  // them would miss a recommendation merged from multiple findings.
+  const draftFor = (r) => {
+    for (const fid of r.finding_ids) {
+      const d = liveDrafts.get(fid);
+      if (d) return d;
+    }
+    return null;
+  };
+  const attemptsFor = (r) => {
+    // Attempt history is additive across every finding merged into this
+    // recommendation: they are the same underlying issue by definition, and
+    // resetting the count when a second detector merges in would hand the
+    // item a fresh set of retries it hasn't earned.
+    let merged = null;
+    for (const fid of r.finding_ids) {
+      const a = attemptsByFinding.get(fid);
+      if (!a) continue;
+      if (!merged) { merged = { ...a }; continue; }
+      merged.attempts += a.attempts;
+      merged.itemDefectAttempts += a.itemDefectAttempts;
+      if (a.lastAt > merged.lastAt) {
+        merged.lastAt = a.lastAt; merged.lastOutcome = a.lastOutcome;
+        merged.lastPolicy = a.lastPolicy; merged.lastReason = a.lastReason;
+      }
+    }
+    return merged;
+  };
   const items = rows
-    .filter((r) => r.finding_ids.every((fid) => !draftedFindingIds.has(fid)))
-    .map((r) => {
+    .map((r) => ({ r, draft: draftFor(r), attempts: attemptsFor(r) }))
+    .map((ctx) => ({ ...ctx, lifecycle: deriveLifecycle(ctx.r, ctx.draft, ctx.attempts) }))
+    // Only a FINISHED recommendation leaves the board. Everything else stays
+    // on it — including work in flight, which used to disappear the instant a
+    // draft existed and reappear later as a brand-new card with no history.
+    // That disappearance is what let 48 recommendations sit invisible behind
+    // stalled drafts on site 1, and what made the same issue look new every
+    // time it came back. See lib/action-center-reconciler.js.
+    .filter((ctx) => ctx.lifecycle !== 'fixed')
+    .map(({ r, draft, attempts, lifecycle }) => {
       const { bucket, category } = classify({ source: r.detecting_agents[0], generatorId: r.recommendation_type });
       return {
         id: String(r.id), findingIds: r.finding_ids,
@@ -374,6 +489,39 @@ export async function getRecommendations(siteId) {
         // real architectural constraint, e.g. a shared programmatic
         // template). See store/recommendations.js's classifyBlockedKind.
         blockedKind: r.blocked_kind || null,
+        // ---- Lifecycle: one identity, whole life -----------------------
+        // 'new' | 'in_progress' | 'retry' | 'blocked'. ('fixed' is derived
+        // too, but never reaches here — a fixed recommendation is filtered
+        // off the active board above.)
+        lifecycle,
+        // Where the in-flight work actually is, so "in progress" is a
+        // statement the user can check rather than one they have to trust.
+        draft: draft
+          ? {
+            id: draft.id,
+            status: draft.status,
+            prNumber: draft.pr_number || null,
+            prUrl: draft.pr_url || null,
+            prState: draft.pr_state || null,
+            // A draft waiting on a person needs to say so on the card. The
+            // reviewer is the only one who can move it, and until now the
+            // card wasn't visible at all for them to find.
+            awaitingReview: HUMAN_OWNED_DRAFT_STATUSES.has(draft.status),
+          }
+          : null,
+        // ---- Attempt history -------------------------------------------
+        // Why this card is back, in the user's terms. attemptCount is every
+        // attempt; itemDefectAttempts is the subset that says something is
+        // wrong with the item itself, which is the number the convergence
+        // cap acts on (agents/lib/ship-pacing.js).
+        attemptCount: attempts?.attempts || 0,
+        itemDefectAttempts: attempts?.itemDefectAttempts || 0,
+        lastAttemptAt: attempts?.lastAt || null,
+        lastFailureReason: attempts?.lastReason || null,
+        // 'retry' | 'needs_human' | 'already_resolved' | 'item_defect' |
+        // 'never' — see lib/attempt-classification.js. The UI branches on
+        // this to tell "we'll try again" apart from "this needs you".
+        lastFailurePolicy: attempts?.lastPolicy || null,
       };
     });
   const lastAnalyzedAt = {};
