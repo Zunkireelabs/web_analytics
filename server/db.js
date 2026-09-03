@@ -13,6 +13,34 @@ if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is not set. Copy .env.example to .env and fill it in.');
 }
 
+// Under node's own test runner (NODE_TEST_CONTEXT is set automatically by
+// `node --test`, whether that's `npm test` or a single file run by hand),
+// refuse to connect to anything but a local database. Real incident,
+// 2026-09-03: several *.test.js files write real fixture rows on every run
+// and either had no DATABASE_URL guard at all, or a
+// `DATABASE_URL ||= 'postgres://...localhost.../test'` fallback that ESM's
+// import-hoisting made a no-op whenever the same file also imports this
+// module — the `import 'dotenv/config'` above already ran and set
+// DATABASE_URL from .env before the fallback line's own text position ever
+// executed, so the fallback silently never fired. Dozens of
+// `status='active'` test-fixture sites accumulated in the real staging
+// database over time as a result, and a daily cron job choking on one of
+// them (a hung, untimed-out GitHub call — see github/client.js) is what
+// surfaced this while diagnosing that hang. Enforced here, the one
+// chokepoint every DB access — test or not — actually goes through, so no
+// individual test file's guard (present, absent, or silently shadowed)
+// matters.
+if (process.env.NODE_TEST_CONTEXT) {
+  const dbHost = new URL(process.env.DATABASE_URL).hostname;
+  if (!/^(localhost|127\.0\.0\.1|::1)$/i.test(dbHost)) {
+    throw new Error(
+      `Refusing to run tests against a non-local DATABASE_URL (host: ${dbHost}). ` +
+      'Tests must run against a local database — set DATABASE_URL=postgres://test:test@localhost:5432/test ' +
+      'before running tests, or make sure nothing else in your shell/.env has already set it to a real one.'
+    );
+  }
+}
+
 // DB_POOL_MAX defaults to 10, unchanged from before this was configurable —
 // the standalone MCP process (mcp-server/index.js) overrides it smaller
 // (read-heavy, short queries) since it holds its own independent Pool
