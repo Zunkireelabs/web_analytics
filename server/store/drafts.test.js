@@ -234,16 +234,33 @@ describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
 describe('countFailedAttemptsByFinding — what must never count as an item failure', () => {
   beforeEach(() => { issued = []; });
 
-  const sqlFor = async () => {
+  const recordFor = async () => {
     const { countFailedAttemptsByFinding } = await import('./drafts.js');
     await countFailedAttemptsByFinding(1);
-    return issued.at(-1).sql;
+    return issued.at(-1);
   };
+  const sqlFor = async () => (await recordFor()).sql;
 
   test('config gaps a human can close are excluded — the item becomes eligible the moment they do', async () => {
-    const sql = await sqlFor();
-    assert.match(sql, /No markers configured/);
-    assert.match(sql, /No url_file_map entry matches/);
+    const { params } = await recordFor();
+    assert.ok(params.includes('No markers configured for'));
+    assert.ok(params.includes('No url_file_map entry matches'));
+  });
+
+  // Real incident, 2026-09-03: DESIGN_NOT_REVIEWED_FRAGMENT ("This site's
+  // design has not been reviewed yet") was inlined into the SQL text via
+  // template literal, same as the two config-gap fragments above. Its
+  // apostrophe closed the LIKE pattern's quoted string literal early,
+  // producing `syntax error at or near "s"` and silently failing every
+  // autonomous shipping run's failed-attempt count. Fixed by passing every
+  // fragment as a bind parameter instead of inlining it — this test proves
+  // a fragment WITH a quote in it can never do that again, not just that
+  // today's specific fragments happen to be quote-free.
+  test('a fragment containing a single quote (the removed design-review gate) is bound as a parameter, never inlined into the SQL text', async () => {
+    const { sql, params } = await recordFor();
+    assert.ok(params.includes("This site's design has not been reviewed yet"));
+    assert.doesNotMatch(sql, /site's/);
+    assert.match(sql, /NOT LIKE '%' \|\| \$\d+ \|\| '%'/);
   });
 
   // The opposite of the case above: this one recurs identically FOREVER
