@@ -756,6 +756,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   }
 
   const site = await getSiteById(siteId);
+  if (!site) throw httpError(404, 'Site not found');
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
     resolved = await resolveImplementerForApply(site, draft, renderMode);
