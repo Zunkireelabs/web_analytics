@@ -29,7 +29,7 @@ import { validateRendering, checkClientBuildStatus } from '../implementers/lib/r
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
-  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths,
+  recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
@@ -1151,12 +1151,36 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   // shipped. auto-remediation.js applies both rules BEFORE its daily budget
   // for exactly this reason. 4x covers a batch that is overwhelmingly one
   // paced generator while keeping the query bounded.
-  const [selected, site, pendingDraftFilePaths] = await Promise.all([
+  const [rawSelected, site, pendingDraftFilePaths, draftedFindingIds] = await Promise.all([
     listOpenSafeRecommendations(siteId, limit * 4),
     getSiteById(siteId),
     getPendingDraftFilePaths(siteId),
+    getDraftedFindingIds(siteId),
   ]);
   const job = await createExecutionJob(siteId, { trigger: 'bulk', requestedBy: userId });
+
+  // Same exclusion auto-remediation.js's unattended path already applies
+  // (its own `rows.filter` a few lines below its listOpenRecommendations
+  // call) and getRecommendations already applies for the Recs list display
+  // (recommendation-coordinator.js) — this bulk path was the one place that
+  // never did. Real incident, 2026-09-03: listOpenSafeRecommendations has no
+  // idea a recommendation's finding was already drafted (on ANY day, not
+  // just today — a merged fix from a week ago counts too), so every one of
+  // these kept re-entering the eligible pool and consuming a slot in the
+  // 60-item budget purely to be recognized as `alreadyShipped` at ship time
+  // and no-op — one real run drafted 4 genuinely new fixes and spent the
+  // other 44 of its 60 slots re-confirming already-merged work instead of
+  // reaching more of the real backlog. shipRecommendation's alreadyShipped
+  // short-circuit stays as the correctness backstop (a finding drafted
+  // between this filter and that check, e.g. by a concurrent run, must
+  // still resolve safely) — this filter is what makes the 60-slot budget
+  // actually go to 60 pieces of NEW work on the common day, not a backstop
+  // replacement.
+  const selected = rawSelected.filter((r) => r.finding_ids.every((fid) => !draftedFindingIds.has(fid)));
+  const alreadyDraftedCount = rawSelected.length - selected.length;
+  if (alreadyDraftedCount > 0) {
+    await appendJobLog(job.id, `${alreadyDraftedCount} candidate(s) already have a drafted/shipped finding — excluded before pacing.`);
+  }
 
   // The same two candidate rules the unattended path applies (ship-pacing.js).
   // Both were missing here, and this is the path that actually carries the

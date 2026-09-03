@@ -80,7 +80,61 @@ export function summarizeAgentRuns(ran) {
   return { findings, perAgent };
 }
 
-export async function runOrchestration({ siteId, start, end, agentIds, question, persistSubAgentRuns = false, personaPrompt = null } = {}) {
+// Hard ceiling on any ONE agent inside the Promise.all fan-out below. Without
+// this, a single hung agent blocks the entire battery forever: Promise.all
+// only resolves once every promise does, so runDailyAgentAnalysisForSite
+// never reaches saveAgentRun (the executive-report row the hourly catch-up
+// guard checks for), buildRecommendations, or shipping — a fault in ANY ONE
+// of 16 daily agents, current or future, silently costs the whole day.
+// Confirmed live, 2026-09-03: two separate detection attempts both
+// completed exactly the same 8 lightweight/site-wide agents and never
+// persisted a run for any of the 8 slower, real-per-page agents
+// (content-integrity, duplicate-content, ai-visibility, etc.) — the whole
+// battery was still waiting on at least one of them when both attempts
+// ended. This is a ceiling on the SLOWEST agent, not a total run-time
+// budget — every agent runs concurrently, so the whole battery's wall time
+// is bounded by this constant regardless of how many agents there are.
+// 5 minutes is generous for legitimate per-page work (page-level fetches
+// already carry their own much shorter timeout, e.g. page-content.js's
+// FETCH_TIMEOUT_MS=5000) while still guaranteeing the battery — and
+// therefore the whole daily pipeline behind it — completes in bounded time.
+const AGENT_TIMEOUT_MS = 5 * 60 * 1000;
+
+// `timeoutMs` and `runAgentFn` are overridable only so a test can prove the
+// timeout actually fires without waiting out the real 5 minutes — every real
+// caller gets AGENT_TIMEOUT_MS and the real runAgent.
+function runAgentWithTimeout(id, input, opts, { timeoutMs = AGENT_TIMEOUT_MS, runAgentFn = runAgent } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.error(`[orchestrator] agent "${id}" exceeded ${timeoutMs}ms — treating as failed for this run, not waiting further.`);
+      resolve([id, { status: 'error', message: 'This signal took too long to compute and was skipped for this run.' }]);
+    }, timeoutMs);
+    runAgentFn(id, input, opts).then(
+      (out) => {
+        if (settled) return; // already timed out — runAgent's own persist call still lands normally when this finally resolves
+        settled = true;
+        clearTimeout(timer);
+        resolve([id, out]);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const { message } = safeMessage(`orchestrator.runOrchestration:${id}`, err, 'this signal is temporarily unavailable');
+        resolve([id, { status: 'error', message }]);
+      }
+    );
+  });
+}
+
+export async function runOrchestration({
+  siteId, start, end, agentIds, question, persistSubAgentRuns = false, personaPrompt = null,
+  // Test-only overrides — see runAgentWithTimeout's own comment.
+  agentTimeoutMs = AGENT_TIMEOUT_MS, runAgentFn = runAgent,
+} = {}) {
   const ids = agentIds?.length
     ? agentIds
     : (await listAgentMeta()).map((m) => m.id).filter((id) => id !== 'executive-report');
@@ -89,15 +143,9 @@ export async function runOrchestration({ siteId, start, end, agentIds, question,
   // for why this needs no special handling to stay out of persisted history.
   const pageCache = createPageCache();
 
-  const ran = await Promise.all(ids.map(async (id) => {
-    try {
-      const out = await runAgent(id, { siteId, start, end, pageCache }, { persist: persistSubAgentRuns });
-      return [id, out];
-    } catch (err) {
-      const { message } = safeMessage(`orchestrator.runOrchestration:${id}`, err, 'this signal is temporarily unavailable');
-      return [id, { status: 'error', message }];
-    }
-  }));
+  const ran = await Promise.all(ids.map((id) =>
+    runAgentWithTimeout(id, { siteId, start, end, pageCache }, { persist: persistSubAgentRuns }, { timeoutMs: agentTimeoutMs, runAgentFn })
+  ));
 
   const { findings, perAgent } = summarizeAgentRuns(ran);
   const narrative = await synthesizeFindings(findings, perAgent, question, personaPrompt);

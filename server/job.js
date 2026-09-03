@@ -13,7 +13,7 @@ import { runDailyDocReport } from './report/daily-doc.js';
 import { runExecutiveDocReport } from './report/executive-doc.js';
 import { runMonthlyDocReport } from './report/monthly-doc.js';
 import { isGoogleAuthError } from './integrations/google-oauth.js';
-import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds } from './util/dates.js';
+import { daysAgoInTz, dateRange, previousWeek, previousMonth, monthBounds, todayInTz } from './util/dates.js';
 import { runOrchestration } from './agents/orchestrator.js';
 import { runAgent } from './agents/runner.js';
 import { saveAgentRun, getLatestAgentRuns } from './store/agent-runs.js';
@@ -732,15 +732,37 @@ export async function runMonthlyIfDueForAllSites() {
 // time, re-run the daily job (and weekly-if-due) for that site only. Same
 // per-site idempotency as runDailyJob() itself — this just decides whether
 // it's worth calling. `tz` is the fallback when a site has no timezone set.
+//
+// "Done" requires BOTH the narrative AND today's agent analysis to exist —
+// not narrative alone. runDailyJobForSite writes the narrative early
+// (ingest -> narrative -> email -> doc), well BEFORE the daily agent
+// battery (runDailyAgentAnalysisForSite) that actually does detection and
+// feeds shipping. Real incident, 2026-09-03: a hung GitHub request (fixed
+// separately, see github/client.js) froze the 07:00 run partway through
+// that battery — narrative/email/doc had already succeeded, so this guard
+// saw a narrative and considered the whole day done, every hour, all day.
+// The auto-remediation catch-up guard (runAutoRemediationCatchupForAllSites
+// below) never got a reason to fire either, since nothing here ever
+// re-opened the day. Checked via the same 'executive-report' agent_runs row
+// runDailyAgentAnalysisForSite itself writes on completion (saveAgentRun) —
+// created today in the site's own timezone, not just present at all, so a
+// stale row from a PRIOR day's run (a still-connected site whose 07:00 pass
+// hung every day this week, say) can't false-positive as "done" either.
 export async function runHourlyCatchupForAllSites(tz) {
   const sites = await listConnectedSites();
   for (const site of sites) {
     try {
       const reportDate = daysAgoInTz(site.timezone || tz, GSC_LAG_DAYS);
-      const existing = await getNarrative(site.id, reportDate);
-      if (existing?.narrative) continue; // already done for this site
+      const [existing, [latestExecReport]] = await Promise.all([
+        getNarrative(site.id, reportDate),
+        getLatestAgentRuns(site.id, ['executive-report']),
+      ]);
+      const analysisDoneToday = latestExecReport != null
+        && todayInTz(site.timezone || tz, new Date(latestExecReport.created_at)) === todayInTz(site.timezone || tz);
+      if (existing?.narrative && analysisDoneToday) continue; // whole day's work genuinely done
 
-      console.log(`[job] hourly guard: daily report for site ${site.id} "${site.name}" (${reportDate}) missing — running catch-up`);
+      const reason = !existing?.narrative ? 'report missing' : 'detection incomplete';
+      console.log(`[job] hourly guard: daily report for site ${site.id} "${site.name}" (${reportDate}) ${reason} — running catch-up`);
       const { reportDate: done } = await runDailyJobForSite(site);
       console.log(`[job] hourly guard: catch-up done for site ${site.id} — report date ${done}`);
       await runWeeklyIfDue(site);
