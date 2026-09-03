@@ -1138,12 +1138,43 @@ export async function finalizeBatchPr(site, branchName, draftIds) {
 // failed items LESS visible, not more.
 export const SAFE_FIX_BATCH_LIMIT = 60;
 
-// "Execute Today's Safe Fixes" — picks up to `limit` open, safe-tier
-// recommendations not already claimed by another job, ships each one via
-// the chain above under ONE execution_jobs row. A failure on one item
-// doesn't stop the rest; the job's final branch/PR reflect whatever the
-// last successful item produced (they all share the same batch branch/PR).
-export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
+// Ceiling on ONE item inside runSafeFixesJob's loop below, mirroring
+// orchestrator.js's runAgentWithTimeout (added for the daily agent battery,
+// commit 57150ae) for the same reason: without it, one stuck item — a
+// design-agent wait that never returns, a GitHub retry loop that never gives
+// up — blocks every item behind it in the batch indefinitely, not just the
+// 15-minute DESIGN_AGENT_WAIT_MS a *well-behaved* first-of-type item costs.
+// Set comfortably above that 15-minute figure (plus LLM + git overhead) so
+// it only ever fires on a genuine hang, never on the wait it's specifically
+// there to let happen. A timed-out item is recorded as a normal shipping
+// failure (same shape as any other `result.ok === false`) so it doesn't
+// abort the rest of the batch — just like a real per-item error today.
+const SAFE_FIX_ITEM_TIMEOUT_MS = 20 * 60 * 1000;
+
+function shipRecommendationWithTimeout(siteId, rec, opts, { timeoutMs = SAFE_FIX_ITEM_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.error(`[action-center] shipRecommendation for #${rec.id} exceeded ${timeoutMs}ms — marking failed for this run, not waiting further.`);
+      resolve({ ok: false, error: 'This item took too long to ship and was skipped for this run — it remains open for the next run.' });
+    }, timeoutMs);
+    shipRecommendation(siteId, rec, opts).then(
+      (out) => { if (settled) return; settled = true; clearTimeout(timer); resolve(out); },
+      (err) => { if (settled) return; settled = true; clearTimeout(timer); resolve({ ok: false, error: err.message || 'Shipping failed' }); }
+    );
+  });
+}
+
+// Fast half of "Execute Today's Safe Fixes": selects candidates, applies the
+// drafted/pacing/convergence filters, and opens the execution_jobs row —
+// every step here is DB reads plus one insert, never an LLM call or a git
+// push, so it comfortably finishes inside an HTTP request. Split out from
+// the (slow) shipping loop in runSafeFixesJob below so the route can respond
+// with a real job id the instant selection is done, instead of the browser
+// blocking on the whole batch — see the route handler's own comment.
+export async function prepareSafeFixesJob(siteId, { userId, limit = SAFE_FIX_BATCH_LIMIT } = {}) {
   // Over-fetch, THEN trim, then take `limit`. Selecting exactly `limit` rows
   // first and pacing them afterwards means every held item silently consumes
   // a slot: a site whose top 60 contain 28 blog-outline candidates would ship
@@ -1202,7 +1233,7 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   const recs = converged.slice(0, limit);
 
   if (recs.length === 0) {
-    return { job: await finishExecutionJob(job.id, { status: 'completed' }), shipped: 0, failed: 0 };
+    return { job: await finishExecutionJob(job.id, { status: 'completed' }), recs: [], pendingDraftFilePaths, site };
   }
   const heldCount = Math.min(selected.length, limit) - recs.length;
   await appendJobLog(job.id, `Selected ${recs.length} safe recommendation(s) for execution${heldCount > 0 ? ` (${heldCount} held by pacing/convergence rules)` : ''}.`);
@@ -1216,6 +1247,18 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
   const branchName = batchBranchName(site);
   beginBatchPush(site, branchName);
 
+  return { job, recs, pendingDraftFilePaths, site, branchName };
+}
+
+// Slow half of "Execute Today's Safe Fixes": ships every candidate
+// prepareSafeFixesJob selected, under the job it already opened. Takes
+// `prepared` (that function's return value) rather than re-deriving
+// anything, so the route can call prepare → respond → run in the background
+// without the shipping loop re-running selection a second time.
+export async function runSafeFixesJob({ job, recs, pendingDraftFilePaths, site, branchName }) {
+  if (recs.length === 0) return { job, shipped: 0, failed: 0 };
+
+  const siteId = site.id;
   let lastSuccess = null;
   let shipped = 0;
   let failed = 0;
@@ -1245,7 +1288,7 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
       failed++;
       continue;
     }
-    const result = await shipRecommendation(siteId, rec, { userId, jobId: job.id, deferPr: true, batchBranch: branchName });
+    const result = await shipRecommendationWithTimeout(siteId, rec, { userId: job.requested_by, jobId: job.id, deferPr: true, batchBranch: branchName });
     if (result.ok) {
       shipped++;
       lastSuccess = result.draft;
@@ -1299,6 +1342,19 @@ export async function executeSafeFixes(siteId, { userId, limit = SAFE_FIX_BATCH_
     prUrl: finalization.prUrl ?? lastSuccess?.pr_url,
   });
   return { job: finishedJob, shipped, failed };
+}
+
+// "Execute Today's Safe Fixes" — picks up to `limit` open, safe-tier
+// recommendations not already claimed by another job, ships each one via
+// the chain above under ONE execution_jobs row. A failure on one item
+// doesn't stop the rest; the job's final branch/PR reflect whatever the
+// last successful item produced (they all share the same batch branch/PR).
+// Runs prepare then run back-to-back and awaits both, so any caller other
+// than the HTTP route (tests, a future MCP tool) still gets today's
+// synchronous behavior — only the route itself needs the split, to respond
+// with a job id before the shipping loop finishes (see its own comment).
+export async function executeSafeFixes(siteId, opts) {
+  return runSafeFixesJob(await prepareSafeFixesJob(siteId, opts));
 }
 
 // How many pending drafts one manual "Approve All Pending" click ships in a
@@ -1427,9 +1483,31 @@ export async function approveAndShipRecommendation(siteId, recommendationId, { u
   return result.draft;
 }
 
+// Responds as soon as selection is done (prepareSafeFixesJob — DB reads plus
+// one insert, never an LLM call or git push) rather than waiting out the
+// shipping loop, which is the part that can legitimately run for many
+// minutes across a 60-item batch. The client gets a real job id immediately
+// and polls GET .../execution-jobs/:id for progress/completion instead of
+// one long-lived fetch racing web/src/api.js's REQUEST_TIMEOUT_MS — the
+// design this route's own comments already described but never actually
+// implemented (it used to await executeSafeFixes() in full, so the browser
+// gave up mid-batch while the server kept going with no way for the client
+// to watch it work).
+// runSafeFixesJob is deliberately NOT awaited: its promise is left to run
+// after the response is sent, with its own rejection handled here (it
+// shouldn't reject — every per-item and finalize failure inside it is
+// already caught and recorded on the job — but an uncaught rejection here
+// would otherwise become an unhandled promise rejection).
 router.post('/action-center/execute-safe-fixes', async (req, res, next) => {
   try {
-    res.json(await executeSafeFixes(req.siteId, { userId: req.userId, limit: req.body?.limit }));
+    const prepared = await prepareSafeFixesJob(req.siteId, { userId: req.userId, limit: req.body?.limit });
+    if (prepared.recs.length === 0) {
+      return res.json({ job: prepared.job, shipped: 0, failed: 0 });
+    }
+    res.json({ job: prepared.job, shipped: 0, failed: 0, total: prepared.recs.length });
+    runSafeFixesJob(prepared).catch((err) => {
+      console.error(`[action-center] background safe-fixes job ${prepared.job.id} failed:`, err.message);
+    });
   } catch (e) {
     if (e.status) return respondWithStatusError(res, e, 'Could not execute safe fixes right now — try again shortly.');
     next(e);
