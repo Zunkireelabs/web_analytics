@@ -11,11 +11,27 @@ const SOURCE_LABEL = {
   internal_analysis: 'Gap analysis',
 };
 
-// product_relevance is set once, at approval time (classifyGapRelevance in
-// server/agents/lib/analyst-seo-mapping.js) — a gap still pending review
-// simply has no chip yet, not "unrelated".
+// product_relevance/search_intent are classified within a week of a gap
+// first appearing (analyst-seo-mapping.js's refreshPendingKeywordGapObservations,
+// run weekly) — a genuinely brand-new gap still simply has no chip yet, not
+// "unrelated".
 const RELEVANCE_CHIP = { direct: 'an-chip-emerald', supporting: 'an-chip-amber', unrelated: 'an-chip-slate' };
 const RELEVANCE_LABEL = { direct: 'Product match', supporting: 'Supports product', unrelated: 'Not product-related' };
+
+// Informational only — mirrors gapDraftEligibility's own commercial-intent +
+// direct-relevance rule (server/agents/lib/analyst-seo-mapping.js) just
+// closely enough to tell a reviewer what clicking "Send to Action Center"
+// is actually approving. The backend is the sole authority on what actually
+// ships: this never gates the button, and analyst-seo-mapping.js's
+// qualifyAndShipContentGaps refuses to auto-approve a "Landing page" gap
+// through the unattended biweekly cycle regardless of this label — a human
+// clicking here is the ask that generator was held back for.
+function predictedShape(gap) {
+  if (!gap.product_relevance) return null;
+  const commercial = gap.search_intent === 'commercial' || gap.search_intent === 'transactional';
+  if (commercial && gap.product_relevance === 'direct') return 'Would create: Landing page';
+  return 'Would create: Blog post';
+}
 
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
   const [opportunities, setOpportunities] = useState(null);
@@ -282,6 +298,9 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                             <span className={`an-chip ${RELEVANCE_CHIP[gap.product_relevance] || 'an-chip-slate'}`}>
                               {RELEVANCE_LABEL[gap.product_relevance] || gap.product_relevance}
                             </span>
+                          )}
+                          {predictedShape(gap) && (
+                            <span className="an-chip an-chip-slate">{predictedShape(gap)}</span>
                           )}
                         </div>
                         {gap.reason && (

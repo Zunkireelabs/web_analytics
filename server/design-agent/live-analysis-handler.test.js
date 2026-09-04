@@ -39,6 +39,44 @@ describe('createLiveDesignAnalysisHandler', () => {
     assert.equal(outcome.componentTemplates['content-wrapper'], undefined, 'only requested action types are projected');
   });
 
+  test('consistency-scan mode compares the fresh capture against the site\'s STORED profile, never re-derives a new one', async () => {
+    let extractCalled = false;
+    let getSiteByIdCalledWith = null;
+    const STORED_PROFILE = {
+      version: 2,
+      typography: { body: 'text-base', heading: { item: 'text-2xl font-bold' } },
+      responsive: { breakpoints: ['md:'] },
+      components: {},
+    };
+    const handler = createLiveDesignAnalysisHandler({
+      captureSiteFn: async () => ({
+        pages: [{ url: 'https://x.com/', pageType: 'homepage', title: 'X', blocks: [
+          { order: 0, tag: 'div', landmark: null, classes: 'flex', top: 0, height: 200, width: 1440, viewportWidth: 1440 },
+        ] }],
+      }),
+      extractProfileFn: async () => { extractCalled = true; return FAKE_PROFILE; },
+      getSiteByIdFn: async (siteId) => { getSiteByIdCalledWith = siteId; return { id: siteId, url_file_map: { siteRoot: { designProfile: STORED_PROFILE } } }; },
+    });
+
+    const outcome = await handler({ id: 5, site_id: 42, params: { mode: 'consistency-scan', pageUrl: 'https://x.com/' } });
+
+    assert.equal(getSiteByIdCalledWith, 42);
+    assert.equal(extractCalled, false, 'must never re-derive a new profile — this mode only compares against the stored one');
+    assert.equal(outcome.pagesScanned, 1);
+    assert.ok(Array.isArray(outcome.consistencyFindings));
+  });
+
+  test('consistency-scan mode refuses (input_validation) when the site has no stored profile yet', async () => {
+    const handler = createLiveDesignAnalysisHandler({
+      captureSiteFn: async () => FAKE_CAPTURE,
+      getSiteByIdFn: async () => ({ id: 42, url_file_map: {} }),
+    });
+    await assert.rejects(
+      () => handler({ id: 6, site_id: 42, params: { mode: 'consistency-scan', pageUrl: 'https://x.com/' } }),
+      (err) => { assert.equal(err.stage, 'input_validation'); return true; },
+    );
+  });
+
   test('no pageUrl throws an input_validation-staged error, never silently no-ops', async () => {
     const handler = createLiveDesignAnalysisHandler();
     await assert.rejects(

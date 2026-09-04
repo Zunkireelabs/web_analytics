@@ -48,6 +48,16 @@ export const GENERATOR_SHARE_CAP = 0.5;
 export function buildDailyQueue({
   candidates = [], remaining = 0, pageMetrics = new Map(), learnedMap = new Map(),
   declines = new Map(), baselineBudget = remaining, analystBudget = null,
+  // Set<findingId> | null — when provided, restricts the analyst lane to
+  // recommendations analyst-fusion.js actually fused and shipped as an 'act'
+  // verdict (analyst_evidence.finding_id), rather than every recommendation
+  // that merely sits on a page decline-detection flagged. Backward
+  // compatible: omitted (null) falls back to `item.declining`, the original
+  // behavior, so a site with no fusion evidence yet (or a caller in a test)
+  // is unaffected. This is what makes "only evidence-backed recommendations
+  // qualify" for the 20/day lane an enforced fact rather than a convention —
+  // see auto-remediation.js for how the set is built.
+  analystFindingIds = null,
 } = {}) {
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
@@ -99,7 +109,11 @@ export function buildDailyQueue({
   if (analystLaneSize > 0) {
     for (const item of pool) {
       if (analystPlaced >= analystLaneSize || selected.length >= remaining) break;
-      if (takenIds.has(item.rec.id) || !item.declining) continue;
+      if (takenIds.has(item.rec.id)) continue;
+      const laneEligible = analystFindingIds
+        ? (item.rec.finding_ids || []).some((fid) => analystFindingIds.has(fid))
+        : item.declining;
+      if (!laneEligible) continue;
       take(item, 'analyst');
       analystPlaced++;
     }

@@ -143,6 +143,31 @@ export async function createComponentTemplateJob(siteId, componentKeys, { reques
   return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
 }
 
+// Same sentinel pattern as DESIGN_PROFILE_JOB_KEY just above — stored in
+// params.componentKeys purely so getQueuedComponentTemplateJob's existing
+// "is one already pending" dedup check and getLatestDesignAgentJob's
+// "when did this last run" read both work for this job type with no new
+// query of their own.
+export const CONSISTENCY_SCAN_JOB_KEY = '__consistency-scan__';
+
+// Whole-site design-consistency scan (agents/lib/design-consistency.js):
+// re-captures a representative page of EVERY page type the live-analysis
+// pipeline already discovers (live-analysis/capture.js's discoverPages —
+// homepage, a service page, a location page, a blog article, the legal
+// pages, ...) and compares each one's real sections against the site's
+// already-stored design profile, flagging drift outside the SEOAI-marker
+// regions the daily content-repair pass already covers — see
+// consistency-check.js's own module comment for exactly what "drift" means
+// here. Needs a usable profile to compare AGAINST (queueConsistencyScanForSite
+// in job.js checks this before ever calling here), so this is always a
+// refresh of an existing understanding, never a first derivation.
+export async function createConsistencyScanJob(siteId, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, {
+    requestedBy,
+    params: { mode: 'consistency-scan', componentKeys: [CONSISTENCY_SCAN_JOB_KEY], pageUrl: pageUrl || null },
+  });
+}
+
 // Step 6B: atomically claims the oldest queued design_generate job for the
 // calling worker process. SELECT ... FOR UPDATE SKIP LOCKED inside its own
 // transaction is what makes this safe under N concurrent worker processes —

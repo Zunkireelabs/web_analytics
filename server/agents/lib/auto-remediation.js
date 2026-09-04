@@ -12,6 +12,7 @@ import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { buildDailyQueue } from './daily-queue.js';
 import { loadDeclines } from './decline-detection.js';
+import { listActionableAnalystEvidence } from '../../store/analyst-evidence.js';
 import { buildPageMetrics } from './growth-scoring.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
@@ -251,7 +252,27 @@ export async function autoRemediateSafeRecommendations(siteId, {
     console.warn(`[auto-remediation] site ${siteId}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
     return { declines: new Map(), siteWide: null };
   });
-  const decliningCandidates = candidates.filter((r) => declines.has(r.params?.page || r.page));
+
+  // EVIDENCE-BACKED LANE MEMBERSHIP. analyst-fusion.js's nightly pass
+  // (job.js's runAnalystFusionForAllSites) already corroborated signals
+  // across decline-detection, the insight pipeline and growth-opportunities,
+  // gated on real input freshness, and recorded every conclusion that
+  // cleared the bar in analyst_evidence with verdict='act'. That table —
+  // not "any recommendation whose page happens to be in declines" — is the
+  // authority for which of today's candidates are genuinely evidence-backed,
+  // which is what "never manufacture weak Analyst recommendations to fill
+  // the quota" requires in practice: a page can be in `declines` on ONE
+  // signal alone (decline-detection's own threshold), which fusion would
+  // correctly leave at 'monitor', not 'act', if nothing else corroborates it.
+  //
+  // Falls back to the raw declines Map when fusion has not run for this site
+  // yet (a brand-new site, or before the first nightly pass) — never a hard
+  // dependency, same posture as every other Analyst integration point.
+  const actEvidence = await listActionableAnalystEvidence(siteId).catch(() => []);
+  const analystFindingIds = actEvidence.length ? new Set(actEvidence.map((e) => e.finding_id)) : null;
+  const decliningCandidates = analystFindingIds
+    ? candidates.filter((r) => (r.finding_ids || []).some((fid) => analystFindingIds.has(fid)))
+    : candidates.filter((r) => declines.has(r.params?.page || r.page));
   if (siteWide?.siteIsDown) {
     // Reported, never acted on by mass-shipping. detectDeclines already
     // measures every page RELATIVE to this site-wide move, so a uniform fall
@@ -263,8 +284,18 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // Lane sizing. `site.auto_remediation_daily_limit` is honoured as an
   // explicit per-site override of the Analytics target when set, so an
   // operator can still hold one tenant lower without touching this logic.
-  const analyticsTarget = site.auto_remediation_daily_limit ?? ANALYTICS_TARGET;
-  const analyticsMax = Math.max(analyticsTarget, ANALYTICS_MAX);
+  //
+  // The override caps the SURGE ceiling too, not just the target — an
+  // operator setting daily_limit=3 (or 0, to pause a tenant entirely) means
+  // "never more than this for this site," and Math.max(analyticsTarget,
+  // ANALYTICS_MAX) used to silently ignore that: any override below 100
+  // still let the day surge to the GLOBAL 100-item max whenever enough
+  // candidates existed, which defeated the one thing an explicit override
+  // exists to do. Only the unset (default) case gets the global surge
+  // ceiling; an explicit override IS the ceiling.
+  const dailyLimitOverride = site.auto_remediation_daily_limit;
+  const analyticsTarget = dailyLimitOverride ?? ANALYTICS_TARGET;
+  const analyticsMax = dailyLimitOverride != null ? dailyLimitOverride : ANALYTICS_MAX;
 
   // The analyst lane never exceeds the evidence available for it. Sized from
   // real candidates, so it is empty on a day with nothing forward-looking to
@@ -296,7 +327,15 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
-    const reason = spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached';
+    // A dailyLimit of 0 from zero genuinely eligible candidates is not the
+    // same fact as a real budget cap being reached — nothing was ever
+    // going to be attempted today, so there is nothing to report as
+    // "exhausted" or "ceiling-reached". Both of those imply real, present
+    // work that the budget stopped; stoppedReason stays null (the same
+    // "skipped, never attempted-and-failed" contract every other
+    // ineligibility path in this function already honors) so a caller can't
+    // mistake an empty queue for a stopped run.
+    const reason = candidates.length === 0 ? null : (spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached');
     console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
@@ -330,7 +369,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       return new Map();
     });
 
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);

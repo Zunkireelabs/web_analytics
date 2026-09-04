@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -73,6 +73,18 @@ export function startCron() {
         console.log(`[cron] content repair run finished — ${filesRepaired} file(s) repaired, ${prsOpened} PR(s) opened across ${results.length} site(s)`);
       } catch (err) {
         console.error('[cron] content repair run error:', err.message);
+      }
+
+      // Same slot: does any connected site have zero FAQ coverage anywhere?
+      // See job.js's runFaqOnboardingCoverageForAllSites / agents/lib/
+      // faq-onboarding-check.js. Cheap on every day after the first FAQ
+      // ships for a site — this only does real work (a live fetch, maybe a
+      // recommendation) for a site that still has none.
+      try {
+        const { sites, created } = await runFaqOnboardingCoverageForAllSites();
+        if (created) console.log(`[cron] FAQ onboarding check finished — ${created} site(s) of ${sites} had no FAQ coverage and got a homepage FAQ recommendation.`);
+      } catch (err) {
+        console.error('[cron] FAQ onboarding check error:', err.message);
       }
 
       // Daily blocked-recommendation refresh, right after template-capability
@@ -353,8 +365,17 @@ export function startCron() {
     } catch (err) {
       console.error('[cron] fix impact measurement error:', err.message);
     }
+    // Same hour, right after: carries any measurement fix-impact.js just
+    // wrote back onto the analyst_evidence row that produced it (see
+    // agents/lib/analyst-outcome.js). Cheap and almost always a no-op, same
+    // reasoning as the sweep above.
+    try {
+      await runAnalystOutcomeSweepForAllSites();
+    } catch (err) {
+      console.error('[cron] analyst outcome sweep error:', err.message);
+    }
   }, { timezone: tz });
-  console.log('[cron] fix impact measurement scheduled (fires at :40 each hour)');
+  console.log('[cron] fix impact measurement + analyst outcome sweep scheduled (fires at :40 each hour)');
 
   // PR-status polling fallback — independent safety net alongside the
   // GitHub webhook (routes/webhooks.js) for sites where the webhook was
@@ -410,13 +431,24 @@ export function startCron() {
     console.error(`[cron] invalid ANALYST_SYNC_CRON_SCHEDULE "${analystSync}" — analyst sync NOT scheduled.`);
   } else {
     cron.schedule(analystSync, async () => {
+      // The fusion pass runs first, same slot: it reads the exact same
+      // 03:00 UTC nightly pipeline output as the sync below, combines it
+      // with decline-detection's own signals, and ships only corroborated,
+      // freshness-gated conclusions. See job.js's runAnalystFusionForAllSites
+      // doc comment for why the older sync below still runs after it rather
+      // than being replaced.
+      try {
+        await runAnalystFusionForAllSites();
+      } catch (err) {
+        console.error('[cron] analyst fusion error:', err.message);
+      }
       try {
         await runAnalystSyncForAllSites();
       } catch (err) {
         console.error('[cron] analyst sync error:', err.message);
       }
     }, { timezone: 'UTC' });
-    console.log(`[cron] analyst -> Action Center sync scheduled "${analystSync}" (UTC)`);
+    console.log(`[cron] analyst fusion + Action Center sync scheduled "${analystSync}" (UTC)`);
   }
 
   // Growth Opportunities -> Action Center sync, weekly. Growth Opportunities
@@ -511,6 +543,29 @@ export function startCron() {
       }
     }, { timezone: tz });
     console.log(`[cron] weekly design-context rescan scheduled "${designProfileRescan}" (${tz})`);
+  }
+
+  // Weekly whole-site design-consistency scan — one day AFTER the profile
+  // rescan above (Tuesday, not Monday), so a site whose profile just
+  // refreshed is compared against ITS OWN fresh understanding, not last
+  // week's. This is the check that covers a page/section OUTSIDE the daily
+  // content-repair pass's SEOAI-marker scope — a hand-written table, a
+  // legacy section, a legal page's own body content. Genuinely expensive
+  // (a real headless-browser capture per page type), hence weekly, hence
+  // its own cron entry rather than folded into anything daily.
+  const consistencyScan = process.env.DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE || '30 5 * * 2'; // 05:30 every Tuesday
+  if (!cron.validate(consistencyScan)) {
+    console.error(`[cron] invalid DESIGN_AGENT_CONSISTENCY_SCAN_CRON_SCHEDULE "${consistencyScan}" — weekly consistency scan NOT scheduled.`);
+  } else {
+    cron.schedule(consistencyScan, async () => {
+      try {
+        const { queued } = await queueConsistencyScanForAllSites();
+        console.log(`[cron] weekly design-consistency scan finished — ${queued} site(s) queued`);
+      } catch (err) {
+        console.error('[cron] weekly design-consistency scan error:', err.message);
+      }
+    }, { timezone: tz });
+    console.log(`[cron] weekly design-consistency scan scheduled "${consistencyScan}" (${tz})`);
   }
 
   // Weekly content-gap recommendation refresh — the content-gap counterpart

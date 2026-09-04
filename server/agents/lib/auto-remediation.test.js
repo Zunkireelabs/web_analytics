@@ -126,6 +126,11 @@ mock.module(resolve('./generator-learning.js'), {
   namedExports: {
     getLearnedConfidenceMap: async () => learnedMap ?? new Map(),
     recordOutcome: async (siteId, generatorId, outcome) => { recordedOutcomes.push({ generatorId, outcome }); },
+    // Feeds ship-pacing.js's applyRefusalCap — mocked to "nothing has ever
+    // been refused" (an empty Map), same no-op-collaborator stance as the
+    // other two exports above. generator-learning.test.js covers the real
+    // query/classification logic against a real database.
+    countRefusalsByRecommendation: async () => new Map(),
   },
 });
 // The real implementation (implementers/lib/onboarding-readiness.js) hits a

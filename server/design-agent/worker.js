@@ -5,6 +5,7 @@ import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
 import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
+import { persistConsistencyFindings } from '../agents/lib/design-consistency.js';
 import { isDesignAgentQuietHours } from '../lib/design-agent-window.js';
 
 const DEFAULT_POLL_INTERVAL_MS = 5000;
@@ -99,6 +100,7 @@ export async function processOneJob({
   getSiteByIdFn = getSiteById,
   persistTemplates = persistDerivedComponentTemplates,
   persistProfile = persistDesignProfile,
+  persistConsistency = persistConsistencyFindings,
   maxAttempts = 3,
   sleep = defaultSleep,
   isQuietHours = isDesignAgentQuietHours,
@@ -152,6 +154,16 @@ export async function processOneJob({
         throw new Error(`Design Agent returned no saveable component template — ${why}`);
       }
       await appendJobLog(job.id, `Verified and saved component template(s): ${savedKeys.join(', ')}`);
+    }
+
+    // consistencyFindings can legitimately be an empty array (a fully
+    // consistent site) — that is success, not a reason to skip persisting;
+    // persistConsistency itself is a no-op over an empty list, so this is
+    // simply always called when the mode ran, same "always call, let the
+    // persister decide" shape as the two branches above.
+    if (job.params?.mode === 'consistency-scan' && outcome?.consistencyFindings) {
+      const result = await persistConsistency(job.site_id, outcome.consistencyFindings);
+      await appendJobLog(job.id, `Consistency scan: ${outcome.pagesScanned} page(s) scanned, ${outcome.consistencyFindings.length} finding(s) across ${result.pagesWithFindings} page(s), ${result.created} recommendation(s) created (${result.skipped} already open).`);
     }
 
     await appendJobLog(job.id, 'Job completed');
