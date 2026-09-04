@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPacing, applyConvergenceCap, MAX_FAILED_ATTEMPTS } from './ship-pacing.js';
+import { applyPacing, applyConvergenceCap, applyRefusalCap, MAX_FAILED_ATTEMPTS, MAX_REFUSALS } from './ship-pacing.js';
 
 // Both collaborators are injectable, so this suite needs neither a database
 // nor module mocks — the rules under test are pure candidate filtering.
@@ -127,5 +127,35 @@ describe('applyConvergenceCap', () => {
 
     assert.deepEqual(converged, []);
     assert.equal(consulted, false);
+  });
+});
+
+// The refusal cap. Refusals are excluded from the learned score AND
+// invisible to the convergence cap (which counts abandoned drafts, and a
+// refusal never creates one), so before this a refusing item had no brake at
+// all — site 1 had one direct-answer recommendation refused 22 times and
+// still being re-drafted every hour.
+describe('applyRefusalCap', () => {
+  test('holds a recommendation once it has been refused MAX_REFUSALS times', async () => {
+    const candidates = [rec(1), rec(2)];
+    const refusalCounts = new Map([[1, MAX_REFUSALS]]);
+    const { kept, notes } = await applyRefusalCap(site, candidates, { refusalCounts });
+
+    assert.deepEqual(kept.map((r) => r.id), [2]);
+    assert.match(notes[0], /held after 5 honest refusal/);
+  });
+
+  test('keeps one still under the cap — a refusal can start succeeding when the page changes', async () => {
+    const refusalCounts = new Map([[1, MAX_REFUSALS - 1]]);
+    const { kept, notes } = await applyRefusalCap(site, [rec(1)], { refusalCounts });
+
+    assert.deepEqual(kept.map((r) => r.id), [1]);
+    assert.equal(notes.length, 0, 'nothing was held, so nothing is reported');
+  });
+
+  test('is a no-op when the site has no refusal history at all', async () => {
+    const { kept, notes } = await applyRefusalCap(site, [rec(1)], { refusalCounts: new Map() });
+    assert.deepEqual(kept.map((r) => r.id), [1]);
+    assert.equal(notes.length, 0);
   });
 });

@@ -8,7 +8,7 @@ import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.j
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
-import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
+import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { buildDailyQueue } from './daily-queue.js';
 import { buildPageMetrics } from './growth-scoring.js';
@@ -90,6 +90,21 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 // caller (routes/action-center.js's executeSafeFixes, a human-triggered
 // batch, is never subject to it — same reasoning as pacing above, a human
 // asking for a batch isn't the runaway this ceiling exists to catch).
+// The day's baseline budget when a site has no explicit
+// sites.auto_remediation_daily_limit, and the deeper budget a site surges to
+// while its shippable backlog stays above SURGE_BACKLOG_THRESHOLD.
+//
+// Env-overridable because the right numbers depend on the repo's GitHub API
+// headroom, which is per-installation: every shipped item costs several API
+// calls, and rate limiting is already the largest single abandon cause in the
+// live table. Raise SURGE_DAILY_LIMIT only alongside that headroom.
+const BASELINE_DAILY_LIMIT = Number(process.env.AUTO_REMEDIATION_BASELINE_DAILY_LIMIT) || 60;
+const SURGE_DAILY_LIMIT = Number(process.env.AUTO_REMEDIATION_SURGE_DAILY_LIMIT) || 80;
+// How much shippable work makes a day a "deep backlog" day. Set at twice the
+// baseline: below this, a baseline day already clears the queue inside two
+// days and the extra slots would go unused.
+const SURGE_BACKLOG_THRESHOLD = Number(process.env.AUTO_REMEDIATION_SURGE_THRESHOLD) || 120;
+
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
   onboardingAnalysisPending = isOnboardingAnalysisPending,
@@ -182,15 +197,40 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // item-specific reason stops being auto-drafted. It stays open and fully
   // visible — what stops is spending a model call per run to reach the same
   // error. See ship-pacing.js for the measured churn this ends.
-  const { converged: candidates, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
   for (const note of convergenceNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+
+  // Refusal cap: the convergence cap above counts abandoned DRAFTS, and a
+  // refusal never creates one, so a permanently-refusing item slipped past
+  // both it and the learned score. See applyRefusalCap for the live case (one
+  // item refused 22 times, re-attempted hourly).
+  const { kept: candidates, notes: refusalNotes } = await applyRefusalCap(site, converged);
+  for (const note of refusalNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
   // budget left" rather than a negative slice that would silently take
   // everything. Also capped by the platform-wide ceiling (globalRemaining),
   // when the caller supplied one — whichever is tighter wins.
-  const dailyLimit = site.auto_remediation_daily_limit ?? 60;
+  // ADAPTIVE BUDGET. The site's configured limit is the BASELINE, not the
+  // ceiling: when the eligible backlog is deep enough that a baseline day
+  // would leave most of it untouched, the day surges to SURGE_DAILY_LIMIT.
+  //
+  // The point is to drain a backlog at the rate it actually accumulates
+  // without paying for that capacity on quiet days — a flat 80 would spend
+  // GitHub API budget and model calls chasing work that isn't there, and a
+  // flat 60 can never catch up on a site carrying 500+ open items.
+  //
+  // Measured against `candidates` (post-pacing, post-convergence, post-refusal
+  // — i.e. genuinely shippable work), never against raw open rows, so a
+  // backlog made entirely of held or demoted items can't trigger a surge that
+  // would then find nothing to do with the extra slots.
+  const baselineDailyLimit = site.auto_remediation_daily_limit ?? BASELINE_DAILY_LIMIT;
+  const surging = candidates.length >= SURGE_BACKLOG_THRESHOLD;
+  const dailyLimit = surging ? Math.max(baselineDailyLimit, SURGE_DAILY_LIMIT) : baselineDailyLimit;
+  if (surging && dailyLimit > baselineDailyLimit) {
+    console.log(`[auto-remediation] site ${siteId}: ${candidates.length} shippable candidates (>= ${SURGE_BACKLOG_THRESHOLD}) — surging today's budget from ${baselineDailyLimit} to ${dailyLimit}.`);
+  }
   const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
     const reason = spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached';

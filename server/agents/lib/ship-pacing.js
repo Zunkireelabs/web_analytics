@@ -1,4 +1,5 @@
 import { hasRecentDraftOfType, countFailedAttemptsByFinding } from '../../store/drafts.js';
+import { countRefusalsByRecommendation } from './generator-learning.js';
 
 // Candidate thinning shared by BOTH ship paths — auto-remediation.js's
 // unattended cron run and routes/action-center.js's executeSafeFixes ("Execute
@@ -106,6 +107,50 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
  * among them decides, since one permanently-unfixable component is enough to
  * make the whole recommendation fail the same way every time.
  */
+// How many times one recommendation may be REFUSED before it stops being
+// auto-drafted. The refusal counterpart to MAX_FAILED_ATTEMPTS, and
+// deliberately looser: a refusal is the no-fabrication policy working
+// correctly, and unlike a failure it can legitimately start succeeding when
+// the page's own content changes, so it earns more attempts before being set
+// aside.
+//
+// Something had to bound it, though. A refusal is excluded from the learned
+// score (generator-learning.js) AND invisible to the convergence cap (which
+// counts abandoned drafts, and a refusal never creates one), so a refusing
+// item previously had no brake whatsoever. The measured result on site 1: one
+// direct-answer recommendation refused 22 times and was still being
+// re-attempted every hour — and once the demotion bug had collapsed the
+// eligible pool to a single candidate, that one item was the ENTIRE content
+// of five consecutive runs.
+//
+// Like the convergence cap, this never closes or hides anything: the
+// recommendation stays open and a human can still generate it by hand. What
+// stops is spending a model call per run to reach the same honest refusal.
+export const MAX_REFUSALS = 5;
+
+/**
+ * Drops candidates that have already been refused MAX_REFUSALS times.
+ * Same shape as applyPacing/applyConvergenceCap so a caller applies all three
+ * the same way.
+ */
+export async function applyRefusalCap(site, candidates, { refusalCounts = null } = {}) {
+  if (candidates.length === 0) return { kept: candidates, notes: [] };
+  const counts = refusalCounts ?? await countRefusalsByRecommendation(site.id);
+  if (counts.size === 0) return { kept: candidates, notes: [] };
+
+  const notes = [];
+  const kept = [];
+  for (const rec of candidates) {
+    const refusals = counts.get(rec.id) || 0;
+    if (refusals >= MAX_REFUSALS) {
+      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${refusals} honest refusal(s) — still open for a human, but no longer auto-drafted.`);
+      continue;
+    }
+    kept.push(rec);
+  }
+  return { kept, notes };
+}
+
 export async function applyConvergenceCap(site, candidates, { attemptCounts = null } = {}) {
   if (candidates.length === 0) return { converged: candidates, notes: [] };
   const counts = attemptCounts ?? await countFailedAttemptsByFinding(site.id);
