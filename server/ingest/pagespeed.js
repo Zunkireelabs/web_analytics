@@ -66,3 +66,62 @@ export async function fetchCoreWebVitals(pageUrl, { strategy = 'mobile' } = {}) 
   const category = perfScore == null ? null : perfScore >= 0.9 ? 'GOOD' : perfScore >= 0.5 ? 'NEEDS_IMPROVEMENT' : 'POOR';
   return { ok: true, dataSource: 'lab', lcp, inp, cls, category };
 }
+
+// Real tap-target-sizing and legible-font-size checks — the two Lighthouse
+// "seo" category audits agents/mobile-usability.js's own dataSources entry
+// has always documented as real but "not-connected", because
+// fetchCoreWebVitals above only ever requests category=performance. Same
+// endpoint, same key, a second request with category=seo — PSI does not let
+// one call return multiple categories' full audit detail together.
+//
+// Both audits need a rendering engine to compute real on-screen geometry
+// (which this app has none of otherwise — see accessibility.js's own gap
+// doc), so unlike fetchCoreWebVitals there is no lab/field distinction and
+// no fallback: PSI's Lighthouse run IS the only source, always labeled
+// 'lab' (a single simulated run), never invented when it fails.
+export async function fetchMobileUsabilityAudit(pageUrl, { strategy = 'mobile' } = {}) {
+  const key = process.env.PAGESPEED_API_KEY;
+  if (!key) throw new Error('PAGESPEED_API_KEY is not set — mobile usability audits cannot be fetched.');
+
+  const url = `${ENDPOINT}?url=${encodeURIComponent(pageUrl)}&key=${key}&strategy=${strategy}&category=seo`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let body;
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return { ok: false, error: `PageSpeed Insights request failed: HTTP ${res.status}` };
+    body = await res.json();
+  } catch (err) {
+    return { ok: false, error: err.name === 'AbortError' ? 'timeout' : String(err.message || err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const audits = body?.lighthouseResult?.audits;
+  if (!audits) return { ok: false, error: 'no lab data returned' };
+
+  // Lighthouse scores every audit 0..1 (1 = fully passing) or null when the
+  // audit is genuinely not applicable to this page (e.g. no tappable
+  // elements at all) — null is passed through as null, never coerced to a
+  // score, so a page with nothing to check reads as "not applicable", not
+  // as a passing or failing result it never earned.
+  const tapTargets = audits['tap-targets'];
+  const fontSize = audits['font-size'];
+  return {
+    ok: true,
+    dataSource: 'lab',
+    tapTargets: {
+      score: tapTargets?.score ?? null,
+      // items: the real failing elements Lighthouse found (selector + size),
+      // capped defensively — PSI can return dozens for a dense mobile nav.
+      failingElements: (tapTargets?.details?.items || []).slice(0, 10),
+    },
+    fontSize: {
+      score: fontSize?.score ?? null,
+      // Lighthouse's own human-readable summary, e.g. "97% legible text" —
+      // the real percentage of the page's text PSI measured as legible,
+      // straight from its audit output, never recomputed here.
+      summary: typeof fontSize?.displayValue === 'string' ? fontSize.displayValue : null,
+    },
+  };
+}

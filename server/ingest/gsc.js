@@ -44,7 +44,9 @@ export function pageFilterGroups(domains) {
 // queryPages caps at 250 rows, so a long-tail query spread across many
 // low-volume pages can legitimately be undercounted there without any
 // leak — hence a ratio threshold, not exact equality, and a minimum
-// impression floor so single-digit noise never fires this.
+// impression floor so single-digit noise never fires this. (The queryPages
+// cap is now GSC_QUERY_PAGE_ROW_LIMIT, raised from 250, which makes that
+// benign gap rarer but not impossible — the tolerance still earns its keep.)
 export function detectQueryDimensionLeakage(queries, queryPages, { minImpressions = 20, toleranceRatio = 1.5 } = {}) {
   const filteredImpressionsByQuery = new Map();
   for (const r of queryPages) {
@@ -62,6 +64,17 @@ export function detectQueryDimensionLeakage(queries, queryPages, { minImpression
   }
   return suspicious;
 }
+
+// Env-overridable so a site with an unusually broad footprint can be widened
+// without a deploy. Both are well inside GSC's 25,000-row per-call ceiling.
+const GSC_TOP_N_ROW_LIMIT = Number(process.env.GSC_TOP_N_ROW_LIMIT) || 1000;
+// The query+page combined request — the single most important one for the
+// Analyst, since gsc_query_page is what page/query trend, decline and
+// forecast work all read. At 250 this file's own leak-detector comment
+// already acknowledged undercounting a long-tail query spread across many
+// low-volume pages; that undercount was silently shaping every downstream
+// page/query signal.
+const GSC_QUERY_PAGE_ROW_LIMIT = Number(process.env.GSC_QUERY_PAGE_ROW_LIMIT) || 5000;
 
 // Fetch GSC Search Analytics for a single date, using `site`'s own Google
 // credentials if it has a dedicated file (secrets/clients/<site.id>/), else
@@ -104,15 +117,31 @@ export async function fetchGscForDate(site, date) {
       position: r.position ?? 0,
     }));
 
-  const queries = mapRows(await queryApi(['query'], 25));
-  const pages = mapRows(await queryApi(['page'], 25));
+  // Query/page depth is what the Analyst's long-tail visibility is made of.
+  //
+  // These were 25 — a DISPLAY cap inherited from the dashboard's top-N cards,
+  // never an API or cost constraint. Verified before raising it:
+  //   - Cost is unchanged. rowLimit does not add requests; GSC serves up to
+  //     25,000 rows in this same single call, so the day still costs 6 calls.
+  //   - The dashboard is unaffected. Every read applies its own LIMIT
+  //     (store/read.js getBreakdown 10, getRangeTopQueries 5), so storing
+  //     more rows changes storage only, never a rendered list.
+  //   - Writes stay idempotent. gsc_breakdown is delete-then-reinsert per
+  //     (site, date, dim_type), so a shrinking result set leaves no stale rows.
+  //   - Storage is modest: ~1k rows/day/site worst case, and this site
+  //     currently returns ~90 query+page rows a day in total.
+  // Deliberately NOT unbounded: a cap still bounds a pathological day, and
+  // device/country below keep their small caps because they ARE closed, short
+  // vocabularies where 25 already covers the real set.
+  const queries = mapRows(await queryApi(['query'], GSC_TOP_N_ROW_LIMIT));
+  const pages = mapRows(await queryApi(['page'], GSC_TOP_N_ROW_LIMIT));
   const devices = mapRows(await queryApi(['device'], 10));   // DESKTOP / MOBILE / TABLET
   const countries = mapRows(await queryApi(['country'], 25)); // ISO-3 country codes
 
   // query+page combined rows, so a single-click query can be traced to its exact
   // landing page (the single-dimension 'queries'/'pages' rows above share no key).
   // Also includes device + country for circumstantial context on that click.
-  const queryPageRows = await queryApi(['query', 'page', 'device', 'country'], 250);
+  const queryPageRows = await queryApi(['query', 'page', 'device', 'country'], GSC_QUERY_PAGE_ROW_LIMIT);
   const domains = ownDomains(site);
   // Real, observed gap: the API's own page-dimension regex filter above
   // (dimensionFilterGroups) does not reliably exclude a foreign subdomain

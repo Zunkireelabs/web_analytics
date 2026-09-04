@@ -387,3 +387,24 @@ export async function saveLayoutSuggestion(siteId, layoutJson, reason) {
   );
   return rows[0];
 }
+
+// Direct-DB read of insights for page-dimension fusion (analyst-fusion.js) —
+// deliberately a straight SQL read of the shared `insights` table rather
+// than a round trip through fetchAnalystInsights' HTTP call to the Python
+// service, which analyst-seo-mapping.js's nightly sync already uses for its
+// own, unrelated purpose. Both are valid; this one exists because the
+// fusion engine needs to group insights BY PAGE across insight_type values
+// (anomaly + forecast_risk + trend_shift together) to compute corroboration,
+// which is cheaper and simpler as one grouped query than three HTTP-shaped
+// filters over the same payload.
+export async function getRecentPageInsights(siteId, days = 21) {
+  const { rows } = await query(
+    `SELECT id, metric_key, dimension_value AS page, insight_type, severity, evidence, generated_at, period_start
+       FROM insights
+      WHERE client_id = $1 AND dimension_type = 'page'
+        AND generated_at >= now() - ($2 * interval '1 day')
+      ORDER BY generated_at DESC`,
+    [siteId, days]
+  );
+  return rows;
+}

@@ -24,11 +24,29 @@ let githubCalls;
 let existingPrsForBranch;
 
 mock.module(resolve('../store/read.js'), { namedExports: { getSiteById: async () => currentSite } });
+
+// Mocked at the LOWEST level (github/client.js) only. github-ops.js
+// (baseBranch/getOrInitBatchBranch/openPrForBranch) runs FOR REAL against
+// these mocks — this is deliberate: it's what proves the repair now lands
+// on the exact same shared batch branch/PR the Action Center itself uses,
+// rather than asserting against a second, hand-rolled mock of that
+// decision. Every real export is spread in first so github-ops.js's own
+// imports (mergeBranchFromBase, the file-overlay functions — unused by this
+// script but still imported by github-ops.js) resolve to something real.
+const realClient = await import(resolve('../github/client.js'));
 mock.module(resolve('../github/client.js'), {
   namedExports: {
+    ...realClient,
     getRepoTree: async () => ({ files: repoFiles, truncated: false }),
     getFileContent: async (_s, p) => (fileContents[p] !== undefined ? { content: fileContents[p], sha: 's' } : null),
-    getBranchSha: async () => 'base-sha',
+    // 'main' (the base branch) always exists; anything else (today's batch
+    // branch, which getOrInitBatchBranch probes for) does not yet — same
+    // "always a fresh branch" starting state the tests below already
+    // assumed before this file existed on a shared branch.
+    getBranchSha: async (_s, ref) => {
+      if (ref !== 'main') throw new Error('404 Not Found');
+      return 'base-sha';
+    },
     createBranch: async (...a) => { githubCalls.createBranch.push(a); },
     commitFilesAtomic: async (...a) => { githubCalls.commitFilesAtomic.push(a); },
     openPullRequest: async (...a) => { githubCalls.openPullRequest.push(a); return { url: 'https://github.com/acme/x/pull/1', number: 1 }; },
@@ -38,6 +56,7 @@ mock.module(resolve('../github/client.js'), {
 });
 
 const { repairSiteContentLive } = await import(resolve('./repair-site-content-live.js'));
+const { batchBranchName } = await import(resolve('../implementers/lib/github-ops.js'));
 
 beforeEach(() => {
   currentSite = SITE;
@@ -67,6 +86,14 @@ describe('repairSiteContentLive', () => {
     assert.match(files[0].content, /expandAll/, 'restyled through the site\'s real accordion, not left as qa-content');
     assert.ok(report.prCreated.url);
     assert.deepEqual(report.changedFiles, ['src/pages/team.njk']);
+
+    // The whole point of routing this through github-ops.js: it lands on
+    // the SAME branch name the Action Center's own daily batch uses for
+    // this site, not a separate content-repair-only branch — so whichever
+    // of the two runs first that day, the other's commits join the same
+    // branch and the same PR.
+    const [, branchArg] = githubCalls.createBranch[0];
+    assert.equal(branchArg, batchBranchName(SITE));
   });
 
   test('the blog-index self-inclusion bug is fixed as part of the same run', async () => {

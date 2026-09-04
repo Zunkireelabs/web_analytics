@@ -30,6 +30,9 @@ import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
 import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter, refreshPendingKeywordGapObservations, qualifyAndShipContentGaps } from './agents/lib/analyst-seo-mapping.js';
+import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
+import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
+import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
@@ -41,7 +44,7 @@ import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
-import { createDesignProfileJob, getQueuedComponentTemplateJob, DESIGN_PROFILE_JOB_KEY } from './store/execution-jobs.js';
+import { createDesignProfileJob, getQueuedComponentTemplateJob, getLatestDesignAgentJob, DESIGN_PROFILE_JOB_KEY, createConsistencyScanJob, CONSISTENCY_SCAN_JOB_KEY } from './store/execution-jobs.js';
 
 // Daily-cadence agents only. competitor-intelligence, authority, and
 // ai-recommendation are all throttled (see runAgentIfDue below — real
@@ -789,6 +792,87 @@ export async function runHourlyCatchupForAllSites(tz) {
   }
 }
 
+// THE FUSION PASS — runs BEFORE runAnalystSyncForAllSites below, on the same
+// per-site, best-effort, never-throws posture. Combines decline-detection's
+// page-level signals with the nightly insight pipeline's anomaly/forecast_risk/
+// trend_shift rows and growth-opportunities.js's real-threshold opportunities
+// into corroborated conclusions (analyst-fusion.js), gates them on real input
+// freshness (analyst-freshness.js — the twelve-day MCP outage's fix), and
+// ships only conclusions that clear the evidence bar as real recommendations
+// through the SAME insertRecommendation/gates path syncAnalystInsightsToActionCenter
+// already uses.
+//
+// Deliberately runs ahead of, not instead of, the two older sync functions:
+// this covers page-dimension decline/growth signals with real corroboration;
+// they still cover everything else (non-page insights, content-gap's own
+// richer approval path). Where both would touch the same page+generator,
+// findOpenRecommendation's existing-row check makes the second call a safe
+// no-op — nothing here needed to change that idempotency contract.
+export async function runAnalystFusionForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, created: 0, monitored: 0, stale: 0 };
+  for (const site of sites) {
+    try {
+      const result = await runAnalystFusion(site.id, { site });
+      totals.sites++;
+      totals.created += result.created;
+      totals.monitored += result.monitored;
+      if (result.freshness?.verdict === 'stale') totals.stale++;
+    } catch (err) {
+      console.error(`[job] analyst fusion failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  if (totals.created || totals.stale) {
+    console.log(`[job] analyst fusion complete — ${totals.created} recommendation(s) created, ${totals.monitored} monitored, ${totals.stale} site(s) with stale inputs, across ${totals.sites} site(s).`);
+  }
+  return totals;
+}
+
+// The outcome half of the same loop: for recommendations the fusion pass
+// above created, checks whether fix-impact.js's own due-driven sweep
+// (runDueImpactMeasurements) has produced a real before/after measurement
+// yet, and if so records it back onto the analyst_evidence row — see
+// agents/lib/analyst-outcome.js for why this never re-measures anything
+// itself.
+export async function runAnalystOutcomeSweepForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, checked: 0, recorded: 0 };
+  for (const site of sites) {
+    try {
+      const { checked, recorded } = await sweepAnalystOutcomes(site.id);
+      totals.sites++; totals.checked += checked; totals.recorded += recorded;
+    } catch (err) {
+      console.error(`[job] analyst outcome sweep failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
+}
+
+// New-client FAQ coverage — the proactive half described in
+// faq-onboarding-check.js's own doc comment: does this site have ANY FAQ
+// content anywhere, and if genuinely not, generate one for the homepage
+// instead of waiting for a reactive finding to notice. Cheap once a site
+// has coverage (two DB checks, no fetch, no LLM call) — the one live fetch
+// and (on a real gap) one recommendation insert only happen for a site that
+// still has none, which stops happening forever once the first FAQ ships.
+export async function runFaqOnboardingCoverageForAllSites() {
+  const sites = await listConnectedSites();
+  const totals = { sites: 0, created: 0 };
+  for (const site of sites) {
+    try {
+      const result = await checkFaqOnboardingCoverage(site.id, { site });
+      totals.sites++;
+      if (result.created) {
+        totals.created++;
+        console.log(`[job] FAQ onboarding check: site ${site.id} "${site.name}" had no FAQ coverage anywhere — created a homepage FAQ recommendation.`);
+      }
+    } catch (err) {
+      console.error(`[job] FAQ onboarding check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return totals;
+}
+
 // Verify stage: re-checks every due fix_verifications row (real re-fetch of
 // the exact flagged page, real re-run of the exact check that flagged it —
 // see agents/lib/fix-verification.js). Due-ness is per-row (verify_after),
@@ -1349,6 +1433,60 @@ export async function queueDesignProfileRescanForAllSites({
     if (await queueForSite(site)) queued++;
   }
   if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for sites with a stale profile`);
+  return { queued };
+}
+
+// Whole-site design-consistency scan (agents/lib/design-consistency.js,
+// design-agent/live-analysis/consistency-check.js) — the "does every real
+// page still match the site's own design" check the daily
+// runContentRepairForAllSites pass never covers, because that one is
+// scoped to SEOAI-marker regions only. Same weekly cadence and staleness
+// gate as the design-profile rescan just above (a real browser capture per
+// page type is genuinely expensive — this is not a per-agent-run inline
+// check the way technical-seo.js/mobile-usability.js's static-fetch checks
+// are), and the same hard precondition: a site needs a USABLE STORED
+// PROFILE to compare against, so this only ever runs for a site the
+// profile rescan above has already kept current.
+const CONSISTENCY_SCAN_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+export async function queueConsistencyScanForSite(site, {
+  hasUsableProfile = siteHasUsableDesignProfile,
+  findQueuedScanJob = getQueuedComponentTemplateJob,
+  getLatestScanJob = getLatestDesignAgentJob,
+  enqueueScanJob = createConsistencyScanJob,
+  resolvePageUrl = sitePageUrl,
+  now = () => Date.now(),
+  staleAfterMs = CONSISTENCY_SCAN_STALE_AFTER_MS,
+} = {}) {
+  if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
+  if (!hasUsableProfile(site)) return false; // nothing real to compare against yet
+
+  try {
+    const pending = await findQueuedScanJob(site.id, CONSISTENCY_SCAN_JOB_KEY);
+    if (pending) return false;
+
+    const latest = await getLatestScanJob(site.id, CONSISTENCY_SCAN_JOB_KEY);
+    const finishedAt = latest?.finished_at ? Date.parse(latest.finished_at) : NaN;
+    if (Number.isFinite(finishedAt) && now() - finishedAt < staleAfterMs) return false;
+
+    await enqueueScanJob(site.id, { requestedBy: null, pageUrl: resolvePageUrl(site) });
+    return true;
+  } catch (err) {
+    console.error(`[job] could not queue consistency scan for site ${site.id}:`, err.message);
+    return false;
+  }
+}
+
+export async function queueConsistencyScanForAllSites({
+  listAllSites = listSites,
+  queueForSite = queueConsistencyScanForSite,
+} = {}) {
+  const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
+  let queued = 0;
+  for (const site of sites) {
+    if (await queueForSite(site)) queued++;
+  }
+  if (queued) console.log(`[job] design-agent: queued ${queued} whole-site consistency scan(s)`);
   return { queued };
 }
 

@@ -318,6 +318,25 @@ export async function recordApplyFailure(siteId, id, errorMessage, renderModeInf
 // other. Shared by every query below that used to check 'faq' alone.
 const VISIBLE_FAQ_ACTION_TYPES = ['faq', 'qa-content'];
 
+// Has this tool EVER shipped real FAQ/Q&A content for this site — visible
+// OR schema-only, unlike the visible-FAQ-cap queries below which only count
+// the visible mechanism. Used by faq-onboarding-check.js to decide whether
+// a genuinely new client has zero FAQ coverage anywhere and needs one
+// proactively generated, rather than waiting for a reactive finding.
+// 'pr_opened' or later (not just 'branch_pushed') — a real PR is the bar
+// for "this tool produced something", same reasoning as
+// hasImplementedVisibleFaqForPage's own status filter one function below.
+export async function hasAnyFaqDraftEver(siteId) {
+  const { rows } = await query(
+    `SELECT 1 FROM drafts
+      WHERE site_id = $1 AND action_type = ANY($2::text[])
+        AND status IN ('pr_opened', 'implemented')
+      LIMIT 1`,
+    [siteId, VISIBLE_FAQ_ACTION_TYPES]
+  );
+  return rows.length > 0;
+}
+
 // Every page on this site with a live, actually-applied visible FAQ block —
 // render_mode is only ever set from markDraftBranchPushed onward, so this
 // naturally only counts drafts with a real GitHub branch already pushed.

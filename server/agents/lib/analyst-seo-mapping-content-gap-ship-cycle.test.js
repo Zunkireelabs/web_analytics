@@ -128,13 +128,28 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
     assert.equal(result.candidates, 0);
   });
 
-  test('a fully-qualifying gap is selected and its chosen generator is reported, without shipping (dryRun)', async () => {
-    pendingGaps = [baseGap()];
+  test('a fully-qualifying, blog-shaped gap is selected and its generator is reported, without shipping (dryRun)', async () => {
+    // informational intent (not commercial/transactional) routes to
+    // blog-outline, not landing-page — see gapDraftEligibility. This is the
+    // shape the biweekly cron is allowed to auto-approve.
+    pendingGaps = [baseGap({ search_intent: 'informational' })];
     const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
     assert.equal(result.candidates, 1);
     assert.equal(result.shipped, 0, 'dryRun must never actually ship');
-    assert.equal(result.results[0].generatorId, 'landing-page');
+    assert.equal(result.results[0].generatorId, 'blog-outline');
     assert.equal(result.results[0].dryRun, true);
+  });
+
+  test('a landing-page-shaped gap is NEVER auto-approved, even when every other gate passes — it needs a human "yes" on the Analyst page first', async () => {
+    // baseGap() defaults to commercial + direct relevance, i.e. exactly the
+    // combination gapDraftEligibility routes to 'landing-page'.
+    pendingGaps = [baseGap()];
+    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    assert.equal(result.candidates, 1, 'it still counts as a real candidate — the evidence is genuine');
+    assert.equal(result.shipped, 0);
+    assert.equal(result.results[0].qualified, false);
+    assert.equal(result.results[0].reason, 'landing-page-needs-human-approval');
+    assert.equal(result.results[0].generatorId, 'landing-page');
   });
 
   test('mixed pending queue: only the qualifying gap is selected, others are excluded with no side effects', async () => {
@@ -142,11 +157,12 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
       baseGap({ id: 1, observation_count: 1 }), // too new
       baseGap({ id: 2, product_relevance: 'unrelated' }), // not relevant
       baseGap({ id: 3, evidence_snapshots: [{ impressions: 50 }, { impressions: 5 }] }), // declining
-      baseGap({ id: 4 }), // qualifies
+      baseGap({ id: 4, search_intent: 'informational' }), // qualifies and auto-ships (blog-shaped)
     ];
     const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
     assert.equal(result.pending, 4);
     assert.equal(result.candidates, 1);
     assert.equal(result.results[0].gapId, 4);
+    assert.equal(result.results[0].qualified, true);
   });
 });

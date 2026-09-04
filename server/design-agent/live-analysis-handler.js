@@ -1,10 +1,11 @@
 // The live-site replacement for openhands-handler.js's OpenHands/Docker
 // analysis path. Same job interface worker.js's processOneJob expects
-// (async handler(job) -> outcome), same job kind/mode ('design_generate',
-// params.mode 'design-profile' | 'component-templates') and the exact same
-// consumer contract (outcome.designProfile / outcome.componentTemplates) —
-// so this drops in as worker.js's handler with no change to job creation,
-// queueing, retry, or persistence anywhere else in the platform. What's
+// (async handler(job) -> outcome), same job kind ('design_generate',
+// params.mode 'design-profile' | 'component-templates' | 'consistency-scan')
+// and the exact same consumer contract (outcome.designProfile /
+// outcome.componentTemplates / outcome.consistencyFindings) — so this drops
+// in as worker.js's handler with no change to job creation, queueing,
+// retry, or persistence anywhere else in the platform. What's
 // gone is the sibling Docker container and the OpenHands agent loop: this
 // is a plain async function that loads the site's real live pages in a
 // headless browser and asks the model to classify/synthesize what it sees,
@@ -12,8 +13,10 @@
 import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
 import { extractDesignProfile } from './live-analysis/profile-extract.js';
+import { compareSectionsToProfile } from './live-analysis/consistency-check.js';
 import { composeGeneratedExpandLayout } from './live-analysis/compose-expand-layout.js';
 import { projectAllComponentTemplates } from './lib/design-profile.js';
+import { getSiteById } from '../store/read.js';
 
 function taggedError(message, stage) {
   const err = new Error(message);
@@ -25,6 +28,7 @@ export function createLiveDesignAnalysisHandler({
   captureSiteFn = captureSite,
   extractProfileFn = extractDesignProfile,
   composeExpandLayoutFn = composeGeneratedExpandLayout,
+  getSiteByIdFn = getSiteById,
 } = {}) {
   return async function liveDesignAnalysisHandler(job) {
     const pageUrl = job.params?.pageUrl;
@@ -38,6 +42,23 @@ export function createLiveDesignAnalysisHandler({
     }
 
     const segmented = segmentSite(capture);
+
+    // Whole-site consistency scan (agents/lib/design-consistency.js): a
+    // fresh capture compared against the site's ALREADY-STORED profile —
+    // deliberately never re-derives a new profile here (that is a separate,
+    // much more expensive LLM-synthesis job, design-profile mode above/
+    // below). A site with no usable stored profile has nothing to compare
+    // against; queueConsistencyScanForSite (job.js) already guards this
+    // before ever creating the job, so reaching here without one is an
+    // input-validation fault, not a normal "nothing to do" outcome.
+    if (job.params?.mode === 'consistency-scan') {
+      const site = await getSiteByIdFn(job.site_id);
+      const storedProfile = site?.url_file_map?.siteRoot?.designProfile;
+      if (!storedProfile) throw taggedError('No stored design profile to compare against — derive one first.', 'input_validation');
+      const findings = compareSectionsToProfile(storedProfile, segmented);
+      return { jobId: job.id, consistencyFindings: findings, pagesScanned: segmented.length };
+    }
+
     const profile = await extractProfileFn(segmented, { siteId: job.site_id }).catch((err) => {
       throw taggedError(`Design profile extraction failed: ${err.message}`, 'result_validation');
     });

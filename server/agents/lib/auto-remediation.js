@@ -8,9 +8,11 @@ import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.j
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
-import { applyPacing, applyConvergenceCap } from './ship-pacing.js';
+import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { buildDailyQueue } from './daily-queue.js';
+import { loadDeclines } from './decline-detection.js';
+import { listActionableAnalystEvidence } from '../../store/analyst-evidence.js';
 import { buildPageMetrics } from './growth-scoring.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
@@ -90,6 +92,38 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 // caller (routes/action-center.js's executeSafeFixes, a human-triggered
 // batch, is never subject to it — same reasoning as pacing above, a human
 // asking for a batch isn't the runaway this ceiling exists to catch).
+
+// TWO LANES, ONE HARD CEILING.
+//
+// The day is not one budget. It is an ANALYTICS lane for routine remediation
+// findings and an ANALYST lane for forward-looking growth and prevention, and
+// they are counted separately so each stays observable on its own.
+//
+//   Analytics: targets ANALYTICS_TARGET (60) and may stretch to
+//              ANALYTICS_MAX (100) when enough valid, high-quality work
+//              exists. When fewer than the target exist, the day simply
+//              ships every valid finding there is — the target is an
+//              intention, never a quota, and nothing is ever manufactured or
+//              quality-relaxed to reach it.
+//   Analyst:   up to ANALYST_MAX (20), and NOT expected to fill. Only items
+//              that clear the evidence bar take these slots; an empty analyst
+//              lane on a quiet day is the system working, not underperforming.
+//
+// Both lanes draw from what is genuinely eligible, so the real composition
+// follows the work: 100+20, 80+20, 40+20, 10+15, or 0+12 are all valid days.
+// COMBINED_MAX (120) is the only hard stop.
+//
+// Why a hard stop at all: every shipped item costs several GitHub API calls
+// against a 5,000/hour token budget that is SHARED across sites, and rate
+// limiting is already the single largest abandon cause in the live drafts
+// table. github/client.js reads the real headers and auto-remediation stops
+// the run when the remaining budget falls under RATE_LIMIT_RESERVE, so the
+// ceiling is a second belt on top of a working brace — not the only defence.
+const ANALYTICS_TARGET = Number(process.env.AUTO_REMEDIATION_ANALYTICS_TARGET) || 60;
+const ANALYTICS_MAX = Number(process.env.AUTO_REMEDIATION_ANALYTICS_MAX) || 100;
+const ANALYST_MAX = Number(process.env.AUTO_REMEDIATION_ANALYST_MAX) || 20;
+const COMBINED_MAX = Number(process.env.AUTO_REMEDIATION_COMBINED_MAX) || 120;
+
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
   onboardingAnalysisPending = isOnboardingAnalysisPending,
@@ -182,18 +216,126 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // item-specific reason stops being auto-drafted. It stays open and fully
   // visible — what stops is spending a model call per run to reach the same
   // error. See ship-pacing.js for the measured churn this ends.
-  const { converged: candidates, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
+  const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
   for (const note of convergenceNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+
+  // Refusal cap: the convergence cap above counts abandoned DRAFTS, and a
+  // refusal never creates one, so a permanently-refusing item slipped past
+  // both it and the learned score. See applyRefusalCap for the live case (one
+  // item refused 22 times, re-attempted hourly).
+  const { kept: candidates, notes: refusalNotes } = await applyRefusalCap(site, converged);
+  for (const note of refusalNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
   // budget left" rather than a negative slice that would silently take
   // everything. Also capped by the platform-wide ceiling (globalRemaining),
   // when the caller supplied one — whichever is tighter wins.
-  const dailyLimit = site.auto_remediation_daily_limit ?? 60;
+  // ADAPTIVE BUDGET. The site's configured limit is the BASELINE, not the
+  // ceiling: when the eligible backlog is deep enough that a baseline day
+  // would leave most of it untouched, the day surges to SURGE_DAILY_LIMIT.
+  //
+  // The point is to drain a backlog at the rate it actually accumulates
+  // without paying for that capacity on quiet days — a flat 80 would spend
+  // GitHub API budget and model calls chasing work that isn't there, and a
+  // flat 60 can never catch up on a site carrying 500+ open items.
+  //
+  // Measured against `candidates` (post-pacing, post-convergence, post-refusal
+  // — i.e. genuinely shippable work), never against raw open rows, so a
+  // backlog made entirely of held or demoted items can't trigger a surge that
+  // would then find nothing to do with the extra slots.
+  // What the analyst found losing ground, and which of today's candidates sit
+  // on those pages. Never fatal: a site with no GSC history, or an outage,
+  // simply runs a normal 60 day — the same posture the metrics fetch below
+  // already takes.
+  const { declines, siteWide } = await loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch((err) => {
+    console.warn(`[auto-remediation] site ${siteId}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
+    return { declines: new Map(), siteWide: null };
+  });
+
+  // EVIDENCE-BACKED LANE MEMBERSHIP. analyst-fusion.js's nightly pass
+  // (job.js's runAnalystFusionForAllSites) already corroborated signals
+  // across decline-detection, the insight pipeline and growth-opportunities,
+  // gated on real input freshness, and recorded every conclusion that
+  // cleared the bar in analyst_evidence with verdict='act'. That table —
+  // not "any recommendation whose page happens to be in declines" — is the
+  // authority for which of today's candidates are genuinely evidence-backed,
+  // which is what "never manufacture weak Analyst recommendations to fill
+  // the quota" requires in practice: a page can be in `declines` on ONE
+  // signal alone (decline-detection's own threshold), which fusion would
+  // correctly leave at 'monitor', not 'act', if nothing else corroborates it.
+  //
+  // Falls back to the raw declines Map when fusion has not run for this site
+  // yet (a brand-new site, or before the first nightly pass) — never a hard
+  // dependency, same posture as every other Analyst integration point.
+  const actEvidence = await listActionableAnalystEvidence(siteId).catch(() => []);
+  const analystFindingIds = actEvidence.length ? new Set(actEvidence.map((e) => e.finding_id)) : null;
+  const decliningCandidates = analystFindingIds
+    ? candidates.filter((r) => (r.finding_ids || []).some((fid) => analystFindingIds.has(fid)))
+    : candidates.filter((r) => declines.has(r.params?.page || r.page));
+  if (siteWide?.siteIsDown) {
+    // Reported, never acted on by mass-shipping. detectDeclines already
+    // measures every page RELATIVE to this site-wide move, so a uniform fall
+    // marks no individual page — which is correct: no page edit fixes an
+    // algorithm update, and opening 80 PRs at one would add risk, not traffic.
+    console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
+  }
+
+  // Lane sizing. `site.auto_remediation_daily_limit` is honoured as an
+  // explicit per-site override of the Analytics target when set, so an
+  // operator can still hold one tenant lower without touching this logic.
+  //
+  // The override caps the SURGE ceiling too, not just the target — an
+  // operator setting daily_limit=3 (or 0, to pause a tenant entirely) means
+  // "never more than this for this site," and Math.max(analyticsTarget,
+  // ANALYTICS_MAX) used to silently ignore that: any override below 100
+  // still let the day surge to the GLOBAL 100-item max whenever enough
+  // candidates existed, which defeated the one thing an explicit override
+  // exists to do. Only the unset (default) case gets the global surge
+  // ceiling; an explicit override IS the ceiling.
+  const dailyLimitOverride = site.auto_remediation_daily_limit;
+  const analyticsTarget = dailyLimitOverride ?? ANALYTICS_TARGET;
+  const analyticsMax = dailyLimitOverride != null ? dailyLimitOverride : ANALYTICS_MAX;
+
+  // The analyst lane never exceeds the evidence available for it. Sized from
+  // real candidates, so it is empty on a day with nothing forward-looking to
+  // do rather than being padded from the analytics backlog.
+  const analystLane = Math.min(ANALYST_MAX, decliningCandidates.length);
+
+  // Analytics stretches toward its max only on genuinely eligible work — the
+  // count here is post-pacing, post-convergence, post-refusal, so "enough
+  // valid work" means exactly that.
+  const analyticsCandidates = candidates.length - decliningCandidates.length;
+  const analyticsLane = Math.min(analyticsMax, Math.max(0, analyticsCandidates));
+
+  // COMBINED_MAX is applied to the TOTAL, and the analyst lane is protected
+  // when the two together would breach it: analytics backlog is effectively
+  // unbounded (236 eligible expand-content items alone), so letting it absorb
+  // the ceiling first would silently close the analyst lane on exactly the
+  // busy days prevention matters most.
+  const analystBudget = Math.min(analystLane, COMBINED_MAX);
+  const analyticsBudget = Math.min(analyticsLane, COMBINED_MAX - analystBudget);
+  const dailyLimit = analyticsBudget + analystBudget;
+
+  console.log(
+    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget}/${analyticsMax} `
+    + `(target ${analyticsTarget}, ${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
+    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${COMBINED_MAX}.`
+  );
+  if (analyticsCandidates < analyticsTarget) {
+    console.log(`[auto-remediation] site ${siteId}: only ${analyticsCandidates} valid analytics finding(s) available — shipping all of them rather than padding to the ${analyticsTarget} target.`);
+  }
   const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
-    const reason = spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached';
+    // A dailyLimit of 0 from zero genuinely eligible candidates is not the
+    // same fact as a real budget cap being reached — nothing was ever
+    // going to be attempted today, so there is nothing to report as
+    // "exhausted" or "ceiling-reached". Both of those imply real, present
+    // work that the budget stopped; stoppedReason stays null (the same
+    // "skipped, never attempted-and-failed" contract every other
+    // ineligibility path in this function already honors) so a caller can't
+    // mistake an empty queue for a stopped run.
+    const reason = candidates.length === 0 ? null : (spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached');
     console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
@@ -227,13 +369,13 @@ export async function autoRemediateSafeRecommendations(siteId, {
       return new Map();
     });
 
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
   console.log(
     `[auto-remediation] site ${siteId}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
-    + `By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
+    + `By lane: ${JSON.stringify(selection.byLane)}. By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
   );
   for (const top of selection.topSelected.slice(0, 5)) {
     console.log(`[auto-remediation] site ${siteId}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);

@@ -110,6 +110,40 @@ const RULES = [
     policy: RETRY_POLICY.RETRY,
     summary: 'A stalled attempt was reset so it could be retried cleanly.',
   },
+  {
+    // The citation-grounding provider was down or out of quota. Tavily's
+    // adapter applies a strict daily cap (search-grounding-providers/
+    // tavily.js) and expand-content.js turns any search failure into this
+    // message. Both are statements about an EXTERNAL dependency's budget,
+    // never about the item — but with no rule here they fell through to the
+    // ITEM_DEFECT default below and were scored as this generator's own
+    // failures. That single misattribution is what demoted expand-content
+    // (15 "failures", 0 genuine) and with it 320 open recommendations,
+    // 56% of site 1's entire backlog, measured 2026-09-04.
+    // Matches BOTH the customer-facing message (persisted to
+    // drafts.abandoned_reason) and the short reason CODE a refusal records
+    // instead (auto-remediation.js stores err.reason, not err.message, for
+    // refusals) — the refusal cap in ship-pacing.js classifies those codes
+    // through this same function.
+    match: (r) => /citation search is temporarily unavailable/i.test(r)
+      || /daily query cap reached/i.test(r)
+      || /refusing further citation search/i.test(r)
+      || r === 'citation-grounding-unavailable'
+      || r === 'citation-grounding-not-configured',
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The citation-grounding service was unavailable or out of quota.',
+  },
+  {
+    // "Draft was not in a submittable state" — the row moved underneath the
+    // shipping loop (another pass, a reconciler sweep, a state reset). Pure
+    // bookkeeping about draft lifecycle, the same class as 'Stuck at "'
+    // above, and equally not a verdict on the generated content.
+    match: (r) => /not in a submittable state/i.test(r),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The draft changed state before it could be submitted.',
+  },
 
   // ---- Already resolved ------------------------------------------------
   {

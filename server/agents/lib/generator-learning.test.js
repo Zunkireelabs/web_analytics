@@ -1,7 +1,7 @@
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { pool, query } from '../../db.js';
-import { recordOutcome, getLearnedConfidenceMap } from './generator-learning.js';
+import { recordOutcome, getLearnedConfidenceMap, attributeOutcome } from './generator-learning.js';
 import { classifyRecommendation } from './autonomy-decision.js';
 
 // Real DB coverage — the whole point of this module is a query over real
@@ -118,5 +118,53 @@ describe('learning integrates with classifyRecommendation without weakening the 
     // no second argument — learning must be additive, never a prerequisite.
     const decision = classifyRecommendation({ risk_tier: 'safe', blocked_reason: null, status: 'open', recommendation_type: 'schema' });
     assert.equal(decision.decision, 'SAFE_TO_AUTO_EXECUTE');
+  });
+});
+
+// Attribution: the fix for the misattribution that demoted seven generators
+// and removed 398 of site 1's 569 open recommendations from the autonomous
+// shipping loop while the daily budget sat at 5 of 60 used (2026-09-04).
+// Pure — no database needed, the decision is a function of the detail text.
+describe('attributeOutcome', () => {
+  test('a genuine, item-specific defect stays a failure', () => {
+    assert.equal(attributeOutcome('failed', 'This content-expansion draft has no sections.'), 'failed');
+    assert.equal(attributeOutcome('failed', '1 anchor(s) no longer found verbatim in src/pages/about.njk'), 'failed');
+  });
+
+  test('an unexplained failure stays a failure — unattributable is treated as real', () => {
+    assert.equal(attributeOutcome('failed', null), 'failed');
+    assert.equal(attributeOutcome('failed', '   '), 'failed');
+  });
+
+  test('infrastructure and human causes become infra, never the generator’s fault', () => {
+    for (const detail of [
+      'Auto-ship failed: getBranchSha failed (403): API rate limit exceeded for user ID 286862633',
+      'Batch push/PR failed: This pull request could not be opened right now',
+      "Auto-ship failed: Today's batch branch (action-center/batch-1-2026-08-30) has diverged from main",
+      'Citation search is temporarily unavailable — try again shortly',
+      'No GitHub PAT set in env var "GITHUB_PAT"',
+      'Draft was not in a submittable state',
+      'sent_back_to_recommendations',
+      'pr_closed_without_merge',
+    ]) {
+      assert.equal(attributeOutcome('failed', detail), 'infra', `should not be scored as a failure: ${detail}`);
+    }
+  });
+
+  test('a human’s own rejection reason is a real signal and stays rejected', () => {
+    assert.equal(attributeOutcome('rejected', 'The tone is wrong for our brand.'), 'rejected');
+  });
+
+  test('a reconciler sentinel recorded as rejected is not a human verdict', () => {
+    // RECLAIM_REASON (action-center-reconciler.js) means only "withdrawn and
+    // returned to the board". These rows alone kept alt-text, broken-link-fix
+    // and schema-repair demoted after the failure-side fix.
+    assert.equal(attributeOutcome('rejected', 'sent_back_to_recommendations'), 'infra');
+  });
+
+  test('positive and refusal outcomes are never touched', () => {
+    assert.equal(attributeOutcome('shipped', null), 'shipped');
+    assert.equal(attributeOutcome('merged', 'anything at all'), 'merged');
+    assert.equal(attributeOutcome('refused', 'citation-grounding-unavailable'), 'refused');
   });
 });

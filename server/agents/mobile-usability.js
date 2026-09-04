@@ -1,31 +1,39 @@
 import { getSearchPerformanceForPages } from '../store/read.js';
-import { makeFinding } from './lib/findings.js';
+import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
+import { fetchMobileUsabilityAudit, configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 
 export const meta = {
   id: 'mobile-usability',
   name: 'Mobile Usability Agent',
-  description: 'Checks real, statically-verifiable mobile-usability issues — a missing or misconfigured viewport meta tag, including patterns that block pinch-zoom.',
+  description: 'Checks real mobile-usability issues — a missing or misconfigured viewport meta tag (always), plus real tap-target-sizing and legible-font-size audits when PageSpeed Insights is configured.',
   // 'seo' rather than 'performance' — Lighthouse's own audit taxonomy groups
   // viewport/tap-target/font-size checks under its SEO category, and
   // 'performance' is kept reserved for a future Core-Web-Vitals-focused
   // agent so the two categories don't overlap in meaning.
   category: 'seo',
-  version: 1,
+  version: 2,
   dataSources: [
     // Same honest gap as accessibility.js: tap-target sizing and legible
     // font size need a rendering engine to compute real on-screen geometry.
-    // PageSpeed Insights' Lighthouse "seo" category audits both, but
-    // technical-seo.js's existing PSI integration only requests
-    // category=performance — always 'not-connected' regardless of
-    // PAGESPEED_API_KEY, since that key isn't used for this category today.
-    { id: 'lighthouse-mobile-audit', status: 'not-connected', description: 'Real tap-target-sizing/legible-font-size checks via PageSpeed Insights\' Lighthouse seo category — not requested by any current integration.' },
+    // pagespeed.js's fetchMobileUsabilityAudit now requests PSI's Lighthouse
+    // "seo" category for this (a second request from fetchCoreWebVitals's
+    // own category=performance one — PSI does not return both categories'
+    // full detail in one call). Connected exactly when PAGESPEED_API_KEY is
+    // set — same key, same config surface as technical-seo.js's own CWV
+    // check, no new env var.
+    { id: 'lighthouse-mobile-audit', status: pagespeedConfigured() ? 'connected' : 'not-connected', description: 'Real tap-target-sizing/legible-font-size checks via PageSpeed Insights\' Lighthouse seo category.' },
   ],
 };
 
 const MAX_PAGES = 20;
+// Lighthouse's own "average" cutoff — a score below this on either audit is
+// a real, page-failing result, not a stylistic nitpick. Matches the
+// 0.5/0.9 boundaries pagespeed.js's own categoryFor uses for CWV, so a
+// 'POOR' reads the same way across every PSI-derived check in this app.
+const AUDIT_FAIL_SCORE = 0.9;
 
 export async function run({ siteId, start, end, pageCache, params }) {
   const { batch, impressionsByPage } = params?.pages?.length
@@ -91,6 +99,55 @@ export async function run({ siteId, start, end, pageCache, params }) {
     }));
   }
 
+  // Real tap-target-sizing and legible-font-size audits, via PSI's
+  // Lighthouse "seo" category — only when PAGESPEED_API_KEY is set (see
+  // meta.dataSources above). Same all-at-once Promise.all fan-out as
+  // technical-seo-analysis.js's own fetchCoreWebVitals batch — the
+  // established pattern in this codebase for a per-page PSI call over a
+  // rotation-sized batch (<= MAX_PAGES).
+  //
+  // recommendedAction is deliberately null on both findings, same
+  // convention as technical-seo.js's own CWV/layout-shift findings: a small
+  // tap target or an illegible font size is near-always a shared
+  // CSS/template issue, not something a single-page content generator can
+  // safely rewrite blind. This is real, verified evidence surfaced for a
+  // human to act on — not a fabricated "detection means auto-fix" claim.
+  let smallTapTargets = [];
+  let illegibleFontSize = [];
+  if (pagespeedConfigured() && reachable.length) {
+    const audited = await Promise.all(reachable.map(async (r) => ({
+      ...r,
+      audit: await fetchMobileUsabilityAudit(r.page).catch((err) => ({ ok: false, error: String(err.message || err) })),
+    })));
+    const auditedOk = audited.filter((r) => r.audit.ok);
+    smallTapTargets = auditedOk.filter((r) => r.audit.tapTargets.score != null && r.audit.tapTargets.score < AUDIT_FAIL_SCORE);
+    illegibleFontSize = auditedOk.filter((r) => r.audit.fontSize.score != null && r.audit.fontSize.score < AUDIT_FAIL_SCORE);
+
+    const tapTargetsFinding = aggregateSystemicFinding({
+      id: 'mobile-usability:small-tap-targets',
+      affected: smallTapTargets,
+      checkedCount: auditedOk.length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      extraEvidence: (affected) => ({ sampleFailingElements: affected.slice(0, 5).map((r) => ({ page: r.page, elements: r.audit.tapTargets.failingElements })) }),
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have buttons or links too small/close together for a real thumb tap (Lighthouse's tap-target audit) — a real conversion and accessibility problem on mobile, not a cosmetic one.`,
+      recommendedAction: null,
+    });
+    if (tapTargetsFinding) findings.push(tapTargetsFinding);
+
+    const fontSizeFinding = aggregateSystemicFinding({
+      id: 'mobile-usability:illegible-font-size',
+      affected: illegibleFontSize,
+      checkedCount: auditedOk.length,
+      getPage: (r) => r.page,
+      getImpressions: (r) => r.impressions,
+      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, summary: r.audit.fontSize.summary })) }),
+      whyItMatters: (n, c) => `${n} of ${c} checked pages have text below Lighthouse's legible-font-size threshold on mobile — real visitors on a phone have to pinch-zoom to read it.`,
+      recommendedAction: null,
+    });
+    if (fontSizeFinding) findings.push(fontSizeFinding);
+  }
+
   const facts = {
     rangeStart: start, rangeEnd: end,
     batchSize: batch.length,
@@ -99,6 +156,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
     pagesMissingViewport: missingViewport.length,
     pagesWithWrongViewport: wrongViewport.length,
     pagesBlockingZoom: zoomBlocked.length,
+    pagesWithSmallTapTargets: smallTapTargets.length,
+    pagesWithIllegibleFontSize: illegibleFontSize.length,
     findings,
   };
 

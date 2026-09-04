@@ -871,6 +871,25 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false }
     const eligibility = gapDraftEligibility(gap);
     if (!eligibility) { results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'no-draft-eligibility' }); continue; }
 
+    // LANDING PAGES ARE NEVER AUTO-APPROVED HERE, no matter how strong the
+    // evidence — a dedicated product/use-case page is a bigger commitment
+    // than a blog post, and this loop's own auto-approval (below) was
+    // silently making that call for every commercial/transactional,
+    // directly-relevant gap with no human ever asked. riskTierForGenerator
+    // already keeps landing-page 'manual' so no PR can ship without a human
+    // clicking through Action Center — but by the time it gets there the
+    // gap is buried among everything else, and the actual "should this
+    // become a real page" question was already answered, silently, right
+    // here. The gap now stays 'pending_review' — visible on the Analyst
+    // page's review queue with the "landing page" shape already labeled —
+    // until a human explicitly approves it via PUT .../gaps/:gapId. Nothing
+    // else about the candidate's evidence changes; only landing-page's
+    // routing is held back.
+    if (eligibility.generatorId === 'landing-page') {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'landing-page-needs-human-approval', generatorId: eligibility.generatorId });
+      continue;
+    }
+
     if (dryRun) {
       results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, dryRun: true });
       continue;
@@ -930,7 +949,12 @@ const GENERIC_PRODUCT_WORDS = new Set([
   'system', 'systems', 'tool', 'tools', 'management', 'provider', 'providers', 'company', 'companies',
 ]);
 
-function relatesToCapability(text, capability) {
+// Exported for analyst-product-mapping.js — the per-page/per-topic product
+// mapping the fusion engine needs is the same word-overlap judgment
+// buildProductTopicMap already makes for clusters/gaps, just applied to a
+// single piece of text (a declining page's top query, a growth
+// opportunity's query) instead of every cluster/gap on the site at once.
+export function relatesToCapability(text, capability) {
   const words = significantWords(text);
   const capWords = new Set([
     ...significantWords(capability.name),

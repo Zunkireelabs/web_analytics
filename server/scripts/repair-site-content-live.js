@@ -45,10 +45,8 @@ import { mkdtemp, rm, mkdir, writeFile as fsWriteFile, readFile as fsReadFile } 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { getSiteById } from '../store/read.js';
-import {
-  getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic,
-  openPullRequest, defaultBranchName, listOpenPullRequestsForBranch,
-} from '../github/client.js';
+import { getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic } from '../github/client.js';
+import { baseBranch, getOrInitBatchBranch, openPrForBranch } from '../implementers/lib/github-ops.js';
 import { enforceVisibleFaqCap } from './enforce-visible-faq-cap.js';
 import { repairSiteMarkerStyling } from './repair-site-marker-styling.js';
 import { repairNewContentFrontmatter } from './repair-newcontent-frontmatter.js';
@@ -75,7 +73,7 @@ export async function repairSiteContentLive(siteId, { dryRun = false } = {}) {
   const templates = site.url_file_map?.siteRoot?.componentTemplates;
   if (!templates) { report.skipped = 'no-component-templates'; return report; }
 
-  const ref = defaultBranchName(site);
+  const ref = baseBranch(site);
   const { files: repoFiles } = await getRepoTree(site, ref);
   const targets = repoFiles.filter((p) => p.startsWith(PREFIX));
 
@@ -123,31 +121,43 @@ export async function repairSiteContentLive(siteId, { dryRun = false } = {}) {
     report.changedFiles = edits.map((e) => e.path);
     if (!edits.length || dryRun) return report;
 
-    const branchName = `content-repair/${new Date().toISOString().slice(0, 10)}`;
-    const fromSha = await getBranchSha(site, ref);
-    await createBranch(site, branchName, fromSha);
+    // SAME branch/PR the Action Center's own daily batch uses
+    // (github-ops.js's batchBranchName/getOrInitBatchBranch), not a separate
+    // `content-repair/DATE` branch of its own. This runs first in the
+    // morning cron sequence (see cron.js — role correction, then content
+    // repair, then auto-remediation), so on a normal day this is the commit
+    // that CREATES today's shared branch, and whatever Action Center ships
+    // afterward lands as later commits on the same branch/PR. On a day
+    // Action Center ships nothing, openPrForBranch below still guarantees a
+    // real PR exists for this repair alone — the two orderings converge on
+    // one shared PR either way because openPrForBranch always checks for an
+    // already-open PR on the branch and reuses it rather than opening a
+    // second one.
+    //
+    // Previously this repair opened its own separate `content-repair/DATE`
+    // PR with a hand-written body listing every changed file. That
+    // descriptive text now lives in the commit message instead (still
+    // fully visible to a reviewer, same as every Action Center commit on
+    // this branch already works) — the PR itself carries generic batch
+    // wording once shared, exactly like every other day's Action Center PR.
+    const { branchName, exists, conflicted } = await getOrInitBatchBranch(site);
+    if (conflicted) { report.skipped = 'batch-branch-conflicted'; return report; }
+    if (!exists) {
+      const fromSha = await getBranchSha(site, ref);
+      await createBranch(site, branchName, fromSha);
+    }
     await commitFilesAtomic(site, branchName, edits,
       `Repair shipped content to match the site's own design (${edits.length} file(s))\n\n`
       + 'No text changed. Re-renders SEOAI-marker and data-array content through this site\'s current '
       + 'component templates, enforces visible_faq_cap, aligns generated blog front matter with its '
       + 'directory\'s own contract, and removes any section that still carries an unresolved citation '
-      + 'or an invented competitor. See server/scripts/repair-site-content-live.js.');
+      + 'or an invented competitor.\n\n'
+      + `${edits.map((e) => `- ${e.path}`).join('\n')}\n\n`
+      + 'See server/scripts/repair-site-content-live.js.');
 
-    const existingPrs = await listOpenPullRequestsForBranch(site, branchName);
-    const pr = existingPrs.length
-      ? { url: existingPrs[0].html_url, number: existingPrs[0].number }
-      : await openPullRequest(site, {
-        branch: branchName,
-        title: `Repair ${edits.length} file(s) to match the site's own design`,
-        body: `Automated daily repair — re-checks every SEOAI-marker region and generated blog post against `
-          + `this site's own current design (component templates, visible-FAQ cap, blog front-matter contract, `
-          + `directory-collection self-inclusion, and placeholder/fabricated-competitor content), and fixes `
-          + `anything that has drifted.\n\n`
-          + `No post/page TEXT is changed by this pipeline — only markup, front matter, and (for placeholder `
-          + `content specifically) removal of sections that were never honestly fillable.\n\n`
-          + `${edits.map((e) => `- \`${e.path}\``).join('\n')}\n\n**This PR does not merge itself.**`,
-      });
-    report.prCreated = { url: pr.url, number: pr.number, reused: existingPrs.length > 0 };
+    const pr = await openPrForBranch(site, null, branchName);
+    if (!pr.ok) { report.skipped = 'pr-open-failed'; report.error = pr.error; return report; }
+    report.prCreated = { url: pr.prUrl, number: pr.prNumber, reused: pr.reused };
     return report;
   } finally {
     await rm(tempDir, { recursive: true, force: true });

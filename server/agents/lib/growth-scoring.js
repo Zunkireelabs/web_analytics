@@ -36,6 +36,12 @@ const tierBase = (tier) => (6 - tier) * STEP;
 // and impressions that are not converting to clicks at the rank they already
 // hold. A page can qualify for more than one.
 const DEMAND_CAP = 300;
+
+// Ceiling on the decline bonus. Set above DEMAND_CAP on purpose: a page
+// actively losing 800 impressions must be able to outrank a healthy page
+// sitting at a high but stable level, which is the entire behaviour change.
+// Capped all the same, so one catastrophic page cannot claim the whole day.
+const DECLINE_CAP = 600;
 export function demandScore(metrics) {
   if (!metrics || !metrics.impressions) return { score: 0, factors: [] };
   const { impressions, avgPosition, ctr } = metrics;
@@ -141,7 +147,7 @@ const LABEL_BONUS = { High: 40, Medium: 20, Low: 0 };
  * @returns { score, tier, tierLabel, factors: string[] }
  */
 export function scoreRecommendation(rec, ctx = {}) {
-  const { pageMetrics, learnedMap, groupSizes, groupKeyFor } = ctx;
+  const { pageMetrics, learnedMap, groupSizes, groupKeyFor, declines } = ctx;
   const tier = severityTierFor(rec.recommendation_type);
   const factors = [`tier ${tier} (${severityTierLabel(rec.recommendation_type)})`];
   let score = tierBase(tier);
@@ -166,17 +172,35 @@ export function scoreRecommendation(rec, ctx = {}) {
     factors.push(`impact label ${label} (+${LABEL_BONUS[label]})`);
   }
 
+  // TRAJECTORY. demandScore above reads a LEVEL, so a page that fell from
+  // 2,000 impressions to 400 scored below a flat page at 1,000 — the ranker
+  // deprioritised precisely the pages that were bleeding. This is the
+  // counterweight: a page losing ground is worth fixing in proportion to what
+  // it is losing. See decline-detection.js for how the signals are measured
+  // (and why a site-wide fall never marks every page).
+  const decline = page ? declines?.get(page) : null;
+  if (decline) {
+    const urgency = Math.min(DECLINE_CAP, decline.declineScore);
+    score += urgency;
+    factors.push(`DECLINING: ${decline.reasons.join('; ')} (+${urgency})`);
+  }
+
   // An expansion item with NO measured demand is speculative in a way the
   // tier alone doesn't capture — tier 3 exists for "real demand exists for
   // this page". Demoted toward the content tier rather than out of the run,
   // since thin GSC coverage means absent data often means unmeasured, not
   // worthless.
-  if (tier === SEVERITY_TIER.EXPANSION && demand.score === 0) {
+  //
+  // Never applied to a DECLINING page. A page whose traffic has collapsed
+  // reads as "no measured demand" for exactly the reason that makes it
+  // urgent, and penalising it here would bury the worst cases — the further a
+  // page fell, the more certainly it was ignored.
+  if (tier === SEVERITY_TIER.EXPANSION && demand.score === 0 && !decline) {
     score -= STEP / 2;
     factors.push('no measured search demand for this page (-500)');
   }
 
-  return { score: Math.round(score), tier, tierLabel: severityTierLabel(rec.recommendation_type), factors };
+  return { score: Math.round(score), tier, tierLabel: severityTierLabel(rec.recommendation_type), factors, declining: Boolean(decline) };
 }
 
 // Builds the page-keyed metric map scoreRecommendation reads. Kept here (not

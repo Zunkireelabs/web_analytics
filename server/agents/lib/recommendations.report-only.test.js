@@ -17,7 +17,15 @@ mock.module(resolve('./fresh-runs.js'), {
   },
 });
 mock.module(resolve('../../store/drafts.js'), {
-  namedExports: { getDraftedFindingIds: async () => new Set() },
+  namedExports: {
+    getDraftedFindingIds: async () => new Set(),
+    // recommendation-coordinator.js's syncFromGrounded reads this to tell
+    // "in progress, PR #N" from "vanished and retryable" — mocked to "no
+    // live drafts anywhere", same no-op-collaborator stance as
+    // getDraftedFindingIds above; this file tests report-only findings
+    // never reaching a draft at all.
+    getLiveDraftsByFindingId: async () => new Map(),
+  },
 });
 mock.module(resolve('./command-center.js'), {
   namedExports: { categoryByAgentId: async () => new Map([['font-consistency', { name: 'Font Consistency Agent' }]]) },
