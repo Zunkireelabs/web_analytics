@@ -11,6 +11,7 @@ import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-r
 import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing.js';
 import { getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../../github/client.js';
 import { buildDailyQueue } from './daily-queue.js';
+import { loadDeclines } from './decline-detection.js';
 import { buildPageMetrics } from './growth-scoring.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
@@ -90,20 +91,28 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 // caller (routes/action-center.js's executeSafeFixes, a human-triggered
 // batch, is never subject to it — same reasoning as pacing above, a human
 // asking for a batch isn't the runaway this ceiling exists to catch).
-// The day's baseline budget when a site has no explicit
-// sites.auto_remediation_daily_limit, and the deeper budget a site surges to
-// while its shippable backlog stays above SURGE_BACKLOG_THRESHOLD.
+
+// The day is TWO budgets, not one.
 //
-// Env-overridable because the right numbers depend on the repo's GitHub API
-// headroom, which is per-installation: every shipped item costs several API
-// calls, and rate limiting is already the largest single abandon cause in the
-// live table. Raise SURGE_DAILY_LIMIT only alongside that headroom.
+// BASELINE_DAILY_LIMIT (60) is the routine analytics backlog — the findings
+// the agents detect on a normal day. SURGE_EXTRA (20) is the ANALYST LANE on
+// top of it, and it opens only when there is preventive work to do: pages the
+// analyst found losing ground (decline-detection.js), whose fixes need to ship
+// THIS week so the impressions don't go next week. A day with nothing
+// declining is a 60 day; a day with declining pages is a 60 + up-to-20 day,
+// and daily-queue.js reserves that headroom so routine backlog can't eat it.
+//
+// This is why the surge is measured in DECLINING items rather than raw backlog
+// size. Backlog is always deep here (236 eligible expand-content items alone),
+// so a size-based trigger would surge every single day and the extra 20 slots
+// would just be 20 more expansion items — extending the day without changing
+// what it does.
+//
+// Env-overridable because the ceiling is really GitHub API headroom, which is
+// per-installation: every shipped item costs several API calls, and rate
+// limiting is already the largest single abandon cause in the live table.
 const BASELINE_DAILY_LIMIT = Number(process.env.AUTO_REMEDIATION_BASELINE_DAILY_LIMIT) || 60;
-const SURGE_DAILY_LIMIT = Number(process.env.AUTO_REMEDIATION_SURGE_DAILY_LIMIT) || 80;
-// How much shippable work makes a day a "deep backlog" day. Set at twice the
-// baseline: below this, a baseline day already clears the queue inside two
-// days and the extra slots would go unused.
-const SURGE_BACKLOG_THRESHOLD = Number(process.env.AUTO_REMEDIATION_SURGE_THRESHOLD) || 120;
+const SURGE_EXTRA = Number(process.env.AUTO_REMEDIATION_SURGE_EXTRA) || 20;
 
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
@@ -225,11 +234,29 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // — i.e. genuinely shippable work), never against raw open rows, so a
   // backlog made entirely of held or demoted items can't trigger a surge that
   // would then find nothing to do with the extra slots.
+  // What the analyst found losing ground, and which of today's candidates sit
+  // on those pages. Never fatal: a site with no GSC history, or an outage,
+  // simply runs a normal 60 day — the same posture the metrics fetch below
+  // already takes.
+  const { declines, siteWide } = await loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch((err) => {
+    console.warn(`[auto-remediation] site ${siteId}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
+    return { declines: new Map(), siteWide: null };
+  });
+  const decliningCandidates = candidates.filter((r) => declines.has(r.params?.page || r.page));
+  if (siteWide?.siteIsDown) {
+    // Reported, never acted on by mass-shipping. detectDeclines already
+    // measures every page RELATIVE to this site-wide move, so a uniform fall
+    // marks no individual page — which is correct: no page edit fixes an
+    // algorithm update, and opening 80 PRs at one would add risk, not traffic.
+    console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
+  }
+
   const baselineDailyLimit = site.auto_remediation_daily_limit ?? BASELINE_DAILY_LIMIT;
-  const surging = candidates.length >= SURGE_BACKLOG_THRESHOLD;
-  const dailyLimit = surging ? Math.max(baselineDailyLimit, SURGE_DAILY_LIMIT) : baselineDailyLimit;
-  if (surging && dailyLimit > baselineDailyLimit) {
-    console.log(`[auto-remediation] site ${siteId}: ${candidates.length} shippable candidates (>= ${SURGE_BACKLOG_THRESHOLD}) — surging today's budget from ${baselineDailyLimit} to ${dailyLimit}.`);
+  const analystLane = Math.min(SURGE_EXTRA, decliningCandidates.length);
+  const dailyLimit = baselineDailyLimit + analystLane;
+  if (analystLane > 0) {
+    const lost = decliningCandidates.reduce((s, r) => s + (declines.get(r.params?.page || r.page)?.impressionsLost || 0), 0);
+    console.log(`[auto-remediation] site ${siteId}: ${declines.size} page(s) losing ground, ${decliningCandidates.length} with shippable fixes (${lost} impressions lost) — opening a ${analystLane}-slot analyst lane on top of the ${baselineDailyLimit} baseline (budget ${dailyLimit}).`);
   }
   const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
@@ -267,7 +294,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       return new Map();
     });
 
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, baselineBudget: Math.max(0, baselineDailyLimit - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);

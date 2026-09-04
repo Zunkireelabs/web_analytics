@@ -45,11 +45,14 @@ export const GENERATOR_SHARE_CAP = 0.5;
  *   queue    — [{ rec, score, tier, tierLabel, factors }] in execution order
  *   report   — the observability payload (also persisted on the run row)
  */
-export function buildDailyQueue({ candidates = [], remaining = 0, pageMetrics = new Map(), learnedMap = new Map() } = {}) {
+export function buildDailyQueue({
+  candidates = [], remaining = 0, pageMetrics = new Map(), learnedMap = new Map(),
+  declines = new Map(), baselineBudget = remaining,
+} = {}) {
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
     rec,
-    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor }),
+    ...scoreRecommendation(rec, { pageMetrics, learnedMap, groupSizes: sizes, groupKeyFor, declines }),
   })).sort((a, b) => b.score - a.score);
 
   if (remaining <= 0 || scored.length === 0) {
@@ -66,12 +69,35 @@ export function buildDailyQueue({ candidates = [], remaining = 0, pageMetrics = 
   const selected = [];
   const takenIds = new Set();
   const perGenerator = new Map();
+
   const take = (item) => {
     selected.push(item);
     takenIds.add(item.rec.id);
     const gen = item.rec.recommendation_type;
     perGenerator.set(gen, (perGenerator.get(gen) || 0) + 1);
   };
+
+  // THE ANALYST LANE. The day's budget is two things, not one: a baseline for
+  // routine analytics findings, and headroom above it that exists ONLY because
+  // there is preventive work to do. `remaining - baselineBudget` is that
+  // headroom, and it is reserved here for pages the analyst found losing
+  // ground (decline-detection.js) — routine backlog cannot take these slots.
+  //
+  // Without the reservation the surge would be pointless: expand-content alone
+  // has 236 eligible candidates, so 20 extra slots handed to open merit would
+  // simply go to 20 more expansion items and the declining pages — the reason
+  // the day was extended at all — would still not ship. The lane is what makes
+  // "60 routine, +20 to stop the drop" true rather than just "80 of whatever".
+  const analystLaneSize = Math.max(0, remaining - baselineBudget);
+  if (analystLaneSize > 0) {
+    let placed = 0;
+    for (const item of pool) {
+      if (placed >= analystLaneSize) break;
+      if (takenIds.has(item.rec.id) || !item.declining) continue;
+      take(item);
+      placed++;
+    }
+  }
 
   // Pass 0 — reserve floor slots WITHOUT letting them starve higher-tier
   // work on a short run. The real backlog this was built against has ~480
