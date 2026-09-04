@@ -28,6 +28,33 @@ async def run_nightly(today: date | None = None) -> None:
             await _run_one(client, collector, window_start, today)
 
 
+def _describe(exc: BaseException) -> str:
+    """Never returns an empty string.
+
+    `str(exc)` alone hid a twelve-day production outage. Every MCP-backed
+    collector failed nightly from 2026-08-23 onward because the standalone
+    MCP server (mcp-server/index.js, port 3003) was not running, and httpx's
+    connect/timeout exceptions carry an EMPTY message — so `str(e)` wrote
+    `error = ''` into ingestion_runs on all eleven of them. The rows said
+    'error' with nothing beside it, `metric_observations` silently stopped at
+    2026-08-21, and the forecast/anomaly/insight engines downstream kept
+    running and kept publishing confident output computed from data that had
+    stopped moving. The anomaly detector looked broken; its input was dead.
+
+    Falling back to the exception's type name guarantees a failure always
+    names itself, which is the difference between a bad night and a fortnight
+    of nobody noticing.
+    """
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    # httpx.ConnectError / ConnectTimeout / ReadTimeout land here.
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and str(cause).strip():
+        return f"{type(exc).__name__} (via {type(cause).__name__}: {str(cause).strip()})"
+    return f"{type(exc).__name__} (no message)"
+
+
 async def _run_one(client: Client, collector, window_start: date, window_end: date) -> None:
     """Isolated per (client, collector) — one failure never blocks any other
     client or collector. Errors are recorded, never raised further."""
@@ -53,11 +80,18 @@ async def _run_one(client: Client, collector, window_start: date, window_end: da
                 await _upsert_observations(session, client.id, observations)
             await session.commit()
     except McpAuthError as e:
-        status, error = "insufficient-data", str(e)
+        status, error = "insufficient-data", _describe(e)
     except McpToolError as e:
-        status, error = "error", str(e)
+        status, error = "error", _describe(e)
     except Exception as e:  # noqa: BLE001 — deliberately broad: this must never propagate
-        status, error = "error", str(e)
+        status, error = "error", _describe(e)
+
+    if status == "error":
+        # Loud on the way out as well as recorded. A collector that fails
+        # every night for twelve days (see _describe) produced no log line
+        # anyone was reading and no alert — the only trace was a row in
+        # ingestion_runs nobody queries.
+        print(f"[run_nightly] collector {collector.collector_id} FAILED for client {client.id}: {error}", flush=True)
 
     took_ms = int((time.monotonic() - started) * 1000)
     async with SessionLocal() as session:

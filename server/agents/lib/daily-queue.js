@@ -47,7 +47,7 @@ export const GENERATOR_SHARE_CAP = 0.5;
  */
 export function buildDailyQueue({
   candidates = [], remaining = 0, pageMetrics = new Map(), learnedMap = new Map(),
-  declines = new Map(), baselineBudget = remaining,
+  declines = new Map(), baselineBudget = remaining, analystBudget = null,
 } = {}) {
   const sizes = groupSizes(candidates);
   const scored = candidates.map((rec) => ({
@@ -70,34 +70,46 @@ export function buildDailyQueue({
   const takenIds = new Set();
   const perGenerator = new Map();
 
-  const take = (item) => {
-    selected.push(item);
+  // `lane` is stamped at SELECTION, never inferred later from whether the
+  // item happens to be on a declining page. A declining page's fix that did
+  // not win a reserved slot is ordinary analytics work competing on merit,
+  // and counting it as analyst work would make the lane totals lie — the two
+  // lanes have to stay separately observable to mean anything.
+  const take = (item, lane = 'analytics') => {
+    selected.push(Object.assign(item, { lane }));
     takenIds.add(item.rec.id);
     const gen = item.rec.recommendation_type;
     perGenerator.set(gen, (perGenerator.get(gen) || 0) + 1);
   };
 
-  // THE ANALYST LANE. The day's budget is two things, not one: a baseline for
-  // routine analytics findings, and headroom above it that exists ONLY because
-  // there is preventive work to do. `remaining - baselineBudget` is that
-  // headroom, and it is reserved here for pages the analyst found losing
-  // ground (decline-detection.js) — routine backlog cannot take these slots.
+  // THE ANALYST LANE — reserved capacity, not leftover capacity.
   //
-  // Without the reservation the surge would be pointless: expand-content alone
-  // has 236 eligible candidates, so 20 extra slots handed to open merit would
-  // simply go to 20 more expansion items and the declining pages — the reason
-  // the day was extended at all — would still not ship. The lane is what makes
-  // "60 routine, +20 to stop the drop" true rather than just "80 of whatever".
-  const analystLaneSize = Math.max(0, remaining - baselineBudget);
+  // Sized by the caller from real evidence (auto-remediation.js), so it is
+  // empty on a day with nothing forward-looking to do. Reserved because the
+  // analytics backlog is effectively unbounded — 236 eligible expand-content
+  // items alone — and open merit would hand every slot to routine remediation
+  // and never ship the preventive work the lane exists for.
+  //
+  // `analystBudget` is passed explicitly rather than inferred as
+  // `remaining - baselineBudget`: once both lanes are clamped by a combined
+  // ceiling that difference stops equalling the lane, and the reservation
+  // would silently shrink on exactly the busiest days.
+  const analystLaneSize = analystBudget ?? Math.max(0, remaining - baselineBudget);
+  let analystPlaced = 0;
   if (analystLaneSize > 0) {
-    let placed = 0;
     for (const item of pool) {
-      if (placed >= analystLaneSize) break;
+      if (analystPlaced >= analystLaneSize || selected.length >= remaining) break;
       if (takenIds.has(item.rec.id) || !item.declining) continue;
-      take(item);
-      placed++;
+      take(item, 'analyst');
+      analystPlaced++;
     }
   }
+  // Routine work may not spend what the analyst lane was given. Everything
+  // below fills only the analytics half, so an unfilled analyst lane shrinks
+  // the day rather than leaking its slots to the backlog — that is what keeps
+  // "up to 20, not required to be filled" honest.
+  const analyticsCeiling = Math.max(0, remaining - analystLaneSize);
+  const analyticsLimit = analyticsCeiling + analystPlaced;
 
   // Pass 0 — reserve floor slots WITHOUT letting them starve higher-tier
   // work on a short run. The real backlog this was built against has ~480
@@ -115,7 +127,7 @@ export function buildDailyQueue({
   // reservation untouched; on a 1-slot day it correctly reserves nothing,
   // fixing the case that motivated this pass in the first place.
   const totalFloorWanted = Object.values(TIER_FLOOR).reduce((sum, f) => sum + f, 0);
-  let floorBudgetLeft = Math.min(Math.floor(remaining / 2), totalFloorWanted);
+  let floorBudgetLeft = Math.min(Math.floor(analyticsCeiling / 2), totalFloorWanted);
 
   // Pass 1 — tier floors, best-first within each tier, bounded by the
   // reservation computed above rather than the raw floor number.
@@ -124,7 +136,7 @@ export function buildDailyQueue({
     let placed = 0;
     const cap = Math.min(floor, floorBudgetLeft);
     for (const item of pool) {
-      if (placed >= cap || selected.length >= remaining) break;
+      if (placed >= cap || selected.length >= analyticsLimit) break;
       if (takenIds.has(item.rec.id) || item.tier !== Number(tier)) continue;
       take(item);
       placed++;
@@ -133,18 +145,18 @@ export function buildDailyQueue({
   }
 
   // Pass 2 — merit, subject to the per-generator share cap.
-  const generatorCap = Math.max(1, Math.floor(remaining * GENERATOR_SHARE_CAP));
+  const generatorCap = Math.max(1, Math.floor(analyticsCeiling * GENERATOR_SHARE_CAP));
   for (const item of pool) {
-    if (selected.length >= remaining) break;
+    if (selected.length >= analyticsLimit) break;
     if (takenIds.has(item.rec.id)) continue;
     if ((perGenerator.get(item.rec.recommendation_type) || 0) >= generatorCap) continue;
     take(item);
   }
 
-  // Pass 3 — fill any capacity the cap left behind. "Attempt up to 60" must
-  // mean 60 whenever 60 eligible items exist.
+  // Pass 3 — fill any capacity the cap left behind. "Up to N" must mean N
+  // whenever N eligible items exist.
   for (const item of pool) {
-    if (selected.length >= remaining) break;
+    if (selected.length >= analyticsLimit) break;
     if (takenIds.has(item.rec.id)) continue;
     take(item);
   }
@@ -200,6 +212,9 @@ function buildReport({ scored, queue, deferred, remaining, generatorCap, groupNo
     skipped: deferred.length,
     budget: remaining,
     generatorCap,
+    // Lane composition is reported so a run row answers "how much of today
+    // was prevention?" without re-deriving it from the queue.
+    byLane: distribution(queue, (i) => i.lane || 'analytics'),
     byTier: distribution(queue, (i) => i.tierLabel),
     byGenerator: distribution(queue, (i) => i.rec.recommendation_type),
     eligibleByTier: distribution(scored, (i) => TIER_LABEL[i.tier] || 'unknown'),

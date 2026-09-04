@@ -92,27 +92,36 @@ const CONSECUTIVE_REFUSAL_LIMIT = 8;
 // batch, is never subject to it — same reasoning as pacing above, a human
 // asking for a batch isn't the runaway this ceiling exists to catch).
 
-// The day is TWO budgets, not one.
+// TWO LANES, ONE HARD CEILING.
 //
-// BASELINE_DAILY_LIMIT (60) is the routine analytics backlog — the findings
-// the agents detect on a normal day. SURGE_EXTRA (20) is the ANALYST LANE on
-// top of it, and it opens only when there is preventive work to do: pages the
-// analyst found losing ground (decline-detection.js), whose fixes need to ship
-// THIS week so the impressions don't go next week. A day with nothing
-// declining is a 60 day; a day with declining pages is a 60 + up-to-20 day,
-// and daily-queue.js reserves that headroom so routine backlog can't eat it.
+// The day is not one budget. It is an ANALYTICS lane for routine remediation
+// findings and an ANALYST lane for forward-looking growth and prevention, and
+// they are counted separately so each stays observable on its own.
 //
-// This is why the surge is measured in DECLINING items rather than raw backlog
-// size. Backlog is always deep here (236 eligible expand-content items alone),
-// so a size-based trigger would surge every single day and the extra 20 slots
-// would just be 20 more expansion items — extending the day without changing
-// what it does.
+//   Analytics: targets ANALYTICS_TARGET (60) and may stretch to
+//              ANALYTICS_MAX (100) when enough valid, high-quality work
+//              exists. When fewer than the target exist, the day simply
+//              ships every valid finding there is — the target is an
+//              intention, never a quota, and nothing is ever manufactured or
+//              quality-relaxed to reach it.
+//   Analyst:   up to ANALYST_MAX (20), and NOT expected to fill. Only items
+//              that clear the evidence bar take these slots; an empty analyst
+//              lane on a quiet day is the system working, not underperforming.
 //
-// Env-overridable because the ceiling is really GitHub API headroom, which is
-// per-installation: every shipped item costs several API calls, and rate
-// limiting is already the largest single abandon cause in the live table.
-const BASELINE_DAILY_LIMIT = Number(process.env.AUTO_REMEDIATION_BASELINE_DAILY_LIMIT) || 60;
-const SURGE_EXTRA = Number(process.env.AUTO_REMEDIATION_SURGE_EXTRA) || 20;
+// Both lanes draw from what is genuinely eligible, so the real composition
+// follows the work: 100+20, 80+20, 40+20, 10+15, or 0+12 are all valid days.
+// COMBINED_MAX (120) is the only hard stop.
+//
+// Why a hard stop at all: every shipped item costs several GitHub API calls
+// against a 5,000/hour token budget that is SHARED across sites, and rate
+// limiting is already the single largest abandon cause in the live drafts
+// table. github/client.js reads the real headers and auto-remediation stops
+// the run when the remaining budget falls under RATE_LIMIT_RESERVE, so the
+// ceiling is a second belt on top of a working brace — not the only defence.
+const ANALYTICS_TARGET = Number(process.env.AUTO_REMEDIATION_ANALYTICS_TARGET) || 60;
+const ANALYTICS_MAX = Number(process.env.AUTO_REMEDIATION_ANALYTICS_MAX) || 100;
+const ANALYST_MAX = Number(process.env.AUTO_REMEDIATION_ANALYST_MAX) || 20;
+const COMBINED_MAX = Number(process.env.AUTO_REMEDIATION_COMBINED_MAX) || 120;
 
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
@@ -251,12 +260,39 @@ export async function autoRemediateSafeRecommendations(siteId, {
     console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
   }
 
-  const baselineDailyLimit = site.auto_remediation_daily_limit ?? BASELINE_DAILY_LIMIT;
-  const analystLane = Math.min(SURGE_EXTRA, decliningCandidates.length);
-  const dailyLimit = baselineDailyLimit + analystLane;
-  if (analystLane > 0) {
-    const lost = decliningCandidates.reduce((s, r) => s + (declines.get(r.params?.page || r.page)?.impressionsLost || 0), 0);
-    console.log(`[auto-remediation] site ${siteId}: ${declines.size} page(s) losing ground, ${decliningCandidates.length} with shippable fixes (${lost} impressions lost) — opening a ${analystLane}-slot analyst lane on top of the ${baselineDailyLimit} baseline (budget ${dailyLimit}).`);
+  // Lane sizing. `site.auto_remediation_daily_limit` is honoured as an
+  // explicit per-site override of the Analytics target when set, so an
+  // operator can still hold one tenant lower without touching this logic.
+  const analyticsTarget = site.auto_remediation_daily_limit ?? ANALYTICS_TARGET;
+  const analyticsMax = Math.max(analyticsTarget, ANALYTICS_MAX);
+
+  // The analyst lane never exceeds the evidence available for it. Sized from
+  // real candidates, so it is empty on a day with nothing forward-looking to
+  // do rather than being padded from the analytics backlog.
+  const analystLane = Math.min(ANALYST_MAX, decliningCandidates.length);
+
+  // Analytics stretches toward its max only on genuinely eligible work — the
+  // count here is post-pacing, post-convergence, post-refusal, so "enough
+  // valid work" means exactly that.
+  const analyticsCandidates = candidates.length - decliningCandidates.length;
+  const analyticsLane = Math.min(analyticsMax, Math.max(0, analyticsCandidates));
+
+  // COMBINED_MAX is applied to the TOTAL, and the analyst lane is protected
+  // when the two together would breach it: analytics backlog is effectively
+  // unbounded (236 eligible expand-content items alone), so letting it absorb
+  // the ceiling first would silently close the analyst lane on exactly the
+  // busy days prevention matters most.
+  const analystBudget = Math.min(analystLane, COMBINED_MAX);
+  const analyticsBudget = Math.min(analyticsLane, COMBINED_MAX - analystBudget);
+  const dailyLimit = analyticsBudget + analystBudget;
+
+  console.log(
+    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget}/${analyticsMax} `
+    + `(target ${analyticsTarget}, ${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
+    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${COMBINED_MAX}.`
+  );
+  if (analyticsCandidates < analyticsTarget) {
+    console.log(`[auto-remediation] site ${siteId}: only ${analyticsCandidates} valid analytics finding(s) available — shipping all of them rather than padding to the ${analyticsTarget} target.`);
   }
   const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
@@ -294,13 +330,13 @@ export async function autoRemediateSafeRecommendations(siteId, {
       return new Map();
     });
 
-  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, baselineBudget: Math.max(0, baselineDailyLimit - spentToday) });
+  const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
   for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
   console.log(
     `[auto-remediation] site ${siteId}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
-    + `By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
+    + `By lane: ${JSON.stringify(selection.byLane)}. By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
   );
   for (const top of selection.topSelected.slice(0, 5)) {
     console.log(`[auto-remediation] site ${siteId}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
