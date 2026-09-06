@@ -60,6 +60,10 @@ router.get('/internal/clients', async (req, res, next) => {
       connected: !!(s.gsc_property && s.ga4_property_id),
       baselined: !!s.onboarded_at,
       repoConnected: !!(s.repo_owner && s.repo_name),
+      repoOwner: s.repo_owner,
+      repoName: s.repo_name,
+      githubPatEnvVar: s.github_pat_env_var,
+      githubAppInstallationId: s.github_app_installation_id,
       onboardedAt: s.onboarded_at, createdAt: s.created_at,
       oauthMaxPermissionLevel: s.oauth_max_permission_level,
       visibleFaqCap: s.visible_faq_cap,
@@ -381,8 +385,24 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     const existing = await getSiteById(siteId);
     if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
 
-    const { repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap } = req.body || {};
+    const { repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId, urlFileMap } = req.body || {};
     if (!repoOwner || !repoName) return res.status(400).json({ error: 'repoOwner and repoName are required.' });
+
+    // Mirrors connect-repo.js's own validation: an integer id, or null/'none'
+    // to move the site back onto its PAT. Left undefined, the existing value
+    // (often auto-populated by the GitHub App installation webhook, see
+    // webhooks.js) is untouched.
+    let parsedGithubAppInstallationId;
+    if (githubAppInstallationId === undefined) {
+      parsedGithubAppInstallationId = undefined;
+    } else if (githubAppInstallationId === null || githubAppInstallationId === '' || githubAppInstallationId === 'none') {
+      parsedGithubAppInstallationId = null;
+    } else {
+      parsedGithubAppInstallationId = Number(githubAppInstallationId);
+      if (!Number.isInteger(parsedGithubAppInstallationId)) {
+        return res.status(400).json({ error: 'githubAppInstallationId must be an integer (or null/"none" to clear it).' });
+      }
+    }
 
     // A real HTTP surface (not a trusted local CLI operator) — validate the
     // hand-authored mapping actually parses before it's saved, same
@@ -403,7 +423,7 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       }
     }
 
-    let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, urlFileMap: parsedUrlFileMap });
+    let site = await updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUrl, repoDefaultBranch, techStack, githubPatEnvVar, githubAppInstallationId: parsedGithubAppInstallationId, urlFileMap: parsedUrlFileMap });
 
     // Full onboarding autonomy: a genuinely first-time repo connection
     // automatically grants the same consent the platform_admin-only
@@ -439,12 +459,13 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       targetId: String(siteId),
       tenantSiteId: siteId,
       tenantName: site.name,
-      metadata: { repoOwner, repoName, repoDefaultBranch: repoDefaultBranch || null, techStack: techStack || null },
+      metadata: { repoOwner, repoName, repoDefaultBranch: repoDefaultBranch || null, techStack: techStack || null, githubAppInstallationId: site.github_app_installation_id },
       success: true,
     });
 
     res.json({
       id: site.id, repoOwner: site.repo_owner, repoName: site.repo_name,
+      githubAppInstallationId: site.github_app_installation_id,
       autoRemediationEnabled: site.auto_remediation_enabled,
       autoRemediationDailyLimit: site.auto_remediation_daily_limit,
     });

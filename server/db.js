@@ -148,6 +148,21 @@ export async function updateSiteRepoConfig({ siteId, repoOwner, repoName, repoUr
   return rows[0];
 }
 
+// Uninstall-time cleanup for the GitHub App installation webhook
+// (server/routes/webhooks.js) — moves every site still pointing at a
+// deleted installation id back onto its PAT, without needing the payload's
+// `repositories` list (absent for "all repositories" installs; see the
+// webhook handler's own comment). Matches by installation id rather than
+// by repo, so it's correct even if repo_owner/repo_name were renamed after
+// the App was installed.
+export async function clearGithubAppInstallation(installationId) {
+  const { rows } = await query(
+    'UPDATE sites SET github_app_installation_id = NULL WHERE github_app_installation_id = $1 RETURNING *',
+    [installationId]
+  );
+  return rows;
+}
+
 // Persists the outcome of an audit-url-file-map.js run (migration 088), so
 // "has this site's Action Center config actually been verified clean" is a
 // queryable fact — read by integrations/github.js's Integration Health check
