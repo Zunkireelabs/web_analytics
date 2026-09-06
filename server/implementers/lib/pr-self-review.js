@@ -46,32 +46,87 @@ export const FAILURE_CATEGORY = {
 //      own work; it may not start editing a client's codebase because a
 //      check went red.
 //   2. The correction is deterministic — recomputable from the draft's own
-//      content by an existing validator, with no judgment call.
+//      content, with no judgment call about the client's intent.
 //   3. It is in scope — the fix touches only the files this draft already
 //      wrote.
+//   4. It is EXECUTABLE HERE — this app can actually perform it without
+//      running the client repository's own tooling.
 //
-// Anything failing any of the three is not category A, however obvious the
-// fix might look. That is the whole boundary, and it is deliberately narrow:
-// an agent pushing unreviewed commits into a client's repository on a guess
-// is a worse failure than a red check waiting for a person.
-const SAFE_TO_FIX_CHECKS = new Set([CLIENT_BUILD_CHECK_NAME]);
+// Anything failing any of the four is not category A, however obvious the fix
+// might look. The boundary is deliberately narrow: an agent pushing
+// unreviewed commits into a client's repository on a guess is a worse failure
+// than a red check waiting for a person.
+//
+// WHY THIS SET IS CURRENTLY EMPTY — this is a real architectural constraint,
+// not an omission, and it is worth reading before adding to it.
+//
+// Formatter/linter autofix (prettier --write, eslint --fix) fails requirement
+// 4. This app never holds the client's repository: no working tree, no
+// node_modules, no plugins. Running eslint --fix means loading their eslint
+// config, which require()s arbitrary code from their repo — the exact
+// remote-code-execution surface this system deliberately refuses, and the
+// reason the rendering-validation build runs in GitHub Actions inside the
+// client's own sandbox rather than on this app's infrastructure (see the
+// action-center-onboarding skill's build-location decision). Prettier without
+// their config would reformat to OUR defaults and fight their setup, which is
+// a new defect rather than a fix.
+//
+// Raw-Markdown rendering failures fail requirement 2. checkRenderCapability
+// already fails closed BEFORE a PR exists — a PR is never opened for a file
+// whose target this app cannot positively vouch for as markdown-safe. So
+// rendering-validation failing on raw Markdown in the client's CI does not
+// mean the generated content is malformed; it means the site's recorded
+// renderCapabilities is wrong (a human declared an extension markdown-capable
+// when that target's build does not run a markdown pass). Rewriting the
+// content would paper over an incorrect capability declaration that will
+// mis-render every future page for that site. The correct fix is to that
+// metadata, and it needs a person who knows the client's build.
+//
+// The honest place to execute a formatter autofix is the client's own
+// GitHub Actions sandbox — the same venue rendering-validation already uses.
+// That is a real option, but it is a new workflow in someone else's repo, so
+// it is a deliberate choice to make rather than something to infer from a red
+// check.
+const SAFE_TO_FIX_CHECKS = new Set([]);
 
-// Failures within the safe-to-fix checks that are still NOT safe, because the
-// defect is not in our generated content. rendering-validation runs two
-// independent steps (see rendering-validation-templates/workflow.yml): the
-// raw-Markdown/unresolved-template scan, which examines what we wrote, and
-// check-family-siblings, which detects a change leaking into sibling pages of
-// a shared data-driven template family. The second is a blast-radius problem
-// in the client's own template structure — regenerating our content does not
-// address it, and guessing at it would mean editing shared templates.
-const UNSAFE_WITHIN_SAFE_CHECK = [
-  { pattern: /sibling|family/i, reason: 'the change affected sibling pages of a shared template family — a blast-radius problem in the client\'s templates, not a defect in this draft\'s own generated content' },
+// Checks whose failure is a formatting/lint problem. Recognised as its own
+// category so the reason recorded on the draft names the real situation —
+// "this is deterministically fixable, but not from here" — rather than
+// disappearing into a generic unsafe bucket. See SAFE_TO_FIX_CHECKS above.
+const FORMATTING_CHECK_PATTERN = /\b(lint|eslint|prettier|format|formatting|style)\b/i;
+
+// The rendering-validation check's two independent steps fail for different
+// reasons and neither is a content defect this app can patch. Named
+// separately so the recorded reason points at the actual cause.
+const RENDERING_FAILURE_DIAGNOSES = [
+  {
+    pattern: /sibling|family/i,
+    diagnosis: 'the change reached sibling pages of a shared, data-driven template family. That is a blast-radius property of the client\'s own templates, not a defect in this draft\'s content — correcting it means changing a shared template, which is outside what this draft was authorised to touch.',
+  },
+  {
+    pattern: /markdown|unresolved|\{\{|\{%/i,
+    diagnosis: 'the built page contains raw Markdown or unresolved template syntax. Because checkRenderCapability already fails closed before a PR is opened, this does not indicate malformed generated content — it indicates this site\'s recorded url_file_map.renderCapabilities claims an extension renders Markdown when that target\'s build does not. Rewriting the page would hide an incorrect capability declaration that will mis-render every future page for this site; the fix belongs in that metadata.',
+  },
 ];
 
 // GitHub-side conditions that are the infrastructure failing rather than the
 // change being wrong. Retried under the existing policy; never escalated as
 // if the content were at fault.
 const TRANSIENT_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'stale']);
+
+// A PR whose branch cannot merge cleanly. Explicitly never auto-fixed:
+// resolving a conflict means choosing between two people's intended changes,
+// which is a judgment call, and the batch branch can carry several drafts
+// (github-ops.js's openPrForBranch) so a bad resolution would corrupt work
+// this draft does not own.
+export function classifyMergeability(mergeableState) {
+  if (!mergeableState || ['clean', 'unstable', 'has_hooks', 'unknown'].includes(mergeableState)) return null;
+  return {
+    category: FAILURE_CATEGORY.UNSAFE,
+    check: 'merge-state',
+    reason: `GitHub reports this PR's branch as "${mergeableState}" — it cannot merge cleanly. Resolving that means choosing between two people's intended changes, and this branch may carry several drafts batched together, so an automatic resolution could corrupt work this draft does not own.`,
+  };
+}
 
 export const MAX_AGENT_FIX_ATTEMPTS = 2;
 
@@ -88,41 +143,61 @@ export function classifyCheckFailure(run, { draftGeneratedFiles = [] } = {}) {
     };
   }
 
-  if (!SAFE_TO_FIX_CHECKS.has(name)) {
-    // Everything the agent didn't author the inputs to: the client's unit
-    // tests, integration tests, type checks, lint, their build. A red one is
-    // real information and is recorded in full, but repairing it means
-    // changing the client's code on a guess.
-    return {
-      category: FAILURE_CATEGORY.UNSAFE,
-      check: name,
-      reason: `"${name}" is a check whose inputs this draft does not own. Its failure is recorded in full, but correcting it would mean editing the client's own code or configuration on an inference — outside what this draft was authorised to change.`,
-    };
-  }
-
   const message = `${run?.output?.title || ''} ${run?.output?.summary || ''}`;
-  for (const { pattern, reason } of UNSAFE_WITHIN_SAFE_CHECK) {
-    if (pattern.test(message)) {
-      return { category: FAILURE_CATEGORY.UNSAFE, check: name, reason: `"${name}" failed, but ${reason}.` };
-    }
-  }
 
-  if (!draftGeneratedFiles.length) {
-    // Without knowing which files this draft wrote, "in scope" cannot be
-    // established, so requirement 3 fails. Refusing here is the same
-    // discipline url-file-map.js applies to an unmapped page: an honest stop
-    // rather than a guess.
+  // rendering-validation — the one check whose inputs this draft DOES own.
+  // Still not auto-fixed, but the recorded reason names which of its two
+  // steps failed and what actually needs changing, so the human it escalates
+  // to starts from a diagnosis rather than a red X.
+  if (name === CLIENT_BUILD_CHECK_NAME) {
+    for (const { pattern, diagnosis } of RENDERING_FAILURE_DIAGNOSES) {
+      if (pattern.test(message)) {
+        return { category: FAILURE_CATEGORY.UNSAFE, check: name, reason: `"${name}" failed: ${diagnosis}` };
+      }
+    }
+    if (!draftGeneratedFiles.length) {
+      // Without knowing which files this draft wrote, scope cannot be
+      // established. Same discipline url-file-map.js applies to an unmapped
+      // page: an honest stop rather than a guess.
+      return {
+        category: FAILURE_CATEGORY.ITEM_DEFECT,
+        check: name,
+        reason: `"${name}" failed and this draft has no recorded generated files, so the scope of any corrective edit cannot be established. Treated as a real defect rather than guessed at.`,
+      };
+    }
     return {
       category: FAILURE_CATEGORY.ITEM_DEFECT,
       check: name,
-      reason: `"${name}" failed and this draft has no recorded generated files, so the scope of a corrective edit cannot be established. Treated as a real defect rather than guessed at.`,
+      reason: `"${name}" failed on this draft's generated files (${draftGeneratedFiles.join(', ')}) for a reason its output does not identify. Treated as a real defect — an unrecognised failure is real until shown otherwise.`,
     };
   }
 
+  // Formatting/lint. Deterministically fixable in principle, and explicitly
+  // NOT fixable from here — see SAFE_TO_FIX_CHECKS. Named as its own case so
+  // the reason says which it is.
+  if (FORMATTING_CHECK_PATTERN.test(name)) {
+    return {
+      category: FAILURE_CATEGORY.UNSAFE,
+      check: name,
+      reason: `"${name}" is a formatting/lint check. Its fix is deterministic in principle, but running it requires the client repository's own tooling and configuration (their eslint config resolves plugin code from their repo), which this app deliberately never executes — the same reason the build check runs in their GitHub Actions sandbox rather than here. Escalated rather than approximated with different formatting settings.`,
+    };
+  }
+
+  if (SAFE_TO_FIX_CHECKS.has(name)) {
+    return {
+      category: FAILURE_CATEGORY.SAFE_TO_FIX,
+      check: name,
+      reason: `"${name}" failed on content this draft generated (${draftGeneratedFiles.join(', ')}), and the correction is recomputable here from the draft's own content.`,
+    };
+  }
+
+  // Everything else: the client's unit tests, integration tests, type checks,
+  // their build. Real information, recorded in full — but repairing it means
+  // changing the client's code on an inference.
   return {
-    category: FAILURE_CATEGORY.SAFE_TO_FIX,
+    category: FAILURE_CATEGORY.UNSAFE,
     check: name,
-    reason: `"${name}" failed on content this draft generated (${draftGeneratedFiles.join(', ')}), and the correction is recomputable from the draft's own content by the same validator that rejected it.`,
+    reason: `"${name}" is a check whose inputs this draft does not own. Its failure is recorded in full, but correcting it would mean editing the client's own code or configuration on an inference — outside what this draft was authorised to change.`,
   };
 }
 
@@ -131,7 +206,7 @@ export function classifyCheckFailure(run, { draftGeneratedFiles = [] } = {}) {
 // rendering-validation was ever looked at, so a failing unit test, type error
 // or build break on the same PR was invisible to this app and the draft
 // looked clean.
-export async function reviewPrChecks(site, ref, draft, { getCheckRuns = getCheckRunsForRef } = {}) {
+export async function reviewPrChecks(site, ref, draft, { getCheckRuns = getCheckRunsForRef, mergeableState = null } = {}) {
   let runs;
   try {
     runs = await getCheckRuns(site, ref);
@@ -153,6 +228,12 @@ export async function reviewPrChecks(site, ref, draft, { getCheckRuns = getCheck
 
   const draftGeneratedFiles = generatedFilePaths(draft);
   const failures = failed.map((run) => ({ ...classifyCheckFailure(run, { draftGeneratedFiles }), conclusion: run.conclusion }));
+
+  // A branch that cannot merge is a blocking problem even when every check is
+  // green, so it joins the failure list rather than being reported separately.
+  // Before this, mergeable_state was recorded for display and decided nothing.
+  const mergeConflict = classifyMergeability(mergeableState);
+  if (mergeConflict) failures.push({ ...mergeConflict, conclusion: mergeableState });
 
   if (pending.length) {
     // Still running. Not ready, not failed — say so rather than resolving it

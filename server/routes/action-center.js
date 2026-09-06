@@ -2042,7 +2042,7 @@ export async function checkDraftPrStatus(siteId, draftId) {
   // so the review inherits all three triggers and adds no new poller. The
   // reconciler is forbidden from calling GitHub and is deliberately untouched.
   const updated = await recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
-  await runAgentPrReview(site, updated || draft);
+  await runAgentPrReview(site, updated || draft, { mergeableState: pr.mergeableState });
   return getDraft(siteId, draft.id);
 }
 
@@ -2052,12 +2052,12 @@ export async function checkDraftPrStatus(siteId, draftId) {
 // PR-status reconciliation above, which is what actually finalizes a merged
 // draft. Any error here leaves the draft needing a human rather than looking
 // clean.
-async function runAgentPrReview(site, draft) {
+async function runAgentPrReview(site, draft, { mergeableState = null } = {}) {
   const siteId = site.id;
   try {
     await recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.REVIEWING, { startedAt: new Date().toISOString() });
 
-    const review = await reviewPrChecks(site, draft.branch_name, draft);
+    const review = await reviewPrChecks(site, draft.branch_name, draft, { mergeableState });
 
     if (review.state !== AGENT_REVIEW_STATE.FIXING) {
       return recordAgentReviewState(siteId, draft.id, review.state, {
@@ -2085,18 +2085,20 @@ async function runAgentPrReview(site, draft) {
   }
 }
 
-// Re-runs this app's own rendering validation against the draft's real
-// generated content. If the content the draft wrote no longer passes, the
-// honest conclusion is that regenerating it is not something this function can
-// do deterministically — a generator produced it, and re-running a generator
-// is a new draft, not a patch. So this reports precisely what failed and hands
-// over, rather than inventing a repair.
+// The category-A execution path.
 //
-// This is deliberately conservative, and deliberately does not grow by
-// guesswork: a category-A failure the validator cannot explain becomes
-// NEEDS_HUMAN_REVIEW with the validator's own message attached. Widening what
-// the agent will repair on its own means adding a real, deterministic repairer
-// here, not loosening this.
+// UNREACHABLE TODAY, and deliberately kept rather than deleted: pr-self-review.js's
+// SAFE_TO_FIX_CHECKS is currently empty, because both candidate autofixes
+// (formatter/linter autofix, and rewriting content behind a rendering-validation
+// failure) require either running the client repository's own tooling — which
+// this app never does — or papering over incorrect renderCapabilities metadata.
+// See that module's comment for the full reasoning.
+//
+// This function is the seam where a genuinely executable repair would attach.
+// It re-runs this app's OWN validator (the same one that gates every push, not
+// a second parallel notion of valid) and reports precisely what it found. It
+// never invents a repair, so if it is ever reached before a real repairer
+// exists, the outcome is still an honest escalation rather than a guess.
 async function attemptSafeSelfRepair(site, draft, review) {
   const files = generatedFilePaths(draft);
   if (!files.length) {
