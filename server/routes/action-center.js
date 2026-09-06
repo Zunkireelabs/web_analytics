@@ -30,7 +30,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
@@ -38,6 +38,7 @@ import { resolveOrCreateComponentTemplate, componentTemplateVerification, compon
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
@@ -1854,6 +1855,67 @@ export async function openDraftPr(siteId, draftId) {
 router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
   try {
     res.json(await openDraftPr(req.siteId, req.params.id));
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
+});
+
+// awaiting_publish -> implemented, for the CMS path. THE HUMAN GATE.
+//
+// This is the only route in the app that publishes CMS content, and nothing
+// scheduled can reach it: auto-remediation, the Monday keyword ship cycle and
+// the reconciler have no path here, and publishSanityDraft is deliberately not
+// part of the adapter contract adapters/registry.js validates, so it isn't
+// reachable through getAdapter() either. It corresponds to a person clicking
+// "Merge pull request" on GitHub — the equivalent act, on the equivalent
+// surface, performed by the same equivalent human.
+//
+// Accepts a LIST of draft ids rather than one, because of the rebuild. The
+// site is a static export: a published Sanity document is invisible until the
+// site rebuilds, and a rebuild is a full site build. Publishing five drafts
+// one at a time would queue five builds of the same site to publish changes
+// that could have gone out in one. So every draft is published first, and
+// exactly one rebuild is triggered afterwards — and only if at least one
+// publish actually succeeded.
+//
+// A failed publish does not stop the others, and never reports success: each
+// draft's real outcome is returned individually, and a draft whose publish
+// failed stays at awaiting_publish so it can be retried.
+router.post('/action-center/drafts/publish-cms', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.draftIds) ? req.body.draftIds : [];
+    if (!ids.length) return res.status(400).json({ error: 'draftIds must be a non-empty array' });
+
+    const site = await getSiteById(req.siteId);
+    const { publishSanityDraft } = await import('../implementers/adapters/sanity-document.js');
+
+    const results = [];
+    for (const draftId of ids) {
+      // getDraft is site-scoped, so an id belonging to another tenant simply
+      // isn't found here — a draft id from Client B can never be published
+      // under Client A's session.
+      const draft = await getDraft(req.siteId, draftId);
+      if (!draft) { results.push({ draftId, ok: false, error: 'Draft not found' }); continue; }
+      if (draft.status !== 'awaiting_publish') {
+        results.push({ draftId, ok: false, error: `Draft is ${draft.status}, not awaiting_publish` });
+        continue;
+      }
+      try {
+        const outcome = await publishSanityDraft(site, draft);
+        if (!outcome.ok) { results.push({ draftId, ok: false, error: outcome.error, reason: outcome.reason }); continue; }
+        const updated = await markCmsDraftPublished(req.siteId, draft.id);
+        results.push({ draftId, ok: true, publishedId: outcome.cmsPublishedId, status: updated?.status ?? null });
+      } catch (err) {
+        // One document's failure must not abandon the rest of the batch.
+        results.push({ draftId, ok: false, error: err.message });
+      }
+    }
+
+    const publishedCount = results.filter((r) => r.ok).length;
+    const rebuild = publishedCount > 0 ? await triggerCmsRebuild(site) : { triggered: false, reason: 'nothing-published' };
+
+    res.json({ results, published: publishedCount, failed: results.length - publishedCount, rebuild });
   } catch (e) {
     if (e.status) return sendHttpError(res, e);
     next(e);
