@@ -189,6 +189,25 @@ export async function run({ siteId, start, end, pageCache, params }) {
     },
   });
 
+  // Deliberately NOT folded into faq-schema-mismatch above: that finding is
+  // "the schema drifted from the page" and its repair resyncs one against the
+  // other. This is "the schema describes content that does not exist," which
+  // is a Google FAQ rich-result policy violation rather than a drift, and has
+  // no honest automatic fix — resyncing to zero visible questions would mean
+  // deleting the schema, while writing the missing FAQ is a content decision.
+  // So it reports and leaves the call to a human, same as every other finding
+  // here whose only fixes would require inventing content.
+  const faqSchemaWithoutVisibleFinding = aggregateSystemicFinding({
+    id: 'content-integrity:faq-schema-without-visible',
+    affected: reachable.filter((r) => r.analysis.faqSchemaWithoutVisible),
+    checkedCount: reachable.length,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages carry FAQPage structured data but show no FAQ content at all. Google requires FAQ markup to describe content visible on the page — schema with nothing behind it risks a manual action or loss of rich results, and tells AI crawlers the page answers questions a visitor can't actually find.`,
+    extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, schemaCount: r.analysis.faqMainEntityCount, visibleCount: 0 })) }),
+    recommendedAction: null,
+  });
+
   const duplicateFaqFinding = aggregateSystemicFinding({
     id: 'content-integrity:duplicate-visible-faq',
     affected: reachable.filter((r) => r.analysis.duplicateVisibleFaqSections),
@@ -222,7 +241,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     expectedImpact: { label: 'Medium', basis: 'computed', value: inconsistentFaqQuestions.length },
   }) : null;
 
-  const findings = [brokenTableFinding, rawTextTableFinding, faqMismatchFinding, duplicateFaqFinding, faqCrossPageFinding].filter(Boolean);
+  const findings = [brokenTableFinding, rawTextTableFinding, faqMismatchFinding, faqSchemaWithoutVisibleFinding, duplicateFaqFinding, faqCrossPageFinding].filter(Boolean);
 
   const facts = {
     rangeStart: start, rangeEnd: end,

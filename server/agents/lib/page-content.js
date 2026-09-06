@@ -338,6 +338,20 @@ export function analyzePage(html, pageUrl) {
   const faqCountMismatch = hasFaqSchema && faqMainEntityCount > 0 && hasFaqAccordion
     && faqMainEntityCount !== faqVisibleQuestionCount;
 
+  // The case faqCountMismatch structurally cannot catch, and the worst one:
+  // an FAQPage schema on a page with NO visible FAQ whatsoever. The check
+  // above requires hasFaqAccordion (>=2 visible questions) so it never infers
+  // a mismatch from one side alone — correct for "6 vs 5", but it means "5 vs
+  // 0" is silently exempt, and that is the version Google actually penalises.
+  // FAQ rich results require the marked-up content to be visible on the page,
+  // so schema with nothing behind it is a policy violation, not a drift.
+  //
+  // Zero visible questions is not an inference from one side: it is a
+  // complete, confident reading of both (schema says N, page shows none).
+  // Real instance: /resources/ai-search-playbook/ on site 1, 5 schema
+  // questions and no FAQ on the page at all.
+  const faqSchemaWithoutVisible = hasFaqSchema && faqMainEntityCount > 0 && faqVisibleQuestionCount === 0;
+
   // Distinct FAQ-marked containers (id/class containing "faq") that each
   // independently qualify as a real accordion (2+ visible questions), kept
   // WITH their real question text (not just a count) so a caller can tell a
@@ -814,6 +828,7 @@ export function analyzePage(html, pageUrl) {
     faqSchemaRaw, // transient — exact raw <script> text of the FAQPage block, for an exact-match schema rewrite
     faqSchemaSimple, // true only when that script tag carries FAQPage alone (safe to replace whole-tag)
     faqCountMismatch,
+    faqSchemaWithoutVisible,
     duplicateVisibleFaqSections,
     duplicateFaqRemovalHtml, // transient — exact html of the confirmed-duplicate (later) FAQ container, null unless overlap is confident
   };
