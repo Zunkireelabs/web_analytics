@@ -175,15 +175,22 @@ export async function approveDraft(siteId, id, approvedBy) {
 // shared, and what editing it would affect. null for anything the caller
 // couldn't or didn't resolve (e.g. site-level generators with no single
 // page), same as appliedFiles above.
-export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null, targetProvenance = null }) {
+// cmsDocumentId/cmsReviewUrl are the CMS path's counterpart to branchName: for
+// a Sanity-routed draft there is no branch, and the "where the staged change
+// lives" identifier is a draft document id. Recorded here rather than only at
+// awaiting_publish so mergeToStage has it — the same reason branch_name is
+// written at this step and not at pr_opened. NULL for every GitHub-path draft.
+export async function markDraftBranchPushed(siteId, id, { branchName, implementerId, renderMode = null, appliedFiles = null, targetProvenance = null, cmsDocumentId = null, cmsReviewUrl = null }) {
   const { rows } = await query(
     `UPDATE drafts SET status = 'branch_pushed', branch_name = $3, implementer_id = $4, render_mode = $5,
        apply_error = NULL, render_mode_confirm = NULL, updated_at = now(),
        content = CASE WHEN $6::jsonb IS NOT NULL THEN content || jsonb_build_object('appliedFiles', $6::jsonb) ELSE content END,
-       target_provenance = COALESCE($7::jsonb, target_provenance)
+       target_provenance = COALESCE($7::jsonb, target_provenance),
+       cms_document_id = COALESCE($8, cms_document_id),
+       cms_review_url = COALESCE($9, cms_review_url)
      WHERE site_id = $1 AND id = $2 AND status = 'approved'
      RETURNING *`,
-    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null, targetProvenance ? JSON.stringify(targetProvenance) : null]
+    [siteId, id, branchName, implementerId, renderMode, appliedFiles ? JSON.stringify(appliedFiles) : null, targetProvenance ? JSON.stringify(targetProvenance) : null, cmsDocumentId, cmsReviewUrl]
   );
   return rows[0] || null;
 }
@@ -225,6 +232,71 @@ export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackS
      WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
      RETURNING *`,
     [siteId, id, prNumber, prUrl, rollbackSnapshot ? JSON.stringify(rollbackSnapshot) : null]
+  );
+  return rows[0] || null;
+}
+
+// Records the agent's own review of the PR it opened (migration 146).
+//
+// Does NOT touch drafts.status — deliberately. status is the change's journey
+// to being live and stays 'pr_opened' throughout; this column is the separate
+// question of whether the agent has finished checking its own work. Keeping
+// them apart is what lets listDraftsAwaitingPrCheck and markDraftImplemented
+// keep working unchanged, and is also why the agent structurally cannot
+// produce a merged state: 'merged' is not a value this column accepts, and
+// 'implemented' still requires GitHub-confirmed pr_state='merged'.
+//
+// bumpFixAttempt increments the corrective-push counter that bounds the fix
+// loop. Incremented when a fix is actually pushed, never merely attempted, so
+// the bound counts real changes to the PR rather than passes over it.
+export async function recordAgentReviewState(siteId, id, state, detail = {}, { bumpFixAttempt = false } = {}) {
+  const { rows } = await query(
+    `UPDATE drafts
+        SET agent_review_state = $3,
+            agent_review_detail = $4::jsonb,
+            agent_fix_attempts = agent_fix_attempts + $5,
+            updated_at = now()
+      WHERE site_id = $1 AND id = $2
+      RETURNING *`,
+    [siteId, id, state, JSON.stringify({ ...detail, recordedAt: new Date().toISOString() }), bumpFixAttempt ? 1 : 0]
+  );
+  return rows[0] || null;
+}
+
+// branch_pushed -> awaiting_publish. The CMS counterpart of markDraftPrOpened:
+// an adapter has written a real, reviewable draft document to the CMS
+// (server/implementers/adapters/sanity-document.js writes `drafts.<id>` in
+// Sanity) and a human must publish it. Like pr_opened, this persists real
+// evidence rather than creating it — apply() already wrote the document AND
+// read it back to confirm the fields took effect before this is called.
+//
+// Nothing in this app publishes. This status is where the autonomous system's
+// responsibility ends, exactly as pr_opened is on the GitHub side.
+export async function markDraftAwaitingPublish(siteId, id, { cmsDocumentId, cmsReviewUrl = null }) {
+  const { rows } = await query(
+    `UPDATE drafts SET status = 'awaiting_publish', cms_document_id = $3, cms_review_url = $4,
+       apply_error = NULL, render_mode_confirm = NULL, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed'
+     RETURNING *`,
+    [siteId, id, cmsDocumentId, cmsReviewUrl]
+  );
+  return rows[0] || null;
+}
+
+// awaiting_publish -> implemented, on real evidence a human published.
+// Separate from markDraftImplemented's own guards because the evidence differs
+// in kind: there is no PR to ask GitHub about, so the caller
+// (adapters/sanity-document.js's publishSanityDraft, reached only from an
+// explicit human action) must have already re-read the PUBLISHED document and
+// confirmed it carries the change. Passing that read-back is the precondition
+// for calling this — same "persists evidence, doesn't create it" rule as every
+// other transition in this file.
+export async function markCmsDraftPublished(siteId, id) {
+  const { rows } = await query(
+    `UPDATE drafts SET status = 'implemented', implemented_at = now(), cms_published_at = now(), updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'awaiting_publish'
+     RETURNING *`,
+    [siteId, id]
   );
   return rows[0] || null;
 }

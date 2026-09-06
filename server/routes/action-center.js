@@ -27,10 +27,11 @@ import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../
 import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
 import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
-import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
+import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
+import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
@@ -38,6 +39,7 @@ import { resolveOrCreateComponentTemplate, componentTemplateVerification, compon
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
+import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
@@ -832,7 +834,11 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     return getDraft(siteId, approvedDraft.id);
   }
-  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles });
+  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, {
+    branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles,
+    // CMS-path adapters return a document id instead of a branch name.
+    cmsDocumentId: applyResult.cmsDocumentId ?? null, cmsReviewUrl: applyResult.cmsReviewUrl ?? null,
+  });
 
   // deferPr: this draft is part of a batch run (github-ops.js's
   // beginBatchPush is already active for its branch) — its commit was
@@ -850,6 +856,19 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   if (!prResult.ok) {
     await recordMergeFailure(siteId, branchPushedDraft.id, prResult.error);
     return getDraft(siteId, branchPushedDraft.id);
+  }
+  // CMS path: there is no PR to open, and no merge for a human to click.
+  // The change is a real draft document in the CMS, already written and
+  // read-back-verified by apply(); what's left is a person publishing it.
+  // 'awaiting_publish' is that wait — deliberately NOT 'pr_opened', which
+  // would send the hourly PR poller (checkDraftPrStatus) hunting for a GitHub
+  // pull request that does not exist, and NOT left at 'branch_pushed', which
+  // the reconciler would reclaim as stalled after IDLE_RECLAIM_HOURS.
+  if (prResult.awaitingHumanPublish) {
+    return markDraftAwaitingPublish(siteId, branchPushedDraft.id, {
+      cmsDocumentId: prResult.cmsDocumentId,
+      cmsReviewUrl: prResult.cmsReviewUrl,
+    });
   }
   return markDraftPrOpened(siteId, branchPushedDraft.id, {
     prNumber: prResult.prNumber, prUrl: prResult.prUrl,
@@ -1843,6 +1862,67 @@ router.post('/action-center/drafts/:id/open-pr', async (req, res, next) => {
   }
 });
 
+// awaiting_publish -> implemented, for the CMS path. THE HUMAN GATE.
+//
+// This is the only route in the app that publishes CMS content, and nothing
+// scheduled can reach it: auto-remediation, the Monday keyword ship cycle and
+// the reconciler have no path here, and publishSanityDraft is deliberately not
+// part of the adapter contract adapters/registry.js validates, so it isn't
+// reachable through getAdapter() either. It corresponds to a person clicking
+// "Merge pull request" on GitHub — the equivalent act, on the equivalent
+// surface, performed by the same equivalent human.
+//
+// Accepts a LIST of draft ids rather than one, because of the rebuild. The
+// site is a static export: a published Sanity document is invisible until the
+// site rebuilds, and a rebuild is a full site build. Publishing five drafts
+// one at a time would queue five builds of the same site to publish changes
+// that could have gone out in one. So every draft is published first, and
+// exactly one rebuild is triggered afterwards — and only if at least one
+// publish actually succeeded.
+//
+// A failed publish does not stop the others, and never reports success: each
+// draft's real outcome is returned individually, and a draft whose publish
+// failed stays at awaiting_publish so it can be retried.
+router.post('/action-center/drafts/publish-cms', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.draftIds) ? req.body.draftIds : [];
+    if (!ids.length) return res.status(400).json({ error: 'draftIds must be a non-empty array' });
+
+    const site = await getSiteById(req.siteId);
+    const { publishSanityDraft } = await import('../implementers/adapters/sanity-document.js');
+
+    const results = [];
+    for (const draftId of ids) {
+      // getDraft is site-scoped, so an id belonging to another tenant simply
+      // isn't found here — a draft id from Client B can never be published
+      // under Client A's session.
+      const draft = await getDraft(req.siteId, draftId);
+      if (!draft) { results.push({ draftId, ok: false, error: 'Draft not found' }); continue; }
+      if (draft.status !== 'awaiting_publish') {
+        results.push({ draftId, ok: false, error: `Draft is ${draft.status}, not awaiting_publish` });
+        continue;
+      }
+      try {
+        const outcome = await publishSanityDraft(site, draft);
+        if (!outcome.ok) { results.push({ draftId, ok: false, error: outcome.error, reason: outcome.reason }); continue; }
+        const updated = await markCmsDraftPublished(req.siteId, draft.id);
+        results.push({ draftId, ok: true, publishedId: outcome.cmsPublishedId, status: updated?.status ?? null });
+      } catch (err) {
+        // One document's failure must not abandon the rest of the batch.
+        results.push({ draftId, ok: false, error: err.message });
+      }
+    }
+
+    const publishedCount = results.filter((r) => r.ok).length;
+    const rebuild = publishedCount > 0 ? await triggerCmsRebuild(site) : { triggered: false, reason: 'nothing-published' };
+
+    res.json({ results, published: publishedCount, failed: results.length - publishedCount, rebuild });
+  } catch (e) {
+    if (e.status) return sendHttpError(res, e);
+    next(e);
+  }
+});
+
 // pr_opened -> implemented, once GitHub confirms the PR was actually merged;
 // pr_opened -> abandoned if it closed without merging. Triggered three ways:
 // the manual "Check PR Status" button, the GitHub webhook (routes/webhooks.js,
@@ -1954,7 +2034,97 @@ export async function checkDraftPrStatus(siteId, draftId) {
     });
     return abandoned;
   }
-  return recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+  // PR still open. This is where the agent reviews its OWN work, rather than
+  // treating "PR opened" as the end of its responsibility.
+  //
+  // Runs here and nowhere else: this function is already the single
+  // GitHub-aware PR path (manual button, webhook, hourly poll all land here),
+  // so the review inherits all three triggers and adds no new poller. The
+  // reconciler is forbidden from calling GitHub and is deliberately untouched.
+  const updated = await recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+  await runAgentPrReview(site, updated || draft, { mergeableState: pr.mergeableState });
+  return getDraft(siteId, draft.id);
+}
+
+// Reads every check on the PR, classifies any failures, corrects the ones
+// that are genuinely this draft's own doing, and records an honest terminal
+// state. Best-effort as a whole: a failure to REVIEW must never break the
+// PR-status reconciliation above, which is what actually finalizes a merged
+// draft. Any error here leaves the draft needing a human rather than looking
+// clean.
+async function runAgentPrReview(site, draft, { mergeableState = null } = {}) {
+  const siteId = site.id;
+  try {
+    await recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.REVIEWING, { startedAt: new Date().toISOString() });
+
+    const review = await reviewPrChecks(site, draft.branch_name, draft, { mergeableState });
+
+    if (review.state !== AGENT_REVIEW_STATE.FIXING) {
+      return recordAgentReviewState(siteId, draft.id, review.state, {
+        reason: review.reason, failures: review.failures, pending: review.pending, passed: review.passed,
+        checksVisible: review.checksVisible, noChecksConfigured: review.noChecksConfigured ?? false,
+      });
+    }
+
+    // Category A: the defect is in content this draft generated and the
+    // correction is deterministic. Re-validate with the SAME validator that
+    // gates every push (validateRenderingBatch), rather than a second
+    // parallel notion of what "valid" means.
+    await recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.FIXING, { reason: review.reason, failures: review.failures });
+
+    const repair = await attemptSafeSelfRepair(site, draft, review);
+    return recordAgentReviewState(siteId, draft.id, repair.state, {
+      reason: repair.reason, failures: review.failures, repair: repair.detail,
+    }, { bumpFixAttempt: repair.pushed });
+  } catch (err) {
+    // An error reviewing is not evidence the PR is fine.
+    const { message } = safeMessage('action-center.runAgentPrReview', err, 'The agent could not complete its own review of this PR');
+    return recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.NEEDS_HUMAN, {
+      reason: `${message}. Handing over rather than reporting it ready.`,
+    }).catch(() => null);
+  }
+}
+
+// The category-A execution path.
+//
+// UNREACHABLE TODAY, and deliberately kept rather than deleted: pr-self-review.js's
+// SAFE_TO_FIX_CHECKS is currently empty, because both candidate autofixes
+// (formatter/linter autofix, and rewriting content behind a rendering-validation
+// failure) require either running the client repository's own tooling — which
+// this app never does — or papering over incorrect renderCapabilities metadata.
+// See that module's comment for the full reasoning.
+//
+// This function is the seam where a genuinely executable repair would attach.
+// It re-runs this app's OWN validator (the same one that gates every push, not
+// a second parallel notion of valid) and reports precisely what it found. It
+// never invents a repair, so if it is ever reached before a real repairer
+// exists, the outcome is still an honest escalation rather than a guess.
+async function attemptSafeSelfRepair(site, draft, review) {
+  const files = generatedFilePaths(draft);
+  if (!files.length) {
+    return { state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false, reason: 'No recorded generated files for this draft, so no in-scope correction could be identified.', detail: null };
+  }
+
+  const validation = await validateRenderingBatch(site, files.map((filePath) => ({ path: filePath, content: null })))
+    .catch((err) => ({ ok: false, reason: 'validation-error', error: err.message }));
+
+  if (validation.ok) {
+    // Our own content validates, but the client's build check still failed —
+    // so the cause is something this app cannot see from the draft alone
+    // (their build config, an environment issue, a dependency). Not ours to
+    // patch, and not safe to guess at.
+    return {
+      state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false,
+      reason: `${review.reason} This app's own rendering validation passes against the generated files (${files.join(', ')}), so the failure originates outside this draft's content and cannot be corrected from here.`,
+      detail: { revalidated: files, result: 'passed-locally' },
+    };
+  }
+
+  return {
+    state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false,
+    reason: `${review.reason} Re-validation identified: ${validation.error || validation.reason}. Correcting it requires regenerating the content, which produces a new draft rather than a patch to this one, so it is being handed over instead of amended in place.`,
+    detail: { revalidated: files, result: 'failed-locally', reason: validation.reason, error: validation.error },
+  };
 }
 
 // Finds the recommendation a draft belongs to, by the finding they share.

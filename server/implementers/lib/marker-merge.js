@@ -454,6 +454,25 @@ const DEFAULT_QA_TEMPLATE = {
   row: '  <details>\n    <summary><h3>{{QUESTION}}</h3></summary>\n    <p>{{ANSWER}}</p>\n  </details>',
 };
 
+// A site that captured its real FAQ accordion but never captured a separate
+// qaContent template should get its OWN accordion for Q&A content too, not
+// the generic default above. To a reader these are the same component, and
+// letting one page render the site's real accordion while another renders a
+// bare <details> block is exactly the "the FAQ on this page doesn't look like
+// the FAQ on the other pages" inconsistency reported on site 1 (/team/ and
+// blog posts against / and /resources/). componentTemplates.qaContent still
+// wins outright when a site really has captured a distinct one.
+//
+// Gated on the captured row carrying a real h1/h2/h3, because qa-content
+// exists to satisfy questionHeadingCount (page-content.js counts h1/h2/h3
+// whose text ends in "?"). Borrowing an faq template built on <dt> or <span>
+// would look right and silently fail the very check the draft was queued to
+// fix — the same trap DEFAULT_QA_TEMPLATE's own comment describes.
+export function faqTemplateUsableForQa(faqTemplate) {
+  if (!faqTemplate?.row) return null;
+  return /<h[123][\s>]/i.test(faqTemplate.row) ? faqTemplate : null;
+}
+
 // INDEX mirrors renderFaqHtml's own fill exactly — a captured qaContent
 // template is real site markup that may reuse the same interactive
 // accordion pattern as componentTemplates.faq (activeIndex-keyed toggle
@@ -833,7 +852,16 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
 
   if (actionType === 'qa-content') {
     if (!content.items?.length) return { ok: false, error: 'This Q&A draft has no items.' };
-    const visible = renderQaHtml(content.items, templateFor('qa-content', componentTemplates.qaContent, DEFAULT_QA_TEMPLATE));
+    const visible = renderQaHtml(content.items, templateFor(
+      'qa-content',
+      // The site's own captured FAQ accordion stands in when it has no
+      // distinct qaContent template — see faqTemplateUsableForQa. Ordered
+      // ahead of the design-profile projection inside templateFor because a
+      // real captured component is closer to the site than a projection of
+      // it, and far closer than DEFAULT_QA_TEMPLATE.
+      componentTemplates.qaContent || faqTemplateUsableForQa(componentTemplates.faq),
+      DEFAULT_QA_TEMPLATE,
+    ));
     // suppressSchema: mirror of 'faq' above — avoids a second FAQPage schema
     // when the 'faq' slot already published one for this same page.
     const schema = (!suppressSchema && content.schemaJsonLd) ? `<script type="application/ld+json">${JSON.stringify(content.schemaJsonLd)}</script>` : null;

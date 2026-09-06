@@ -86,7 +86,7 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
-  if (item.generatorId === 'broken-link-fix') return `${item.params?.page || ''}::${item.params?.href || ''}`;
+  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${item.params?.page || ''}::${item.params?.href || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   // Same failure mode as blog-outline above: landing-page has no `page`
   // param either (country-intelligence.js calls it with {market}/{city},
@@ -145,6 +145,10 @@ export const DEDUP_IDENTITY = {
   'analytics-install': 'provider',
   'expand-content': 'focus',
   'broken-link-fix': 'href',
+  // Same identity as broken-link-fix — both are "this one dead href", and a
+  // link can flip between the two resolutions as the section around it gains
+  // or loses sibling pages, so they must key identically.
+  'missing-page-create': 'href',
   'blog-outline': 'topic',
   'landing-page': 'topic|city|market',
   'comparison-page': 'topic',

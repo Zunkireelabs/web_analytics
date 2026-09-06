@@ -366,6 +366,51 @@ export function resolveNewContentUrl(site, actionType, title) {
   return url;
 }
 
+// Where a page that SHOULD exist at `href` would have to be written, derived
+// from the real files of its already-existing siblings rather than from
+// per-target config.
+//
+// missing-page-create deliberately does not use resolveNewContentTarget's
+// newContentTargets config, for two reasons. First, that config is one fixed
+// dir+extension per action type, but a missing page can be missing from any
+// section (/resources/, /blog/, /guides/) and each maps to a different
+// directory — one config key cannot express that. Second, requiring new
+// per-site config would gate this behind an onboarding step on every tenant,
+// when the answer is already sitting in the url_file_map entries the
+// siblings resolve through.
+//
+// The siblings passed here are the same ones dead-link-intent.js required
+// before allowing creation at all, so if this returns null the caller has
+// already lost nothing: it falls back to removing the link.
+//
+// The slug comes from the dead URL itself, never from a slugified title — the
+// whole point is to make THAT href resolve, and a page written at any other
+// slug would leave the original link just as broken.
+export function resolveMissingPageTarget(site, href, siblings = []) {
+  let slug;
+  try {
+    slug = new URL(href).pathname.split('/').filter(Boolean).pop() || '';
+  } catch { return null; }
+  // The slug lands in a repo path, so anything that could escape the target
+  // directory or name a file we didn't intend disqualifies it outright.
+  if (!slug || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(slug) || slug.includes('..')) return null;
+  const bareSlug = slug.replace(/\.[a-zA-Z0-9]+$/, '');
+  if (!bareSlug) return null;
+
+  for (const sibling of siblings) {
+    const file = resolveFile(site, sibling);
+    if (!file) continue;
+    const lastSlash = file.lastIndexOf('/');
+    if (lastSlash < 0) continue;
+    const dir = file.slice(0, lastSlash);
+    const dot = file.lastIndexOf('.');
+    const extension = dot > lastSlash ? file.slice(dot) : '';
+    if (!extension) continue;
+    return { filePath: `${dir}/${bareSlug}${extension}`, dir, extension, modelFile: file };
+  }
+  return null;
+}
+
 // Site-level (not per-page) targets — today only llms.txt/robots.txt.
 export function resolveSiteRootFile(site, key) {
   return site.url_file_map?.siteRoot?.[key] || null;

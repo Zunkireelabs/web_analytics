@@ -53,9 +53,16 @@ Deliberately NOT included here: predictive alert delivery
 sends, not analysis — wiring them into an automatic nightly cron is a
 product decision about cadence and opt-in a customer hasn't made yet, not a
 scheduling bug to silently fix by turning on new emails no one asked for.
-They remain scripts/run_nightly_pipeline.py-only (still documented there as
-a host crontab line nothing in this repo installs) until that decision is
-made explicitly.
+They remain scripts/run_nightly_pipeline.py-only until that decision is made
+explicitly.
+
+Note that this is no longer only a hand-run script: staging installs it as a
+host crontab at 22:00 UTC (.github/workflows/deploy-staging.yml), so on
+staging those alerts and briefings DO send nightly. An earlier version of
+this docstring described that crontab as something nothing in the repo
+installs, which was true when written. The opt-in question above is
+therefore already answered in the affirmative on staging — revisit it there
+deliberately rather than assuming these paths are still dormant.
 """
 import logging
 

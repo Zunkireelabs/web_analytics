@@ -178,6 +178,9 @@ async function runTurns({ provider, client, model, systemPrompt, tools, messages
         // eslint-disable-next-line no-await-in-loop
         resultText = await executeTool(sandbox, tc.name, tc.input, { allowlist, fileAllowlist });
       } catch (err) {
+        // Fed back into this LLM tool-use conversation only (discarded once
+        // the loop ends) — never persisted or shown to a customer, so the
+        // real detail stays in for the model to self-correct from.
         resultText = `Error: ${err.message}`;
       }
       results.push(String(resultText).slice(0, 8000));

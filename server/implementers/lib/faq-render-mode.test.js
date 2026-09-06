@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { countCurrentlyVisibleFaqPages } from './faq-render-mode.js';
+import { countCurrentlyVisibleFaqPages, decideFaqRenderMode } from './faq-render-mode.js';
 
 function siteWithPages(pages) {
   const url_file_map = { pages: {} };
@@ -67,5 +67,41 @@ describe('countCurrentlyVisibleFaqPages', () => {
     const count = await countCurrentlyVisibleFaqPages(site, { listPages, fetchFile });
     assert.equal(count, 1);
     assert.ok(count < site.visible_faq_cap, 'a freed-up slot must be reflected as room under the cap');
+  });
+});
+
+// The rule these cover: a page never gets a second VISIBLE FAQ. The live
+// page is the only signal that holds regardless of where the existing FAQ
+// lives — a partial, a layout, or a shared data file looped elsewhere are all
+// invisible to a scan of the page's own template file.
+describe('decideFaqRenderMode — never a second visible FAQ', () => {
+  const site = { id: 1, visible_faq_cap: 5, visible_faq_baseline: 0, url_file_map: { pages: {} } };
+
+  test('forces schema-only when the live page already shows an FAQ, even though its template file has none', async () => {
+    // The template file is deliberately clean — this is the partial/data-file
+    // case, where template scanning alone would wrongly say "visible".
+    const readLivePage = async () => ({ ok: true, analysis: { faqVisibleQuestionCount: 10 } });
+    const result = await decideFaqRenderMode(site, '/resources/', '<p>no faq markup in this file at all</p>', 'faq', { readLivePage });
+    assert.equal(result.mode, 'schema-only');
+    assert.equal(result.source, 'live-page');
+    assert.match(result.reason, /10 questions/);
+  });
+
+  test('a single question-shaped heading is not an FAQ — does not suppress a legitimate first FAQ', async () => {
+    const readLivePage = async () => ({ ok: true, analysis: { faqVisibleQuestionCount: 1 } });
+    const result = await decideFaqRenderMode(site, '/team/', '<p>plain page</p>', 'faq', { readLivePage });
+    assert.notEqual(result.source, 'live-page');
+  });
+
+  test('a failed live fetch falls through rather than blocking the draft', async () => {
+    const readLivePage = async () => ({ ok: false });
+    const result = await decideFaqRenderMode(site, '/team/', '<p>plain page</p>', 'faq', { readLivePage });
+    assert.notEqual(result.source, 'live-page');
+  });
+
+  test('a thrown live fetch is caught, not propagated', async () => {
+    const readLivePage = async () => { throw new Error('network down'); };
+    const result = await decideFaqRenderMode(site, '/team/', '<p>plain page</p>', 'faq', { readLivePage });
+    assert.notEqual(result.source, 'live-page');
   });
 });

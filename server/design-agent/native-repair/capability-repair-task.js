@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { snapshotFiles, diffSnapshots, runSandboxCommand, resolveScopedPath, listSandboxFiles } from './sandbox.js';
 import { checkLandmarkOrderPreserved, detectLandmarkLabels } from './landmark-order.js';
+import { safeMessage } from '../../lib/errors.js';
 
 // Same prompt content as design_task.py's build_capability_repair_task —
 // same grounding rule (only real evidence the payload supplies, never
@@ -146,7 +147,8 @@ export async function validateCapabilityRepair(sandbox, { templatePath, dataFile
       try {
         JSON.parse(dataEdit.newContent);
       } catch (err) {
-        return { ok: false, output: `${dataFilePath} is not valid JSON after the change: ${err.message}` };
+        const { message } = safeMessage('capability-repair-task.validateJson', err, `${dataFilePath} is not valid JSON after the change`);
+        return { ok: false, output: message };
       }
     }
   }

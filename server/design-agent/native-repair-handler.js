@@ -12,6 +12,7 @@ import { runAgentLoop } from './native-repair/agent-loop.js';
 import { buildCapabilityRepairPrompt, validateCapabilityRepair } from './native-repair/capability-repair-task.js';
 import { buildCodeSelfRepairPrompt, validateCodeSelfRepair } from './native-repair/code-self-repair-task.js';
 import { getSiteById } from '../store/read.js';
+import { safeMessage } from '../lib/errors.js';
 
 const CAPABILITY_REPAIR_SYSTEM = 'You are a careful, minimal-diff software engineer working inside a real client website repository. '
   + 'Only make the exact change requested. Never touch a file you were not told to touch.';
@@ -37,14 +38,16 @@ export function createNativeCapabilityRepairHandler({ getSiteByIdFn = getSiteByI
     }
 
     const site = await getSiteByIdFn(job.site_id).catch((err) => {
-      throw taggedError(`Could not load site ${job.site_id}: ${err.message}`, 'input_validation');
+      const { message } = safeMessage('native-repair-handler.capabilityRepair.getSite', err, `Could not load site ${job.site_id}`);
+      throw taggedError(message, 'input_validation');
     });
     if (!site) throw taggedError(`Site ${job.site_id} no longer exists.`, 'input_validation');
 
     let sandbox;
     try {
       sandbox = await checkoutIntoSandboxFn(site, { ref: site.repo_default_branch }).catch((err) => {
-        const wrapped = taggedError(`Could not check out this site's repository: ${err.message}`, 'repo_checkout');
+        const { message } = safeMessage('native-repair-handler.capabilityRepair.checkout', err, "Could not check out this site's repository");
+        const wrapped = taggedError(message, 'repo_checkout');
         wrapped.code = err.code || null;
         throw wrapped;
       });
@@ -92,7 +95,8 @@ export function createNativeCodeSelfRepairHandler({
     let sandbox;
     try {
       sandbox = await checkoutIntoSandboxFn(repo, { ref: getRepoDefaultBranch(repo) }).catch((err) => {
-        const wrapped = taggedError(`Could not check out the platform repository: ${err.message}`, 'repo_checkout');
+        const { message } = safeMessage('native-repair-handler.codeSelfRepair.checkout', err, 'Could not check out the platform repository');
+        const wrapped = taggedError(message, 'repo_checkout');
         wrapped.code = err.code || null;
         throw wrapped;
       });

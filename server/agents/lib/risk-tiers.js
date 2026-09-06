@@ -94,6 +94,12 @@ const SAFE_GENERATOR_IDS = new Set([
   // refusing otherwise. Same exact-match-or-refuse shape as redirect-fix
   // above, just one step more conservative (deletes rather than rewrites).
   'broken-link-fix',
+  // NOT safe-tier, deliberately, and its sibling sitting directly above is
+  // exactly why this note is here: 'missing-page-create' fixes the same
+  // finding but by WRITING A WHOLE NEW PAGE of LLM-authored prose, which has
+  // none of the exact-match-or-refuse properties that justify every entry in
+  // this list. It stays approval-required so a human reads the page before it
+  // is published under the site's own name.
   // Promoted 2026-08-15. The one non-provably-safe shape (anything other
   // than an SVG gradient/clipPath/mask referenced only by url(#id)) already
   // produces an advisory draft with no file diff, which the apply-time

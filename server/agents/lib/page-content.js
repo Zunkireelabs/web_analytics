@@ -338,6 +338,20 @@ export function analyzePage(html, pageUrl) {
   const faqCountMismatch = hasFaqSchema && faqMainEntityCount > 0 && hasFaqAccordion
     && faqMainEntityCount !== faqVisibleQuestionCount;
 
+  // The case faqCountMismatch structurally cannot catch, and the worst one:
+  // an FAQPage schema on a page with NO visible FAQ whatsoever. The check
+  // above requires hasFaqAccordion (>=2 visible questions) so it never infers
+  // a mismatch from one side alone — correct for "6 vs 5", but it means "5 vs
+  // 0" is silently exempt, and that is the version Google actually penalises.
+  // FAQ rich results require the marked-up content to be visible on the page,
+  // so schema with nothing behind it is a policy violation, not a drift.
+  //
+  // Zero visible questions is not an inference from one side: it is a
+  // complete, confident reading of both (schema says N, page shows none).
+  // Real instance: /resources/ai-search-playbook/ on site 1, 5 schema
+  // questions and no FAQ on the page at all.
+  const faqSchemaWithoutVisible = hasFaqSchema && faqMainEntityCount > 0 && faqVisibleQuestionCount === 0;
+
   // Distinct FAQ-marked containers (id/class containing "faq") that each
   // independently qualify as a real accordion (2+ visible questions), kept
   // WITH their real question text (not just a count) so a caller can tell a
@@ -416,6 +430,15 @@ export function analyzePage(html, pageUrl) {
   // '/' — that shortcut incorrectly counted protocol-relative external
   // links (e.g. "//evil.com/x", which also starts with '/') as internal.
   const internalLinks = [];
+  // Parallel to internalLinks (same push order), carrying each anchor's real
+  // visible text. Kept as a separate array rather than turning internalLinks
+  // into objects, because internalLinks is consumed as a flat href list in
+  // several places (technical-seo-analysis.js's crawlInternalLinks among
+  // them) and changing its element type would break every one of them
+  // silently. The text is what a dead link *claimed* to point at, which is
+  // the only on-site evidence of what a missing page was supposed to be —
+  // dead-link-intent.js uses it to title a page it decides to create.
+  const internalLinkAnchors = [];
   const internalLinkCount = host
     ? $('a[href]').filter((_, el) => {
       const href = $(el).attr('href');
@@ -424,6 +447,7 @@ export function analyzePage(html, pageUrl) {
       try { resolved = new URL(href, pageUrl); } catch { return false; }
       if (resolved.hostname !== host) return false;
       internalLinks.push(resolved.href);
+      internalLinkAnchors.push({ href: resolved.href, text: $(el).text().replace(/\s+/g, ' ').trim() });
       return true;
     }).length
     : 0;
@@ -741,6 +765,15 @@ export function analyzePage(html, pageUrl) {
     h1Count: $('h1').length,
     h2Count: $('h2').length,
     questionHeadingCount: $('h1, h2, h3').filter((_, el) => /\?\s*$/.test($(el).text().trim())).length,
+    // Transient, like bodyText — the page's real heading sequence as text, not
+    // just the counts above. generators/missing-page-create.js reads a sibling
+    // page's outline to write a new page in the same shape; a count alone
+    // can't convey a structure to match. Capped because this is prompt
+    // context, not a persisted fact.
+    headingOutline: $('h1, h2, h3').map((_, el) => ({
+      level: Number(el.tagName[1]),
+      text: $(el).text().replace(/\s+/g, ' ').trim(),
+    })).get().filter((h) => h.text).slice(0, 20),
     imagesTotal: images.length,
     imagesWithoutAlt,
     imagesMissingAlt, // transient, like bodyText/internalLinks — real {src, nearbyText} pairs for alt-text.js, not meant for persisted facts
@@ -759,6 +792,7 @@ export function analyzePage(html, pageUrl) {
     tableCount: $('table').length,
     internalLinkCount,
     internalLinks, // transient, like bodyText — real hrefs for the technical-seo crawler, not meant for persisted facts on other callers
+    internalLinkAnchors, // transient, like internalLinks — {href, text} pairs so a dead link's own anchor text survives to dead-link-intent.js
     wordCount,
     bodyText, // transient — callers should not persist this into stored facts (used only for LLM context); nav/header/footer/script/style already stripped, and sourced from a real content container when one is found — see extractMainText
     mainContentSelector, // transient — which MAIN_CONTENT_SELECTORS entry bodyText came from, null if it fell back to the whole (stripped) body
@@ -794,6 +828,7 @@ export function analyzePage(html, pageUrl) {
     faqSchemaRaw, // transient — exact raw <script> text of the FAQPage block, for an exact-match schema rewrite
     faqSchemaSimple, // true only when that script tag carries FAQPage alone (safe to replace whole-tag)
     faqCountMismatch,
+    faqSchemaWithoutVisible,
     duplicateVisibleFaqSections,
     duplicateFaqRemovalHtml, // transient — exact html of the confirmed-duplicate (later) FAQ container, null unless overlap is confident
   };
@@ -1092,6 +1127,9 @@ const GENERATOR_EFFORT = {
   viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
+  // High, not Low like its broken-link-fix sibling: removing a link is a
+  // one-line deletion, writing the page it pointed at is a whole new page.
+  'missing-page-create': 'High',
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
   'content-integrity-repair': 'Low',
   'blog-image': 'Low',
