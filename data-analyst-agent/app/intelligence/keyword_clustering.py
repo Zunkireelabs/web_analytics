@@ -319,26 +319,47 @@ def _research_gap_reason(keyword: str, parent_topic: str, position: float | None
 
 
 def gaps_from_research(
-    topic: str, researched: list[dict], observed_positions: dict[str, float], existing_topics: set[str],
+    topic: str, researched: list[dict], observed_positions: dict[str, float], seen_this_run: set[str],
 ) -> list[dict]:
     """observed_positions: {lowercased keyword: avg_position} — this site's
     own real gsc_breakdown data for the researched keywords (see the
     collector's own MCP fetch). A keyword absent from that dict has no
-    coverage at all. existing_topics is mutated in place so cross-topic
-    dupes within the same run are also caught, mirroring the retired
-    script's in-loop behavior."""
+    coverage at all.
+
+    seen_this_run is mutated in place and guards ONLY against emitting the
+    same keyword twice within a single run (Step 3's clustering gaps, plus
+    earlier topics in this same loop). It deliberately does NOT include
+    topics already persisted in previous runs.
+
+    That distinction is the whole point. This function used to be handed the
+    set of already-persisted gaps and skipped anything in it, on the reasoning
+    that re-emitting a known topic would create a duplicate row. It doesn't —
+    saveKeywordGaps (server/store/data-analyst.js) upserts on migration 129's
+    partial unique index and treats a re-sight as a re-observation. Filtering
+    here meant save_keyword_gaps was never called for a topic after its first
+    week, so its observation_count could never leave 1, while
+    qualifyAndShipContentGaps (server/agents/lib/analyst-seo-mapping.js)
+    requires >= 2 before a gap may ship. Every research-sourced opportunity
+    was therefore permanently unshippable — 111 of site 1's 118 rows sat at
+    exactly 1 observation for this reason.
+
+    Re-emitting a still-relevant researched topic is a genuine re-observation:
+    the LLM surfaced it again this cycle AND it still fails the coverage test
+    below. Repeats within one calendar week do not inflate the count —
+    migration 143's last_observed_week gates the increment to one per week.
+    """
     new_gaps = []
     for r in researched:
         keyword_lower = r["keyword"].lower()
         position = observed_positions.get(keyword_lower)
         if position is not None and position < EXTERNAL_RESEARCH_RANKING_THRESHOLD:
-            continue  # already ranking well — not a gap
-        if keyword_lower in existing_topics:
-            continue  # already flagged (Step 3 or an earlier topic this run) — never duplicate
+            continue  # already ranking well — no longer a gap, so not re-observed either
+        if keyword_lower in seen_this_run:
+            continue  # emitted already by this same run — one observation per run, not per topic-loop
         new_gaps.append({
             "topic": r["keyword"],
             "reason": _research_gap_reason(r["keyword"], topic, position, r["search_intent"]),
             "priority": DIFFICULTY_TO_PRIORITY[r["estimated_difficulty"]],
         })
-        existing_topics.add(keyword_lower)
+        seen_this_run.add(keyword_lower)
     return new_gaps

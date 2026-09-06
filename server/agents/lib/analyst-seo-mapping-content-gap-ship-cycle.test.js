@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
-// qualifyAndShipContentGaps (analyst-seo-mapping.js) is the biweekly
+// qualifyAndShipContentGaps (analyst-seo-mapping.js) is the weekly Monday
 // autonomous half of content-gap shipping: it must NEVER qualify a gap that
 // hasn't survived at least one re-observation (observation_count >= 2), that
-// isn't relevant to a real product ('unrelated' never qualifies), or whose
-// real GSC demand dropped between its two most recent weekly snapshots. All
-// three gates are exercised here via dryRun:true, which never calls
+// isn't relevant to a real product ('unrelated' never qualifies), whose real
+// GSC demand dropped between its two most recent weekly snapshots, or that
+// was discovered by THIS week's own discovery pass rather than last week's.
+// All four gates are exercised here via dryRun:true, which never calls
 // createActionCenterRecommendationForGap (and therefore needs none of its
 // heavy dependency chain — generateDraft, recommendation-gates, etc.).
 
@@ -54,13 +55,23 @@ mock.module(resolve('./recommendation-coordinator.js'), {
   namedExports: { recommendationPageKey: () => { throw new Error('dryRun must never write a recommendation'); } },
 });
 
-const { qualifyAndShipContentGaps, hasStableOrGrowingDemand } = await import('./analyst-seo-mapping.js');
+const { qualifyAndShipContentGaps, hasStableOrGrowingDemand, isoWeekStart } = await import('./analyst-seo-mapping.js');
+
+// The Monday this suite pretends "now" is. Every gap below is attributed to
+// an EARLIER week by default, i.e. the previous week's discovery cycle — the
+// only cohort a Monday ship pass is ever allowed to act on.
+const THIS_MONDAY = new Date('2026-08-31T00:00:00Z');
+const LAST_WEEK = '2026-08-24';
 
 function baseGap(overrides = {}) {
   return {
     id: 1, topic: 'ai booking engine nepal', reason: null, priority: 'medium', status: 'pending_review',
     search_intent: 'commercial', product_relevance: 'direct', existing_page_match: null,
     observation_count: 2,
+    // 'YYYY-MM-DD' strings, matching getKeywordGaps's ::text cast — see the
+    // comment on that query for why these are never Date objects.
+    first_discovery_week: LAST_WEEK,
+    last_observed_week: LAST_WEEK,
     evidence_snapshots: [
       { observed_at: '2026-08-17T00:00:00Z', impressions: 40, position: 6 },
       { observed_at: '2026-08-24T00:00:00Z', impressions: 55, position: 5 },
@@ -68,6 +79,10 @@ function baseGap(overrides = {}) {
     ...overrides,
   };
 }
+
+// Every call pins `now` so these tests describe a fixed Monday rather than
+// silently changing behavior depending on the day the suite happens to run.
+const dry = () => qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true, now: THIS_MONDAY });
 
 beforeEach(() => { pendingGaps = []; });
 
@@ -103,20 +118,20 @@ describe('hasStableOrGrowingDemand', () => {
 describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)', () => {
   test('a freshly-discovered gap (observation_count 1) never qualifies, regardless of everything else looking perfect', async () => {
     pendingGaps = [baseGap({ observation_count: 1 })];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 0);
     assert.equal(result.shipped, 0);
   });
 
   test('an "unrelated" product_relevance gap never auto-qualifies, even with 2+ growing observations', async () => {
     pendingGaps = [baseGap({ product_relevance: 'unrelated' })];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 0);
   });
 
   test('"supporting" product_relevance (not just "direct") is allowed to qualify', async () => {
     pendingGaps = [baseGap({ product_relevance: 'supporting' })];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 1);
   });
 
@@ -124,7 +139,7 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
     pendingGaps = [baseGap({
       evidence_snapshots: [{ impressions: 90, position: 4 }, { impressions: 8, position: 9 }],
     })];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 0);
   });
 
@@ -133,7 +148,7 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
     // blog-outline, not landing-page — see gapDraftEligibility. This is the
     // shape the biweekly cron is allowed to auto-approve.
     pendingGaps = [baseGap({ search_intent: 'informational' })];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 1);
     assert.equal(result.shipped, 0, 'dryRun must never actually ship');
     assert.equal(result.results[0].generatorId, 'blog-outline');
@@ -144,7 +159,7 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
     // baseGap() defaults to commercial + direct relevance, i.e. exactly the
     // combination gapDraftEligibility routes to 'landing-page'.
     pendingGaps = [baseGap()];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.candidates, 1, 'it still counts as a real candidate — the evidence is genuine');
     assert.equal(result.shipped, 0);
     assert.equal(result.results[0].qualified, false);
@@ -159,10 +174,78 @@ describe('qualifyAndShipContentGaps — qualification gates (dryRun, no writes)'
       baseGap({ id: 3, evidence_snapshots: [{ impressions: 50 }, { impressions: 5 }] }), // declining
       baseGap({ id: 4, search_intent: 'informational' }), // qualifies and auto-ships (blog-shaped)
     ];
-    const result = await qualifyAndShipContentGaps(1, { id: 1 }, { dryRun: true });
+    const result = await dry();
     assert.equal(result.pending, 4);
     assert.equal(result.candidates, 1);
     assert.equal(result.results[0].gapId, 4);
     assert.equal(result.results[0].qualified, true);
+  });
+});
+
+// The week boundary is what makes the cycle "ship LAST week's, then start
+// THIS week's" rather than "ship whatever happens to look ready." Without it,
+// a Monday run could ship an opportunity its own sibling job discovered hours
+// earlier the same morning — which is precisely the outcome the two-schedule
+// design exists to prevent. It is enforced on the DATA (first_discovery_week)
+// rather than on job ordering, because the ship pass (Node cron, 00:00 UTC)
+// and the discovery pass (Python collector, 03:00 UTC in-process and 22:00
+// UTC via a staging host crontab) are independent schedulers in two
+// languages; "which one ran first" is not a guarantee anything can rely on.
+describe('qualifyAndShipContentGaps — weekly cycle boundary', () => {
+  test('a gap discovered by THIS week\'s own discovery pass never ships in the same week', async () => {
+    // Same Monday as `now`. Everything else about it is perfect.
+    pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-08-31' })];
+    const result = await dry();
+    assert.equal(result.candidates, 0, 'a same-week discovery must wait for the NEXT Monday');
+    assert.equal(result.shipped, 0);
+  });
+
+  test('last week\'s discovery is exactly the cohort this Monday ships', async () => {
+    pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-08-24' })];
+    const result = await dry();
+    assert.equal(result.candidates, 1);
+  });
+
+  test('an older backlog gap from several weeks ago still qualifies — the rule is "not this week", not "exactly last week"', async () => {
+    pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-06-01' })];
+    const result = await dry();
+    assert.equal(result.candidates, 1);
+  });
+
+  test('a gap with no discovery week attributed at all is held, never shipped on a guess', async () => {
+    // A row predating migration 143 whose backfill somehow didn't land. The
+    // honest response is to hold it until a real discovery pass attributes
+    // it, not to assume it belongs to a shippable week.
+    pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: null })];
+    const result = await dry();
+    assert.equal(result.candidates, 0);
+  });
+
+  test('the same-week exclusion is applied per gap, not to the whole batch', async () => {
+    pendingGaps = [
+      baseGap({ id: 10, search_intent: 'informational', first_discovery_week: '2026-08-31' }), // this week — held
+      baseGap({ id: 11, search_intent: 'informational', first_discovery_week: '2026-08-24' }), // last week — ships
+    ];
+    const result = await dry();
+    assert.equal(result.candidates, 1);
+    assert.equal(result.results[0].gapId, 11);
+  });
+});
+
+describe('isoWeekStart — must agree with Postgres date_trunc and the Python collector', () => {
+  test('a Sunday belongs to the week that began the preceding Monday', () => {
+    assert.equal(isoWeekStart(new Date('2026-09-06T00:00:00Z')), '2026-08-31');
+  });
+
+  test('a Monday is its own week start', () => {
+    assert.equal(isoWeekStart(new Date('2026-08-31T00:00:00Z')), '2026-08-31');
+  });
+
+  test('the following Monday rolls into a new week', () => {
+    assert.equal(isoWeekStart(new Date('2026-09-07T00:00:00Z')), '2026-09-07');
+  });
+
+  test('a late-evening UTC timestamp does not leak into the next week', () => {
+    assert.equal(isoWeekStart(new Date('2026-09-06T23:59:59Z')), '2026-08-31');
   });
 });

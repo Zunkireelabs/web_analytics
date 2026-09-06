@@ -856,13 +856,51 @@ export function hasStableOrGrowingDemand(gap) {
   return latestImpressions >= priorImpressions;
 }
 
-export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false } = {}) {
+// Monday of the ISO week containing `d`, in UTC — the JS counterpart of
+// migration 143's date_trunc('week', ...)::date and of the Python collector's
+// _week_start (data-analyst-agent/app/collectors/keyword_clustering.py).
+// All three must agree on where a week starts; change one, change all three.
+export function isoWeekStart(d = new Date()) {
+  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  // getUTCDay(): 0=Sunday. Monday-based offset puts Sunday 6 days after Monday.
+  utc.setUTCDate(utc.getUTCDate() - ((utc.getUTCDay() + 6) % 7));
+  return utc.toISOString().slice(0, 10);
+}
+
+export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
   const gaps = await getKeywordGaps(siteId, 'pending_review');
+
+  // A gap discovered THIS week is never shippable by this week's own pass.
+  // The cycle is "ship what last week's discovery produced, then let this
+  // week's discovery start" — an opportunity has to survive at least one full
+  // week of evidence-gathering (the Tue–Sun refresh passes) before anyone
+  // acts on it, which is also the only way it can reach two observations and
+  // two evidence snapshots in the first place.
+  //
+  // This is enforced here, on the data, rather than left to the fact that the
+  // Node ship cron (00:00 UTC Monday) currently happens to fire before the
+  // Python discovery collector (03:00 UTC). That ordering is real but
+  // incidental — it is two independent schedulers in two languages, and on
+  // staging a third entry point (a 22:00 UTC host crontab) runs the same
+  // collector again. A same-week gap must be unshippable because of what it
+  // is, not because of which job won a race.
+  const currentWeek = isoWeekStart(now);
 
   const candidates = gaps.filter((gap) =>
     (gap.observation_count || 1) >= 2 &&
     ['direct', 'supporting'].includes(gap.product_relevance) &&
+    // A NULL first_discovery_week means a row predating migration 143 whose
+    // backfill somehow didn't land; treat it as not-yet-attributable and hold
+    // it rather than shipping something whose week we can't establish.
+    //
+    // Compared as 'YYYY-MM-DD' STRINGS, never as Dates: getKeywordGaps returns
+    // this column as ::text precisely so this comparison can't be knocked a day
+    // (and therefore a week) out by node-postgres parsing a DATE to local
+    // midnight. Both sides are already Monday-normalized, so a plain
+    // lexicographic < is the whole test.
+    gap.first_discovery_week != null &&
+    gap.first_discovery_week < currentWeek &&
     hasStableOrGrowingDemand(gap)
   );
 
