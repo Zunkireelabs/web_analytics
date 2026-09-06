@@ -72,6 +72,30 @@ export async function attemptSummaryByFinding(siteId) {
   }]));
 }
 
+// finding_id -> count of 'recovered' outcomes (migration 142) — how many
+// times the system has already re-analyzed this finding against LIVE content
+// and refreshed the recommendation's params, as opposed to blindly retrying
+// the same generator against the same stale evidence again.
+//
+// This is the counter that turns ship-pacing's flat MAX_FAILED_ATTEMPTS cap
+// into a moving target: lib/action-center-reconciler.js's autonomous-recovery
+// pass raises the effective cap by MAX_FAILED_ATTEMPTS every time it uses one
+// of these, so a finding gets several independently-evidenced attempts before
+// NEEDS_HUMAN is ever considered, instead of stopping cold at the first
+// stale-evidence plateau. Unwindowed, unlike countFailedAttemptsByFinding's
+// 30-day window — a recovery cycle is a rare, deliberate escalation (bounded
+// by MAX_RECOVERY_CYCLES), not routine attempt noise that should age out.
+export async function countRecoveryCyclesByFinding(siteId) {
+  const { rows } = await query(
+    `SELECT finding_id, COUNT(*)::int AS cycles
+       FROM recommendation_attempts
+      WHERE site_id = $1 AND finding_id IS NOT NULL AND outcome = 'recovered'
+      GROUP BY finding_id`,
+    [siteId],
+  );
+  return new Map(rows.map((r) => [r.finding_id, r.cycles]));
+}
+
 // The full history behind one card, oldest first — what the Action Center
 // shows when a user asks "why does this keep coming back".
 export async function listAttemptsForRecommendation(siteId, recommendationId, findingIds = []) {

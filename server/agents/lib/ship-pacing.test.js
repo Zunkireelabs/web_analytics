@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPacing, applyConvergenceCap, applyRefusalCap, MAX_FAILED_ATTEMPTS, MAX_REFUSALS } from './ship-pacing.js';
+import { applyPacing, applyConvergenceCap, applyRefusalCap, MAX_FAILED_ATTEMPTS, MAX_REFUSALS, MAX_RECOVERY_CYCLES, effectiveConvergenceCap } from './ship-pacing.js';
 
 // Both collaborators are injectable, so this suite needs neither a database
 // nor module mocks — the rules under test are pure candidate filtering.
@@ -87,17 +87,18 @@ describe('applyPacing', () => {
 // abandoned. Abandoning un-hides a finding so it can be retried — right for a
 // transient failure, wrong for a permanent one, and nothing told them apart.
 describe('applyConvergenceCap', () => {
-  test('drops a finding that has already failed the maximum number of times', async () => {
+  test('drops a finding that has already failed the maximum number of times, with no recovery cycles yet earned', async () => {
     const attemptCounts = new Map([['f2', MAX_FAILED_ATTEMPTS]]);
-    const { converged, notes } = await applyConvergenceCap(site, [rec(1), rec(2), rec(3)], { attemptCounts });
+    const { converged, notes } = await applyConvergenceCap(site, [rec(1), rec(2), rec(3)], { attemptCounts, recoveryCounts: new Map() });
 
     assert.deepEqual(converged.map((r) => r.id), [1, 3]);
     assert.match(notes[0], /held after 3 failed attempt/);
+    assert.match(notes[0], /cap 3 after 0 recovery cycle/);
   });
 
   test('keeps a finding still under the cap — an early failure can genuinely be bad luck', async () => {
     const attemptCounts = new Map([['f1', MAX_FAILED_ATTEMPTS - 1]]);
-    const { converged, notes } = await applyConvergenceCap(site, [rec(1)], { attemptCounts });
+    const { converged, notes } = await applyConvergenceCap(site, [rec(1)], { attemptCounts, recoveryCounts: new Map() });
 
     assert.deepEqual(converged.map((r) => r.id), [1]);
     assert.deepEqual(notes, []);
@@ -107,7 +108,7 @@ describe('applyConvergenceCap', () => {
   // component is enough to make the whole thing fail identically every run.
   test('uses the highest attempt count among a recommendation\'s findings', async () => {
     const attemptCounts = new Map([['fa', 0], ['fb', MAX_FAILED_ATTEMPTS + 4]]);
-    const { converged } = await applyConvergenceCap(site, [rec(1, { findingIds: ['fa', 'fb'] })], { attemptCounts });
+    const { converged } = await applyConvergenceCap(site, [rec(1, { findingIds: ['fa', 'fb'] })], { attemptCounts, recoveryCounts: new Map() });
 
     assert.deepEqual(converged, []);
   });
@@ -127,6 +128,52 @@ describe('applyConvergenceCap', () => {
 
     assert.deepEqual(converged, []);
     assert.equal(consulted, false);
+  });
+
+  // The whole point of the 2026-09-06 autonomous-recovery change: a finding
+  // that has already earned recovery cycles (lib/action-center-reconciler.js
+  // re-detected it against live content and refreshed its params) gets a
+  // HIGHER cap, not the same flat one — each cycle is a genuinely fresh,
+  // independently-evidenced attempt, not a repeat of the one that already
+  // failed 3 times.
+  test('a finding that has already earned a recovery cycle survives past the flat cap', async () => {
+    const attemptCounts = new Map([['f1', MAX_FAILED_ATTEMPTS]]);
+    const recoveryCounts = new Map([['f1', 1]]);
+    const { converged } = await applyConvergenceCap(site, [rec(1)], { attemptCounts, recoveryCounts });
+
+    assert.deepEqual(converged.map((r) => r.id), [1], 'one recovery cycle raises the cap to 2*MAX_FAILED_ATTEMPTS — 3 attempts is still under it');
+  });
+
+  test('is held again once attempts exhaust the raised cap from an earned recovery cycle', async () => {
+    const attemptCounts = new Map([['f1', MAX_FAILED_ATTEMPTS * 2]]);
+    const recoveryCounts = new Map([['f1', 1]]);
+    const { converged, notes } = await applyConvergenceCap(site, [rec(1)], { attemptCounts, recoveryCounts });
+
+    assert.deepEqual(converged, []);
+    assert.match(notes[0], /cap 6 after 1 recovery cycle/);
+  });
+
+  test('never fetches recovery history for a site with no failed attempts at all', async () => {
+    let consulted = false;
+    const { converged } = await applyConvergenceCap(site, [rec(1)], {
+      attemptCounts: new Map(),
+      recoveryCounts: new Proxy(new Map(), { get: () => { consulted = true; return undefined; } }),
+    });
+
+    assert.deepEqual(converged.map((r) => r.id), [1]);
+    assert.equal(consulted, false, 'counts.size === 0 short-circuits before recovery history is ever read');
+  });
+});
+
+describe('effectiveConvergenceCap', () => {
+  test('is the flat cap with zero recovery cycles', () => {
+    assert.equal(effectiveConvergenceCap(0), MAX_FAILED_ATTEMPTS);
+    assert.equal(effectiveConvergenceCap(undefined), MAX_FAILED_ATTEMPTS);
+  });
+
+  test('grows by one full MAX_FAILED_ATTEMPTS per recovery cycle', () => {
+    assert.equal(effectiveConvergenceCap(1), MAX_FAILED_ATTEMPTS * 2);
+    assert.equal(effectiveConvergenceCap(MAX_RECOVERY_CYCLES), MAX_FAILED_ATTEMPTS * (MAX_RECOVERY_CYCLES + 1));
   });
 });
 
