@@ -81,6 +81,20 @@ jobs:
             REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
             REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
 
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            # Same reserved-prefix rule as GITHUB_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+
             # ── Email ────────────────────────────────────────────────────────
             SMTP_HOST=${{ vars.SMTP_HOST }}
             SMTP_PORT=${{ vars.SMTP_PORT }}
@@ -93,6 +107,32 @@ jobs:
             # ── Dashboard auth (production) ─────────────────────────────────
             SESSION_SECRET=${{ secrets.PROD_SESSION_SECRET }}
             COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
+
+            # ── Action Center GitHub integration ────────────────────────────
+            # Without this, server/github/client.js throws "No GitHub PAT set"
+            # the moment someone pushes/merges a draft from the live
+            # dashboard. The Actions secret itself can't be named GITHUB_PAT —
+            # GitHub reserves any secret name starting with GITHUB_ for its
+            # own auto-provided secrets (e.g. GITHUB_TOKEN) and rejects
+            # creating one — so the secret is named GH_PAT instead, and only
+            # renamed to the GITHUB_PAT env var the app code actually expects
+            # right here.
+            GITHUB_PAT=${{ secrets.GH_PAT }}
+            # Verifies inbound POSTs to /api/webhooks/github really came from
+            # GitHub (server/routes/webhooks.js) — must be the exact same
+            # value entered as the webhook's "Secret" on each site's repo, or
+            # every delivery 401s. Same GITHUB_-prefix restriction as above:
+            # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
+            # GITHUB_WEBHOOK_SECRET env var the app code expects.
+            GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
+            # Same idea, but for the GitHub App's own webhook (installation /
+            # installation_repositories events, server/routes/webhooks.js's
+            # /webhooks/github-app route) — a separate secret from the one
+            # above since it's a different trust boundary (one App-level
+            # webhook covering every client's installation, vs. a per-repo
+            # one). Actions secret is GH_APP_WEBHOOK_SECRET, same
+            # GITHUB_-prefix restriction as every other secret here.
+            GITHUB_APP_WEBHOOK_SECRET=${{ secrets.GH_APP_WEBHOOK_SECRET }}
 
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}

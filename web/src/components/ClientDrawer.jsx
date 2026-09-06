@@ -153,11 +153,12 @@ const EXAMPLE_URL_FILE_MAP = `{
 }`;
 
 function RepoConnectStep({ client, onConnected }) {
-  const [repoOwner, setRepoOwner] = useState('');
-  const [repoName, setRepoName] = useState('');
+  const [repoOwner, setRepoOwner] = useState(client.repoOwner || '');
+  const [repoName, setRepoName] = useState(client.repoName || '');
   const [repoDefaultBranch, setRepoDefaultBranch] = useState('main');
   const [techStack, setTechStack] = useState('');
-  const [githubPatEnvVar, setGithubPatEnvVar] = useState('GITHUB_PAT');
+  const [githubPatEnvVar, setGithubPatEnvVar] = useState(client.githubPatEnvVar || 'GITHUB_PAT');
+  const [githubAppInstallationId, setGithubAppInstallationId] = useState(client.githubAppInstallationId ?? '');
   const [urlFileMapText, setUrlFileMapText] = useState('');
   const [state, setState] = useState('idle');
   const [error, setError] = useState(null);
@@ -176,8 +177,18 @@ function RepoConnectStep({ client, onConnected }) {
         return;
       }
     }
+    const trimmedInstallationId = String(githubAppInstallationId).trim();
+    if (trimmedInstallationId && !/^\d+$/.test(trimmedInstallationId)) {
+      setError('GitHub App Installation ID must be a whole number.');
+      setState('error');
+      return;
+    }
     try {
-      await api.clients.connectRepo(client.id, { repoOwner, repoName, repoDefaultBranch, techStack: techStack || undefined, githubPatEnvVar, urlFileMap });
+      await api.clients.connectRepo(client.id, {
+        repoOwner, repoName, repoDefaultBranch, techStack: techStack || undefined, githubPatEnvVar,
+        githubAppInstallationId: trimmedInstallationId ? Number(trimmedInstallationId) : null,
+        urlFileMap,
+      });
       setState('done');
       onConnected?.();
     } catch (err) {
@@ -213,6 +224,10 @@ function RepoConnectStep({ client, onConnected }) {
       </div>
       <Field label="GitHub PAT Env Var Name" value={githubPatEnvVar} onChange={(e) => setGithubPatEnvVar(e.target.value)}
         placeholder="GITHUB_PAT" hint="Server-side environment variable key naming the GitHub access token." icon={Key} />
+      <Field label="GitHub App Installation ID (optional)" value={githubAppInstallationId} onChange={(e) => setGithubAppInstallationId(e.target.value)}
+        placeholder="e.g. 64837201"
+        hint="Overrides the PAT above entirely once set — tokens are minted per-installation instead of shared. Usually filled in automatically once the client installs the GitHub App; leave blank to keep using the PAT, or clear it to move back."
+        icon={Key} />
       <label className="block">
         <span className={labelCls}>url_file_map (JSON, optional)</span>
         <textarea className={inputMonoCls} rows={8} value={urlFileMapText} onChange={(e) => setUrlFileMapText(e.target.value)}
@@ -588,7 +603,16 @@ function RepositoryTab({ client, onReload }) {
           <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
             <GitBranch size={11} /> Repository link
           </span>
-          <p className="text-xs font-bold text-slate-800 mt-1">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
+          <p className="text-xs font-bold text-slate-800 mt-1">
+            {client.repoConnected ? `${client.repoOwner}/${client.repoName}` : 'Not connected'}
+          </p>
+          {client.repoConnected && (
+            <p className="text-[10.5px] font-semibold text-slate-400 mt-0.5">
+              {client.githubAppInstallationId
+                ? `Auth: GitHub App (installation #${client.githubAppInstallationId})`
+                : `Auth: PAT (${client.githubPatEnvVar || 'GITHUB_PAT'})`}
+            </p>
+          )}
         </div>
         {client.repoConnected && (
           <span className="text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md border border-slate-200 text-slate-500 bg-slate-50">Git link</span>
