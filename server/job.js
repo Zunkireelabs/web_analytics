@@ -972,27 +972,37 @@ export async function runKeywordGapDiscoveryRefreshForAllSites() {
   return totals;
 }
 
-// Content-gap autonomous shipping, biweekly ship half. Deliberately NOT a
-// second cron schedule (no `*/14` day-of-month entry — that drifts against a
-// site's own cycle rather than counting 14 real days since this SITE last
-// shipped): called every Monday alongside the weekly discovery refresh
-// above, but a per-site marker column (sites.keyword_gap_ship_cycle_last_done,
-// migration 129) makes it a no-op except on the Monday that's actually due,
-// same "marker column read/written directly" idempotency shape as
-// runWeeklyIfDue above.
-const KEYWORD_GAP_SHIP_CYCLE_DAYS = 14;
-export async function runKeywordGapShipCycleIfDueForAllSites() {
-  const sites = await listConnectedSites();
+// Content-gap autonomous shipping — runs every Monday, for every eligible
+// site, alongside the weekly discovery refresh above. Previously gated by a
+// per-site 14-day cooldown on sites.keyword_gap_ship_cycle_last_done
+// (migration 129), on the theory that discovery ran every 14 days so
+// shipping should only check in every 14 days too. That theory was wrong in
+// practice: discovery (keyword_clustering.py's RECLUSTER_INTERVAL_DAYS) runs
+// weekly, and qualifyAndShipContentGaps already has its own evidence-based
+// qualification gate (observation_count >= 2, relevance, non-decreasing
+// demand) plus per-gap idempotency (a shipped gap moves to status='approved'
+// and drops out of getKeywordGaps(siteId, 'pending_review'), so it can never
+// be shipped twice) — the site-level cooldown on top of that just meant most
+// Mondays silently shipped nothing for a site regardless of how many gaps
+// had newly qualified. Removed; sites.keyword_gap_ship_cycle_last_done is
+// still written, now purely as a "last shipped at" audit timestamp, read by
+// nothing.
+// Deps are injectable (matching queueDesignAgentDerivationsForAllSites'
+// shape) so this can be unit-tested with plain fakes — job.js's own import
+// graph reaches openai's formdata-node dependency, which fails to load
+// under node:test's module-mocking loader (see job.design-agent-eligibility
+// .test.js's precedent), so mock.module is not an option here.
+export async function runKeywordGapShipCycleForAllSites({
+  listAllSites = listConnectedSites,
+  shipForSite = qualifyAndShipContentGaps,
+  markShipped = (siteId) => query('UPDATE sites SET keyword_gap_ship_cycle_last_done = now() WHERE id = $1', [siteId]),
+} = {}) {
+  const sites = await listAllSites();
   const totals = { sites: 0, shipped: 0 };
   for (const site of sites) {
     try {
-      const { rows } = await query('SELECT keyword_gap_ship_cycle_last_done FROM sites WHERE id = $1', [site.id]);
-      const lastDone = rows[0]?.keyword_gap_ship_cycle_last_done ? new Date(rows[0].keyword_gap_ship_cycle_last_done) : null;
-      const dueMs = KEYWORD_GAP_SHIP_CYCLE_DAYS * 24 * 60 * 60 * 1000;
-      if (lastDone && Date.now() - lastDone.getTime() < dueMs) continue;
-
-      const result = await qualifyAndShipContentGaps(site.id, site);
-      await query('UPDATE sites SET keyword_gap_ship_cycle_last_done = now() WHERE id = $1', [site.id]);
+      const result = await shipForSite(site.id, site);
+      await markShipped(site.id);
       totals.sites++;
       totals.shipped += result.shipped;
       if (result.shipped) {

@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleIfDueForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -471,17 +471,17 @@ export function startCron() {
       }
 
       // Content-gap autonomous shipping, same Monday slot — deliberately NOT
-      // a second cron.schedule call (see runKeywordGapShipCycleIfDueForAllSites's
-      // own comment): discovery/observation refresh runs every Monday here,
-      // while shipping only actually does anything on the Monday a site's
-      // own 14-day marker says is due.
+      // a second cron.schedule call: discovery/observation refresh and
+      // shipping both run every Monday here (see
+      // runKeywordGapShipCycleForAllSites's own comment for why
+      // shipping is no longer gated by a per-site 14-day cooldown).
       try {
         await runKeywordGapDiscoveryRefreshForAllSites();
       } catch (err) {
         console.error('[cron] keyword-gap discovery refresh error:', err.message);
       }
       try {
-        await runKeywordGapShipCycleIfDueForAllSites();
+        await runKeywordGapShipCycleForAllSites();
       } catch (err) {
         console.error('[cron] keyword-gap ship cycle error:', err.message);
       }
