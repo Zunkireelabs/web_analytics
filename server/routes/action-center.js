@@ -30,7 +30,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
@@ -832,7 +832,11 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     return getDraft(siteId, approvedDraft.id);
   }
-  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, { branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles });
+  const branchPushedDraft = await markDraftBranchPushed(siteId, approvedDraft.id, {
+    branchName: applyResult.branchName, implementerId, renderMode: applyResult.renderMode, appliedFiles: applyResult.appliedFiles,
+    // CMS-path adapters return a document id instead of a branch name.
+    cmsDocumentId: applyResult.cmsDocumentId ?? null, cmsReviewUrl: applyResult.cmsReviewUrl ?? null,
+  });
 
   // deferPr: this draft is part of a batch run (github-ops.js's
   // beginBatchPush is already active for its branch) — its commit was
@@ -850,6 +854,19 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   if (!prResult.ok) {
     await recordMergeFailure(siteId, branchPushedDraft.id, prResult.error);
     return getDraft(siteId, branchPushedDraft.id);
+  }
+  // CMS path: there is no PR to open, and no merge for a human to click.
+  // The change is a real draft document in the CMS, already written and
+  // read-back-verified by apply(); what's left is a person publishing it.
+  // 'awaiting_publish' is that wait — deliberately NOT 'pr_opened', which
+  // would send the hourly PR poller (checkDraftPrStatus) hunting for a GitHub
+  // pull request that does not exist, and NOT left at 'branch_pushed', which
+  // the reconciler would reclaim as stalled after IDLE_RECLAIM_HOURS.
+  if (prResult.awaitingHumanPublish) {
+    return markDraftAwaitingPublish(siteId, branchPushedDraft.id, {
+      cmsDocumentId: prResult.cmsDocumentId,
+      cmsReviewUrl: prResult.cmsReviewUrl,
+    });
   }
   return markDraftPrOpened(siteId, branchPushedDraft.id, {
     prNumber: prResult.prNumber, prUrl: prResult.prUrl,
