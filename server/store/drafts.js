@@ -236,6 +236,33 @@ export async function markDraftPrOpened(siteId, id, { prNumber, prUrl, rollbackS
   return rows[0] || null;
 }
 
+// Records the agent's own review of the PR it opened (migration 146).
+//
+// Does NOT touch drafts.status — deliberately. status is the change's journey
+// to being live and stays 'pr_opened' throughout; this column is the separate
+// question of whether the agent has finished checking its own work. Keeping
+// them apart is what lets listDraftsAwaitingPrCheck and markDraftImplemented
+// keep working unchanged, and is also why the agent structurally cannot
+// produce a merged state: 'merged' is not a value this column accepts, and
+// 'implemented' still requires GitHub-confirmed pr_state='merged'.
+//
+// bumpFixAttempt increments the corrective-push counter that bounds the fix
+// loop. Incremented when a fix is actually pushed, never merely attempted, so
+// the bound counts real changes to the PR rather than passes over it.
+export async function recordAgentReviewState(siteId, id, state, detail = {}, { bumpFixAttempt = false } = {}) {
+  const { rows } = await query(
+    `UPDATE drafts
+        SET agent_review_state = $3,
+            agent_review_detail = $4::jsonb,
+            agent_fix_attempts = agent_fix_attempts + $5,
+            updated_at = now()
+      WHERE site_id = $1 AND id = $2
+      RETURNING *`,
+    [siteId, id, state, JSON.stringify({ ...detail, recordedAt: new Date().toISOString() }), bumpFixAttempt ? 1 : 0]
+  );
+  return rows[0] || null;
+}
+
 // branch_pushed -> awaiting_publish. The CMS counterpart of markDraftPrOpened:
 // an adapter has written a real, reviewable draft document to the CMS
 // (server/implementers/adapters/sanity-document.js writes `drafts.<id>` in

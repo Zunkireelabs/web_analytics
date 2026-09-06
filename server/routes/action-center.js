@@ -27,10 +27,11 @@ import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../
 import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
 import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
-import { validateRendering, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
+import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
+import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
   createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
-  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordPrState, recordApplyFailure, recordMergeFailure,
+  markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
@@ -2033,7 +2034,95 @@ export async function checkDraftPrStatus(siteId, draftId) {
     });
     return abandoned;
   }
-  return recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+  // PR still open. This is where the agent reviews its OWN work, rather than
+  // treating "PR opened" as the end of its responsibility.
+  //
+  // Runs here and nowhere else: this function is already the single
+  // GitHub-aware PR path (manual button, webhook, hourly poll all land here),
+  // so the review inherits all three triggers and adds no new poller. The
+  // reconciler is forbidden from calling GitHub and is deliberately untouched.
+  const updated = await recordPrState(siteId, draft.id, pr.state, pr.mergeableState);
+  await runAgentPrReview(site, updated || draft);
+  return getDraft(siteId, draft.id);
+}
+
+// Reads every check on the PR, classifies any failures, corrects the ones
+// that are genuinely this draft's own doing, and records an honest terminal
+// state. Best-effort as a whole: a failure to REVIEW must never break the
+// PR-status reconciliation above, which is what actually finalizes a merged
+// draft. Any error here leaves the draft needing a human rather than looking
+// clean.
+async function runAgentPrReview(site, draft) {
+  const siteId = site.id;
+  try {
+    await recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.REVIEWING, { startedAt: new Date().toISOString() });
+
+    const review = await reviewPrChecks(site, draft.branch_name, draft);
+
+    if (review.state !== AGENT_REVIEW_STATE.FIXING) {
+      return recordAgentReviewState(siteId, draft.id, review.state, {
+        reason: review.reason, failures: review.failures, pending: review.pending, passed: review.passed,
+        checksVisible: review.checksVisible, noChecksConfigured: review.noChecksConfigured ?? false,
+      });
+    }
+
+    // Category A: the defect is in content this draft generated and the
+    // correction is deterministic. Re-validate with the SAME validator that
+    // gates every push (validateRenderingBatch), rather than a second
+    // parallel notion of what "valid" means.
+    await recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.FIXING, { reason: review.reason, failures: review.failures });
+
+    const repair = await attemptSafeSelfRepair(site, draft, review);
+    return recordAgentReviewState(siteId, draft.id, repair.state, {
+      reason: repair.reason, failures: review.failures, repair: repair.detail,
+    }, { bumpFixAttempt: repair.pushed });
+  } catch (err) {
+    console.error(`[action-center] agent PR review failed for draft ${draft.id}:`, err.message);
+    // An error reviewing is not evidence the PR is fine.
+    return recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.NEEDS_HUMAN, {
+      reason: `The agent could not complete its own review of this PR: ${err.message}. Handing over rather than reporting it ready.`,
+    }).catch(() => null);
+  }
+}
+
+// Re-runs this app's own rendering validation against the draft's real
+// generated content. If the content the draft wrote no longer passes, the
+// honest conclusion is that regenerating it is not something this function can
+// do deterministically — a generator produced it, and re-running a generator
+// is a new draft, not a patch. So this reports precisely what failed and hands
+// over, rather than inventing a repair.
+//
+// This is deliberately conservative, and deliberately does not grow by
+// guesswork: a category-A failure the validator cannot explain becomes
+// NEEDS_HUMAN_REVIEW with the validator's own message attached. Widening what
+// the agent will repair on its own means adding a real, deterministic repairer
+// here, not loosening this.
+async function attemptSafeSelfRepair(site, draft, review) {
+  const files = generatedFilePaths(draft);
+  if (!files.length) {
+    return { state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false, reason: 'No recorded generated files for this draft, so no in-scope correction could be identified.', detail: null };
+  }
+
+  const validation = await validateRenderingBatch(site, files.map((filePath) => ({ path: filePath, content: null })))
+    .catch((err) => ({ ok: false, reason: 'validation-error', error: err.message }));
+
+  if (validation.ok) {
+    // Our own content validates, but the client's build check still failed —
+    // so the cause is something this app cannot see from the draft alone
+    // (their build config, an environment issue, a dependency). Not ours to
+    // patch, and not safe to guess at.
+    return {
+      state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false,
+      reason: `${review.reason} This app's own rendering validation passes against the generated files (${files.join(', ')}), so the failure originates outside this draft's content and cannot be corrected from here.`,
+      detail: { revalidated: files, result: 'passed-locally' },
+    };
+  }
+
+  return {
+    state: AGENT_REVIEW_STATE.NEEDS_HUMAN, pushed: false,
+    reason: `${review.reason} Re-validation identified: ${validation.error || validation.reason}. Correcting it requires regenerating the content, which produces a new draft rather than a patch to this one, so it is being handed over instead of amended in place.`,
+    detail: { revalidated: files, result: 'failed-locally', reason: validation.reason, error: validation.error },
+  };
 }
 
 // Finds the recommendation a draft belongs to, by the finding they share.

@@ -72,11 +72,15 @@ describe('buildFieldUpdates', () => {
   test('REFUSES an unmapped field rather than silently dropping it', () => {
     // Dropping it would mark the draft applied while part of the generated
     // change vanished with no trace — worse than an honest failure.
-    const { error, updates } = buildFieldUpdates({ content: { page: '/blogs/x', metaTitle: 'T', ogImage: 'https://x/y.png' } });
+    // `body` is deliberately chosen: it's a real field on the post schema
+    // that this adapter does NOT write, so it is exactly the shape of mistake
+    // this guard exists for — a generator emitting something plausible that
+    // has no mapping here.
+    const { error, updates } = buildFieldUpdates({ content: { page: '/blogs/x', metaTitle: 'T', body: 'some portable text' } });
     assert.equal(updates, undefined);
     assert.equal(error.ok, false);
     assert.equal(error.reason, 'unsupported-field');
-    assert.match(error.error, /ogImage/);
+    assert.match(error.error, /body/);
   });
 
   test('a draft carrying nothing writable is refused, not reported as applied', () => {
@@ -134,5 +138,61 @@ describe('mergeToStage — hands off to a human, publishes nothing', () => {
   test('operates only on the draft document id, never the published one', async () => {
     const result = await mergeToStage({ id: 1 }, { cms_document_id: 'drafts.abc' });
     assert.ok(result.cmsDocumentId.startsWith('drafts.'), 'must hand a human the DRAFT, never the live document');
+  });
+});
+
+describe('ogImage — a Sanity image reference, not a URL', () => {
+  const { normalizeOgImage, valueMatches } = __testables;
+
+  test('is a supported field (the client schema defines seo.ogImage)', () => {
+    assert.equal(__testables.FIELD_MAP.ogImage, 'seo.ogImage');
+  });
+
+  test('accepts a bare asset id and wraps it in the image shape Sanity expects', () => {
+    const out = normalizeOgImage('image-abc123-1200x630-png');
+    assert.equal(out.ok, true);
+    assert.deepEqual(out.value, { _type: 'image', asset: { _type: 'reference', _ref: 'image-abc123-1200x630-png' } });
+  });
+
+  test('accepts an already-shaped {asset:{_ref}} object', () => {
+    const out = normalizeOgImage({ asset: { _ref: 'image-abc123-1200x630-png' } });
+    assert.equal(out.ok, true);
+    assert.equal(out.value.asset._ref, 'image-abc123-1200x630-png');
+  });
+
+  test('REFUSES a URL, and says why — writing one would render as nothing', () => {
+    // A URL in an image field type-checks nowhere: Studio shows an empty
+    // field and urlFor() returns undefined, so the change would look applied
+    // while doing nothing at all.
+    const out = normalizeOgImage('https://admizzeducation.com/images/og/x.webp');
+    assert.equal(out.ok, false);
+    assert.match(out.error, /not a URL/);
+    assert.match(out.error, /does not upload assets/);
+  });
+
+  test('a URL reaches the caller as an invalid-edit refusal, not a silent write', () => {
+    const { error } = buildFieldUpdates({ content: { page: '/blogs/x', ogImage: 'https://example.com/og.png' } });
+    assert.equal(error.ok, false);
+    assert.equal(error.reason, 'invalid-edit');
+  });
+
+  test('a valid reference produces a real update entry', () => {
+    const { updates, error } = buildFieldUpdates({ content: { page: '/blogs/x', ogImage: 'image-abc-1200x630-png' } });
+    assert.equal(error, undefined);
+    assert.equal(updates['seo.ogImage'].asset._ref, 'image-abc-1200x630-png');
+  });
+
+  test('read-back compares images by asset ref, so Sanity echoing a fuller object is not a false mismatch', () => {
+    const written = { _type: 'image', asset: { _type: 'reference', _ref: 'image-abc-1200x630-png' } };
+    const echoed = { _type: 'image', _key: 'generated', asset: { _type: 'reference', _ref: 'image-abc-1200x630-png' } };
+    assert.equal(valueMatches(echoed, written), true);
+    assert.equal(valueMatches({ asset: { _ref: 'image-different-1200x630-png' } }, written), false);
+    assert.equal(valueMatches(undefined, written), false);
+  });
+
+  test('scalar read-back comparison is unchanged', () => {
+    assert.equal(valueMatches('A title', 'A title'), true);
+    assert.equal(valueMatches('Other', 'A title'), false);
+    assert.equal(valueMatches(true, true), true);
   });
 });

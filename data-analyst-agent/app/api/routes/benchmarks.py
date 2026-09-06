@@ -1,11 +1,48 @@
 """Cross-client benchmarking + industry trends — the first routes in this
 service that deliberately span every tenant rather than scoping to one
 client_id. Gated only by the admin key (same pattern as GET /alerts), never
-by get_active_client. Every response is aggregate-only (percentiles across
->= MIN_CLIENTS_PER_GROUP clients) — never a per-client breakdown, so one
-client's raw value is never inferable from another client's view. industry
-has no fixed vocabulary yet (a product/sales decision, not an engineering
-one) — see app/db/models.py::Client.industry."""
+by get_active_client. industry has no fixed vocabulary yet (a product/sales
+decision, not an engineering one) — see app/db/models.py::Client.industry.
+
+DISCLOSURE CONTROL — read before lowering MIN_CLIENTS_PER_GROUP.
+
+An earlier version of this docstring claimed that because every response is
+aggregate-only, "one client's raw value is never inferable from another
+client's view". That was false, and the threshold it rested on (2) was the
+worst possible case for it. Given a group of exactly two clients, sorted
+[a, b], _percentile_summary publishes:
+
+    p25    = a + 0.25(b - a)
+    median = (a + b) / 2
+    p75    = a + 0.75(b - a)
+
+from which b - a = 2(p75 - p25) and a = median - (b - a)/2. Both raw values
+are recoverable exactly, by arithmetic, from the published aggregate. With
+three, the median IS the middle client's value verbatim. Aggregation is not
+anonymization at small n.
+
+That mattered beyond these two endpoints, because
+app/intelligence/opportunity_scoring.py reuses get_industry_percentiles to
+score an individual client. With two clients in an industry, the peer group
+was {A, B}, so A's own stored scoring factors encoded B's exact metric value
+— and A's score moved when B's data changed. Cross-client contamination of a
+per-client inference, not merely a reporting nicety.
+
+Two changes fix it, and both are needed:
+
+  1. exclude_client_id — a client is never a peer of itself. Comparing a
+     client against a distribution it is inside is also just wrong: with a
+     small group it drags the percentiles toward its own value, so a client
+     partly measures itself and calls the result a benchmark.
+  2. MIN_CLIENTS_PER_GROUP = 5, counted AFTER that exclusion. Standard
+     small-cell suppression. This is a threshold, not a formal privacy
+     guarantee — no claim stronger than that belongs in this docstring.
+
+Consequence, stated plainly: with only a handful of tenants, no industry
+reaches the threshold and these endpoints return no groups, while
+_existing_performance_factor excludes itself with a reason. That is the
+correct behaviour. A benchmark computed from one peer is not a weak
+benchmark, it is a disclosure of that peer."""
 import statistics
 from datetime import date
 
@@ -21,23 +58,34 @@ from app.stats.deltas import _aggregate
 
 router = APIRouter()
 
-MIN_CLIENTS_PER_GROUP = 2
+# Minimum PEERS in a group before any aggregate is published. See the
+# module docstring for why this is 5 and not 2 — at 2 the published
+# percentiles invert to the exact raw values, and at 3 the median is one
+# client's value verbatim.
+MIN_CLIENTS_PER_GROUP = 5
 DEFAULT_TREND_MONTHS = 6
 
 
-async def get_industry_percentiles(session: AsyncSession, metric_key: str) -> dict[str, dict]:
+async def get_industry_percentiles(
+    session: AsyncSession, metric_key: str, *, exclude_client_id: int | None = None,
+) -> dict[str, dict]:
     """{industry: {industry, client_count, p25, median, p75}} for every
     industry with >= MIN_CLIENTS_PER_GROUP active, industry-tagged clients
     holding a recent site-level value for this metric. Plain function (no
     FastAPI dependency injection) extracted from get_benchmark's own body so
     app/intelligence/opportunity_scoring.py can reuse the exact same
     cross-client aggregate-only logic — same reuse pattern as
-    app/api/routes/breakdown.py::get_page_query_top_movers_data."""
-    clients = (
-        await session.execute(
-            select(Client).where(Client.status == "active", Client.industry.is_not(None))
-        )
-    ).scalars().all()
+    app/api/routes/breakdown.py::get_page_query_top_movers_data.
+
+    exclude_client_id removes one client from the peer pool entirely, before
+    the threshold is applied. Callers scoring a specific client MUST pass it:
+    a client is not its own peer, and including it both contaminates the
+    comparison and (at small n) puts the other members' raw values within
+    arithmetic reach of that client's own stored factors."""
+    query = select(Client).where(Client.status == "active", Client.industry.is_not(None))
+    if exclude_client_id is not None:
+        query = query.where(Client.id != exclude_client_id)
+    clients = (await session.execute(query)).scalars().all()
 
     by_industry: dict[str, list[float]] = {}
     for client in clients:

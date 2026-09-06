@@ -60,13 +60,53 @@ const FIELD_MAP = {
   metaDescription: 'seo.metaDescription',
   canonicalUrl: 'seo.canonicalUrl',
   noIndex: 'seo.noIndex',
+  ogImage: 'seo.ogImage',
 };
+
+// seo.ogImage is a Sanity `image`, not a string: a reference to an asset that
+// already exists in the dataset, shaped
+// {_type:'image', asset:{_type:'reference', _ref:'image-<hash>-<dims>-<ext>'}}.
+// Writing a bare URL there would type-check nowhere and render as nothing —
+// Studio would show an empty image field and the site's urlFor() would return
+// undefined, so the change would look applied while doing nothing.
+//
+// Uploading a new asset is a different API (/assets/images/<dataset>) and a
+// different kind of act: it puts a permanent binary into the client's dataset.
+// This adapter deliberately does not do that. It accepts an ogImage only when
+// the generator supplies a real asset reference, and refuses a URL with an
+// explanation rather than writing something malformed.
+function normalizeOgImage(value) {
+  if (typeof value === 'object' && value?.asset?._ref) {
+    return { ok: true, value: { _type: 'image', asset: { _type: 'reference', _ref: value.asset._ref } } };
+  }
+  if (typeof value === 'string' && value.startsWith('image-')) {
+    return { ok: true, value: { _type: 'image', asset: { _type: 'reference', _ref: value } } };
+  }
+  return {
+    ok: false,
+    error: typeof value === 'string' && /^https?:\/\//.test(value)
+      ? `ogImage was given the URL "${value}", but seo.ogImage is a Sanity image reference, not a URL. The asset must already exist in the dataset and be passed as its asset id (image-<hash>-<dims>-<ext>). This adapter does not upload assets.`
+      : 'ogImage must be a Sanity asset reference (image-<hash>-<dims>-<ext>) or {asset:{_ref}}',
+  };
+}
 
 // The client's own schema warns above these lengths (seo.ts). Enforced here as
 // hard limits rather than warnings: there is no build step on this path to
 // catch an over-long title, and a truncated <title> in a SERP is a real
 // regression that would ship silently.
 const MAX_LENGTHS = { 'seo.metaTitle': 70, 'seo.metaDescription': 160 };
+
+// Read-back comparison. Scalars compare by value; an image compares by its
+// asset reference, because Sanity echoes back a fuller object than the one
+// written (it adds _key and may normalize the asset shape), so a strict !==
+// on the object would report a mismatch on every successful image write and
+// fail the apply that actually worked.
+function valueMatches(actual, expected) {
+  if (expected && typeof expected === 'object' && expected.asset?._ref) {
+    return actual?.asset?._ref === expected.asset._ref;
+  }
+  return actual === expected;
+}
 
 function configError(page, detail) {
   return { ok: false, reason: 'sanity-config-invalid', error: `sanity-document adapter misconfigured for ${page}: ${detail}` };
@@ -107,6 +147,12 @@ function buildFieldUpdates(draft) {
     if (value == null) continue;
     const path = FIELD_MAP[key];
     if (!path) { unmapped.push(key); continue; }
+    if (path === 'seo.ogImage') {
+      const normalized = normalizeOgImage(value);
+      if (!normalized.ok) return { error: { ok: false, reason: 'invalid-edit', error: normalized.error } };
+      updates[path] = normalized.value;
+      continue;
+    }
     updates[path] = value;
   }
   if (unmapped.length) {
@@ -184,7 +230,7 @@ export async function apply(site, draft) {
 
     const mismatched = Object.entries(updates).filter(([path, expected]) => {
       const actual = path.split('.').reduce((node, key) => (node == null ? node : node[key]), readBack);
-      return actual !== expected;
+      return !valueMatches(actual, expected);
     });
     if (mismatched.length) {
       return { ok: false, reason: 'invalid-edit', error: `Read-back mismatch on ${mismatched.map(([p]) => p).join(', ')} — the write did not take effect as intended` };
@@ -252,4 +298,4 @@ export async function publishSanityDraft(site, draft) {
   }
 }
 
-export const __testables = { buildFieldUpdates, slugFromUrl, FIELD_MAP, MAX_LENGTHS };
+export const __testables = { buildFieldUpdates, slugFromUrl, normalizeOgImage, valueMatches, FIELD_MAP, MAX_LENGTHS };
