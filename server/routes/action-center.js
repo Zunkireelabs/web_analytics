@@ -2077,10 +2077,10 @@ async function runAgentPrReview(site, draft, { mergeableState = null } = {}) {
       reason: repair.reason, failures: review.failures, repair: repair.detail,
     }, { bumpFixAttempt: repair.pushed });
   } catch (err) {
-    console.error(`[action-center] agent PR review failed for draft ${draft.id}:`, err.message);
     // An error reviewing is not evidence the PR is fine.
+    const { message } = safeMessage('action-center.runAgentPrReview', err, 'The agent could not complete its own review of this PR');
     return recordAgentReviewState(siteId, draft.id, AGENT_REVIEW_STATE.NEEDS_HUMAN, {
-      reason: `The agent could not complete its own review of this PR: ${err.message}. Handing over rather than reporting it ready.`,
+      reason: `${message}. Handing over rather than reporting it ready.`,
     }).catch(() => null);
   }
 }

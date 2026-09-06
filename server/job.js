@@ -1,4 +1,5 @@
 import { getOrCreateSite, query } from './db.js';
+import { safeMessage } from './lib/errors.js';
 import { callDataAnalystAgent } from './lib/data-analyst-client.js';
 import { fetchGscForDate } from './ingest/gsc.js';
 import { fetchGa4ForDate } from './ingest/ga4.js';
@@ -286,8 +287,8 @@ export async function runDailyJobForSite(site) {
     await saveNarrative(site.id, reportDate, narrative);
     console.log(`[report] site ${site.id} narrative saved for ${reportDate}`);
   } catch (err) {
-    console.error(`[report] site ${site.id} narrative failed:`, err.message);
-    stepErrors.push(new Error(`narrative: ${err.message}`));
+    const { message } = safeMessage(`job.runDailyJobForSite.narrative[site ${site.id}]`, err, 'narrative generation failed');
+    stepErrors.push(new Error(message));
   }
 
   const day = await getDay(site.id, reportDate);
@@ -302,8 +303,8 @@ export async function runDailyJobForSite(site) {
       if (sent) await saveNarrative(site.id, reportDate, narrative, new Date().toISOString());
     }
   } catch (err) {
-    console.error(`[report] site ${site.id} email failed:`, err.message);
-    stepErrors.push(new Error(`email: ${err.message}`));
+    const { message } = safeMessage(`job.runDailyJobForSite.email[site ${site.id}]`, err, 'daily email send failed');
+    stepErrors.push(new Error(message));
   }
 
   try {
@@ -316,16 +317,16 @@ export async function runDailyJobForSite(site) {
       console.log(`[report] site ${site.id} daily doc entry written → ${r.url}`);
     }
   } catch (err) {
-    console.error(`[report] site ${site.id} daily doc failed:`, err.message);
-    stepErrors.push(new Error(`daily doc: ${err.message}`));
+    const { message } = safeMessage(`job.runDailyJobForSite.dailyDoc[site ${site.id}]`, err, 'daily doc write failed');
+    stepErrors.push(new Error(message));
   }
 
   try {
     const { ranAgentIds, findingsCount, notificationsEmitted, watchlistAdded, watchlistClosed } = await runDailyAgentAnalysisForSite(site);
     console.log(`[job] site ${site.id} daily agent analysis: ${ranAgentIds.length} agents, ${findingsCount} findings, ${notificationsEmitted} notification(s), watchlist +${watchlistAdded}/-${watchlistClosed}.`);
   } catch (err) {
-    console.error(`[job] site ${site.id} daily agent analysis failed:`, err.message);
-    stepErrors.push(new Error(`agent analysis: ${err.message}`));
+    const { message } = safeMessage(`job.runDailyJobForSite.agentAnalysis[site ${site.id}]`, err, 'daily agent analysis failed');
+    stepErrors.push(new Error(message));
   }
 
   await notePipelineOutcome(stepErrors.length === 0, stepErrors[0]);

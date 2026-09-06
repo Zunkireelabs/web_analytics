@@ -21,6 +21,7 @@
 
 import { getCheckRunsForRef } from '../../github/client.js';
 import { CLIENT_BUILD_CHECK_NAME } from './rendering-gate.js';
+import { safeMessage } from '../../lib/errors.js';
 
 export const AGENT_REVIEW_STATE = {
   REVIEWING: 'agent_reviewing',
@@ -213,10 +214,11 @@ export async function reviewPrChecks(site, ref, draft, { getCheckRuns = getCheck
   } catch (err) {
     // Cannot see the checks — that is not the same as the checks passing, and
     // must never be reported as ready.
+    const { message } = safeMessage('pr-self-review.reviewPrChecks', err, `Could not read check runs for "${ref}"`);
     return {
       state: AGENT_REVIEW_STATE.NEEDS_HUMAN,
       checksVisible: false,
-      reason: `Could not read check runs for "${ref}": ${err.message}. Unknown is not the same as green, so this is being handed over rather than reported ready.`,
+      reason: `${message}. Unknown is not the same as green, so this is being handed over rather than reported ready.`,
       failures: [], pending: [], passed: [],
     };
   }

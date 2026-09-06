@@ -17,6 +17,7 @@ import { compareSectionsToProfile } from './live-analysis/consistency-check.js';
 import { composeGeneratedExpandLayout } from './live-analysis/compose-expand-layout.js';
 import { projectAllComponentTemplates } from './lib/design-profile.js';
 import { getSiteById } from '../store/read.js';
+import { safeMessage } from '../lib/errors.js';
 
 function taggedError(message, stage) {
   const err = new Error(message);
@@ -35,7 +36,8 @@ export function createLiveDesignAnalysisHandler({
     if (!pageUrl) throw taggedError('No target page URL was provided for this design analysis job.', 'input_validation');
 
     const capture = await captureSiteFn(pageUrl).catch((err) => {
-      throw taggedError(`Could not load the live site to analyze its design: ${err.message}`, 'live_capture');
+      const { message } = safeMessage('live-analysis-handler.capture', err, 'Could not load the live site to analyze its design');
+      throw taggedError(message, 'live_capture');
     });
     if (!capture.pages?.length) {
       throw taggedError('Could not load any page of the live site — it may be unreachable or blocking automated requests.', 'live_capture');
@@ -60,7 +62,8 @@ export function createLiveDesignAnalysisHandler({
     }
 
     const profile = await extractProfileFn(segmented, { siteId: job.site_id }).catch((err) => {
-      throw taggedError(`Design profile extraction failed: ${err.message}`, 'result_validation');
+      const { message } = safeMessage('live-analysis-handler.extractProfile', err, 'Design profile extraction failed');
+      throw taggedError(message, 'result_validation');
     });
 
     if (job.params?.mode === 'component-templates') {

@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterSoftNotFoundPages, clearSoftNotFoundCache } from './candidate-pages.js';
+import { filterSoftNotFoundPages, clearSoftNotFoundCache, zeroTrafficSlotsFor } from './candidate-pages.js';
 
 // A 200 status does not prove a page exists. zunkireelabs.com serves its
 // homepage byte-for-byte for ANY unmatched path — /gaas/ and /zzz-not-a-page/
@@ -106,5 +106,36 @@ describe('filterSoftNotFoundPages', () => {
       checkSoftNotFound: async () => true,
     });
     assert.deepEqual(junk.pages, ['not-a-url'], 'no origin to fingerprint against — filter cannot apply');
+  });
+});
+
+describe('zeroTrafficSlotsFor — the whole site gets scanned, not just its top pages', () => {
+  // The reported symptom: newer blog posts and low-traffic resource pages
+  // never getting an FAQ, because they never reached the front of the queue.
+  test('a lopsided site gives zero-traffic pages far more than the old fixed quarter', () => {
+    // 40 GSC pages vs 200 zero-traffic: the old fixed 0.25 gave 5 slots.
+    assert.equal(zeroTrafficSlotsFor(20, 40, 200), 12);
+  });
+
+  test('the proportional share is capped, so GSC-known pages keep a real share', () => {
+    // Even at 1000-vs-5, quota-limited GSC work keeps 40% of the batch.
+    assert.equal(zeroTrafficSlotsFor(20, 5, 1000), 12);
+  });
+
+  test('a balanced site is unchanged from the original behaviour', () => {
+    // proportional == 0.5 here, above the 0.25 floor and below the cap.
+    assert.equal(zeroTrafficSlotsFor(20, 100, 100), 10);
+  });
+
+  test('the original quarter still applies as a floor when GSC pages dominate', () => {
+    assert.equal(zeroTrafficSlotsFor(20, 200, 10), 5);
+  });
+
+  test('no zero-traffic pages reserves nothing — the batch is all GSC', () => {
+    assert.equal(zeroTrafficSlotsFor(20, 50, 0), 0);
+  });
+
+  test('a brand-new site with no GSC data at all spends the whole batch on inventory', () => {
+    assert.equal(zeroTrafficSlotsFor(20, 0, 50), 20);
   });
 });

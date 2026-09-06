@@ -44,6 +44,7 @@
 import { resolveAdapter } from '../lib/url-file-map.js';
 import { sanityQuery, sanityMutate, draftId, publishedId, DEFAULT_API_VERSION } from '../../sanity/client.js';
 import { resolveSanityToken, describeSanityCredentialGap } from '../../sanity/credentials.js';
+import { safeMessage } from '../../lib/errors.js';
 
 export const meta = {
   id: 'sanity-document',
@@ -245,7 +246,8 @@ export async function apply(site, draft) {
       page,
     };
   } catch (err) {
-    return { ok: false, reason: 'github-error', error: `Sanity write failed: ${err.message}` };
+    const { message } = safeMessage('sanity-document.apply', err, 'Sanity write failed');
+    return { ok: false, reason: 'github-error', error: message };
   }
 }
 
@@ -294,7 +296,8 @@ export async function publishSanityDraft(site, draft) {
     if (!readBack) return { ok: false, reason: 'github-error', error: `Published ${live} but it could not be read back` };
     return { ok: true, cmsPublishedId: live, publishedAt: new Date().toISOString() };
   } catch (err) {
-    return { ok: false, reason: 'github-error', error: `Sanity publish failed: ${err.message}` };
+    const { message } = safeMessage('sanity-document.publishSanityDraft', err, 'Sanity publish failed');
+    return { ok: false, reason: 'github-error', error: message };
   }
 }
 

@@ -1,5 +1,6 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
+import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -264,6 +265,14 @@ function wrapInSiteProse(body, site) {
   // so the projected <table> lands inside it, same as any other block.
   const tableProjected = projectMarkdownTablesInBody(body, site?.url_file_map?.siteRoot?.designProfile);
 
+  // Then the prose itself. The wrapper below positions a body; it does not
+  // style the headings and paragraphs inside it, and on a utility-class site
+  // nothing else will either — see markdown-prose-render.js for why an
+  // unstyled <h2>/<p> inside a correctly-padded container is precisely the
+  // "generated pages look flat next to the real ones" symptom. Runs after the
+  // table pass so already-projected table markup is left alone.
+  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile);
+
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new
   // pages were the last renderers still shipping unstyled headings and
@@ -275,7 +284,7 @@ function wrapInSiteProse(body, site) {
   const wrapper = configured?.includes('{{BODY}}')
     ? configured
     : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);
-  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, tableProjected) : tableProjected;
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, proseProjected) : proseProjected;
 }
 
 function designProfileOf(site) {
