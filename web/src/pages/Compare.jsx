@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import PageHeader from '../components/PageHeader.jsx';
 import StatCard from '../components/StatCard.jsx';
+import Sparkline from '../components/Sparkline.jsx';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, Radar, Legend, Tooltip } from 'recharts';
 
 const fmtInt = (v) => Number(v).toLocaleString();
@@ -58,18 +59,17 @@ export default function Compare({ siteId }) {
 
   const [data, setData] = useState(null);
   const [series, setSeries] = useState([]);
-  const [plan, setPlan] = useState('');
-  const [planBusy, setPlanBusy] = useState(false);
+  const [error, setError] = useState(false);
 
   // Fetch comparison totals
   useEffect(() => {
     if (!siteId) return;
-    setPlan('');
     setData(null);
+    setError(false);
     if (mode === 'month') {
-      api.compare(siteId, a, b).then(setData).catch(() => setData(null));
+      api.compare(siteId, a, b).then(setData).catch(() => { setData(null); setError(true); });
     } else {
-      api.compareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6)).then(setData).catch(() => setData(null));
+      api.compareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6)).then(setData).catch(() => { setData(null); setError(true); });
     }
   }, [siteId, mode, a, b, wA, wB]);
 
@@ -95,164 +95,219 @@ export default function Compare({ siteId }) {
   const labelA = mode === 'week' ? weekLabel(wA) : a;
   const labelB = mode === 'week' ? weekLabel(wB) : b;
 
-  const genPlan = async () => {
-    setPlanBusy(true); setPlan('');
-    try {
-      const result = mode === 'month'
-        ? await api.aiCompare(siteId, a, b)
-        : await api.aiCompareRange(siteId, wA, addDays(wA, 6), wB, addDays(wB, 6));
-      setPlan(result.plan);
-    } catch { setPlan('Could not generate a plan right now — try again.'); }
-    finally { setPlanBusy(false); }
-  };
-
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-      <PageHeader
-        title="Compare Performance"
-        subtitle={mode === 'week' ? 'Week-over-week intelligence' : 'Month-over-month intelligence'}
-        icon="📈"
-        right={<>
-          <span className="text-xs font-semibold px-2.5 py-1 rounded-full self-center" style={{ background: overall.bg, color: overall.c }}>{overall.t}</span>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 relative font-sans fade-up">
 
-          {/* Mode dropdown */}
-          <label className="text-xs text-slate-500 self-center">
-            View<br />
-            <select
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm bg-white"
-            >
-              <option value="month">Month</option>
-              <option value="week">Week</option>
-            </select>
-          </label>
+      {/* Decorative Glows */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+        <div className="absolute top-0 right-1/4 w-[600px] h-[600px] rounded-full blur-[145px] bg-indigo-500/10 opacity-50 pulse-glow" />
+        <div className="absolute bottom-10 left-1/4 w-[500px] h-[500px] rounded-full blur-[125px] bg-purple-500/8 opacity-45 pulse-glow" />
+      </div>
 
-          {mode === 'month' ? (<>
-            <label className="text-xs text-slate-500">Month A<br />
-              <input type="month" value={a} onChange={(e) => setA(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" /></label>
-            <span className="text-slate-400 pb-2">vs</span>
-            <label className="text-xs text-slate-500">Month B<br />
-              <input type="month" value={b} onChange={(e) => setB(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" /></label>
-          </>) : (<>
-            <label className="text-xs text-slate-500">
-              Week A start<br />
-              <input type="date" value={wA} onChange={(e) => setWA(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" />
-              <span className="block text-[10px] text-slate-400 mt-0.5">{weekLabel(wA)}</span>
-            </label>
-            <span className="text-slate-400 pb-4">vs</span>
-            <label className="text-xs text-slate-500">
-              Week B start<br />
-              <input type="date" value={wB} onChange={(e) => setWB(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-sm" />
-              <span className="block text-[10px] text-slate-400 mt-0.5">{weekLabel(wB)}</span>
-            </label>
-          </>)}
-        </>}
-      />
+      {error && (
+        <div className="card p-4 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 text-center">
+          Unable to load this comparison right now. Try refreshing.
+        </div>
+      )}
 
-      {/* ── AI summary card ── */}
-      <div className="relative card overflow-hidden">
-        <div className="absolute inset-x-0 top-0 h-1" style={{ background: 'linear-gradient(90deg,#6C63FF,#8b5cf6,#0ea5e9)' }} />
-        <div className="p-5">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl grid place-items-center text-white shadow-md shadow-indigo-500/30" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>✨</div>
-              <div className="leading-tight">
-                <div className="text-sm font-semibold text-slate-800">AI Performance Summary</div>
-                <div className="text-[11px] text-slate-400">{labelA} vs {labelB}</div>
-              </div>
-            </div>
-            <button onClick={genPlan} disabled={planBusy || !data}
-              className="text-sm font-semibold text-white rounded-xl px-4 py-2 shadow-md shadow-indigo-500/25 disabled:opacity-50"
-              style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
-              {planBusy ? 'Generating…' : '⚡ Generate Action Plan'}
+      {/* Page Header and Comparison Controls combined */}
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-2">
+        <PageHeader
+          title="Compare Performance"
+          subtitle={mode === 'week' ? 'Week-over-week intelligence analysis' : 'Month-over-month intelligence analysis'}
+          icon="📈"
+        />
+        
+        {/* Mode selector + date inputs stretch full-width on mobile (w-full +
+            flex-1) — at their natural content width they left a big dead gap
+            on the right of this full-width card, same issue as Overview's
+            date bar. The status badge stays natural-width; it's a label, not
+            something that should be artificially stretched. */}
+        <div className="bg-white/70 border border-slate-200/50 backdrop-blur-md p-3.5 rounded-2xl flex flex-wrap items-center gap-3.5 z-10 shadow-sm">
+          {/* Mode Selector */}
+          <div className="flex flex-1 sm:flex-none bg-slate-100/70 p-0.5 rounded-xl border border-slate-200/30">
+            <button onClick={() => setMode('month')}
+              className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
+                mode === 'month' ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow' : 'text-slate-500 hover:text-slate-800'
+              }`}>
+              Month
+            </button>
+            <button onClick={() => setMode('week')}
+              className={`flex-1 sm:flex-none text-center text-[10px] font-bold px-3.5 py-1.5 rounded-lg transition ${
+                mode === 'week' ? 'bg-white text-indigo-600 shadow-sm active-pill-shadow' : 'text-slate-500 hover:text-slate-800'
+              }`}>
+              Week
             </button>
           </div>
 
-          {!data ? <div className="h-4 w-2/3 bg-slate-100 rounded animate-pulse" /> : (
-            <p className="text-sm leading-relaxed text-slate-700">
-              {biggestDrop && biggestDrop.pct < 0 && <>{biggestDrop.label} fell <b className="text-rose-600">{Math.abs(biggestDrop.pct)}%</b> ({biggestDrop.va.toLocaleString()} → {biggestDrop.vb.toLocaleString()}) — the steepest decline. </>}
-              {biggestGain && biggestGain.pct > 0
-                ? <>{biggestGain.label} was the bright spot, up <b className="text-emerald-600">{biggestGain.pct}%</b>. </>
-                : <>Nearly every metric softened this period. </>}
-              To recover, refresh your top-performing pages and improve titles on queries with high impressions but low clicks.
-            </p>
-          )}
+          <span className="shrink-0 text-xs font-bold px-2.5 py-1 rounded-full border bg-indigo-500/5 border-indigo-500/10 text-indigo-600 shadow-sm">
+            {overall.t}
+          </span>
 
-          {(planBusy || plan) && (
-            <div className="flex items-start gap-2.5 mt-4">
-              <div className="w-7 h-7 rounded-lg grid place-items-center text-white text-xs shrink-0" style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>AI</div>
-              <div className="flex-1 rounded-2xl rounded-tl-sm bg-slate-50 border border-slate-100 px-4 py-3 text-sm leading-relaxed text-slate-800 whitespace-pre-line">
-                <div className="text-[11px] font-semibold text-indigo-500 mb-1">Action plan</div>
-                {planBusy ? <span className="text-slate-400">Thinking…</span> : plan}
+          {/* Date inputs depending on mode */}
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            {mode === 'month' ? (
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <input type="month" value={a} onChange={(e) => setA(e.target.value)}
+                  className="flex-1 sm:flex-none min-w-0 bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm sm:w-[120px]" />
+                <span className="text-slate-400 font-bold shrink-0">vs</span>
+                <input type="month" value={b} onChange={(e) => setB(e.target.value)}
+                  className="flex-1 sm:flex-none min-w-0 bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm sm:w-[120px]" />
               </div>
-            </div>
+            ) : (
+              <div className="flex flex-wrap items-start gap-2 w-full sm:w-auto">
+                <div className="flex flex-col flex-1 sm:flex-none min-w-0">
+                  <input type="date" value={wA} onChange={(e) => setWA(e.target.value)}
+                    className="w-full sm:w-[125px] bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm" />
+                  <span className="text-[8px] font-bold text-slate-400 mt-1 px-1">{weekLabel(wA)}</span>
+                </div>
+                <span className="text-slate-400 font-bold shrink-0 self-start mt-1.5">vs</span>
+                <div className="flex flex-col flex-1 sm:flex-none min-w-0">
+                  <input type="date" value={wB} onChange={(e) => setWB(e.target.value)}
+                    className="w-full sm:w-[125px] bg-white border border-slate-200/80 rounded-xl px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/10 transition shadow-sm" />
+                  <span className="text-[8px] font-bold text-slate-400 mt-1 px-1">{weekLabel(wB)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Intelligence summary block */}
+      <div className="rounded-3xl border border-indigo-500/10 p-5 bg-gradient-to-br from-indigo-500/[0.02] via-purple-500/[0.01] to-white/70 backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl grid place-items-center text-white bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md shadow-indigo-500/20">📊</div>
+          <div className="leading-tight">
+            <h3 className="text-sm font-extrabold text-slate-950 tracking-tight">Performance Summary</h3>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">{labelA} vs {labelB}</p>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          {!data ? (
+            <div className="h-4 w-2/3 bg-slate-100 rounded animate-pulse" />
+          ) : (
+            <p className="text-sm leading-relaxed text-slate-700 font-medium">
+              {biggestDrop && biggestDrop.pct < 0 && (
+                <>
+                  <span className="font-bold text-slate-900">{biggestDrop.label}</span> fell{' '}
+                  <span className="text-rose-500 font-extrabold">{Math.abs(biggestDrop.pct)}%</span>{' '}
+                  <span className="text-slate-500">({biggestDrop.va.toLocaleString()} → {biggestDrop.vb.toLocaleString()})</span>, representing the steepest decline.{' '}
+                </>
+              )}
+              {biggestGain && biggestGain.pct > 0 ? (
+                <>
+                  <span className="font-bold text-slate-900">{biggestGain.label}</span> was the strongest area, growing{' '}
+                  <span className="text-emerald-500 font-extrabold">+{biggestGain.pct}%</span>.{' '}
+                </>
+              ) : (
+                <>Almost all metrics softened over this period.</>
+              )}
+            </p>
           )}
         </div>
       </div>
 
-      {/* ── KPI grid ── */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      {/* KPI grid — always 2 cols (even below sm) so 6 cards stacked
+          one-per-row doesn't turn into a long mobile scroll. */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
         {METRICS.map((m) => (
           <StatCard key={m.key} label={m.label} icon={m.icon} color={m.color}
             data={sv(m.key)} value={db[m.key]} prev={da[m.key]} format={fmtInt} loading={!data} />
         ))}
       </div>
 
-      {/* ── Biggest changes + radar ── */}
-      <div className="grid md:grid-cols-2 gap-6">
-        <div className="card p-5">
-          <div className="flex items-baseline justify-between mb-3">
-            <div className="card-title">Biggest changes</div>
-            <span className="text-[11px] text-slate-400">largest drops first</span>
-          </div>
-          {!data ? <div className="text-sm text-slate-400 py-4">Loading…</div> : (
-            <div className="divide-y divide-slate-50">
-              {byDrop.map((c, i) => {
-                const up = c.pct >= 0;
-                return (
-                  <div key={c.key} className="flex items-center gap-3 py-2.5">
-                    <span className="w-6 h-6 rounded-md grid place-items-center text-[11px] font-bold" style={{ background: `${c.color}1a`, color: c.color }}>{i + 1}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm text-slate-700">{c.label}</div>
-                      <div className="text-[11px] text-slate-400">{c.va.toLocaleString()} → {c.vb.toLocaleString()}</div>
-                    </div>
-                    <MiniSpark data={c.spark} color={up ? '#16A34A' : '#EF4444'} />
-                    <span className={`text-xs font-bold px-2 py-1 rounded-lg w-16 text-center shrink-0 ${up ? 'text-emerald-700 bg-emerald-50' : 'text-rose-600 bg-rose-50'}`}>
-                      {up ? '▲' : '▼'} {Math.abs(c.pct)}%
-                    </span>
-                  </div>
-                );
-              })}
+      {/* Biggest changes + radar */}
+      <div className="grid md:grid-cols-2 gap-6 items-stretch">
+        <div className="card p-6 flex flex-col justify-between">
+          <div>
+            <div className="flex items-baseline justify-between mb-5">
+              <h3 className="text-base font-bold text-slate-900 tracking-tight">Steepest Changes</h3>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Largest declines first</span>
             </div>
-          )}
+            
+            {!data ? (
+              <div className="py-14 text-center text-sm text-slate-400 animate-pulse font-medium">Loading details…</div>
+            ) : (
+              <div className="divide-y divide-slate-100/50">
+                {byDrop.map((c, i) => {
+                  const up = c.pct >= 0;
+                  return (
+                    <div key={c.key} className="flex items-center gap-3 py-3 hover:bg-slate-50/50 rounded-xl px-1 transition duration-150 group">
+                      <span className="w-6 h-6 rounded-lg grid place-items-center text-[11px] font-extrabold shrink-0" 
+                        style={{ background: `${c.color}12`, color: c.color }}>
+                        {i + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-slate-700 group-hover:text-slate-900 transition-colors">{c.label}</div>
+                        <div className="text-[10px] font-medium text-slate-400 mt-0.5 tabular-nums">
+                          {c.va.toLocaleString()} → {c.vb.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="pr-2 shrink-0">
+                        <Sparkline data={c.spark} color={up ? '#10b981' : '#f43f5e'} width={44} height={18} fill={false} dot={false} />
+                      </div>
+                      <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border w-16 text-center shrink-0 transition-colors ${
+                        up ? 'text-emerald-600 bg-emerald-500/5 border-emerald-500/10' : 'text-rose-500 bg-rose-500/5 border-rose-500/10'
+                      }`}>
+                        {up ? '▲' : '▼'} {Math.abs(c.pct)}%
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="card p-5">
-          <div className="flex items-baseline justify-between mb-1">
-            <div className="card-title">{mode === 'week' ? 'Week shape comparison' : 'Month shape comparison'}</div>
-            <span className="text-[11px] text-slate-400">normalized</span>
+        <div className="card p-6 flex flex-col justify-between">
+          <div>
+            <div className="flex items-baseline justify-between mb-4">
+              <h3 className="text-base font-bold text-slate-900 tracking-tight">Profile Shape Comparison</h3>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Normalized metrics</span>
+            </div>
+            
+            <div className="w-full flex items-center justify-center py-2">
+              <ResponsiveContainer width="100%" height={290}>
+                <RadarChart data={radar} outerRadius={85} margin={{ top: 10, right: 10, bottom: 10, left: 10 }}>
+                  <PolarGrid stroke="#f1f5f9" />
+                  <PolarAngleAxis dataKey="metric" tick={{ fontSize: 9, fill: '#64748b', fontWeight: 700 }} />
+                  <Radar name={labelA} dataKey="A" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.18} />
+                  <Radar name={labelB} dataKey="B" stroke="#6C63FF" fill="#6C63FF" fillOpacity={0.22} />
+                  <Legend wrapperStyle={{ fontSize: 11, fontWeight: 600, paddingTop: 10 }} />
+                  <Tooltip content={<CustomRadarTooltip labelA={labelA} labelB={labelB} />} />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
-          <ResponsiveContainer width="100%" height={300}>
-            <RadarChart data={radar} outerRadius={100}>
-              <PolarGrid stroke="#e2e8f0" />
-              <PolarAngleAxis dataKey="metric" tick={{ fontSize: 11, fill: '#64748b' }} />
-              <Radar name={labelA} dataKey="A" stroke="#c4b5fd" fill="#c4b5fd" fillOpacity={0.35} />
-              <Radar name={labelB} dataKey="B" stroke="#6C63FF" fill="#6C63FF" fillOpacity={0.35} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Tooltip formatter={(v, n, p) => [(n === labelA ? p.payload.va : p.payload.vb).toLocaleString(), n]} />
-            </RadarChart>
-          </ResponsiveContainer>
         </div>
       </div>
     </div>
   );
 }
 
-function MiniSpark({ data, color }) {
-  const vals = (data || []).map(Number);
-  if (vals.length < 2) return <span className="w-12 shrink-0" />;
-  const max = Math.max(...vals), min = Math.min(...vals), range = max - min || 1;
-  const pts = vals.map((v, i) => `${((i / (vals.length - 1)) * 48).toFixed(1)},${(18 - ((v - min) / range) * 16).toFixed(1)}`).join(' ');
-  return <svg width="48" height="20" className="shrink-0"><polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+// Custom glassmorphic tooltip for Radar chart
+function CustomRadarTooltip({ active, payload, label, labelA, labelB }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-slate-950/90 backdrop-blur-md text-white text-xs rounded-xl p-3 shadow-xl border border-slate-800">
+      <div className="font-bold text-slate-400 mb-1.5 uppercase tracking-wide text-[9px]">{label}</div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-4 font-semibold text-[11px]">
+          <span className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+            {labelA}:
+          </span>
+          <span className="font-bold tabular-nums">{(payload[0].payload.va).toLocaleString()}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4 font-semibold text-[11px]">
+          <span className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+            {labelB}:
+          </span>
+          <span className="font-bold tabular-nums">{(payload[1].payload.vb).toLocaleString()}</span>
+        </div>
+      </div>
+    </div>
+  );
 }

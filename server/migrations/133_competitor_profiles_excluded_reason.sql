@@ -1,0 +1,19 @@
+-- Distinguishes a real business competitor from a SERP/LLM-recall false
+-- positive (a social/search/developer platform like facebook.com,
+-- linkedin.com, github.com, google.com showing up because it happens to
+-- rank or get mentioned, not because it's actually a rival business) —
+-- competitor_profiles (migration 025) had no such distinction, so every
+-- discovered domain was treated as an equally real competitor by anything
+-- consuming this table, including the new competitor-domain policy
+-- (server/agents/lib/competitor-policy.js) that generators use to avoid
+-- promoting/linking a site's own real competitors.
+--
+-- NULL (the default, and the state of every existing row) = active/real
+-- competitor. Non-null = known-excluded, with the reason recorded rather
+-- than just a boolean, so a future exclusion category (e.g. a manual
+-- tenant-admin override) doesn't need another column. Set automatically at
+-- discovery time (server/agents/lib/competitor-analysis.js's
+-- isKnownPlatformDomain) using a small, generic, tenant-agnostic list of
+-- universal platforms — never a per-client list, applies identically to
+-- every site the same way excluding a site's own domain already does.
+ALTER TABLE competitor_profiles ADD COLUMN IF NOT EXISTS excluded_reason TEXT;

@@ -1,0 +1,18 @@
+-- Prompt 7 audit, section 9: drafts.source has been doing double duty —
+-- both "which detecting agent's finding is this" (opportunity/content-gap,
+-- the only two values fix-verification.js::currentTagsFor knows how to
+-- re-derive tags for) AND "which shipping mechanism created this row"
+-- (auto-remediation/execution-engine/analyst-auto, set by the caller that
+-- actually ran generateDraft). Every autonomous shipping path overwrites
+-- `source` with its own mechanism label, silently discarding the real
+-- detecting-agent value and making isVerifiableDraft() (fix-verifications.js)
+-- return false for a fix that DOES have a real tag-based recheck available —
+-- not because the fix is unverifiable, but because the column that used to
+-- carry that answer got repurposed.
+--
+-- finding_origin is a new, separate column: the real detecting agent
+-- (recommendations.detecting_agents[0], e.g. 'opportunity'/'content-gap'/
+-- 'analyst-insights'), set once at draft-creation time and never
+-- overwritten by however the draft is later shipped. `source` keeps its
+-- existing meaning/values unchanged for every existing caller.
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS finding_origin TEXT;

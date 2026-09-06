@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, stage]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — check-error-leaks.js diffs against origin/${{ github.base_ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build dashboard
+        run: npm run build:web
+
+      - name: Check opt-in flag deploy parity
+        run: npm run check-env-parity
+
+      - name: Check for raw error leaks into customer-facing content
+        run: npm run check-error-leaks
+        env:
+          CI_BASE_REF: origin/${{ github.base_ref }}

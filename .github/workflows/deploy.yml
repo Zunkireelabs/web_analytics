@@ -1,0 +1,210 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Pre-deploy Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build dashboard
+        run: npm run build:web
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: checks
+    environment: production
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            # Without this, a failed step (e.g. `docker compose build` running
+            # out of disk space) doesn't stop the script — it falls through to
+            # `up -d`, which happily recreates the container from whatever
+            # image already exists locally (the OLD one), passes its health
+            # check, and the whole job reports success even though nothing
+            # new was actually deployed. Confirmed real on the staging
+            # equivalent of this workflow on 2026-07-22 (VPS out of disk
+            # space), silently serving stale code while CI showed green.
+            set -eo pipefail
+
+            DIR="/home/zunkireelabs/devprojects/analytics-app-prod"
+
+            # First-push bootstrap: create directory and clone if missing
+            if [ ! -d "$DIR" ]; then
+              echo "First deployment — bootstrapping $DIR"
+              mkdir -p "$DIR"
+              git clone -b main git@github.com:${{ github.repository }}.git "$DIR"
+            fi
+
+            cd "$DIR"
+            git fetch origin
+            git checkout main
+            git pull origin main
+
+            cat > .env << 'ENVEOF'
+            # ── Database (production) ───────────────────────────────────────
+            DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}
+
+            # ── Google credentials (OAuth method) ────────────────────────────
+            GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+            GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+            GOOGLE_OAUTH_REFRESH_TOKEN=${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+            GSC_PROPERTY=${{ vars.GSC_PROPERTY }}
+            GA4_PROPERTY_ID=${{ vars.GA4_PROPERTY_ID }}
+
+            # ── AI narrative ────────────────────────────────────────────────
+            REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
+            REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
+
+            # ── Email ────────────────────────────────────────────────────────
+            SMTP_HOST=${{ vars.SMTP_HOST }}
+            SMTP_PORT=${{ vars.SMTP_PORT }}
+            SMTP_SECURE=${{ vars.SMTP_SECURE }}
+            SMTP_USER=${{ vars.SMTP_USER }}
+            SMTP_PASS=${{ secrets.SMTP_PASS }}
+            REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
+            REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
+
+            # ── Dashboard auth (production) ─────────────────────────────────
+            SESSION_SECRET=${{ secrets.PROD_SESSION_SECRET }}
+            COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
+
+            # ── Site identity ───────────────────────────────────────────────
+            SITE_NAME=${{ vars.SITE_NAME }}
+            TZ=${{ vars.TZ }}
+
+            # ── Cron ─────────────────────────────────────────────────────────
+            CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
+
+            # ── Deployment ───────────────────────────────────────────────────
+            ANALYTICS_DOMAIN=${{ vars.PROD_DOMAIN }}
+
+            # Sibling container's name on the shared "hosting" Docker network —
+            # not a secret, just an internal hostname. See .env.example.
+            DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-prod:8000
+
+            # Must match data-analyst-agent's own ADMIN_API_KEY exactly (see
+            # the second .env write below) — this app's /analyst routes
+            # (routes/dataAnalyst.js) inject it as X-Admin-Key server-side.
+            DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+
+            # ── Standalone MCP server (mcp-server/index.js) ─────────────────
+            # POST /api/mcp + the OAuth 2.1 surface, on their own subdomain —
+            # see the plan: "Split the MCP server onto its own subdomain".
+            # *.zunkireelabs.com is already wildcarded to this VPS, so no DNS
+            # change is needed for a new MCP_DOMAIN value.
+            MCP_DOMAIN=${{ vars.PROD_MCP_DOMAIN }}
+            ENVEOF
+
+            docker compose build
+
+            echo "Applying database migrations..."
+            docker compose run --rm analytics node server/migrations/run.js
+
+            docker compose up -d
+
+            # ── data-analyst-agent: sibling Python service, same repo, own
+            # docker-compose.yml (own dedicated Postgres in prod — see that
+            # file's own `db` service — never this app's Neon database).
+            # Reverse-proxied under this app's own domain at /data-agent
+            # (routes/data-agent.js) via DATA_ANALYST_AGENT_INTERNAL_URL
+            # above, so no separate DNS/Traefik domain is required for it
+            # to actually be usable — DATA_ANALYST_AGENT_DOMAIN below only
+            # matters if direct external access to it is wanted later.
+            cd "$DIR/data-analyst-agent"
+
+            cat > .env << 'ENVEOF'
+            DATABASE_URL=postgresql+asyncpg://data_analyst_agent:${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}@db:5432/data_analyst_agent
+            POSTGRES_PASSWORD=${{ secrets.DATA_ANALYST_AGENT_POSTGRES_PASSWORD }}
+            DATA_ANALYST_AGENT_DOMAIN=${{ vars.DATA_ANALYST_AGENT_DOMAIN }}
+            ROOT_PATH=/data-agent
+            TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}
+            # /api/mcp on analytics-app-prod:3002 is now just a 307
+            # compatibility redirect to the standalone mcp-server (see
+            # server/index.js's own comment) — pointing straight at that
+            # real service internally, same as staging's equivalent env
+            # var does over its public MCP_DOMAIN.
+            MCP_BASE_URL=http://analytics-mcp-prod:3003/api/mcp
+            ADMIN_API_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            INGEST_LOOKBACK_DAYS=400
+            Z_SCORE_THRESHOLD=3.0
+            IQR_MULTIPLIER=1.5
+            FORECAST_HORIZON_DAYS=14
+            MIN_HISTORY_DAYS_FOR_FORECAST=30
+            # Forecasts/anomalies/insights now run in-process (see
+            # app/ingestion/scheduler.py) instead of via a host crontab line
+            # that this workflow never installed — without this the Analyst
+            # page's early-warning section has no data to render.
+            ANALYSIS_SCHEDULE_ENABLED=true
+            ANALYSIS_SCHEDULE_HOUR_UTC=4
+            ENVEOF
+
+            docker compose build
+            docker compose up -d
+
+            cd "$DIR"
+
+            echo "Waiting for containers to be healthy..."
+            sleep 10
+            for CONTAINER in analytics-app-prod analytics-mcp-prod data-analyst-agent-prod design-agent-worker-prod; do
+              HEALTHY=0
+              for i in $(seq 1 12); do
+                STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+                if [ "$STATUS" = "healthy" ]; then
+                  echo "$CONTAINER is healthy!"
+                  HEALTHY=1
+                  break
+                fi
+                echo "$CONTAINER attempt $i/12: Status is $STATUS, waiting..."
+                sleep 10
+              done
+              if [ "$HEALTHY" != "1" ]; then
+                echo "$CONTAINER did not become healthy within 2 minutes"
+                docker logs "$CONTAINER" --tail 50
+                exit 1
+              fi
+            done
+
+      - name: Verify Health
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.PROD_DOMAIN }}")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Production health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "Production health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          MCP_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.PROD_MCP_DOMAIN }}/api/health")
+          if [ "$MCP_HTTP_CODE" = "200" ]; then
+            echo "Production MCP health check passed (HTTP $MCP_HTTP_CODE)"
+          else
+            echo "Production MCP health check failed (HTTP $MCP_HTTP_CODE)"
+            exit 1
+          fi

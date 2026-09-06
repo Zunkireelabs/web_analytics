@@ -1,0 +1,342 @@
+import { pool, query } from '../db.js';
+
+// CRUD for execution_jobs / execution_job_recommendations (migration 078).
+// Written to exclusively by agents/lib/execution-engine.js.
+
+export async function createExecutionJob(siteId, { trigger, requestedBy }) {
+  const { rows } = await query(
+    `INSERT INTO execution_jobs (site_id, trigger, status, requested_by, started_at)
+     VALUES ($1, $2, 'preparing', $3, now())
+     RETURNING *`,
+    [siteId, trigger, requestedBy || null]
+  );
+  return rows[0];
+}
+
+// Design Agent job (089): status starts at 'queued', not 'preparing' like
+// createExecutionJob above — a design_generate job has no worker to pick it
+// up yet, so it must wait, unlike bulk/single jobs which execute inline in
+// the same request. started_at is left null until a worker actually starts
+// the job. recommendationId is nullable — a componentTemplates-derivation
+// job (see createComponentTemplateJob below) has no recommendations row to
+// attach to.
+export async function createDesignAgentJob(siteId, recommendationId, { requestedBy, params } = {}) {
+  const { rows } = await query(
+    `INSERT INTO execution_jobs (site_id, trigger, kind, status, recommendation_id, requested_by, params)
+     VALUES ($1, 'single', 'design_generate', 'queued', $2, $3, $4::jsonb)
+     RETURNING *`,
+    [siteId, recommendationId, requestedBy || null, JSON.stringify(params || {})]
+  );
+  return rows[0];
+}
+
+// componentTemplates integration (090): a design_generate job whose task is
+// "inspect the real repo and derive/refresh {wrapper,row} markup for these
+// action types" rather than "act on one recommendation" — recommendation_id
+// is null (nothing to attach to), and `componentKeys` (the
+// design-drift.js/marker-merge.js action-type strings, e.g. ['faq',
+// 'expand-content']) travels in `params` for the worker's handler to read
+// off the claimed job row.
+// Is there already an unfinished componentTemplates derivation pending for
+// this site + component key? Used by design-drift.js's
+// resolveOrCreateComponentTemplate to enqueue at most ONE outstanding
+// re-derivation per site+key: that function sits on generateDraft's hot path,
+// so without this check every draft attempt against a site with an unverified
+// template would queue another job for work already pending — a single daily
+// run would add dozens.
+//
+// Matched on ACTION TYPE ('expand-content'), not the componentTemplates key
+// ('expandContent') — createComponentTemplateJob stores whatever its
+// `componentKeys` argument was, and every caller passes action types. The two
+// vocabularies are identical for faq/qaContent-style names and differ for the
+// hyphenated ones, so querying by the wrong one would silently never match
+// and re-queue forever.
+//
+// Treats both 'queued' and 'executing' as pending: a job a worker has already
+// claimed is still going to produce the template.
+//
+// jsonb_exists() rather than the `?` operator, which node-postgres parses as
+// a placeholder and would break the query.
+export async function getQueuedComponentTemplateJob(siteId, actionType) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate' AND status IN ('queued', 'executing')
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT 1`,
+    [siteId, actionType]
+  );
+  return rows[0] || null;
+}
+
+// Most recent design_generate job for this site + component key, of ANY
+// status — unlike getQueuedComponentTemplateJob above, this also surfaces a
+// FAILED attempt. Lets a caller tell "genuinely just queued, first attempt
+// ever" apart from "every attempt so far has failed and nothing new is
+// pending" — the gate in design-drift.js used to say "queued, no action
+// needed" in both cases, which silently lied once a worker failure left the
+// queue empty with no automatic retry.
+// Lightweight status poll for a single known job id — used by the
+// waitForCompletion path in design-drift.js's resolveOrCreateComponentTemplate,
+// which already knows the id (either just-inserted or found via
+// getQueuedComponentTemplateJob) and only needs to know when it leaves
+// 'queued'/'executing'. Deliberately narrower than getExecutionJob (no
+// items join) since this gets polled repeatedly.
+export async function getDesignAgentJobById(jobId) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at FROM execution_jobs WHERE id = $1 AND kind = 'design_generate'`,
+    [jobId]
+  );
+  return rows[0] || null;
+}
+
+export async function getLatestDesignAgentJob(siteId, actionType) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at, logs FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate'
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT 1`,
+    [siteId, actionType]
+  );
+  return rows[0] || null;
+}
+
+// Most recent N design_generate jobs for this site + component key, newest
+// first, WITH `result` (getLatestDesignAgentJob above deliberately omits it —
+// its one caller, design-drift.js's resolveOrCreateComponentTemplate, never
+// reads it). Added for implementers/lib/design-agent-status.js's honest
+// Action Center status: `result.failure` carries the real diagnostic
+// (failureClass/errorCode/stage/attempts — see lib/failure-classification.js
+// and worker.js's finishExecutionJob call), and a short run of consecutive
+// 'failed' rows is what distinguishes "one bad attempt" from "repeatedly
+// failing and needs a human" — see that module's countTrailingFailures.
+// Scoped by site_id like every other query in this file — a caller can never
+// see another tenant's job history through this function.
+export async function getRecentDesignAgentJobs(siteId, actionType, limit = 5) {
+  const { rows } = await query(
+    `SELECT id, status, finished_at, result FROM execution_jobs
+     WHERE site_id = $1 AND kind = 'design_generate'
+       AND jsonb_exists(params->'componentKeys', $2)
+     ORDER BY id DESC LIMIT $3`,
+    [siteId, actionType, limit]
+  );
+  return rows;
+}
+
+// Sentinel stored in params.componentKeys for a whole-site design-profile
+// job, so getQueuedComponentTemplateJob's existing "is one already pending"
+// check works unchanged for it. Not an action type — deliberately a reserved
+// name no COMPONENT_TEMPLATE_KEY will ever collide with.
+export const DESIGN_PROFILE_JOB_KEY = '__design-profile__';
+
+// Derives the SITE'S whole design language (design-agent/lib/design-profile.js),
+// which every per-component template is then projected from. Takes no action
+// types — the whole site is the scope, which is exactly what makes one of
+// these worth more than N component-template jobs.
+export async function createDesignProfileJob(siteId, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, {
+    requestedBy,
+    params: { mode: 'design-profile', componentKeys: [DESIGN_PROFILE_JOB_KEY], pageUrl: pageUrl || null },
+  });
+}
+
+export async function createComponentTemplateJob(siteId, componentKeys, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, { requestedBy, params: { mode: 'component-templates', componentKeys, pageUrl: pageUrl || null } });
+}
+
+// Same sentinel pattern as DESIGN_PROFILE_JOB_KEY just above — stored in
+// params.componentKeys purely so getQueuedComponentTemplateJob's existing
+// "is one already pending" dedup check and getLatestDesignAgentJob's
+// "when did this last run" read both work for this job type with no new
+// query of their own.
+export const CONSISTENCY_SCAN_JOB_KEY = '__consistency-scan__';
+
+// Whole-site design-consistency scan (agents/lib/design-consistency.js):
+// re-captures a representative page of EVERY page type the live-analysis
+// pipeline already discovers (live-analysis/capture.js's discoverPages —
+// homepage, a service page, a location page, a blog article, the legal
+// pages, ...) and compares each one's real sections against the site's
+// already-stored design profile, flagging drift outside the SEOAI-marker
+// regions the daily content-repair pass already covers — see
+// consistency-check.js's own module comment for exactly what "drift" means
+// here. Needs a usable profile to compare AGAINST (queueConsistencyScanForSite
+// in job.js checks this before ever calling here), so this is always a
+// refresh of an existing understanding, never a first derivation.
+export async function createConsistencyScanJob(siteId, { requestedBy, pageUrl } = {}) {
+  return createDesignAgentJob(siteId, null, {
+    requestedBy,
+    params: { mode: 'consistency-scan', componentKeys: [CONSISTENCY_SCAN_JOB_KEY], pageUrl: pageUrl || null },
+  });
+}
+
+// Step 6B: atomically claims the oldest queued design_generate job for the
+// calling worker process. SELECT ... FOR UPDATE SKIP LOCKED inside its own
+// transaction is what makes this safe under N concurrent worker processes —
+// a row already locked by another worker's in-flight claim is invisible to
+// this query rather than something this query blocks on, so two workers can
+// never both claim the same job. Returns null (not a rejected promise) when
+// the queue is empty, same "empty is a normal outcome" convention as the
+// rest of this file's read helpers.
+//
+// siteId is optional and defaults to unscoped (every real worker.js
+// deployment polls globally, across every tenant, by design). It exists so
+// a caller that already knows it only ever wants ITS OWN site's jobs — in
+// practice, worker.test.js's fixtures — can't accidentally claim (and
+// fake-complete with a mock handler) some other site's real queued job.
+export async function claimNextDesignAgentJob(siteId = null) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: candidates } = await client.query(
+      `SELECT id FROM execution_jobs
+       WHERE kind = 'design_generate' AND status = 'queued'
+         AND ($1::int IS NULL OR site_id = $1)
+       ORDER BY id
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1`,
+      [siteId]
+    );
+    if (!candidates[0]) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const { rows } = await client.query(
+      `UPDATE execution_jobs SET status = 'executing', started_at = now() WHERE id = $1 RETURNING *`,
+      [candidates[0].id]
+    );
+    await client.query('COMMIT');
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// The worst-case time a design_generate job can legitimately stay
+// 'executing' inside ONE live worker process: 3 attempts (worker.js's own
+// runWithRetry default maxAttempts) x the per-attempt task timeout
+// (openhands-handler.js's DESIGN_AGENT_TASK_TIMEOUT_MS, default 10 minutes),
+// plus its own short inter-attempt backoff. A job still 'executing' well
+// past this can only mean the worker PROCESS that claimed it is gone — died,
+// OOM-killed, container crashed — not that it is still working; nothing
+// inside that process's own timeout/retry machinery ever fires if the
+// process itself no longer exists to run it. Generous multiplier (4x, not
+// 3x) so a merely slow-but-alive attempt (e.g. a large repo scan near the
+// timeout) is never mistaken for a dead one.
+const STALE_EXECUTING_MS = Number(process.env.DESIGN_AGENT_TASK_TIMEOUT_MS || 10 * 60 * 1000) * 4;
+
+// Self-healing counterpart to claimNextDesignAgentJob: a job's own worker
+// process crashing mid-run (rather than calling finishExecutionJob or being
+// stopped gracefully via worker.js's stop(), which never leaves a claimed
+// job stranded) leaves it stuck at status='executing' forever — no code
+// path ever revisits it, since claimNextDesignAgentJob only ever looks at
+// status='queued'. Real incident: this is exactly what makes a design_generate
+// job outlive the container that was running it, permanently masquerading
+// as "in progress" (design-agent-status.js reports RUNNING) to every gate
+// that reads it, even after a fresh worker container is deployed and empty.
+//
+// Resets it back to 'queued' (never straight to 'failed' — the run itself
+// may well have been fine, only the process hosting it died) so the NEXT
+// claim, by this worker or any other, gets a genuine, fresh attempt. Scoped
+// to kind='design_generate' only — the one kind this table's workers ever
+// execute (see claimNextDesignAgentJob's own WHERE clause).
+export async function reclaimStaleExecutingJobs({ olderThanMs = STALE_EXECUTING_MS } = {}) {
+  const { rows } = await query(
+    `UPDATE execution_jobs
+       SET status = 'queued', started_at = null,
+           logs = logs || $2::jsonb
+     WHERE kind = 'design_generate' AND status = 'executing'
+       AND started_at < now() - ($1::text || ' milliseconds')::interval
+     RETURNING id, site_id`,
+    [olderThanMs, JSON.stringify([{ at: new Date().toISOString(), message: `Reclaimed: stuck in 'executing' past the ${Math.round(olderThanMs / 60000)}-minute stale threshold — its worker process is presumed dead. Reset to 'queued' for a fresh attempt.` }])]
+  );
+  return rows;
+}
+
+export async function addJobRecommendation(executionJobId, recommendationId) {
+  const { rows } = await query(
+    `INSERT INTO execution_job_recommendations (execution_job_id, recommendation_id)
+     VALUES ($1, $2) RETURNING *`,
+    [executionJobId, recommendationId]
+  );
+  return rows[0];
+}
+
+export async function updateJobRecommendationStatus(id, status, { draftId, error } = {}) {
+  await query(
+    `UPDATE execution_job_recommendations SET status = $2, draft_id = COALESCE($3, draft_id), error = $4, updated_at = now() WHERE id = $1`,
+    [id, status, draftId ?? null, error || null]
+  );
+}
+
+export async function appendJobLog(executionJobId, message) {
+  await query(
+    `UPDATE execution_jobs SET logs = logs || $2::jsonb WHERE id = $1`,
+    [executionJobId, JSON.stringify([{ at: new Date().toISOString(), message }])]
+  );
+}
+
+// `result` (090) is the handler's own return value (e.g. the
+// componentTemplates a design_generate job derived) — optional and additive,
+// COALESCEd like branch_name/pr_number/pr_url above, so every existing
+// caller that never passes it is unaffected.
+export async function finishExecutionJob(executionJobId, { status, branchName, prNumber, prUrl, result }) {
+  const { rows } = await query(
+    `UPDATE execution_jobs SET
+       status = $2, branch_name = COALESCE($3, branch_name), pr_number = COALESCE($4, pr_number), pr_url = COALESCE($5, pr_url),
+       result = COALESCE($6::jsonb, result),
+       finished_at = now(), duration_ms = EXTRACT(EPOCH FROM (now() - started_at)) * 1000
+     WHERE id = $1
+     RETURNING *`,
+    [executionJobId, status, branchName || null, prNumber || null, prUrl || null, result != null ? JSON.stringify(result) : null]
+  );
+  return rows[0];
+}
+
+// Live "today" counters for the Action Center header — shipped/failed
+// counted per execution_job_recommendations row (final status, not
+// transient queued/drafted/submitted states), scoped to this site and
+// today in the DB server's local date.
+export async function getTodayExecutionStats(siteId) {
+  const { rows } = await query(
+    `SELECT
+       count(*) FILTER (WHERE ejr.status = 'approved') AS shipped,
+       count(*) FILTER (WHERE ejr.status = 'failed') AS failed
+     FROM execution_job_recommendations ejr
+     JOIN execution_jobs ej ON ej.id = ejr.execution_job_id
+     WHERE ej.site_id = $1 AND ejr.updated_at >= date_trunc('day', now())`,
+    [siteId]
+  );
+  return { shipped: Number(rows[0].shipped), failed: Number(rows[0].failed) };
+}
+
+// The most recent bulk run for a site, in the same shape getExecutionJob
+// returns. Exists because "Execute Today's Safe Fixes" is a synchronous
+// request that can outlive the browser's own 5-minute fetch ceiling (see
+// web/src/api.js's REQUEST_TIMEOUT_MS) once a batch is large enough — the
+// server finishes the job regardless, but the client that started it never
+// receives the response and so has no job id to ask about. This is how it
+// finds the run it already started.
+export async function getLatestBulkExecutionJob(siteId) {
+  const { rows } = await query(
+    `SELECT id FROM execution_jobs
+     WHERE site_id = $1 AND trigger = 'bulk'
+     ORDER BY id DESC LIMIT 1`,
+    [siteId]
+  );
+  return rows[0] ? getExecutionJob(siteId, rows[0].id) : null;
+}
+
+export async function getExecutionJob(siteId, id) {
+  const { rows } = await query('SELECT * FROM execution_jobs WHERE site_id = $1 AND id = $2', [siteId, id]);
+  if (!rows[0]) return null;
+  const items = await query(
+    `SELECT ejr.*, r.recommendation_type, r.issue, r.page
+     FROM execution_job_recommendations ejr
+     JOIN recommendations r ON r.id = ejr.recommendation_id
+     WHERE ejr.execution_job_id = $1 ORDER BY ejr.id`,
+    [id]
+  );
+  return { ...rows[0], items: items.rows };
+}

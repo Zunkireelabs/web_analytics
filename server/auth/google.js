@@ -1,18 +1,42 @@
 import { google } from 'googleapis';
 import { GoogleAuth } from 'google-auth-library';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 
-// Scopes: read-only for the data APIs, plus Docs write for the weekly report doc.
+// Scopes: read-only for GA4, full read/write for Search Console (sitemap
+// resubmission needs write — see submitSitemap in server/ingest/gsc-technical.js),
+// plus Docs write for the weekly report doc.
 const SCOPES = [
-  'https://www.googleapis.com/auth/webmasters.readonly',   // Search Console
-  'https://www.googleapis.com/auth/analytics.readonly',    // GA4 Data API
-  'https://www.googleapis.com/auth/documents',             // Google Docs (weekly report)
+  'https://www.googleapis.com/auth/webmasters',          // Search Console (read/write)
+  'https://www.googleapis.com/auth/analytics.readonly',  // GA4 Data API
+  'https://www.googleapis.com/auth/documents',           // Google Docs (weekly report)
 ];
 
+const here = dirname(fileURLToPath(import.meta.url));
+const CLIENT_CREDENTIALS_ROOT = join(here, '..', '..', 'secrets', 'clients');
+
+// Per-client credentials, one optional file per site: secrets/clients/<site.id>/service-account.json.
+// Returns the absolute path if that site has its own file, else null — the null case is what makes
+// every caller below fall through to the existing shared-credentials logic, unchanged.
+function getSiteCredentialsPath(site) {
+  if (!site?.id) return null;
+  const p = join(CLIENT_CREDENTIALS_ROOT, String(site.id), 'service-account.json');
+  return existsSync(p) ? p : null;
+}
+
 // Returns a google-auth-library auth client.
-// Primary path: service account via GOOGLE_APPLICATION_CREDENTIALS.
-// Fallback path: OAuth2 refresh token (set the three GOOGLE_OAUTH_* env vars).
-export function getGoogleAuth() {
+// If `site` has its own credentials file (secrets/clients/<site.id>/service-account.json), it is
+// used exclusively for that site. Otherwise, falls back to the shared app-wide credentials:
+// primary path: OAuth2 refresh token (the three GOOGLE_OAUTH_* env vars); fallback path: service
+// account via GOOGLE_APPLICATION_CREDENTIALS.
+export function getGoogleAuth(site) {
+  const siteCredPath = getSiteCredentialsPath(site);
+  if (siteCredPath) {
+    return new GoogleAuth({ scopes: SCOPES, keyFilename: siteCredPath });
+  }
+
   const {
     GOOGLE_OAUTH_CLIENT_ID,
     GOOGLE_OAUTH_CLIENT_SECRET,
@@ -35,22 +59,26 @@ export function getGoogleAuth() {
   return new GoogleAuth({ scopes: SCOPES });
 }
 
-// Search Console API client.
-export async function getSearchConsole() {
-  const auth = getGoogleAuth();
+// Search Console API client, scoped to `site`'s own credentials if it has any.
+export async function getSearchConsole(site) {
+  const auth = getGoogleAuth(site);
   return google.searchconsole({ version: 'v1', auth });
 }
 
-// Google Docs API client (used for the weekly report document).
-export function getDocs() {
-  const auth = getGoogleAuth();
+// Google Docs API client, scoped to `site`'s own credentials if it has any.
+export function getDocs(site) {
+  const auth = getGoogleAuth(site);
   return google.docs({ version: 'v1', auth });
 }
 
-// Returns credentials usable by @google-analytics/data's BetaAnalyticsDataClient.
-// The GA4 client reads GOOGLE_APPLICATION_CREDENTIALS itself for the service-account path;
-// for OAuth we hand it an authClient.
-export function getGa4ClientOptions() {
+// Returns credentials usable by @google-analytics/data's BetaAnalyticsDataClient, scoped to
+// `site`'s own credentials if it has any. Falls back to the same shared-credentials logic as
+// getGoogleAuth() above (OAuth2 authClient, or {} so the GA4 client reads
+// GOOGLE_APPLICATION_CREDENTIALS itself for the service-account path).
+export function getGa4ClientOptions(site) {
+  const siteCredPath = getSiteCredentialsPath(site);
+  if (siteCredPath) return { keyFilename: siteCredPath };
+
   const {
     GOOGLE_OAUTH_CLIENT_ID,
     GOOGLE_OAUTH_CLIENT_SECRET,
@@ -62,6 +90,5 @@ export function getGa4ClientOptions() {
     oauth2.setCredentials({ refresh_token: GOOGLE_OAUTH_REFRESH_TOKEN });
     return { authClient: oauth2 };
   }
-  // Service account: BetaAnalyticsDataClient picks up GOOGLE_APPLICATION_CREDENTIALS automatically.
   return {};
 }

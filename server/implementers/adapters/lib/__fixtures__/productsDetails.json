@@ -1,0 +1,339 @@
+{
+  "ai-booking-engine": {
+    "id": "ai-booking-engine",
+    "title": "Zenly",
+    "category": "Business Tools",
+    "loginUrl": "https://zenly.zunkireelabs.com/login",
+    "tagline": "AI Booking Engine — Intelligent scheduling that fills your calendar",
+    "description": "Smart scheduling platform that handles complex availability, multi-resource bookings, and automatic conflict resolution. Reduce no-shows by 35% with AI-powered reminders.",
+    "heroImage": "/images/ai-booking-hero.svg",
+    "lastUpdated": "2026-03-24",
+    "definition": {
+      "heading": "Scheduling that thinks ahead so you don't have to",
+      "content": "Zenly is an intelligent AI booking engine that goes beyond simple calendar management. It understands complex availability rules, handles multi-resource bookings, resolves conflicts automatically, and optimizes your schedule for maximum efficiency. With AI-powered reminders and predictive analytics, businesses using Zenly see 35% fewer no-shows and 50% reduction in scheduling-related support requests."
+    },
+    "stats": [
+      {
+        "value": "35%",
+        "label": "Fewer No-Shows",
+        "description": "AI reminders"
+      },
+      {
+        "value": "50%",
+        "label": "Less Support",
+        "description": "self-service booking"
+      },
+      {
+        "value": "3x",
+        "label": "Faster Booking",
+        "description": "vs manual scheduling"
+      },
+      {
+        "value": "99.9%",
+        "label": "Uptime SLA",
+        "description": "enterprise reliability"
+      }
+    ],
+    "benefits": [
+      {
+        "icon": "calendar",
+        "title": "Complex availability, simplified",
+        "description": "Handle multiple providers, locations, equipment dependencies, and custom rules. The AI figures out what's available without endless back-and-forth."
+      },
+      {
+        "icon": "speed",
+        "title": "Intelligent conflict resolution",
+        "description": "When conflicts arise, the AI suggests alternatives, handles waitlists, and can automatically rebook affected appointments with customer approval."
+      },
+      {
+        "icon": "integrate",
+        "title": "Connects to your existing calendars",
+        "description": "Syncs with Google Calendar, Outlook, Apple Calendar, and major scheduling systems. Embed booking widgets anywhere with our JavaScript SDK."
+      }
+    ],
+    "useCases": [
+      {
+        "id": "services",
+        "title": "Service Businesses",
+        "headline": "Professional Appointment Booking",
+        "description": "Perfect for consultants, salons, clinics, and any service business. Customers book online, you control the rules.",
+        "features": [
+          "Online self-service",
+          "Service menu display",
+          "Provider selection",
+          "Payment integration"
+        ],
+        "image": "https://images.unsplash.com/photo-1560472354-b33ff0c44a43?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "resources",
+        "title": "Resource Scheduling",
+        "headline": "Room & Equipment Booking",
+        "description": "Manage meeting rooms, equipment, vehicles, or any shared resource. Prevent double-booking and optimize utilization.",
+        "features": [
+          "Room booking",
+          "Equipment checkout",
+          "Capacity management",
+          "Usage analytics"
+        ],
+        "image": "https://images.unsplash.com/photo-1497366216548-37526070297c?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "teams",
+        "title": "Team Scheduling",
+        "headline": "Multi-Provider Coordination",
+        "description": "Coordinate schedules across team members, handle round-robin assignments, and balance workload automatically.",
+        "features": [
+          "Round-robin booking",
+          "Load balancing",
+          "Team availability",
+          "Collective scheduling"
+        ],
+        "image": "https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "events",
+        "title": "Event Registration",
+        "headline": "Class & Event Booking",
+        "description": "Handle recurring classes, workshops, and events. Manage capacity, waitlists, and session-based scheduling.",
+        "features": [
+          "Class scheduling",
+          "Capacity limits",
+          "Waitlist management",
+          "Series bookings"
+        ],
+        "image": "https://images.unsplash.com/photo-1505373877841-8d25f7d46678?w=800&h=600&fit=crop"
+      }
+    ],
+    "resources": [
+      {
+        "title": "Quick Start Guide",
+        "description": "Get booking in 15 minutes",
+        "url": "/docs/booking/quickstart/",
+        "icon": "book"
+      },
+      {
+        "title": "Widget Customization",
+        "description": "Embed and style your booking widget",
+        "url": "/docs/booking/widgets/",
+        "icon": "code"
+      },
+      {
+        "title": "API Reference",
+        "description": "Build custom integrations",
+        "url": "/docs/booking/api/",
+        "icon": "terminal"
+      },
+      {
+        "title": "Best Practices",
+        "description": "Optimize your scheduling workflow",
+        "url": "/resources/booking-best-practices/",
+        "icon": "briefcase"
+      }
+    ],
+    "faq": [
+      {
+        "question": "What is Zenly?",
+        "answer": "Zenly is an intelligent AI booking engine that handles complex availability rules, multi-resource bookings, and automatic conflict resolution. It enables customers to self-service book while giving businesses complete control over scheduling rules."
+      },
+      {
+        "question": "How does Zenly reduce no-shows?",
+        "answer": "Zenly sends personalized reminders via SMS, email, or voice at optimal times based on appointment type and customer behavior. It also makes rescheduling easy, so customers change appointments instead of simply not showing up."
+      },
+      {
+        "question": "Can Zenly handle complex scheduling rules?",
+        "answer": "Yes. Define rules for buffer times, service combinations, provider specialties, equipment dependencies, and location constraints. Zenly applies all rules automatically when showing availability."
+      },
+      {
+        "question": "Does it integrate with payment processors?",
+        "answer": "AI Booking Engine integrates with Stripe, Square, and PayPal for deposits, prepayments, and full payments at booking. You can also connect to your existing payment infrastructure via API."
+      },
+      {
+        "question": "What's the pricing model?",
+        "answer": "Pricing is based on the number of bookings per month and features required. Plans start at $29/month for small businesses. Enterprise custom pricing available. All plans include unlimited calendar connections."
+      }
+    ],
+    "cta": {
+      "headline": "Ready to automate your scheduling?",
+      "description": "See how Zenly can eliminate scheduling friction and reduce no-shows for your business.",
+      "primaryButton": {
+        "text": "Start Free Trial",
+        "url": "/contact/"
+      },
+      "secondaryButton": {
+        "text": "Schedule Demo",
+        "url": "/contact/"
+      }
+    },
+    "clients": []
+  },
+  "dental-ai": {
+    "id": "dental-ai",
+    "title": "Dental AI Assistant",
+    "category": "AI Products",
+    "loginUrl": "https://dental.zunkiree.com",
+    "status": "coming-soon",
+    "tagline": "AI-powered dental practice management",
+    "description": "Intelligent assistant designed for dental operations. Automates patient communication, scheduling, and follow-ups so your team can focus on patient care.",
+    "heroImage": "/images/dental-ai-hero.svg",
+    "lastUpdated": "2026-03-24",
+    "definition": {
+      "heading": "Your practice's always-on patient communication partner",
+      "content": "Dental AI Assistant is an intelligent platform that handles routine patient interactions around the clock. From appointment scheduling and reminders to insurance inquiries and treatment explanations, the AI manages communications that typically consume hours of staff time daily. Practices using Dental AI see 35% reduction in no-shows and reclaim 15+ hours per week of administrative time."
+    },
+    "stats": [
+      {
+        "value": "35%",
+        "label": "Fewer No-Shows",
+        "description": "smart reminders"
+      },
+      {
+        "value": "15+",
+        "label": "Hours Saved",
+        "description": "per week on admin"
+      },
+      {
+        "value": "24/7",
+        "label": "Availability",
+        "description": "always-on support"
+      },
+      {
+        "value": "90%",
+        "label": "Query Resolution",
+        "description": "without staff"
+      }
+    ],
+    "benefits": [
+      {
+        "icon": "chat",
+        "title": "24/7 patient communication",
+        "description": "Patients get instant answers to questions about procedures, pricing, and availability—anytime. No more missed calls or voicemails stacking up."
+      },
+      {
+        "icon": "calendar",
+        "title": "Intelligent appointment scheduling",
+        "description": "AI considers treatment duration, provider availability, and patient preferences to book optimal appointment times automatically."
+      },
+      {
+        "icon": "bell",
+        "title": "Personalized follow-up automation",
+        "description": "Automated reminders, post-visit check-ins, and recall notifications via SMS, email, or voice—personalized to each patient's preferences."
+      }
+    ],
+    "useCases": [
+      {
+        "id": "patient-comms",
+        "title": "Patient Communication",
+        "headline": "Always-On Patient Support",
+        "description": "Answer common questions about procedures, pricing, insurance, and availability instantly—without staff involvement.",
+        "features": [
+          "Procedure FAQs",
+          "Pricing inquiries",
+          "Insurance questions",
+          "Office hours/location"
+        ],
+        "image": "https://images.unsplash.com/photo-1588776814546-1ffcf47267a5?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "scheduling",
+        "title": "Smart Scheduling",
+        "headline": "Optimized Appointment Booking",
+        "description": "AI schedules appointments considering treatment time, chair availability, provider schedules, and patient preferences.",
+        "features": [
+          "Online booking",
+          "Waitlist management",
+          "Rescheduling",
+          "Provider matching"
+        ],
+        "image": "https://images.unsplash.com/photo-1606811841689-23dfddce3e95?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "reminders",
+        "title": "Appointment Reminders",
+        "headline": "Reduce No-Shows Automatically",
+        "description": "Multi-channel reminders that adapt to patient preferences. Confirmations, day-before reminders, and easy rescheduling options.",
+        "features": [
+          "SMS reminders",
+          "Email confirmations",
+          "Voice calls",
+          "Easy rescheduling"
+        ],
+        "image": "https://images.unsplash.com/photo-1576091160550-2173dba999ef?w=800&h=600&fit=crop"
+      },
+      {
+        "id": "reviews",
+        "title": "Review Management",
+        "headline": "Build Your Online Reputation",
+        "description": "Automated post-visit follow-ups that encourage satisfied patients to leave reviews on Google, Yelp, and healthcare directories.",
+        "features": [
+          "Post-visit surveys",
+          "Review requests",
+          "Response management",
+          "Reputation monitoring"
+        ],
+        "image": "https://images.unsplash.com/photo-1629909613654-28e377c37b09?w=800&h=600&fit=crop"
+      }
+    ],
+    "resources": [
+      {
+        "title": "Product Overview",
+        "description": "Detailed feature walkthrough",
+        "url": "/docs/dental-ai/overview/",
+        "icon": "book"
+      },
+      {
+        "title": "Integration Guide",
+        "description": "Connect with your practice software",
+        "url": "/docs/dental-ai/integration/",
+        "icon": "code"
+      },
+      {
+        "title": "ROI Calculator",
+        "description": "Estimate your practice savings",
+        "url": "/resources/dental-ai-roi/",
+        "icon": "briefcase"
+      },
+      {
+        "title": "HIPAA Compliance",
+        "description": "Security and compliance details",
+        "url": "/docs/dental-ai/compliance/",
+        "icon": "terminal"
+      }
+    ],
+    "faq": [
+      {
+        "question": "What is Dental AI Assistant?",
+        "answer": "Dental AI Assistant is an intelligent platform that automates patient communication, appointment scheduling, and follow-ups for dental practices. It handles routine inquiries 24/7 so your staff can focus on in-office patient care."
+      },
+      {
+        "question": "Is Dental AI Assistant HIPAA compliant?",
+        "answer": "Yes. Dental AI Assistant is fully HIPAA compliant with end-to-end encryption, secure data storage, and BAA agreements available. All patient communications are logged and auditable."
+      },
+      {
+        "question": "Does it integrate with my practice management software?",
+        "answer": "Dental AI Assistant integrates with major dental practice management systems including Dentrix, Eaglesoft, Open Dental, and Curve. Integration typically takes 1-2 days."
+      },
+      {
+        "question": "When will Dental AI Assistant be available?",
+        "answer": "Dental AI Assistant is currently in private beta with select practices. Join our waitlist to be notified when we open general availability, expected Q3 2026."
+      },
+      {
+        "question": "What does Dental AI Assistant cost?",
+        "answer": "Pricing will be based on practice size and feature requirements. Early waitlist members will receive preferred pricing. Contact us for details."
+      }
+    ],
+    "cta": {
+      "headline": "Be the first to transform your practice",
+      "description": "Join the waitlist for early access to Dental AI Assistant and help shape the future of dental practice automation.",
+      "primaryButton": {
+        "text": "Join Waitlist",
+        "url": "/contact/"
+      },
+      "secondaryButton": {
+        "text": "Request Early Access",
+        "url": "/contact/"
+      }
+    },
+    "clients": []
+  }
+}

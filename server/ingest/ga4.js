@@ -1,21 +1,29 @@
 import { BetaAnalyticsDataClient } from '@google-analytics/data';
 import { getGa4ClientOptions } from '../auth/google.js';
 
-let client;
-function ga4() {
-  if (!client) client = new BetaAnalyticsDataClient(getGa4ClientOptions());
-  return client;
+// One cached client per distinct credential set, keyed by site id — a single
+// shared singleton would silently reuse the wrong client's credentials for
+// other sites once any site has its own dedicated Google credentials file.
+const clients = new Map();
+function ga4(site) {
+  const key = site?.id ?? '__shared__';
+  if (!clients.has(key)) {
+    clients.set(key, new BetaAnalyticsDataClient(getGa4ClientOptions(site)));
+  }
+  return clients.get(key);
 }
 
 const num = (v) => (v == null || v === '' ? 0 : Number(v));
 
-// Fetch GA4 metrics for a single date.
+// Fetch GA4 metrics for a single date, using `site`'s own Google credentials
+// if it has a dedicated file (secrets/clients/<site.id>/), else the shared
+// app-wide credentials.
 // Returns { totals, channels } shaped for upsert. GA4 is near-real-time (fetch date = today-1).
-export async function fetchGa4ForDate(propertyId, date) {
-  const property = `properties/${propertyId}`;
+export async function fetchGa4ForDate(site, date) {
+  const property = `properties/${site.ga4_property_id}`;
 
   // 1) Overall totals.
-  const [totalsRes] = await ga4().runReport({
+  const [totalsRes] = await ga4(site).runReport({
     property,
     dateRanges: [{ startDate: date, endDate: date }],
     metrics: [
@@ -25,6 +33,7 @@ export async function fetchGa4ForDate(propertyId, date) {
       { name: 'engagedSessions' },
       { name: 'averageSessionDuration' },
       { name: 'conversions' },
+      { name: 'bounceRate' },
     ],
   });
 
@@ -36,10 +45,11 @@ export async function fetchGa4ForDate(propertyId, date) {
     engaged_sessions: num(row[3]?.value),
     avg_engagement_time: num(row[4]?.value),
     conversions: num(row[5]?.value),
+    bounce_rate: num(row[6]?.value),
   };
 
   // 2) Traffic by default channel group.
-  const [chanRes] = await ga4().runReport({
+  const [chanRes] = await ga4(site).runReport({
     property,
     dateRanges: [{ startDate: date, endDate: date }],
     dimensions: [{ name: 'sessionDefaultChannelGroup' }],
@@ -54,7 +64,7 @@ export async function fetchGa4ForDate(propertyId, date) {
 
   // 3) Breakdown by device category and by country (sessions + users).
   const breakdown = async (dimName) => {
-    const [res] = await ga4().runReport({
+    const [res] = await ga4(site).runReport({
       property,
       dateRanges: [{ startDate: date, endDate: date }],
       dimensions: [{ name: dimName }],
@@ -70,6 +80,10 @@ export async function fetchGa4ForDate(propertyId, date) {
 
   const devices = await breakdown('deviceCategory'); // desktop / mobile / tablet
   const countries = await breakdown('country');
+  const cities = await breakdown('city');
+  const languages = await breakdown('language'); // e.g. "English", "French"
+  const browsers = await breakdown('browser'); // e.g. "Chrome", "Safari"
+  const sourceMediums = await breakdown('sessionSourceMedium'); // e.g. "google / organic"
 
-  return { date, totals, channels, devices, countries };
+  return { date, totals, channels, devices, countries, cities, languages, browsers, sourceMediums };
 }

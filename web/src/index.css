@@ -14,30 +14,303 @@
   --neg:        #e11d48;
 }
 
+/* Only body, never html too — html AND body both carrying a non-visible
+   overflow at the same time is a documented Chromium/WebKit quirk that
+   silently breaks `position: sticky` for every descendant (confirmed via
+   Playwright repro: Sidebar.jsx's sticky sidebar scrolled away entirely on
+   a tall page instead of staying pinned). body alone still clips the same
+   accidental horizontal overflow this was added to prevent. */
 body {
+  overflow-x: hidden;
   margin: 0;
-  background: var(--bg);
+  background: radial-gradient(at 0% 0%, rgba(108, 99, 255, 0.05) 0px, transparent 50%),
+              radial-gradient(at 50% 0%, rgba(139, 92, 246, 0.04) 0px, transparent 50%),
+              radial-gradient(at 100% 0%, rgba(56, 189, 248, 0.05) 0px, transparent 50%),
+              #f8fafc;
+  font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  min-height: 100vh;
 }
 
 /* Premium card surface */
 .card {
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 18px 40px -28px rgba(16, 24, 40, 0.22);
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 24px;
+  box-shadow: 
+    0 1px 3px rgba(15, 23, 42, 0.03),
+    0 8px 20px -6px rgba(15, 23, 42, 0.04),
+    0 24px 48px -12px rgba(15, 23, 42, 0.05);
 }
-.card-hover { transition: box-shadow 0.2s ease, transform 0.2s ease; }
+.card-dark {
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%) !important;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 24px;
+  color: #ffffff !important;
+  box-shadow: 
+    0 4px 20px rgba(15, 23, 42, 0.25),
+    0 10px 30px -5px rgba(0, 0, 0, 0.3);
+}
+.card-hover {
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
 .card-hover:hover {
-  box-shadow: 0 2px 6px rgba(16, 24, 40, 0.05), 0 28px 56px -28px rgba(108, 99, 255, 0.28);
-  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 
+    0 4px 10px rgba(108, 99, 255, 0.04),
+    0 16px 36px -4px rgba(108, 99, 255, 0.1),
+    0 32px 64px -16px rgba(108, 99, 255, 0.08),
+    0 0 0 1px rgba(108, 99, 255, 0.25);
+  transform: translateY(-3px) scale(1.005);
 }
+
+/* Glassmorphism panel */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
 
 /* Section / card heading */
-.card-title { font-size: 0.8125rem; font-weight: 600; color: var(--ink-soft); }
+.card-title { font-size: 0.875rem; font-weight: 600; color: var(--ink-soft); letter-spacing: -0.01em; }
 
-/* Subtle entrance */
-@keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.fade-up { animation: fadeUp 0.28s ease-out both; }
+/* Subtle entrance animations */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+.fade-up {
+  animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+.animate-slide-down {
+  animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.05); }
+}
+.pulse-glow {
+  animation: pulseGlow 4s ease-in-out infinite;
+}
+
+/* Custom interactive active state indicators */
+.active-pill-shadow {
+  box-shadow: 0 4px 12px rgba(108, 99, 255, 0.25);
+}
+
+/* Hide scrollbar for Chrome, Safari and Opera */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+/* Hide scrollbar for IE, Edge and Firefox */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+/* Custom premium scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Flowing connector line (login hero) */
+@keyframes dashFlow { to { stroke-dashoffset: -48; } }
+.dash-flow { animation: dashFlow 2.6s linear infinite; }
+
+/* Indeterminate progress sweep (login hero — "agent running" bars) */
+@keyframes shimmerSweep { from { transform: translateX(-100%); } to { transform: translateX(220%); } }
+.shimmer-sweep { animation: shimmerSweep 1.6s ease-in-out infinite; }
+
+/* Gentle hover-in-place drift (login hero — Continuous AI Growth Loop hub) */
+@keyframes floatSoft { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+.float-soft { animation: floatSoft 5s ease-in-out infinite; }
+
+/* Print rules for clean PDF export */
+@media print {
+  aside,
+  nav,
+  button,
+  .no-print,
+  a[href^="http"]:after {
+    display: none !important;
+  }
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+  }
+  body {
+    background: white !important;
+    color: #0f172a !important;
+  }
+  .card {
+    border: 1px solid #e2e8f0 !important;
+    box-shadow: none !important;
+    background: white !important;
+    page-break-inside: avoid;
+  }
+}
+
+/* Custom scrollbar utility */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(108, 99, 255, 0.15);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(108, 99, 255, 0.35);
+}
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(108, 99, 255, 0.15) transparent;
+}
+
+/* ───────── AI Data Analyst Command Center — design system ─────────
+   Light prediction-first visual language used across the /analyst page:
+   clean white surfaces, subtle indigo accents, severity-coded action
+   chips. All tokens centralized here so the Analyst components share one
+   palette instead of re-typing hex values. */
+.analyst-root {
+  color-scheme: light;
+  --an-bg:        #f7f8fc;
+  --an-bg-2:      #eef1f6;
+  --an-panel:     rgba(255, 255, 255, 0.85);
+  --an-panel-2:   rgba(255, 255, 255, 0.95);
+  --an-line:      rgba(139, 92, 246, 0.18);
+  --an-line-2:    rgba(148, 163, 184, 0.22);
+  --an-ink:       #0f172a;
+  --an-ink-soft:  #334155;
+  --an-muted:     #64748b;
+  --an-brand:     #6C63FF;
+  --an-brand-2:   #8b5cf6;
+  --an-cyan:      #06b6d4;
+  --an-emerald:   #059669;
+  --an-amber:     #d97706;
+  --an-rose:      #dc2626;
+}
+
+.an-panel {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.96));
+  border: 1px solid var(--an-line);
+  border-radius: 20px;
+  box-shadow: 0 10px 30px -15px rgba(15, 23, 42, 0.15);
+}
+.an-panel-glow {
+  background:
+    radial-gradient(600px 240px at 15% -10%, rgba(108, 99, 255, 0.12), transparent 60%),
+    radial-gradient(500px 220px at 90% -10%, rgba(6, 182, 212, 0.08), transparent 55%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.98));
+  border: 1px solid var(--an-line);
+  border-radius: 20px;
+  box-shadow: 0 10px 30px -15px rgba(15, 23, 42, 0.15);
+}
+.an-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--an-muted);
+}
+.an-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.an-chip-emerald { color: var(--an-emerald); background: rgba(5, 150, 105, 0.1); border-color: rgba(5, 150, 105, 0.25); }
+.an-chip-amber   { color: var(--an-amber);   background: rgba(217, 119, 6, 0.1);  border-color: rgba(217, 119, 6, 0.25); }
+.an-chip-rose    { color: var(--an-rose);    background: rgba(220, 38, 38, 0.1); border-color: rgba(220, 38, 38, 0.25); }
+.an-chip-violet  { color: #4f46e5;           background: rgba(108, 99, 255, 0.12);   border-color: rgba(108, 99, 255, 0.3); }
+.an-chip-cyan    { color: #0e7490;           background: rgba(6, 182, 212, 0.1);  border-color: rgba(6, 182, 212, 0.25); }
+.an-chip-slate   { color: var(--an-muted);   background: rgba(100, 116, 139, 0.1); border-color: rgba(100, 116, 139, 0.22); }
+
+.an-grad-text {
+  background: linear-gradient(100deg, #c4b5fd, #8b5cf6 45%, #38bdf8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.an-grad-btn {
+  background: linear-gradient(135deg, #6C63FF, #8b5cf6);
+  color: #fff;
+}
+.an-grad-btn:hover { filter: brightness(1.08); }
+.an-grad-btn:disabled { opacity: 0.4; filter: none; cursor: not-allowed; }
+
+.an-input {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--an-line-2);
+  border-radius: 12px;
+  color: var(--an-ink);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+.an-input:focus { border-color: rgba(108, 99, 255, 0.5); box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.15); }
+
+.an-glow-dot {
+  box-shadow: 0 0 0 4px rgba(108, 99, 255, 0.18), 0 0 14px rgba(108, 99, 255, 0.35);
+}
+.an-glow-line {
+  box-shadow: 0 0 12px rgba(108, 99, 255, 0.3);
+}
+
+/* Subtle scanline + grid backdrop for the prediction hero */
+.an-grid-bg {
+  background-image:
+    linear-gradient(rgba(108, 99, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(108, 99, 255, 0.08) 1px, transparent 1px);
+  background-size: 34px 34px;
+}
+
+/* Forecast band breathing glow */
+@keyframes anBreathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.85; }
+}
+.an-breathe { animation: anBreathe 3.2s ease-in-out infinite; }
+
+/* Prediction timeline connectors */
+@keyframes anPulseDash { to { stroke-dashoffset: -28; } }
+.an-pulse-dash { animation: anPulseDash 2.4s linear infinite; }

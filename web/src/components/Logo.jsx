@@ -1,12 +1,12 @@
-// Zunkiree Labs logo mark (red circle + white trend chart), no text, no box.
-// Sourced from the official logo.svg in /public.
+// Search Analytics AI logo mark (search + growth + AI network motif), no text, no box.
+// Sourced from /public/logo.png.
 export default function Logo({ size = 26 }) {
   return (
     <img
-      src="/logo.svg"
+      src="/logo.png"
       width={size}
       height={size}
-      alt="Zunkiree Labs"
+      alt="Search Analytics AI"
       style={{ display: 'block' }}
     />
   );

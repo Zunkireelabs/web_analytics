@@ -1,9 +1,13 @@
 services:
   analytics:
-    container_name: analytics-app
+    container_name: analytics-app-prod
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # So the built SPA's MCP "connect" snippet shows the canonical MCP
+        # subdomain directly (web/src/components/McpTokensCard.jsx).
+        VITE_MCP_ORIGIN: https://${MCP_DOMAIN}
     networks:
       - hosting
     restart: unless-stopped
@@ -12,7 +16,8 @@ services:
     environment:
       - NODE_ENV=production
     volumes:
-      # Mount the Google service-account key read-only (path must match GOOGLE_APPLICATION_CREDENTIALS in .env).
+      # Per-client Google credential overrides (rare — see client-onboarding skill).
+      # Empty by default; only used if secrets/clients/<site.id>/service-account.json exists.
       - ./secrets:/app/secrets:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
@@ -24,15 +29,100 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=hosting"
       # Set ANALYTICS_DOMAIN in .env, e.g. analytics.zunkireelabs.com
-      - "traefik.http.routers.analytics.rule=Host(`${ANALYTICS_DOMAIN}`)"
-      - "traefik.http.routers.analytics.entrypoints=websecure"
-      - "traefik.http.routers.analytics.tls=true"
-      - "traefik.http.routers.analytics.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.analytics-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
-      - "traefik.http.routers.analytics-http.entrypoints=web"
-      - "traefik.http.routers.analytics-http.middlewares=analytics-redirect"
-      - "traefik.http.middlewares.analytics-redirect.redirectscheme.scheme=https"
-      - "traefik.http.services.analytics.loadbalancer.server.port=3002"
+      - "traefik.http.routers.analytics-prod.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-prod.entrypoints=websecure"
+      - "traefik.http.routers.analytics-prod.tls=true"
+      - "traefik.http.routers.analytics-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-prod-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-prod-http.entrypoints=web"
+      - "traefik.http.routers.analytics-prod-http.middlewares=analytics-prod-redirect"
+      - "traefik.http.middlewares.analytics-prod-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-prod.loadbalancer.server.port=3002"
+
+  # Standalone MCP server (mcp-server/index.js) — POST /api/mcp + the OAuth
+  # 2.1 surface, on its own subdomain (MCP_DOMAIN). The canonical public
+  # endpoint for the Data Analyst Agent and any other MCP/OAuth client. No
+  # separate Postgres — reuses the main app's Neon DATABASE_URL via the same
+  # env_file. See the plan: "Split the MCP server onto its own subdomain."
+  analytics-mcp:
+    container_name: analytics-mcp-prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "mcp-server/index.js"]
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - MCP_API_PORT=3003
+      - DB_POOL_MAX=5
+      - DASHBOARD_ORIGIN=https://${ANALYTICS_DOMAIN}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set MCP_DOMAIN in .env, e.g. mcp.zunkireelabs.com
+      - "traefik.http.routers.analytics-mcp-prod.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-prod.entrypoints=websecure"
+      - "traefik.http.routers.analytics-mcp-prod.tls=true"
+      - "traefik.http.routers.analytics-mcp-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-mcp-prod-http.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-prod-http.entrypoints=web"
+      - "traefik.http.routers.analytics-mcp-prod-http.middlewares=analytics-mcp-prod-redirect"
+      - "traefik.http.middlewares.analytics-mcp-prod-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-mcp-prod.loadbalancer.server.port=3003"
+
+  # Design Agent worker (server/design-agent/worker.js) — polls
+  # execution_jobs for kind='design_generate'. As of the 2026-08-26 rewrite,
+  # every job mode runs Docker-free: 'design-profile'/'component-templates'
+  # (read-only site ANALYSIS) run via server/design-agent/live-analysis/ —
+  # Playwright loads the real live site + one Claude call — and
+  # 'capability-repair' (a real repo EDIT — server/agents/lib/
+  # template-capability-repair.js) runs via a native, no-container tool-use
+  # loop (server/design-agent/native-repair/) — see worker.js's
+  # createDispatchingHandler. No public endpoint (a background poller, not
+  # an HTTP service) — no Traefik labels, no exposed port. Runs on THIS same
+  # host/compose deployment rather than a separate VPS, same as
+  # analytics-mcp above: shares this app's own .env (DATABASE_URL,
+  # GITHUB_PAT, OPENAI_API_KEY/ANTHROPIC_API_KEY) and the same Neon database
+  # via execution_jobs/sites, no dedicated DB of its own (unlike
+  # data-analyst-agent's docker-compose.yml, which does have one).
+  #
+  # No /var/run/docker.sock mount and no extra_hosts host-gateway entry —
+  # the OpenHands/Docker-outside-of-Docker path (a sibling
+  # ghcr.io/openhands/agent-server container per job) this used to need that
+  # for was removed 2026-08-27, confirmed unreferenced by any live job
+  # dispatch (see server/design-agent/Dockerfile's own header comment).
+  design-agent-worker:
+    container_name: design-agent-worker-prod
+    build:
+      context: .
+      dockerfile: server/design-agent/Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      # No HTTP endpoint to poll (this is a background poller, not a web
+      # service) — liveness is just "is the poll-loop process still
+      # running", same convention as any other worker-style container with
+      # nothing to curl.
+      test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 networks:
   hosting:

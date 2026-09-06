@@ -1,0 +1,450 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [stage]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Pre-deploy Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build dashboard
+        run: npm run build:web
+
+  deploy:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: checks
+    environment: staging
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # 20m was enough for a warm-cache build. A cold cache (e.g. right
+          # after a disk-space `docker system prune` on the VPS) reinstalls
+          # data-analyst-agent's Python ML dependencies (scikit-learn,
+          # transformers, sentence-transformers) from scratch with no cached
+          # layers — a real deploy on 2026-08-13 got through git pull, image
+          # build, and dependency install, then died on "exporting layers" at
+          # the 20m mark, one step from finishing. 35m covers a full cold
+          # build with headroom; a normal warm-cache deploy still finishes in
+          # its usual few minutes and never gets close to this ceiling.
+          command_timeout: 35m
+          script: |
+            # Without this, a failed step (e.g. `docker compose build` running
+            # out of disk space) doesn't stop the script — it falls through to
+            # `up -d`, which happily recreates the container from whatever
+            # image already exists locally (the OLD one), passes its health
+            # check, and the whole job reports success even though nothing
+            # new was actually deployed. Confirmed real: a real deploy did
+            # exactly this on 2026-07-22 (VPS out of disk space), silently
+            # serving stale code while CI showed green.
+            set -eo pipefail
+
+            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+
+            # First-push bootstrap: create directory and clone if missing
+            if [ ! -d "$DIR" ]; then
+              echo "First deployment — bootstrapping $DIR"
+              mkdir -p "$DIR"
+              git clone -b stage git@github.com:${{ github.repository }}.git "$DIR"
+            fi
+
+            cd "$DIR"
+            # Force the remote back to SSH every deploy: a previous deploy
+            # (2026-08-13) set origin to an HTTPS+PAT URL, which persists in
+            # this checkout's .git/config across deploys since the bootstrap
+            # clone above only runs once. Without this line, reverting the
+            # script's own clone command back to SSH silently did nothing —
+            # the existing checkout kept using the stale HTTPS remote and
+            # kept 403'ing.
+            git remote set-url origin git@github.com:${{ github.repository }}.git
+            git fetch origin
+            git checkout stage
+            git pull origin stage
+
+            cat > .env << 'ENVEOF'
+            # ── Database (staging) ──────────────────────────────────────────
+            DATABASE_URL=${{ secrets.STAGING_DATABASE_URL }}
+
+            # ── Google credentials (shared with production, OAuth method) ──
+            GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+            GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+            GOOGLE_OAUTH_REFRESH_TOKEN=${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+            GSC_PROPERTY=${{ vars.GSC_PROPERTY }}
+            GA4_PROPERTY_ID=${{ vars.GA4_PROPERTY_ID }}
+
+            # ── AI narrative (shared) ───────────────────────────────────────
+            REPORT_PROVIDER=${{ vars.REPORT_PROVIDER }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            REPORT_MODEL_DAILY=${{ vars.REPORT_MODEL_DAILY }}
+            REPORT_MODEL_MONTHLY=${{ vars.REPORT_MODEL_MONTHLY }}
+
+            # ── GitHub App (multi-client credentials) ───────────────────────
+            # Optional. Unset until a GitHub App is registered, at which point
+            # every site carrying a github_app_installation_id authenticates
+            # through it instead of a PAT — which is what lets client #2 onboard
+            # without a new secret, a new line here, and a redeploy.
+            # The key is base64 because this block writes .env in one heredoc
+            # and a PEM's newlines would not survive it.
+            # Same reserved-prefix rule as GH_PAT below: GitHub rejects any
+            # SECRET whose name starts with GITHUB_, so the secrets are named
+            # GH_APP_* and are renamed here to the GITHUB_APP_* env vars the app
+            # actually reads (server/github/app-auth.js).
+            GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
+            GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+
+            # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
+            # Shares OPENAI_API_KEY above but requires this separate flag
+            # before it fires (server/agents/ai-recommendation.js) — a
+            # deliberate opt-in so it never silently activates just because
+            # OPENAI_API_KEY happens to be set for the daily-narrative
+            # feature above. Explicitly turned on for staging.
+            AI_RECOMMENDATION_ENABLED=true
+
+            # ── Growth Plan Narrative (opt-in, Milestones' "Your Growth Plan") ──
+            # Same double-gate reasoning as AI_RECOMMENDATION_ENABLED above —
+            # shares ANTHROPIC_API_KEY/OPENAI_API_KEY but needs this explicit
+            # flag too. Without it, Milestones simply omits this section.
+            GROWTH_PLAN_NARRATIVE_ENABLED=true
+
+            # ── Blog featured images (opt-in, Pexels search, free tier) ──
+            # Same double-gate reasoning as AI_RECOMMENDATION_ENABLED above —
+            # the key alone must not silently turn image-fetching on. Without
+            # this flag, blog-outline.js simply omits a featured image.
+            PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY }}
+            BLOG_IMAGES_ENABLED=true
+
+            # ── Agentic Orchestration (opt-in, smarter agent-selection loop) ──
+            # Same double-gate pattern — without this, Copilot/Action Center
+            # refresh fall back to their fixed-agent-list behavior, not a
+            # crash either way.
+            AGENTIC_ORCHESTRATION_ENABLED=true
+
+            # ── Competitor Intelligence (free real-SERP alternative to DataForSEO) ──
+            # Without these, competitor-intelligence.js falls back to
+            # LLM-only reasoning instead of real, SERP-verified competitor
+            # discovery. GOOGLE_CSE_API_KEY's project has no billing account
+            # linked (Custom Search JSON API requires one even for free-tier
+            # usage), so it silently fails every real call despite passing
+            # configured() — detectCompetitorsFromSerp's per-query
+            # `catch { continue; }` (competitor-analysis.js) meant this had
+            # been falling back to LLM-only guessing on every run, with no
+            # visible error. COMPETITOR_PROVIDER now points at serpapi
+            # (verified working, real position-ordered SERP data returned)
+            # instead — GOOGLE_CSE_API_KEY/CX kept below only as inert
+            # leftover credentials, not read by anything while
+            # COMPETITOR_PROVIDER=serpapi.
+            COMPETITOR_PROVIDER=serpapi
+            GOOGLE_CSE_API_KEY=${{ secrets.GOOGLE_CSE_API_KEY }}
+            GOOGLE_CSE_CX=${{ secrets.GOOGLE_CSE_CX }}
+
+            # SERPAPI_KEY (no-billing SerpApi) is used only by
+            # COMPETITOR_PROVIDER=serpapi above now — no longer a
+            # search-grounding fallback (see the Tavily section below).
+            SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+
+            # ── Content Expansion citations (opt-in, grounded via Tavily —
+            # ingest/search-grounding-providers/tavily.js) ──
+            # Sole search-grounding provider for external-citations, deliberately
+            # never Google CSE/SerpApi (those stay reserved for competitor SERP
+            # data above). Without TAVILY_API_KEY, expand-content.js refuses to
+            # draft external-citations sections rather than invent an ungrounded
+            # link (see generators/expand-content.js).
+            #
+            # Re-enabled 2026-08-31, same day it was disabled: that disable was
+            # because SerpApi/Google CSE were both dead (quota exhausted / no
+            # billing), not because citation search itself was the problem —
+            # Tavily replaces both as the sole provider, so the outage this
+            # worked around no longer applies.
+            TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+            ENABLE_CONTENT_CITATION_SEARCH=true
+
+            # ── Technical SEO (optional Core Web Vitals enrichment) ──────────
+            # Without this, technical-seo.js still reports real GSC index
+            # status/broken links — just without Core Web Vitals findings.
+            PAGESPEED_API_KEY=${{ secrets.PAGESPEED_API_KEY }}
+
+            # ── Authority Score (full 5-signal backlink score) ───────────────
+            # Pending real DataForSEO account/credentials — these secrets
+            # don't exist yet, so this resolves to empty and authority.js
+            # correctly falls back to its insufficient-data state (or the
+            # Common Crawl fallback, once that data is populated) rather than
+            # crashing. Add DATAFORSEO_LOGIN/DATAFORSEO_PASSWORD as real repo
+            # secrets once a DataForSEO account exists — no other change
+            # needed, authority.js already picks them up automatically.
+            DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}
+            DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}
+
+            # ── Email (shared) ──────────────────────────────────────────────
+            SMTP_HOST=${{ vars.SMTP_HOST }}
+            SMTP_PORT=${{ vars.SMTP_PORT }}
+            SMTP_SECURE=${{ vars.SMTP_SECURE }}
+            SMTP_USER=${{ vars.SMTP_USER }}
+            SMTP_PASS=${{ secrets.SMTP_PASS }}
+            REPORT_EMAIL_FROM=${{ vars.REPORT_EMAIL_FROM }}
+            REPORT_EMAIL_TO=${{ vars.REPORT_EMAIL_TO }}
+
+            # Catch-all: EVERY outbound email from this host goes here instead
+            # of its real recipient (server/report/email.js's getTransporter
+            # wraps the shared transporter, so no sender can bypass it). The
+            # original recipient is preserved in the subject and an
+            # X-Original-To header.
+            #
+            # This is what resolves the hazard the Cron block below describes:
+            # staging's 07:00/Thursday schedule is deliberately live, and real
+            # client sites now share this database, so without a redirect the
+            # daily pipeline would email real clients from an environment that
+            # still changes daily. Deliberately absent from deploy.yml —
+            # production must reach real recipients.
+            #
+            # Invitation and password-reset mail is EXEMPT (see email.js's
+            # REDIRECT_EXEMPT): each is addressed to one person who just
+            # requested that exact link, so redirecting it protects nobody and
+            # silently breaks the thing they asked for. Everything
+            # system-initiated — daily reports, notifications, sales leads —
+            # is still redirected here.
+            #
+            # Consequence worth knowing: an invitation sent from staging
+            # contains a STAGING link, so only invite people you actually
+            # want landing in staging while this host is the live one.
+            EMAIL_REDIRECT_TO=${{ vars.EMAIL_REDIRECT_TO || 'yukta@zunkireelabs.com' }}
+
+            # ── Dashboard auth (staging) ────────────────────────────────────
+            SESSION_SECRET=${{ secrets.STAGING_SESSION_SECRET }}
+            COMPANY_SITE_ID=${{ vars.COMPANY_SITE_ID }}
+
+            # ── Action Center GitHub integration ────────────────────────────
+            # Without this, server/github/client.js throws "No GitHub PAT set"
+            # the moment someone pushes/merges a draft from the live staging
+            # dashboard — it previously only worked when run from a machine
+            # with GITHUB_PAT already in its own local .env. The Actions
+            # secret itself can't be named GITHUB_PAT — GitHub reserves any
+            # secret name starting with GITHUB_ for its own auto-provided
+            # secrets (e.g. GITHUB_TOKEN) and rejects creating one — so the
+            # secret is named GH_PAT instead, and only renamed to the
+            # GITHUB_PAT env var the app code actually expects right here.
+            GITHUB_PAT=${{ secrets.GH_PAT }}
+            # Verifies inbound POSTs to /api/webhooks/github really came from
+            # GitHub (server/routes/webhooks.js) — must be the exact same
+            # value entered as the webhook's "Secret" on each site's repo, or
+            # every delivery 401s. Same GITHUB_-prefix restriction as above:
+            # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
+            # GITHUB_WEBHOOK_SECRET env var the app code expects.
+            GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
+
+            # ── Site identity ───────────────────────────────────────────────
+            SITE_NAME=${{ vars.SITE_NAME }}
+            TZ=${{ vars.TZ }}
+
+            # ── Cron ──────────────────────────────────────────────────────
+            # Staging is temporarily doubling as the live automation host for
+            # the company's own site — production (main) has never actually
+            # been deployed, so this is the only VPS instance capable of
+            # sending the daily email without depending on a laptop being on.
+            # DISABLE_CRON is intentionally left ON (false) so the real
+            # 07:00 daily / Thursday weekly schedule fires here for real.
+            # DISABLE_CATCHUP stays true regardless — that only guards
+            # against runStartupCatchup() re-running real ingestion/weekly/
+            # executive jobs (and re-emailing) on every redeploy-triggered
+            # restart; it's unrelated to the recurring schedule itself.
+            # Real client sites DO now share this database, so the "its cron
+            # being live would email them too" hazard this used to warn about
+            # is real rather than hypothetical. It is handled by
+            # EMAIL_REDIRECT_TO above, which sends every outbound message here
+            # to one internal address instead of its real recipient — not by
+            # this schedule being safe. Do not remove that redirect while this
+            # cron stays live and real clients remain in this database.
+            CRON_SCHEDULE=${{ vars.CRON_SCHEDULE }}
+            DISABLE_CRON=false
+            DISABLE_CATCHUP=true
+
+            # ── Deployment ───────────────────────────────────────────────────
+            ANALYTICS_DOMAIN=${{ vars.STAGING_DOMAIN }}
+
+            # ── Standalone MCP server (mcp-server/index.js) ─────────────────
+            # POST /api/mcp + the OAuth 2.1 surface, on their own subdomain —
+            # see the plan: "Split the MCP server onto its own subdomain."
+            # *.zunkireelabs.com is already wildcarded to this VPS, so no DNS
+            # change is needed for a new MCP_DOMAIN value.
+            MCP_DOMAIN=${{ vars.STAGING_MCP_DOMAIN }}
+
+            # ── Data Analyst Agent (Analyst page's "AI Focus" tab) ───────────
+            # Sibling container's name on the shared "hosting" Docker network —
+            # not a secret, just an internal hostname (same pattern as
+            # production's DATA_ANALYST_AGENT_INTERNAL_URL). Without this the
+            # Node app falls back to its http://127.0.0.1:8000 default, finds
+            # nothing listening inside its own container, and every
+            # /internal/analyst/dashboard/:id call 500s.
+            DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-stage:8000
+            DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+            ENVEOF
+
+            # ── Data Analyst Agent's own .env (data-analyst-agent/) ──────────
+            # Staging points this service straight at the same shared Neon
+            # database as the main app (see data-analyst-agent/docker-compose.dev.yml)
+            # rather than standing up a dedicated Postgres like production does.
+            cat > data-analyst-agent/.env << 'DAAENVEOF'
+            DATABASE_URL=${{ secrets.STAGING_DATA_ANALYST_DATABASE_URL }}
+            TOKEN_ENCRYPTION_KEY=${{ secrets.DATA_ANALYST_AGENT_TOKEN_ENCRYPTION_KEY }}
+            MCP_BASE_URL=https://${{ vars.STAGING_MCP_DOMAIN }}/api/mcp
+            ADMIN_API_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            # The host crontab installed further down this job is THE nightly
+            # execution path on staging, so the service's own in-process
+            # APScheduler (app/ingestion/scheduler.py) must be off here.
+            #
+            # Both defaulted to enabled, so staging ran the entire pipeline
+            # TWICE a day: in-process at 03:00/04:00 UTC and via crontab at
+            # 22:00 UTC, all 15 collectors and the full analysis chain each
+            # time, with nothing coordinating them. The crontab is the one to
+            # keep, for two independent reasons:
+            #
+            #   1. The hour. 22:00 UTC is load-bearing — see the crontab step's
+            #      own comment. 03:00 UTC is 08:30 Asia/Kolkata, i.e. AFTER the
+            #      01:30 UTC morning run it is supposed to feed. That exact
+            #      hour is called out there as a rejected earlier draft.
+            #   2. Coverage. The crontab runs scripts.run_nightly_pipeline,
+            #      which also sends predictive alerts and the morning briefing.
+            #      app/analysis/run_pass.py deliberately excludes those, so
+            #      disabling the crontab instead would silently stop
+            #      customer-facing mail.
+            #
+            # Double-running was not corrupting observation_count only by
+            # accident (the keyword collector's cadence gate happened to
+            # intercept the second run). That is now guarded properly at the
+            # write itself — migration 143's last_observed_week — but the
+            # duplicate execution was still doing every embedding and LLM call
+            # twice and writing two ingestion_runs rows per collector per day,
+            # which is the log the Aug-23 collector-outage post-mortem reads.
+            INGEST_SCHEDULE_ENABLED=false
+            ANALYSIS_SCHEDULE_ENABLED=false
+            DAAENVEOF
+
+            # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
+            # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
+            # layers reported CACHED across multiple independent deploy
+            # attempts spanning 30+ minutes, even though package-lock.json's
+            # content had genuinely changed on disk (git-level verified —
+            # the VPS's checkout was confirmed at the exact commit carrying
+            # the fix). BuildKit's COPY caching is supposed to be content-
+            # hashed, so a stale hit like that shouldn't be possible; rather
+            # than chase a persisted daemon-cache bug on this host with no
+            # SSH access to inspect it live, force this one image to always
+            # rebuild the dependency-install layer from scratch. The other
+            # two images don't have this problem (nothing in their build
+            # fails from a stale npm ci) and keep normal caching so most
+            # deploys stay fast.
+            docker compose -f docker-compose.dev.yml build --no-cache design-agent-worker
+            docker compose -f docker-compose.dev.yml build analytics analytics-mcp
+            docker compose -f data-analyst-agent/docker-compose.dev.yml build
+
+            echo "Applying database migrations..."
+            docker compose -f docker-compose.dev.yml run --rm analytics node server/migrations/run.js
+
+            docker compose -f docker-compose.dev.yml up -d
+            docker compose -f data-analyst-agent/docker-compose.dev.yml up -d
+
+            echo "Waiting for containers to be healthy..."
+            sleep 10
+            for CONTAINER in analytics-app-stage analytics-mcp-stage data-analyst-agent-stage design-agent-worker-stage; do
+              HEALTHY=0
+              for i in $(seq 1 12); do
+                STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+                if [ "$STATUS" = "healthy" ]; then
+                  echo "$CONTAINER is healthy!"
+                  HEALTHY=1
+                  break
+                fi
+                echo "$CONTAINER attempt $i/12: Status is $STATUS, waiting..."
+                sleep 10
+              done
+              if [ "$HEALTHY" != "1" ]; then
+                echo "$CONTAINER did not become healthy within 2 minutes"
+                docker logs "$CONTAINER" --tail 50
+                exit 1
+              fi
+            done
+
+            # ── Data Analyst Agent nightly pipeline ──────────────────────────
+            # The container's CMD only starts uvicorn, so the API serves fine
+            # while the pipeline that actually PRODUCES analysis never runs.
+            # That is not hypothetical: staging had 16k metric observations and
+            # 253 insights but zero analyst_recommendations and zero
+            # investigations, because scripts/run_nightly_pipeline.py had no
+            # trigger anywhere — only a commented-out suggestion in
+            # data-analyst-agent/docker-compose.yml.
+            #
+            # It also starves the Node side: server/cron.js syncs analyst
+            # recommendations into the Action Center, and that sync has been
+            # running nightly carrying nothing.
+            #
+            # 22:00 UTC, and the hour is load-bearing. The app's cron runs in
+            # TZ (Asia/Kolkata), so its 07:00 morning run — detect, ship, mail
+            # — is 01:30 UTC. The chain has to COMPLETE before that:
+            #   22:00 UTC  this pipeline
+            #   00:00 UTC  analyst -> Action Center sync (server/cron.js)
+            #   01:30 UTC  morning run consumes it, same day
+            # An earlier draft of this used 03:00 UTC, which is 08:30 in
+            # Asia/Kolkata — after the run it was meant to feed.
+            #
+            # CRON_TZ is set explicitly rather than trusting the host's local
+            # time, since the offset from the app's TZ is the entire reason
+            # this hour works.
+            #
+            # Installed idempotently on every deploy (filter out the old line,
+            # append the current one) so a redeploy can't stack duplicates and
+            # a changed path or hour corrects itself.
+            #
+            # `crontab -l` exits 1 (not just empty output) when the deploy
+            # user has no crontab yet — true on every server's first run of
+            # this step. Under this script's `set -eo pipefail`, that exit
+            # code alone (regardless of the `2>/dev/null`, which only silences
+            # stderr, not the exit status) killed the whole subshell before it
+            # ever reached the two `echo`s below, so `crontab -` received
+            # empty input and the entire deploy died here — after every
+            # container had already deployed and passed its health check.
+            # `|| true` on both the read and the grep (which also exits 1 on
+            # an empty/no-match input) makes "nothing to carry over" a normal
+            # outcome instead of a fatal one.
+            echo "Installing Data Analyst nightly pipeline cron..."
+            NIGHTLY_CMD="cd $DIR && docker compose -f data-analyst-agent/docker-compose.dev.yml exec -T app python -m scripts.run_nightly_pipeline >> /var/log/analyst-nightly.log 2>&1"
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'run_nightly_pipeline' -e '^CRON_TZ=UTC$' || true); echo "CRON_TZ=UTC"; echo "0 22 * * * $NIGHTLY_CMD") | crontab -
+            echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
+            crontab -l | grep run_nightly_pipeline
+
+      - name: Verify Health
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_DOMAIN }}")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "Staging health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "Staging health check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          MCP_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_MCP_DOMAIN }}/api/health")
+          if [ "$MCP_HTTP_CODE" = "200" ]; then
+            echo "Staging MCP health check passed (HTTP $MCP_HTTP_CODE)"
+          else
+            echo "Staging MCP health check failed (HTTP $MCP_HTTP_CODE)"
+            exit 1
+          fi

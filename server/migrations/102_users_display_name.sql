@@ -1,0 +1,13 @@
+-- Human name for the AI Copilot's greeting (routes/copilot.js's /greeting,
+-- agents/lib/copilot-greeting.js).
+--
+-- The Copilot is now client-facing, and greeting a customer by scraping their
+-- email local-part ("hi info.zunkireelabs") reads worse than not greeting them
+-- at all. Nullable on purpose — buildGreeting falls back to the email
+-- local-part and then the site name, so no backfill is required and an
+-- un-named user still gets a sensible greeting.
+--
+-- Deliberately NOT split into first/last: it exists to be said back to the
+-- person in one sentence, and a single free-text field handles mononyms and
+-- non-Western name orders without imposing a structure the product never uses.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;

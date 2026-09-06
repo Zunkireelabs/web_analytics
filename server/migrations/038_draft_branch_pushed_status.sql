@@ -1,0 +1,9 @@
+-- Splits the old atomic "branch+commit+PR in one apply()" into two real,
+-- separately-triggered steps: approved -> branch_pushed -> pr_opened. Gives
+-- staff a real manual checkpoint (review the real pushed branch's diff in
+-- the dashboard) between "a real change exists on a branch" and "a PR is
+-- open" — see server/implementers/lib/github-ops.js's pushDraftBranch/
+-- openPrForBranch and server/store/drafts.js's markDraftBranchPushed.
+--
+-- drafts_status_check itself is not touched here — see the note in
+-- 024_drafts_approval.sql; 039_draft_merged_to_stage.sql owns it now.

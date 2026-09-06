@@ -1,0 +1,78 @@
+services:
+  app:
+    container_name: data-analyst-agent-prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - hosting
+      - default
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set DATA_ANALYST_AGENT_DOMAIN in .env, e.g. analyst.zunkireelabs.com
+      - "traefik.http.routers.data-analyst-agent-prod.rule=Host(`${DATA_ANALYST_AGENT_DOMAIN}`)"
+      - "traefik.http.routers.data-analyst-agent-prod.entrypoints=websecure"
+      - "traefik.http.routers.data-analyst-agent-prod.tls=true"
+      - "traefik.http.routers.data-analyst-agent-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.data-analyst-agent-prod-http.rule=Host(`${DATA_ANALYST_AGENT_DOMAIN}`)"
+      - "traefik.http.routers.data-analyst-agent-prod-http.entrypoints=web"
+      - "traefik.http.routers.data-analyst-agent-prod-http.middlewares=data-analyst-agent-prod-redirect"
+      - "traefik.http.middlewares.data-analyst-agent-prod-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.data-analyst-agent-prod.loadbalancer.server.port=8000"
+
+  # This service's OWN Postgres — entirely separate from the existing
+  # Node app's Neon database. This service never connects to Neon.
+  db:
+    container_name: data-analyst-agent-db-prod
+    image: postgres:16-alpine
+    networks:
+      - default
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=data_analyst_agent
+      - POSTGRES_USER=data_analyst_agent
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  # Nightly pipeline — ingestion AND the analysis pass (stats, anomalies,
+  # forecasts, insights, recommendations) both run in-process now, scheduled
+  # by app/ingestion/scheduler.py at INGEST_SCHEDULE_HOUR_UTC and
+  # ANALYSIS_SCHEDULE_HOUR_UTC. No host cron entry is required for either.
+  #
+  # This comment previously instructed you to add the line below by hand:
+  #   0 3 * * * docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_nightly_pipeline
+  # Nothing in the repo ever installed it, so on any host where it wasn't
+  # added manually the forecast/insight engines simply never ran. If you DID
+  # add it, remove it — it now duplicates the in-process analysis job.
+  #
+  # scripts/run_nightly_pipeline.py is still the full pass (investigations,
+  # briefings, draft triggers) and remains available to exec by hand;
+  # scripts/run_analysis_pass.py runs just the scheduled subset on demand.
+  #
+  # Phase 3 Executive Briefings (Step 10) — weekly/monthly cadences, same
+  # host-level cron approach, scheduled after the nightly pipeline finishes
+  # so that day's data is already current. Morning cadence needs no
+  # separate entry — it's generated as the last step of the nightly run
+  # itself (see scripts/run_nightly_pipeline.py):
+  #   0 6 * * 1 docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_weekly_briefing
+  #   0 6 1 * * docker compose -f /path/to/docker-compose.yml exec -T app python -m scripts.run_monthly_briefing
+
+volumes:
+  db_data:
+
+networks:
+  hosting:
+    external: true

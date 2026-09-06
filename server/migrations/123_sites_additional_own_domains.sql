@@ -1,0 +1,20 @@
+-- A `sc-domain:` GSC property returns EVERY subdomain Search Console has
+-- data for — website_domain (a single hostname) already exists to filter
+-- that down to a site's own real domain (see gsc.js's pageFilterGroups,
+-- site-domain.js's filterOwnDomainPages), but a site can legitimately have
+-- MORE than one hostname it wants counted as "its own": a hero product
+-- launched on its own subdomain of the same root domain (e.g. Zunkiree
+-- Labs' own booking-engine product on zenly.zunkireelabs.com and its CRM
+-- product on edgex.zunkireelabs.com), distinct from an unrelated project
+-- hosted on a different subdomain (e.g. supreme-court.zunkireelabs.com)
+-- that should stay excluded.
+--
+-- Deliberately a SEPARATE column from website_domain, not a comma-joined
+-- overload of it: website_domain is also used to build absolute URLs from
+-- a bare relative path (analyst-seo-mapping.js's absolutePageUrl) — a
+-- multi-value string there would be ambiguous (which of several hosts does
+-- a relative path belong to?). additional_own_domains is filtering-only,
+-- consulted alongside website_domain wherever "is this page really ours"
+-- is being decided (site-domain.js's new ownDomains()), never for URL
+-- construction.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS additional_own_domains TEXT[] NOT NULL DEFAULT '{}';

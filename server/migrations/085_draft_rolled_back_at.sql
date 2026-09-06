@@ -1,0 +1,11 @@
+-- Rollback (POST /action-center/drafts/:id/rollback) opens a real revert PR
+-- but deliberately never overwrites a draft's terminal status — an
+-- 'implemented' draft genuinely was live, and markDraftAbandoned's own
+-- guard refuses to touch it (see store/drafts.js). That's correct for the
+-- audit trail, but it leaves the underlying finding permanently hidden
+-- from Recommendations (getDraftedFindingIds only excludes 'abandoned'),
+-- even after the fix has been reverted. rolled_back_at is a separate,
+-- purely additive marker: set once a rollback PR is opened, independent of
+-- status, so getDraftedFindingIds can also exclude it and let the finding
+-- reopen for another attempt.
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS rolled_back_at TIMESTAMPTZ;

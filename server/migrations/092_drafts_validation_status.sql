@@ -1,0 +1,21 @@
+-- First-class Approval Gate (implementers/lib/rendering-gate.js +
+-- routes/lib/approval-gate.js): persists every validation this app knows
+-- how to run against a draft, keyed by check id, so a draft's approval/PR
+-- state is never the ONLY thing Action Center shows — a human can see
+-- exactly which check passed/failed/is still pending and why, without
+-- re-deriving it from server logs. Shallow-merged (`||`) by
+-- store/drafts.js's recordValidationStatus, since different checks are
+-- written by different callers at different times (quality-gate +
+-- rendering-config synchronously at approval; client-build asynchronously,
+-- once a PR exists, via checkDraftPrStatus's poll) — never a single
+-- writer, so a full-row overwrite would clobber whichever check wrote last.
+--
+-- Shape (informational — this column is intentionally schemaless JSONB,
+-- see routes/lib/approval-gate.js for the authoritative shape):
+--   {
+--     "qualityGate":     { "ok": true|false, "issues": [...] },
+--     "renderingConfig": { "ok": true|false, "reason": "...", "error": "..." },
+--     "clientBuild":     { "ok": true|false|null, "reason": "...", "error": "...", "checksUrl": "..." },
+--     "checkedAt": "2026-08-07T..."
+--   }
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS validation_status JSONB;

@@ -1,0 +1,102 @@
+services:
+  analytics:
+    container_name: analytics-app-stage
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_MCP_ORIGIN: https://${MCP_DOMAIN}
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # Per-client Google credential overrides (rare — see client-onboarding skill).
+      # Empty by default; only used if secrets/clients/<site.id>/service-account.json exists.
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set ANALYTICS_DOMAIN in .env, e.g. dev-analytics.zunkireelabs.com
+      - "traefik.http.routers.analytics-stage.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-stage.entrypoints=websecure"
+      - "traefik.http.routers.analytics-stage.tls=true"
+      - "traefik.http.routers.analytics-stage.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-stage-http.rule=Host(`${ANALYTICS_DOMAIN}`)"
+      - "traefik.http.routers.analytics-stage-http.entrypoints=web"
+      - "traefik.http.routers.analytics-stage-http.middlewares=analytics-stage-redirect"
+      - "traefik.http.middlewares.analytics-stage-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-stage.loadbalancer.server.port=3002"
+
+  # Standalone MCP server, staging — see docker-compose.yml's analytics-mcp
+  # service for the full explanation.
+  analytics-mcp:
+    container_name: analytics-mcp-stage
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "mcp-server/index.js"]
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - MCP_API_PORT=3003
+      - DB_POOL_MAX=5
+      - DASHBOARD_ORIGIN=https://${ANALYTICS_DOMAIN}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=hosting"
+      # Set MCP_DOMAIN in .env, e.g. dev-mcp.zunkireelabs.com
+      - "traefik.http.routers.analytics-mcp-stage.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-stage.entrypoints=websecure"
+      - "traefik.http.routers.analytics-mcp-stage.tls=true"
+      - "traefik.http.routers.analytics-mcp-stage.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.analytics-mcp-stage-http.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.analytics-mcp-stage-http.entrypoints=web"
+      - "traefik.http.routers.analytics-mcp-stage-http.middlewares=analytics-mcp-stage-redirect"
+      - "traefik.http.middlewares.analytics-mcp-stage-redirect.redirectscheme.scheme=https"
+      - "traefik.http.services.analytics-mcp-stage.loadbalancer.server.port=3003"
+
+  # Design Agent worker, staging — see docker-compose.yml's design-agent-worker
+  # service for the full explanation (no public endpoint, shares this
+  # deployment's own .env, no Docker socket needed as of 2026-08-27).
+  design-agent-worker:
+    container_name: design-agent-worker-stage
+    build:
+      context: .
+      dockerfile: server/design-agent/Dockerfile
+    networks:
+      - hosting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'node server/design-agent/worker.js' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  hosting:
+    external: true
