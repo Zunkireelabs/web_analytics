@@ -220,10 +220,19 @@ export async function isSoftNotFound(url, fingerprint) {
 // batch's pages contain.
 export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECKS_PER_DAY) {
   const sourcesByHref = new Map(); // href -> Set(sourcePage)
+  // href -> Set(anchor text). What the site itself calls this destination,
+  // collected across every page that links it. dead-link-intent.js needs it
+  // to name a page it decides to create; empty when a link is image-only.
+  const anchorsByHref = new Map();
   for (const r of pageResults) {
     for (const href of r.analysis?.internalLinks || []) {
       if (!sourcesByHref.has(href)) sourcesByHref.set(href, new Set());
       sourcesByHref.get(href).add(r.page);
+    }
+    for (const { href, text } of r.analysis?.internalLinkAnchors || []) {
+      if (!text) continue;
+      if (!anchorsByHref.has(href)) anchorsByHref.set(href, new Set());
+      anchorsByHref.get(href).add(text);
     }
   }
   const hrefs = [...sourcesByHref.keys()].slice(0, maxChecks);
@@ -238,7 +247,7 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
     const r = await followRedirectsWithRetry(href);
     const eligible = !r.error && r.finalStatus != null && r.finalStatus >= 200 && r.finalStatus < 300;
     const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
-    return { href, sourcePages: [...sourcesByHref.get(href)], ...r, softNotFound };
+    return { href, sourcePages: [...sourcesByHref.get(href)], anchorTexts: [...(anchorsByHref.get(href) || [])], ...r, softNotFound };
   }));
 
   // Bail out on the soft-404 signal entirely if it fired for most of a real

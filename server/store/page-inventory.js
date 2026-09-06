@@ -89,6 +89,32 @@ export async function listContentHashesForSite(siteId) {
   return rows;
 }
 
+// Real, live sibling pages sharing a dead URL's own path prefix — the single
+// signal dead-link-intent.js uses to decide whether a missing page can be
+// created at all. "Can we create /resources/foo?" is answered by "does this
+// site already have other real /resources/* pages to copy the structure of?",
+// never by guessing. Pages known to be 4xx/5xx or orphaned are excluded, so a
+// prefix whose only other members are themselves broken can't vouch for it.
+//
+// prefix is URL-derived, so its LIKE metacharacters are escaped — an
+// unescaped '_' matches any character and would silently pull in unrelated
+// paths (and '%' would match everything under the origin).
+export async function listSiblingPages(siteId, prefix, { limit = 25 } = {}) {
+  const escaped = prefix.replace(/([\\%_])/g, '\\$1');
+  const { rows } = await query(
+    `SELECT page FROM page_inventory
+      WHERE site_id = $1
+        AND page LIKE $2 ESCAPE '\\'
+        AND page <> $3
+        AND orphaned = false
+        AND (http_status IS NULL OR http_status < 400)
+      ORDER BY last_seen_at DESC
+      LIMIT $4`,
+    [siteId, `${escaped}%`, prefix, limit]
+  );
+  return rows.map((r) => r.page);
+}
+
 export async function listPageInventory(siteId, { limit = 500 } = {}) {
   const { rows } = await query(
     'SELECT page, discovered_via, orphaned, first_seen_at, last_seen_at FROM page_inventory WHERE site_id = $1 ORDER BY last_seen_at DESC LIMIT $2',
