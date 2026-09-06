@@ -35,8 +35,9 @@ function parseArgs(argv) {
   return flags;
 }
 
-function report({ siteId, stalled, failures }) {
-  if (!stalled.drafts.length && !failures.classified && !Object.keys(failures.byPolicy).length) return;
+function report({ siteId, stalled, failures, itemDefects, recovery }) {
+  if (!stalled.drafts.length && !failures.classified && !Object.keys(failures.byPolicy).length
+    && !itemDefects.drafts.length && !recovery.recommendations.length) return;
   console.log(`\nSite ${siteId}`);
   if (stalled.drafts.length) {
     console.log(`  stalled drafts to reclaim: ${stalled.drafts.length}`);
@@ -50,6 +51,17 @@ function report({ siteId, stalled, failures }) {
     console.log('  unclassified past failures, by verdict:');
     for (const [policy, n] of policies) console.log(`    ${policy}: ${n}`);
     if (failures.classified) console.log(`  recorded: ${failures.classified}, blocked pending a human: ${failures.blocked}, closed as already resolved: ${failures.resolved}`);
+  }
+  if (itemDefects.drafts.length) {
+    console.log(`  drafts stuck at approved+apply_error (item-defect), abandoned so a fresh attempt can be generated: ${itemDefects.drafts.length}`);
+  }
+  if (recovery.recommendations.length) {
+    const verb = recovery.blocked || recovery.recovered || recovery.resolved ? 'acted on' : 'would be acted on (dry run)';
+    console.log(`  open recommendations past the convergence cap, ${verb}: ${recovery.recommendations.length}`);
+    for (const r of recovery.recommendations) console.log(`    rec ${r.id}: ${r.attempts} attempts, ${r.cycles} recovery cycle(s) already used, on ${r.findingIds.join(', ')}`);
+    if (recovery.recovered) console.log(`  re-analyzed against live content and regenerated: ${recovery.recovered}`);
+    if (recovery.resolved) console.log(`  resolved on re-check (issue no longer present): ${recovery.resolved}`);
+    if (recovery.blocked) console.log(`  blocked for a human (recovery cycles exhausted): ${recovery.blocked}`);
   }
 }
 
@@ -67,7 +79,7 @@ async function main() {
   } else {
     const { results, totals } = await reconcileAllSites({ idleHours, apply });
     for (const r of results) report(r);
-    console.log(`\nTotals — reclaimed ${totals.reclaimed}, returned ${totals.reopened}, classified ${totals.classified}, blocked ${totals.blocked}, resolved ${totals.resolved}`);
+    console.log(`\nTotals — reclaimed ${totals.reclaimed}, returned ${totals.reopened}, classified ${totals.classified}, abandoned-for-retry ${totals.abandonedForRetry}, recovered ${totals.recovered}, resolved ${totals.resolved}, blocked ${totals.blocked}`);
   }
   if (!apply) console.log('\nDry run complete. No rows were changed.');
 }

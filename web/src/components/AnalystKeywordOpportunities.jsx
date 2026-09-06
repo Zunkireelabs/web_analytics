@@ -33,6 +33,29 @@ function predictedShape(gap) {
   return 'Would create: Blog post';
 }
 
+// Read-only mirror of hasStableOrGrowingDemand's own two-most-recent-
+// snapshots comparison (server/agents/lib/analyst-seo-mapping.js) — never
+// reimplements the qualification threshold itself, just labels what that
+// same comparison would say so a reviewer can see the trend the autonomous
+// ship cycle is actually gating on, before it's ever eligible to ship.
+const TREND_CHIP = { new: 'an-chip-slate', rising: 'an-chip-emerald', stable: 'an-chip-amber', falling: 'an-chip-rose' };
+const TREND_LABEL = { new: 'New — no trend yet', rising: 'Rising demand', stable: 'Stable demand', falling: 'Falling demand' };
+function evidenceTrend(gap) {
+  const snapshots = Array.isArray(gap.evidence_snapshots) ? gap.evidence_snapshots : [];
+  if (snapshots.length < 2) return 'new';
+  const [prior, latest] = snapshots.slice(-2);
+  const priorImpressions = Number(prior?.impressions) || 0;
+  const latestImpressions = Number(latest?.impressions) || 0;
+  if (latestImpressions > priorImpressions) return 'rising';
+  if (latestImpressions === priorImpressions) return 'stable';
+  return 'falling';
+}
+
+function formatSeenDate(iso) {
+  if (!iso) return null;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 export default function AnalystKeywordOpportunities({ clientId, refreshToken }) {
   const [opportunities, setOpportunities] = useState(null);
   const [gaps, setGaps] = useState(null);
@@ -302,10 +325,18 @@ export default function AnalystKeywordOpportunities({ clientId, refreshToken }) 
                           {predictedShape(gap) && (
                             <span className="an-chip an-chip-slate">{predictedShape(gap)}</span>
                           )}
+                          <span className={`an-chip ${TREND_CHIP[evidenceTrend(gap)]}`} title="Based on the two most recent weekly demand snapshots">
+                            {TREND_LABEL[evidenceTrend(gap)]}
+                          </span>
                         </div>
                         {gap.reason && (
                           <p className="text-[11px] font-medium text-slate-500 mt-1 line-clamp-2">{gap.reason}</p>
                         )}
+                        <p className="text-[10px] font-medium text-slate-400 mt-1">
+                          Seen {gap.observation_count || 1}x
+                          {formatSeenDate(gap.first_seen_at) && ` · first ${formatSeenDate(gap.first_seen_at)}`}
+                          {formatSeenDate(gap.last_seen_at) && ` · last ${formatSeenDate(gap.last_seen_at)}`}
+                        </p>
 
                         {done && state.draftId && (
                           <a

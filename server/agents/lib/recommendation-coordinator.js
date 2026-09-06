@@ -333,7 +333,22 @@ export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent
 // recommendations (page === '') aren't re-checked here — they cover many
 // pages worth of evidence collapsed into one row, so they close naturally on
 // the next full sync instead.
-export async function recheckRecommendation(siteId, recommendationId) {
+//
+// `refreshEvidence` (default false, preserving the manual "Re-check now"
+// button's exact original behavior for every existing caller): when true and
+// the finding is STILL detected — not resolved, so there's a real fix left to
+// generate — this also merges the fresh finding's params onto the
+// recommendation via mergeIntoRecommendation, the same store function
+// syncFromGrounded uses, so this stays the coordinator's own write path
+// rather than a second one. This is what lib/action-center-reconciler.js's
+// autonomous-recovery pass (2026-09-06) uses: an ITEM_DEFECT failure (a
+// stale anchor, a moved target) means the draft that failed was built from
+// PARAMS captured at original detection time — shipRecommendation always
+// calls generateDraft with `params: rec.params` (routes/action-center.js) —
+// and those never update on their own between here and there. Re-detecting
+// and refreshing them is what makes the NEXT generated draft target reality
+// instead of reproducing the identical stale anchor forever.
+export async function recheckRecommendation(siteId, recommendationId, { refreshEvidence = false } = {}) {
   const rec = await getRecommendationById(siteId, recommendationId);
   if (!rec) { const err = new Error('Recommendation not found'); err.status = 404; throw err; }
   if (rec.status !== 'open') return { status: rec.status, changed: false };
@@ -346,6 +361,9 @@ export async function recheckRecommendation(siteId, recommendationId) {
       await closeRecommendation(rec.id);
       return { status: 'superseded', changed: true, detail: result };
     }
+    // broken-link-fix has no separate "fresh params" to pull beyond the href
+    // itself, which recheckLink just confirmed is still broken — nothing to
+    // refresh, the existing params are already accurate.
     return { status: 'open', changed: false, detail: result };
   }
 
@@ -365,13 +383,31 @@ export async function recheckRecommendation(siteId, recommendationId) {
     const { message } = safeMessage('recommendation-coordinator.recheckRecommendation', err, 'This recommendation could not be re-checked right now — it stays open until the next run.');
     return { status: 'open', changed: false, reason: message };
   }
-  const stillDetected = (output.facts?.findings || []).some((f) => (
+  const match = (output.facts?.findings || []).find((f) => (
     f.recommendedAction?.generatorId === rec.recommendation_type
     && recommendationPageKey({ generatorId: f.recommendedAction.generatorId, params: f.recommendedAction.params }) === rec.page
   ));
-  if (stillDetected) return { status: 'open', changed: false };
-  await closeRecommendation(rec.id);
-  return { status: 'superseded', changed: true };
+  if (!match) {
+    await closeRecommendation(rec.id);
+    return { status: 'superseded', changed: true };
+  }
+  if (refreshEvidence && rec.finding_ids?.length) {
+    const freshParams = match.recommendedAction?.params;
+    if (freshParams) {
+      await mergeIntoRecommendation(rec.id, {
+        // The SAME finding_id already on the row — a union with itself, not
+        // a new one, so this can never grow finding_ids or duplicate
+        // anything. Identity is preserved; only params move.
+        findingId: rec.finding_ids[0],
+        agentId,
+        params: freshParams,
+        blockedReason: null,
+        riskTier: riskTierForGenerator(rec.recommendation_type),
+      });
+      return { status: 'open', changed: true, refreshed: true, freshParams };
+    }
+  }
+  return { status: 'open', changed: false };
 }
 
 // Drop-in replacement for buildRecommendations() at the two call sites that

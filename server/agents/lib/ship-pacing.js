@@ -1,4 +1,5 @@
 import { hasRecentDraftOfType, countFailedAttemptsByFinding } from '../../store/drafts.js';
+import { countRecoveryCyclesByFinding } from '../../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from './generator-learning.js';
 
 // Candidate thinning shared by BOTH ship paths — auto-remediation.js's
@@ -47,9 +48,49 @@ export const PACED_GENERATORS = [
 // Deliberately not zero-tolerance and deliberately not permanent: the
 // recommendation stays OPEN and fully visible in the Action Center, and a
 // human can still generate it by hand. What stops is the automatic
-// redrafting — the loop that was spending a model call per cycle to reach
-// the same error.
+// redrafting AGAINST THE SAME EVIDENCE — the loop that was spending a model
+// call per cycle to reach the same error.
+//
+// "Against the same evidence" is the operative phrase since 2026-09-06:
+// this cap alone used to mean "give up after 3 and tell a human" — but for
+// an ITEM_DEFECT failure (a stale anchor, a moved target) 3 identical
+// retries genuinely tell you nothing more than 1 does, because every retry
+// used the exact same frozen params. lib/action-center-reconciler.js now
+// treats hitting this cap as the trigger to autonomously RE-DETECT the
+// finding against live content and refresh those params (recordAttempt
+// outcome='recovered', migration 142) rather than escalate immediately — see
+// MAX_RECOVERY_CYCLES below for the bound on how many times that itself is
+// allowed to happen before NEEDS_HUMAN is the true, exhausted fallback.
 export const MAX_FAILED_ATTEMPTS = 3;
+
+// How many times a finding may go through a full autonomous recovery cycle
+// (re-detect against live content, refresh params, try again) before the
+// system accepts it genuinely cannot determine or validate a fix on its own
+// and hands it to a human. Each cycle earns the finding another
+// MAX_FAILED_ATTEMPTS worth of tries on fresh evidence — see
+// effectiveConvergenceCap below — so the total autonomous budget before
+// NEEDS_HUMAN is MAX_FAILED_ATTEMPTS * (MAX_RECOVERY_CYCLES + 1) attempts,
+// spread across that many independently-evidenced approaches, not one.
+//
+// Bounded rather than infinite for the same reason MAX_FAILED_ATTEMPTS is:
+// an item whose page keeps changing in a way that never satisfies the
+// generator (a template bug, a genuinely ambiguous target) will re-detect
+// "still broken" forever, and re-detecting is not free — each cycle costs a
+// live agent run plus another generation attempt. Two cycles is enough to
+// distinguish "the page settled and this converges" from "this needs a
+// human's judgment", without turning a stuck item into an unbounded loop of
+// re-analysis instead of an unbounded loop of retries.
+export const MAX_RECOVERY_CYCLES = 2;
+
+// The real, current ceiling for one finding's attempts, accounting for
+// however many recovery cycles it has already earned. The single formula
+// both applyConvergenceCap (below, "should this still be auto-drafted") and
+// the reconciler ("has autonomous recovery been exhausted") must agree on —
+// diverging here would mean ship-pacing silently excludes a finding the
+// reconciler still considers eligible for another try, or the reverse.
+export function effectiveConvergenceCap(recoveryCycles) {
+  return MAX_FAILED_ATTEMPTS * ((recoveryCycles || 0) + 1);
+}
 
 // Drops paced candidates that this site isn't due for yet, and thins the rest
 // to one each. Returns the candidates in their original priority order, plus
@@ -151,18 +192,27 @@ export async function applyRefusalCap(site, candidates, { refusalCounts = null }
   return { kept, notes };
 }
 
-export async function applyConvergenceCap(site, candidates, { attemptCounts = null } = {}) {
+export async function applyConvergenceCap(site, candidates, { attemptCounts = null, recoveryCounts = null } = {}) {
   if (candidates.length === 0) return { converged: candidates, notes: [] };
   const counts = attemptCounts ?? await countFailedAttemptsByFinding(site.id);
   if (counts.size === 0) return { converged: candidates, notes: [] };
+  // Only fetched when there's actually something to hold — a site with no
+  // failed attempts never needs its recovery history either.
+  const recoveries = recoveryCounts ?? await countRecoveryCyclesByFinding(site.id);
 
   const notes = [];
   const kept = [];
   for (const rec of candidates) {
     const findingIds = rec.finding_ids || [];
     const attempts = findingIds.reduce((max, id) => Math.max(max, counts.get(id) || 0), 0);
-    if (attempts >= MAX_FAILED_ATTEMPTS) {
-      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${attempts} failed attempt(s) on the same finding — still open for a human, but no longer auto-drafted.`);
+    const cycles = findingIds.reduce((max, id) => Math.max(max, recoveries.get(id) || 0), 0);
+    const cap = effectiveConvergenceCap(cycles);
+    if (attempts >= cap) {
+      // Held here means "wait for the reconciler's next pass" — it either
+      // raises this very cap by re-detecting and refreshing params (another
+      // recovery cycle, if any remain) or, once MAX_RECOVERY_CYCLES is spent,
+      // hands the card to a human. Never a dead end on its own.
+      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${attempts} failed attempt(s) (cap ${cap} after ${cycles} recovery cycle(s)) — awaiting autonomous re-analysis or a human.`);
       continue;
     }
     kept.push(rec);
