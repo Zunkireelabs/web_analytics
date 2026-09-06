@@ -37,13 +37,18 @@ class Settings(BaseSettings):
 
     # In-process analysis cron (app/ingestion/scheduler.py) — stats, anomalies,
     # forecasts, insights and recommendations. Previously this ran ONLY via a
-    # host-level crontab line that docker-compose.yml documents in a comment
-    # but nothing in the repo ever installs (no crontab file, no deploy step,
-    # no systemd unit), so on any machine where nobody added that line by hand
-    # no forecast or forecast_risk insight was ever generated and the Analyst
-    # dashboard's early-warning list was empty by construction. Scheduling it
-    # in-process, next to ingestion above, makes it deploy with the container
-    # instead of depending on undocumented host state.
+    # host-level crontab line, so on any machine where nobody added that line
+    # by hand no forecast or forecast_risk insight was ever generated and the
+    # Analyst dashboard's early-warning list was empty by construction.
+    # Scheduling it in-process, next to ingestion above, makes it deploy with
+    # the container instead of depending on undocumented host state.
+    #
+    # These defaults are True, and that is a trap worth knowing about: staging
+    # DOES install that crontab (.github/workflows/deploy-staging.yml, 22:00
+    # UTC), so inheriting these defaults there meant the entire pipeline ran
+    # twice a day from two uncoordinated schedulers. Staging now sets both
+    # flags false in its own .env. Any new environment that installs the
+    # crontab must do the same — see scheduler.py's docstring.
     #
     # Runs an hour after ingestion so that day's observations are already
     # written — the forecast models read what run_nightly() just collected.

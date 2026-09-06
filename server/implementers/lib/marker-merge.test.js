@@ -620,6 +620,54 @@ describe('buildMergeValues — faq (per-site template, not one tenant\'s markup 
   });
 });
 
+// The reported symptom this covers: on site 1, /team/ and the blog posts
+// rendered a bare <details> Q&A block while / and /resources/ rendered the
+// site's real Alpine accordion, because the site had captured
+// componentTemplates.faq but never a separate qaContent.
+describe('buildMergeValues — qa-content borrows the site\'s own FAQ template', () => {
+  const items = [
+    { question: 'How do I get in touch?', answer: 'Email or call us.' },
+    { question: 'What are your hours?', answer: '9-5 Nepal time.' },
+  ];
+  const accordion = {
+    wrapper: '<section x-data="{ activeIndex: null }">\n{{ROWS}}\n</section>',
+    row: '<button @click="activeIndex = {{INDEX}}"><h3>{{QUESTION}}</h3></button><p>{{ANSWER}}</p>',
+  };
+
+  test('uses the captured faq accordion when the site has no qaContent template', () => {
+    const result = buildMergeValues('qa-content', { items }, 'visible', { faq: accordion });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.qaContent, /<details>/);
+    assert.match(result.values.qaContent, /<h3>How do I get in touch\?<\/h3>/);
+    assert.match(result.values.qaContent, /activeIndex = 2/);
+  });
+
+  test('a captured qaContent template still wins outright', () => {
+    const qaOwn = { wrapper: '<div class="qa">{{ROWS}}</div>', row: '<h2>{{QUESTION}}</h2><p>{{ANSWER}}</p>' };
+    const result = buildMergeValues('qa-content', { items }, 'visible', { faq: accordion, qaContent: qaOwn });
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<div class="qa">/);
+    assert.doesNotMatch(result.values.qaContent, /activeIndex/);
+  });
+
+  // Borrowing this one would look right and silently defeat the
+  // questionHeadingCount check qa-content exists to satisfy.
+  test('refuses to borrow a <dt>-based faq template, keeping the <details> default', () => {
+    const dlTemplate = { wrapper: '<dl>{{ROWS}}</dl>', row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>' };
+    const result = buildMergeValues('qa-content', { items }, 'visible', { faq: dlTemplate });
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<details>/);
+    assert.match(result.values.qaContent, /<h3>How do I get in touch\?<\/h3>/);
+  });
+
+  test('a site with no templates at all is unchanged — still the <details> default', () => {
+    const result = buildMergeValues('qa-content', { items }, 'visible', {});
+    assert.equal(result.ok, true);
+    assert.match(result.values.qaContent, /<div class="qa-content">/);
+    assert.match(result.values.qaContent, /<details>/);
+  });
+});
+
 describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
   // ensureMarkers itself no longer creates a body-scoped marker on a .tsx
   // file at all (see isNoEofInsertField above) — that's now

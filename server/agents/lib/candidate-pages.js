@@ -19,6 +19,30 @@ const DEFAULT_BATCH_SIZE = 20;
 // protecting quota-limited downstream calls (technical-seo's GSC URL
 // Inspection API specifically) by prioritizing already-important pages.
 const ZERO_TRAFFIC_SHARE = 0.25;
+// ...but a fixed quarter is a floor, not the whole rule, because it ignores
+// how big each pool actually is. A site with 40 GSC-known pages and 200
+// zero-traffic ones gave the 200 exactly 5 slots a run — one full pass over
+// the part of the site that most needs looking at takes ~40 days, so newer
+// blog posts and low-traffic resource pages are, in practice, never scanned.
+// That is the real reason such pages never get an FAQ or any other content
+// finding: not an exclusion rule, just a queue they never reach the front of.
+//
+// The share is therefore proportional to the pools' real sizes, clamped
+// between the original floor and MAX_ZERO_TRAFFIC_SHARE. GSC-known pages keep
+// a guaranteed minority-but-substantial share no matter how lopsided the
+// site, which is what protects the quota-limited downstream calls (technical-
+// seo's GSC URL Inspection API) that made the original bias correct — this
+// changes how a lopsided site splits its batch, not the principle that
+// already-important pages come first.
+const MAX_ZERO_TRAFFIC_SHARE = 0.6;
+
+export function zeroTrafficSlotsFor(batchSize, gscCount, zeroCount) {
+  if (zeroCount <= 0) return 0;
+  if (gscCount <= 0) return batchSize;
+  const proportional = zeroCount / (zeroCount + gscCount);
+  const share = Math.min(MAX_ZERO_TRAFFIC_SHARE, Math.max(ZERO_TRAFFIC_SHARE, proportional));
+  return Math.max(1, Math.round(batchSize * share));
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // SOFT-404 / CATCH-ALL FILTERING
@@ -188,7 +212,7 @@ export async function selectCandidatePages(siteId, agentId, {
   const gscSorted = sortByRotation(gscUrls, checkedAt);
   const zeroTrafficSorted = sortByRotation(zeroTrafficUrls, checkedAt);
 
-  const zeroTrafficSlots = Math.max(1, Math.round(batchSize * ZERO_TRAFFIC_SHARE));
+  const zeroTrafficSlots = zeroTrafficSlotsFor(batchSize, gscSorted.length, zeroTrafficSorted.length);
   let batch = [...gscSorted.slice(0, batchSize - zeroTrafficSlots), ...zeroTrafficSorted.slice(0, zeroTrafficSlots)];
 
   // Either pool can be smaller than its reserved share (e.g. a brand-new

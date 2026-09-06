@@ -48,6 +48,9 @@ const TIER_BY_GENERATOR = {
   'robots-fix': SEVERITY_TIER.CRITICAL_TECHNICAL,    // can block crawling site-wide
   sitemap: SEVERITY_TIER.CRITICAL_TECHNICAL,         // discovery of every URL on the site
   'broken-link-fix': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  // Same dead link, same urgency — the severity is a property of the broken
+  // link, not of which of the two fixes the site's structure allows.
+  'missing-page-create': SEVERITY_TIER.CRITICAL_TECHNICAL,
   'redirect-fix': SEVERITY_TIER.CRITICAL_TECHNICAL,
   'duplicate-id-fix': SEVERITY_TIER.CRITICAL_TECHNICAL, // duplicate ids break parsing/anchors
   'html-lang': SEVERITY_TIER.CRITICAL_TECHNICAL,

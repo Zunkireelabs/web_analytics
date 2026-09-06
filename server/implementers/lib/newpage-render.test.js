@@ -251,7 +251,10 @@ describe('net-new pages consume the site design profile', () => {
   test('landing page sections use the site\'s card pattern', () => {
     const out = renderLandingPageBody(landing, siteWithProfile);
     assert.match(out, /<div class="rounded-lg border border-gray-200 p-6">/);
-    assert.match(out, /## Why us/);
+    // The heading now carries the site's own typography rather than shipping
+    // as a bare markdown "## Why us" that renders unstyled — see
+    // generators/lib/markdown-prose-render.js.
+    assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/);
     assert.match(out, /Real body copy\./);
   });
 
@@ -296,8 +299,13 @@ describe('net-new pages consume the site design profile', () => {
     const sparse = { url_file_map: { siteRoot: { designProfile: { ...PROFILE, components: { articleBody: PROFILE.components.articleBody } } } } };
     const out = renderLandingPageBody(landing, sparse);
     assert.match(out, /prose prose-lg max-w-none/, 'still uses the article wrapper it does have');
-    assert.match(out, /\[Book a call\]\(#\)/, 'no button pattern -> markdown link');
-    assert.match(out, /## Why us/, 'no card pattern -> plain heading');
+    // No BUTTON pattern, so the CTA stays an ordinary link rather than
+    // becoming a styled button — it just carries the site's link colour now
+    // instead of shipping as raw markdown.
+    assert.doesNotMatch(out, /inline-flex rounded-md bg-blue-600/, 'no button pattern -> not a button');
+    assert.match(out, /<a href="#" class="text-blue-600">Book a call<\/a>/);
+    assert.doesNotMatch(out, /rounded-lg border border-gray-200 p-6/, 'no card pattern -> no card wrapper');
+    assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/, 'heading still gets site typography');
     assert.doesNotMatch(out, /rounded-lg border/);
   });
 });

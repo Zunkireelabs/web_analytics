@@ -199,7 +199,12 @@ async def _existing_performance_factor(session: AsyncSession, client: Client, in
     if client.industry is None:
         return {**_excluded("client has no industry set"), "weight": weight}
 
-    percentiles = await get_industry_percentiles(session, insight.metric_key)
+    # exclude_client_id is mandatory here, not an optimization. Without it this
+    # client is inside the distribution it is being scored against — it partly
+    # measures itself — and with a small group the other members' raw values
+    # become recoverable from the factors this function stores against THIS
+    # client. See the disclosure-control note in app/api/routes/benchmarks.py.
+    percentiles = await get_industry_percentiles(session, insight.metric_key, exclude_client_id=client.id)
     group = percentiles.get(client.industry)
     if group is None:
         return {**_excluded(f"fewer than the minimum peer clients in industry '{client.industry}' with data for this metric"), "weight": weight}

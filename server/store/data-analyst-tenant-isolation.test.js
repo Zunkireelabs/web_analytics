@@ -51,19 +51,53 @@ describe('keyword-growth pipeline — tenant isolation', () => {
     assert.equal(gapsB.some((g) => g.topic === 'ai booking engine for hotels'), false, 'Tenant B must never see a gap discovered for Tenant A');
   });
 
-  test('re-discovering the same topic for the same site updates the existing row (observation_count increments), never duplicates it', async () => {
-    await saveKeywordGaps(siteA.id, [{ topic: 'sustainable packaging suppliers', priority: 'medium' }]);
+  test('re-discovering the same topic in a LATER week updates the existing row (observation_count increments), never duplicates it', async () => {
+    // observation_count counts distinct WEEKS a topic was re-observed, not raw
+    // calls to saveKeywordGaps (migration 143). The explicit discoveryWeek
+    // argument is what makes that testable without waiting a week; production
+    // callers omit it and the current ISO-week Monday is computed in SQL.
+    await saveKeywordGaps(siteA.id, [{ topic: 'sustainable packaging suppliers', priority: 'medium' }], 'internal_analysis', { discoveryWeek: '2026-08-31' });
     const beforeGaps = (await getKeywordGaps(siteA.id, 'pending_review')).filter((g) => g.topic === 'sustainable packaging suppliers');
     assert.equal(beforeGaps.length, 1);
     assert.equal(beforeGaps[0].observation_count, 1);
 
-    // A real re-discovery pass (e.g. next week's clustering run) finding the
-    // exact same topic again.
-    await saveKeywordGaps(siteA.id, [{ topic: 'sustainable packaging suppliers', priority: 'medium' }]);
+    // Next week's discovery pass finds the exact same topic again — a genuine
+    // second observation, which is what qualifyAndShipContentGaps's `>= 2`
+    // threshold is actually asking about.
+    await saveKeywordGaps(siteA.id, [{ topic: 'sustainable packaging suppliers', priority: 'medium' }], 'internal_analysis', { discoveryWeek: '2026-09-07' });
     const afterGaps = (await getKeywordGaps(siteA.id, 'pending_review')).filter((g) => g.topic === 'sustainable packaging suppliers');
     assert.equal(afterGaps.length, 1, 'must update the same row, not insert a second one');
     assert.equal(afterGaps[0].id, beforeGaps[0].id);
-    assert.equal(afterGaps[0].observation_count, 2, 'observation_count must increment on genuine re-discovery');
+    assert.equal(afterGaps[0].observation_count, 2, 'observation_count must increment on genuine re-discovery in a new week');
+  });
+
+  test('re-running discovery INSIDE the same week does not double-count the observation', async () => {
+    // The nightly pipeline is not guaranteed to fire exactly once a day —
+    // staging runs it twice (in-process APScheduler at 03:00 UTC and a host
+    // crontab at 22:00 UTC, both calling the same run_nightly(), with no lock
+    // between them). `observation_count = observation_count + 1` is the one
+    // non-idempotent write in that pipeline, so the week gate has to hold
+    // regardless of how many times a cycle runs.
+    const week = '2026-09-14';
+    await saveKeywordGaps(siteA.id, [{ topic: 'double run guard topic', priority: 'low' }], 'internal_analysis', { discoveryWeek: week });
+    await saveKeywordGaps(siteA.id, [{ topic: 'double run guard topic', priority: 'low' }], 'internal_analysis', { discoveryWeek: week });
+    await saveKeywordGaps(siteA.id, [{ topic: 'double run guard topic', priority: 'low' }], 'internal_analysis', { discoveryWeek: week });
+
+    const rows = (await getKeywordGaps(siteA.id, 'pending_review')).filter((g) => g.topic === 'double run guard topic');
+    assert.equal(rows.length, 1, 'repeated runs must never insert a duplicate row');
+    assert.equal(rows[0].observation_count, 1, 'three runs inside one calendar week is still ONE observation');
+  });
+
+  test('an earlier-week re-sight arriving late never rewinds last_observed_week or double-counts', async () => {
+    // A delayed/backfilled run must not be able to re-open an already-counted
+    // week and let the next same-week run increment again.
+    await saveKeywordGaps(siteA.id, [{ topic: 'late arrival topic', priority: 'low' }], 'internal_analysis', { discoveryWeek: '2026-09-21' });
+    await saveKeywordGaps(siteA.id, [{ topic: 'late arrival topic', priority: 'low' }], 'internal_analysis', { discoveryWeek: '2026-09-07' });
+    const rows = (await getKeywordGaps(siteA.id, 'pending_review')).filter((g) => g.topic === 'late arrival topic');
+    assert.equal(rows[0].observation_count, 1, 'an out-of-order older week must not count as a new observation');
+    // Asserted as a plain string: getKeywordGaps returns the week columns as
+    // ::text so no timezone parsing can shift them a day (and thus a week).
+    assert.equal(rows[0].last_observed_week, '2026-09-21', 'last_observed_week must never move backwards');
   });
 
   test('the same topic string discovered independently for two different sites creates two separate, isolated rows', async () => {

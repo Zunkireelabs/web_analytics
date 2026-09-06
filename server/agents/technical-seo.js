@@ -5,6 +5,7 @@ import { runPageChecks, detectDuplicateTitles, crawlInternalLinks, crawlExternal
 import { upsertTechnicalSeoCheck, getCheckedAtForPages as getTechnicalSeoCheckedAt } from '../store/technical-seo-checks.js';
 import { selectCandidatePages } from './lib/candidate-pages.js';
 import { listOrphanedPages } from '../store/page-inventory.js';
+import { decideDeadLinkAction } from './lib/dead-link-intent.js';
 import { recordIntegrationCheck } from '../store/upsert.js';
 import { listSitemaps } from '../ingest/gsc-technical.js';
 import { discoverFromSitemaps, parseRobotsDisallowRules, originForSite } from './lib/site-discovery.js';
@@ -408,20 +409,53 @@ export async function run({ siteId, start, end, pageCache, params }) {
 
   const brokenCandidates = [...crawl.broken].sort((a, b) => sourceImpressions(b.sourcePages) - sourceImpressions(a.sourcePages));
   const brokenPriorities = priorityByRank(brokenCandidates);
-  const brokenFindings = brokenCandidates.map((c, i) => makeFinding({
-    id: `technical-seo:broken-link:${c.sourcePages[0]}:${c.href}`,
-    evidence: { sourcePages: c.sourcePages, href: c.href, status: c.finalStatus, error: c.error, softNotFound: c.softNotFound || false },
-    whyItMatters: c.error
-      ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) failed: ${c.error}.`
-      : c.softNotFound
-        ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus} but serves the same fallback content as a nonexistent page on this site — likely a dead/broken link.`
-        : `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus}.`,
-    priority: brokenPriorities[i],
-    // Strips the dead link rather than guessing a replacement target — always
-    // safe (never worse than the current broken state), no fabricated URL.
-    recommendedAction: { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
-    expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
-  }));
+  // A dead link has two honest fixes, and which one applies is a property of
+  // the site, not of the link: if the section it points into already has real
+  // sibling pages, the page can be written in their shape and the link kept;
+  // with nothing to model on, the only safe fix is still to strip the link.
+  // dead-link-intent.js makes that call per link — see it for why sibling
+  // structure is the sole signal and not a value/relevance score.
+  const brokenIntents = await Promise.all(
+    brokenCandidates.map((c) => decideDeadLinkAction(siteId, { href: c.href, anchorTexts: c.anchorTexts || [] })),
+  );
+  const brokenFindings = brokenCandidates.map((c, i) => {
+    const intent = brokenIntents[i];
+    const create = intent.action === 'create';
+    return makeFinding({
+      id: `technical-seo:broken-link:${c.sourcePages[0]}:${c.href}`,
+      evidence: {
+        sourcePages: c.sourcePages,
+        href: c.href,
+        status: c.finalStatus,
+        error: c.error,
+        softNotFound: c.softNotFound || false,
+        resolution: intent.action,
+        resolutionReason: intent.reason,
+        ...(create ? { siblingPages: intent.siblings } : {}),
+      },
+      whyItMatters: (c.error
+        ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) failed: ${c.error}.`
+        : c.softNotFound
+          ? `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus} but serves the same fallback content as a nonexistent page on this site — likely a dead/broken link.`
+          : `A link to ${c.href} (found on ${c.sourcePages.length} page(s)) returns HTTP ${c.finalStatus}.`)
+        + (create
+          ? ` The site already has ${intent.siblings.length} live pages in this section, so the missing page can be written to match them rather than the link removed.`
+          : ` ${intent.reason} — removing the link is the safe fix.`),
+      priority: brokenPriorities[i],
+      recommendedAction: create
+        ? {
+          label: 'Create missing page',
+          generatorId: 'missing-page-create',
+          params: { page: c.sourcePages[0], href: c.href, title: intent.title, siblings: intent.siblings, sourcePages: c.sourcePages },
+          effort: effortForGenerator('missing-page-create'),
+        }
+        // Strips the dead link rather than guessing a replacement target —
+        // always safe (never worse than the current broken state), no
+        // fabricated URL.
+        : { label: 'Remove broken link', generatorId: 'broken-link-fix', params: { page: c.sourcePages[0], href: c.href, sourcePages: c.sourcePages }, effort: effortForGenerator('broken-link-fix') },
+      expectedImpact: { label: impactFromPriority(brokenPriorities[i]), basis: 'computed', value: sourceImpressions(c.sourcePages) },
+    });
+  });
 
   // Same fix as any other dead link (strip it, keep the real visible text —
   // broken-link-fix.js doesn't care WHY a link died, only that it's dead),

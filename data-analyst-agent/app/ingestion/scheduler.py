@@ -20,10 +20,24 @@ def start_scheduler() -> None:
 
     Two jobs, because ingestion and analysis were previously scheduled by two
     different mechanisms: ingestion here, analysis only via a host-level
-    crontab line that docker-compose.yml documents in a comment but that
-    nothing in this repo installs. Both now deploy with the container. Either
-    job can be disabled independently via settings if one needs to be run by
-    hand during an incident."""
+    crontab line. Both now deploy with the container. Either job can be
+    disabled independently via settings if one needs to be run by hand during
+    an incident.
+
+    THAT CRONTAB LINE IS REAL AND IS INSTALLED. An earlier version of this
+    docstring said "nothing in this repo installs" it; that was true when
+    written and is no longer. .github/workflows/deploy-staging.yml installs it
+    on every staging deploy, at 22:00 UTC, running the wider
+    scripts/run_nightly_pipeline (which also sends alerts and briefings that
+    app/analysis/run_pass.py deliberately excludes).
+
+    So on staging these two mechanisms overlapped and the whole pipeline ran
+    twice a day, uncoordinated. Staging now sets INGEST_SCHEDULE_ENABLED and
+    ANALYSIS_SCHEDULE_ENABLED to false so the crontab is the single
+    authoritative path there; production installs no crontab and runs this
+    scheduler instead. Exactly one of the two is live in any environment —
+    before changing either, check which one that environment uses, because the
+    defaults here are enabled and a new environment inherits them."""
     global _scheduler
     if _scheduler is not None:
         return

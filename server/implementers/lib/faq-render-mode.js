@@ -3,6 +3,7 @@ import { resolveFile } from './url-file-map.js';
 import { baseBranch } from './github-ops.js';
 import { inspectRenderMode, hasVisibleFaqSignal } from './render-inspector.js';
 import { hasImplementedVisibleFaqForPage, distinctVisibleFaqDraftPages } from '../../store/drafts.js';
+import { analyzePageUrl } from '../../agents/lib/page-content.js';
 
 // The sitewide visible-FAQ cap must reflect the CURRENT live/repository
 // state, not a permanent historical record of pages this tool once pushed a
@@ -43,7 +44,7 @@ export async function countCurrentlyVisibleFaqPages(site, { fetchFile = getFileC
 // ahead of any file inspection, since it's stronger evidence than a content
 // scan and the two mechanisms' output isn't visible to each other any other
 // way (see that function's own comment).
-export async function decideFaqRenderMode(site, page, fileContent, actionType = 'faq') {
+export async function decideFaqRenderMode(site, page, fileContent, actionType = 'faq', { readLivePage = analyzePageUrl } = {}) {
   if (await hasImplementedVisibleFaqForPage(site.id, page)) {
     return {
       mode: 'schema-only', confidence: 95,
@@ -51,6 +52,39 @@ export async function decideFaqRenderMode(site, page, fileContent, actionType = 
       source: 'cross-mechanism',
     };
   }
+
+  // The rendered page, not just its own template file. Every other signal
+  // here reads the repo, and a page's visible FAQ frequently does not live in
+  // the file that page resolves to — it can come from an included partial, a
+  // layout, or a shared data file looped somewhere else entirely. In all
+  // those cases hasVisibleFaqSignal scans the page's template, correctly
+  // finds nothing, and a second visible FAQ gets published onto a page that
+  // already had one. That is the /resources/ duplicate-FAQ shape (a
+  // {% for %} over a shared _data file), and no amount of template scanning
+  // can rule it out in general.
+  //
+  // A rule of "never two visible FAQs on a page" has to be checked against
+  // what the page actually shows, so this asks the live page directly and
+  // forces schema-only when it already has one — whoever authored it, by
+  // whatever mechanism, including a hand-built FAQ this tool never touched.
+  //
+  // Best-effort by design: a failed/blocked fetch falls through to the
+  // existing repo-based logic rather than blocking a legitimate draft. It can
+  // only ever move the decision toward schema-only, never toward visible.
+  try {
+    const live = await readLivePage(page);
+    // Same >=2 bar as render-inspector/page-content use for "a real
+    // accordion" — one question-shaped heading is not an FAQ section, and
+    // treating it as one would wrongly suppress every legitimate first FAQ.
+    if (live?.ok && (live.analysis?.faqVisibleQuestionCount || 0) >= 2) {
+      return {
+        mode: 'schema-only', confidence: 95,
+        reason: `The live page already shows a visible FAQ (${live.analysis.faqVisibleQuestionCount} questions) — publishing structured data only, since a page never gets a second visible FAQ.`,
+        source: 'live-page',
+      };
+    }
+  } catch { /* fall through to the repo-based decision below */ }
+
   const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
   return inspectRenderMode(fileContent, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
 }

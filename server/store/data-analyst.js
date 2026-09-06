@@ -104,16 +104,43 @@ export async function saveKeywordClusters(siteId, clusters) {
 // accepted/dismissed falls outside the partial index, so a resighting there
 // inserts a fresh row exactly as before — re-approval/re-dismissal behavior
 // is unchanged.
-export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis') {
+// observation_count counts DISTINCT WEEKS a topic was genuinely re-observed,
+// not raw calls to this function (migration 143). The increment is gated on
+// last_observed_week strictly advancing, which matters for two reasons:
+//
+//   - The nightly pipeline is not guaranteed to run exactly once a day.
+//     Staging runs it twice (an in-process APScheduler at 03:00 UTC and a host
+//     crontab at 22:00 UTC, both executing the same run_nightly(), with no lock
+//     between them). Unlike metric_observations' absolute-value upsert, `+ 1`
+//     is destructive under a double run.
+//   - The research pass now re-submits topics it has already seen, rather than
+//     filtering them out (data-analyst-agent/app/intelligence/keyword_clustering.py's
+//     gaps_from_research). That filtering was what deadlocked research-sourced
+//     gaps at observation_count = 1 forever, below
+//     qualifyAndShipContentGaps's `>= 2` threshold. Now that re-sights reach
+//     this function, the week gate is what keeps the count honest instead of
+//     letting it drift into "number of times any job happened to run."
+//
+// discoveryWeek defaults to the current ISO-week Monday computed in SQL rather
+// than in the caller, so two processes on different hosts (or one with a skewed
+// clock) can't disagree about which week they're writing.
+export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis', { discoveryWeek = null } = {}) {
   for (const g of gaps) {
     await query(
-      `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source)
-       VALUES ($1, $2, $3, $4, 'pending_review', $5)
+      `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source,
+                                 first_discovery_week, last_observed_week)
+       VALUES ($1, $2, $3, $4, 'pending_review', $5,
+               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
+               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date))
        ON CONFLICT (site_id, topic) WHERE status = 'pending_review' DO UPDATE SET
          last_seen_at = now(),
-         observation_count = keyword_gaps.observation_count + 1,
+         observation_count = keyword_gaps.observation_count
+           + (CASE WHEN EXCLUDED.last_observed_week > COALESCE(keyword_gaps.last_observed_week, DATE '0001-01-01')
+                   THEN 1 ELSE 0 END),
+         last_observed_week = GREATEST(EXCLUDED.last_observed_week,
+                                       COALESCE(keyword_gaps.last_observed_week, EXCLUDED.last_observed_week)),
          reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason)`,
-      [siteId, g.topic, g.reason || null, g.priority || 'medium', source]
+      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek]
     );
   }
 }
@@ -138,7 +165,18 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
-            first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at
+            first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
+            -- ::text deliberately. node-postgres parses a DATE into a JS Date at
+            -- LOCAL midnight, so in any positive-offset timezone (this app runs
+            -- Asia/Kolkata) reading its UTC components yields the PREVIOUS day —
+            -- which for a Monday-based week boundary silently means the previous
+            -- WEEK. qualifyAndShipContentGaps compares these against an ISO week
+            -- string, and a week-boundary comparison that is off by one day is
+            -- exactly the bug that would let a gap discovered this Monday ship on
+            -- that same Monday. Keeping them as 'YYYY-MM-DD' text makes the
+            -- comparison lexicographic and timezone-free.
+            first_discovery_week::text AS first_discovery_week,
+            last_observed_week::text   AS last_observed_week
        FROM keyword_gaps
       WHERE site_id = $1 AND ($2::text IS NULL OR status = $2)
       ORDER BY created_at DESC`,

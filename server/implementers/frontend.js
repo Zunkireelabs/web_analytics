@@ -1,15 +1,15 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 
 export const meta = {
   id: 'frontend',
   name: 'Frontend/Content Implementer',
   description: 'Places long-form draft content (landing pages, blog outlines, direct-answer sections, translated pages, trust/compliance pages) into the site\'s real templates as a pull request.',
-  handles: ['landing-page', 'blog-outline', 'direct-answer', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service'],
+  handles: ['landing-page', 'blog-outline', 'direct-answer', 'translation', 'cookie-policy', 'privacy-policy', 'terms-of-service', 'missing-page-create'],
 };
 
 export const COMPLIANCE_ACTION_TYPES = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
@@ -105,6 +105,40 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       ok: true,
       filePath,
       body: renderBlogOutlineBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }),
+      contentFormat: 'markdown',
+    };
+  }
+
+  // Unlike every other branch here, the file path is NOT slugified from the
+  // title and the permalink is NOT urlPattern-derived: both come from the
+  // dead href this page exists to make resolve. The target directory is
+  // derived from the siblings the decision was made on (see
+  // resolveMissingPageTarget) rather than from a newContentTargets entry, so
+  // this needs no per-site onboarding config — a site that has siblings under
+  // the section already has everything required.
+  if (actionType === 'missing-page-create') {
+    const href = content.href;
+    const siblings = Array.isArray(content.siblings) ? content.siblings : [];
+    const target = href ? resolveMissingPageTarget(site, href, siblings) : null;
+    if (!target) {
+      return {
+        ok: false,
+        reason: 'no-file-mapping',
+        error: `No url_file_map entry resolves any sibling page under ${href || 'this section'} to a real repo file, so there is no directory to create the page in — remove the dead link instead.`,
+      };
+    }
+    let permalink = null;
+    try { permalink = new URL(href).pathname; } catch { /* leave null — the build decides, same as every other renderer */ }
+    // Siblings are real existing pages in this same directory, so they are a
+    // strictly better contract source than the target-config path used by
+    // landing-page/blog-outline above — deriveContractFromSourceFile reads the
+    // actual file one of them resolves to.
+    const contract = await deriveContractFromSourceFile(site, target.modelFile, {}, repoDeps).catch(() => ({ unknown: true }));
+    const layout = contract.unknown ? null : contract.layout;
+    return {
+      ok: true,
+      filePath: target.filePath,
+      body: renderMissingPageBody(content, site, { permalink, layout }),
       contentFormat: 'markdown',
     };
   }

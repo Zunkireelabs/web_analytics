@@ -1,5 +1,6 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
+import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -155,6 +156,32 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
+// The page a dead internal link already pointed at (generators/
+// missing-page-create.js). The permalink is the dead URL's own path rather
+// than a urlPattern-derived one — every other net-new renderer here is
+// creating a page at a URL of its own choosing, whereas this one exists to
+// make one specific already-published URL resolve, and a page that builds to
+// any other path leaves that link broken.
+export function renderMissingPageBody(content, site, { permalink = null, layout = null } = {}) {
+  const front = frontMatter([
+    ['layout', layout],
+    ['permalink', permalink],
+    ['title', content.title],
+    ['description', content.metaDescription],
+    ['date', new Date().toISOString().slice(0, 10)],
+  ], site);
+  const parts = [];
+  for (const s of content.sections || []) {
+    if (!s?.heading) continue;
+    parts.push(`## ${s.heading}\n\n${s.body || ''}`);
+  }
+  // content.siblings/modelPage/sourcePages are review metadata (which pages
+  // justified creating this and which one it was modelled on) — same reason
+  // renderBlogOutlineBody withholds its editorial fields, they must never
+  // reach a reader.
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+}
+
 // Deliberately NOT a structural clone of the source page (draft.content only
 // has the source's extracted plain text, not its raw template source — see
 // generators/translation.js) — a minimal new page with the real translated
@@ -238,6 +265,14 @@ function wrapInSiteProse(body, site) {
   // so the projected <table> lands inside it, same as any other block.
   const tableProjected = projectMarkdownTablesInBody(body, site?.url_file_map?.siteRoot?.designProfile);
 
+  // Then the prose itself. The wrapper below positions a body; it does not
+  // style the headings and paragraphs inside it, and on a utility-class site
+  // nothing else will either — see markdown-prose-render.js for why an
+  // unstyled <h2>/<p> inside a correctly-padded container is precisely the
+  // "generated pages look flat next to the real ones" symptom. Runs after the
+  // table pass so already-projected table markup is left alone.
+  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile);
+
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new
   // pages were the last renderers still shipping unstyled headings and
@@ -249,7 +284,7 @@ function wrapInSiteProse(body, site) {
   const wrapper = configured?.includes('{{BODY}}')
     ? configured
     : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);
-  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, tableProjected) : tableProjected;
+  return wrapper?.includes('{{BODY}}') ? fillContentWrapper(wrapper, proseProjected) : proseProjected;
 }
 
 function designProfileOf(site) {

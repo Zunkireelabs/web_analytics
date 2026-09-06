@@ -308,6 +308,35 @@ jobs:
             MCP_BASE_URL=https://${{ vars.STAGING_MCP_DOMAIN }}/api/mcp
             ADMIN_API_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            # The host crontab installed further down this job is THE nightly
+            # execution path on staging, so the service's own in-process
+            # APScheduler (app/ingestion/scheduler.py) must be off here.
+            #
+            # Both defaulted to enabled, so staging ran the entire pipeline
+            # TWICE a day: in-process at 03:00/04:00 UTC and via crontab at
+            # 22:00 UTC, all 15 collectors and the full analysis chain each
+            # time, with nothing coordinating them. The crontab is the one to
+            # keep, for two independent reasons:
+            #
+            #   1. The hour. 22:00 UTC is load-bearing — see the crontab step's
+            #      own comment. 03:00 UTC is 08:30 Asia/Kolkata, i.e. AFTER the
+            #      01:30 UTC morning run it is supposed to feed. That exact
+            #      hour is called out there as a rejected earlier draft.
+            #   2. Coverage. The crontab runs scripts.run_nightly_pipeline,
+            #      which also sends predictive alerts and the morning briefing.
+            #      app/analysis/run_pass.py deliberately excludes those, so
+            #      disabling the crontab instead would silently stop
+            #      customer-facing mail.
+            #
+            # Double-running was not corrupting observation_count only by
+            # accident (the keyword collector's cadence gate happened to
+            # intercept the second run). That is now guarded properly at the
+            # write itself — migration 143's last_observed_week — but the
+            # duplicate execution was still doing every embedding and LLM call
+            # twice and writing two ingestion_runs rows per collector per day,
+            # which is the log the Aug-23 collector-outage post-mortem reads.
+            INGEST_SCHEDULE_ENABLED=false
+            ANALYSIS_SCHEDULE_ENABLED=false
             DAAENVEOF
 
             # design-agent-worker gets --no-cache: a real deploy on 2026-08-26

@@ -44,6 +44,12 @@ const ALLOWED_PATH_PATTERNS = [
   /\.test\.js$/,
   /^server\/scripts\//,
   /^server\/scripts\/check-error-leaks\.js$/,
+  // The native-repair agent loop feeds a tool-execution error's raw message
+  // back into its OWN LLM tool-use conversation only (agent-loop.js's
+  // runTurns) — discarded once that turn's loop ends, never persisted or
+  // shown to a customer. The model needs the real detail to self-correct;
+  // sanitizing it here would just make the repair agent worse at its job.
+  /^server\/design-agent\/native-repair\/agent-loop\.js$/,
 ];
 
 // console.error/console.warn calls are logs, not customer content — the
@@ -59,8 +65,14 @@ const ALLOWED_PATH_PATTERNS = [
 // console at runtime, so it's the same logging call under a different name,
 // not a second interpolation site. Confirmed false positive on
 // recommendation-gates.js:83/122/185 before this was added.
+//
+// A third shape: `(deps.log || console).warn(...)` — the same injectable
+// seam, but written as an inline fallback expression rather than a
+// destructured `log` binding, so it doesn't match either pattern above.
+// Confirmed false positive on pagination-adapter-discovery.js:212.
 function isLoggingLine(line) {
-  return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\(/.test(line) || /\blogInternal\(/.test(line);
+  return /console\.(error|warn)\(/.test(line) || /\blog\.(error|warn|log)\(/.test(line) || /\blogInternal\(/.test(line)
+    || /\)\.(error|warn|log)\(/.test(line);
 }
 
 // `String(err.message || ...).includes('SOME_CODE')` is a content check
