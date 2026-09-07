@@ -111,6 +111,64 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(result.url, 'https://images.pexels.com/photos/2/dentist.jpeg');
   });
 
+  test('never selects a sensitive/inappropriate photo, even when it scores well on keyword overlap', async () => {
+    // The reported incident: "Navigating Challenges: The Struggles of AI
+    // Companies in Nepal" matched a wheelchair-on-stairs accessibility photo
+    // purely because its alt text also contains "struggles"/"challenges" —
+    // a real keyword overlap, but never an acceptable blog image. No score
+    // excuses this category; the query must fall through to its only other
+    // (non-sensitive) candidate instead.
+    global.fetch = mockFetchReturning({
+      'Navigating Challenges: The Struggles of AI Companies': [
+        photo({ alt: 'Man in a wheelchair struggling with the challenges of climbing stairs', url: 'https://images.pexels.com/photos/1/wheelchair.jpeg' }),
+        photo({ alt: 'Software companies team navigating challenges and struggles together', url: 'https://images.pexels.com/photos/2/team.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Navigating Challenges: The Struggles of AI Companies']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/team.jpeg');
+  });
+
+  test('falls through to a later query when every candidate on the first is sensitive content', async () => {
+    global.fetch = mockFetchReturning({
+      'Overcoming Struggles': [
+        photo({ alt: 'Person in a wheelchair struggling on a staircase', url: 'https://images.pexels.com/photos/1/wheelchair.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Overcoming Struggles', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
+  });
+
+  test('never selects a photo of a real third-party brand\'s storefront, even on a strong keyword match', async () => {
+    // The reported incident: "Exploring AI Store Innovations in Nepal"
+    // matched a Google Store storefront photo purely on the word "store" —
+    // a real, unrelated company's branded signage is a brand-safety problem
+    // regardless of score.
+    global.fetch = mockFetchReturning({
+      'Exploring AI Store Innovations': [
+        photo({ alt: 'Google Store storefront with Pixel 10 phones displayed in the window', url: 'https://images.pexels.com/photos/1/googlestore.jpeg' }),
+        photo({ alt: 'Modern AI-powered retail store innovation with digital displays', url: 'https://images.pexels.com/photos/2/aistore.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring AI Store Innovations']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/aistore.jpeg');
+  });
+
+  test('never selects a photo of a real brand\'s signage just because the title has a superlative like "best"', async () => {
+    // The reported incident: "Exploring the Best IT Companies in Nepal"
+    // matched a Seattle's Best Coffee sign purely on the word "best".
+    global.fetch = mockFetchReturning({
+      'Exploring the Best IT Companies': [
+        photo({ alt: "Seattle's Best Coffee sign mounted on a building exterior", url: 'https://images.pexels.com/photos/1/coffeesign.jpeg' }),
+        photo({ alt: 'Best IT companies team collaborating in a modern office', url: 'https://images.pexels.com/photos/2/itteam.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring the Best IT Companies']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/itteam.jpeg');
+  });
+
   test('returns null rather than throwing when every query comes back empty', async () => {
     global.fetch = mockFetchReturning({});
     assert.equal(await searchImage(['nothing matches this']), null);
@@ -155,6 +213,24 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     const result = await searchImage(['How to Build a RAG Pipeline', 'artificial intelligence technology']);
     assert.equal(result.url, 'https://images.pexels.com/photos/2/rag.jpeg');
     assert.equal(fetchSpy.mock.callCount(), 1, 'the broader fallback query must never be fetched once the title query already won');
+  });
+
+  test('a place name in the title must not win a match against unrelated travel/scenery photos', async () => {
+    // The reported incident: "Exploring the Best IT Companies in Nepal" (a
+    // real local-SEO title) matched a Pashupatinath/mountain photo purely on
+    // the word "Nepal" — Pexels' own catalog for that word skews travel, not
+    // tech. The title's remaining words ("best", "companies") don't overlap
+    // with travel-photo alt text, so it must fall through to the fallback.
+    global.fetch = mockFetchReturning({
+      'Exploring the Best IT Companies in': [
+        photo({ alt: 'Spectacular view of snow-capped Machhapuchchhre peak surrounded by clouds in Nepal', url: 'https://images.pexels.com/photos/1/mountain.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring the Best IT Companies in Nepal', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
   });
 
   test('excludePhotoIds skips a photo already used elsewhere on the site, even if it would otherwise win', async () => {

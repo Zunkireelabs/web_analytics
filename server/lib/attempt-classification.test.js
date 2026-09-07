@@ -131,3 +131,49 @@ test('an empty reason is retryable rather than held against the item', () => {
   assert.equal(classifyAbandonReason(null).retryPolicy, RETRY_POLICY.RETRY);
   assert.equal(classifyAbandonReason('').retryPolicy, RETRY_POLICY.RETRY);
 });
+
+// ---- Implementer reason CODES (the refusal path) -----------------------
+// auto-remediation.js records a refusal's `err.reason` — the implementers'
+// short `{ ok: false, reason }` code — into generator_outcomes.detail, and
+// countRefusalsByRecommendation classifies THAT to decide whether the refusal
+// was the item's own fault. A bare code matches none of the prose rules, so
+// before these every code fell through to the ITEM_DEFECT default and counted
+// against the item — retiring, among others, site 1's GA4 and Meta Pixel
+// analytics-install recommendations at 12 and 15 "honest refusals" that were
+// every one of them a self-healing missing marker.
+
+test('a config-gap reason CODE is a human gap, not an item defect', () => {
+  for (const code of ['no-insertion-marker', 'no-file-mapping', 'no-markers-configured', 'no-repo']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.NEEDS_HUMAN, code);
+  }
+});
+
+test('the code form agrees with the prose form of the same gap', () => {
+  // These two describe one situation and must never disagree about it.
+  assert.equal(
+    classifyAbandonReason('no-file-mapping').retryPolicy,
+    classifyAbandonReason('No url_file_map entry matches "/pricing".').retryPolicy,
+  );
+});
+
+test('an infrastructure reason CODE is transient, not an item defect', () => {
+  for (const code of ['github-error', 'batch-branch-conflicted', 'pr-open-failed', 'unreachable']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.RETRY, code);
+  }
+});
+
+test('draft lifecycle-state reason CODES say nothing about the item', () => {
+  // learned-repair.js excuses exactly these two for its own reuse scoring;
+  // the refusal cap has to reach the same verdict from the same input.
+  for (const code of ['awaiting-human-review', 'draft-reset', 'design-unreviewed']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.RETRY, code);
+  }
+});
+
+test('a genuinely item-specific reason CODE still counts against the item', () => {
+  // The caps exist for a reason: only codes that say nothing about the item
+  // were excused, and nothing here may quietly join them.
+  for (const code of ['invalid-edit', 'draft-not-ready', 'quality-gate-exhausted', 'no-match']) {
+    assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.ITEM_DEFECT, code);
+  }
+});

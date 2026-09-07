@@ -304,7 +304,7 @@ describe('rate limiting', () => {
     });
     try {
       await getBranchSha(site, 'main');
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, RATE_LIMIT_RESERVE - 1);
       assert.equal(state.low, true);
     } finally {
@@ -320,7 +320,7 @@ describe('rate limiting', () => {
     });
     try {
       await getBranchSha(site, 'main');
-      assert.equal(getLastKnownRateLimit().low, false);
+      assert.equal(getLastKnownRateLimit(site).low, false);
     } finally {
       globalThis.fetch = original;
     }
@@ -346,7 +346,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
       globalThis.fetch = async () => ok(); // now a response with no headers at all
       await getBranchSha(site, 'main');
 
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.notEqual(state.remaining, 0, 'a missing header must not read as an exhausted budget');
       assert.equal(state.low, false, 'and must not halt the run');
     } finally {
@@ -371,7 +371,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
       });
       await searchCodeForString(site, 'needle');
 
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, 4900, 'core state still reflects the last CORE response');
       assert.equal(state.low, false, 'search exhaustion must not stop the ship path');
     } finally {
@@ -391,7 +391,7 @@ describe('rate-limit state — the ways it must NOT latch', () => {
     globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': past });
     try {
       await getBranchSha(site, 'main');
-      const state = getLastKnownRateLimit();
+      const state = getLastKnownRateLimit(site);
       assert.equal(state.remaining, 3, 'the observation is still reported honestly');
       assert.equal(state.low, false, 'but a budget that has already refilled must not keep halting runs');
     } finally {
@@ -405,7 +405,56 @@ describe('rate-limit state — the ways it must NOT latch', () => {
     globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': future });
     try {
       await getBranchSha(site, 'main');
-      assert.equal(getLastKnownRateLimit().low, true);
+      assert.equal(getLastKnownRateLimit(site).low, true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // Real bug, found 2026-09-07 while auditing for client #2's onboarding
+  // (site 8862, "Admizz Education"): this state used to be one shared value
+  // for the whole process, on the reasoning that every site shared one PAT.
+  // That stopped being true the moment a second tenant gets its OWN
+  // credential — a distinct github_pat_env_var, or its own GitHub App
+  // installation. Before this fix, exhausting site A's budget would falsely
+  // report site B's unrelated, healthy budget as `low` (or the reverse: mask
+  // a real exhaustion on B behind A's healthy reading) — auto-remediation.js
+  // and routes/action-center.js both gate an entire site's shipping run on
+  // this single check.
+  test('two sites on DIFFERENT credentials have independent rate-limit state', async () => {
+    const siteA = { id: 1, repo_owner: 'acme', repo_name: 'site-a' };
+    const siteB = { id: 2, repo_owner: 'acme', repo_name: 'site-b', github_pat_env_var: 'GITHUB_PAT_B' };
+    const originalB = process.env.GITHUB_PAT_B;
+    process.env.GITHUB_PAT_B = 'test-token-b';
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3' }); // exhaust A
+      await getBranchSha(siteA, 'main');
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '4900' }); // B is healthy
+      await getBranchSha(siteB, 'main');
+
+      assert.equal(getLastKnownRateLimit(siteA).low, true, "A's own exhausted budget must still read low");
+      assert.equal(getLastKnownRateLimit(siteB).low, false, "B's healthy budget must not be poisoned by A's");
+    } finally {
+      globalThis.fetch = original;
+      if (originalB === undefined) delete process.env.GITHUB_PAT_B;
+      else process.env.GITHUB_PAT_B = originalB;
+    }
+  });
+
+  // The inverse and equally real case: two sites that deliberately still
+  // share one PAT (the default before a tenant has its own GitHub App
+  // installation) hit the exact same real GitHub-side budget, so they must
+  // be reported as ONE shared state, not artificially separated by site.id.
+  test('two sites sharing the SAME credential see one real shared budget', async () => {
+    const siteA = { id: 1, repo_owner: 'acme', repo_name: 'site-a' }; // both default to GITHUB_PAT
+    const siteC = { id: 3, repo_owner: 'acme', repo_name: 'site-c' };
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ok({ 'x-ratelimit-remaining': '3' });
+      await getBranchSha(siteA, 'main');
+
+      assert.equal(getLastKnownRateLimit(siteC).low, true, "sharing site A's token means sharing its exhausted budget");
     } finally {
       globalThis.fetch = original;
     }

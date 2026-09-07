@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { isVerifiableDraft, createPendingVerification, getWatchlistItemByFindingId } from './fix-verifications.js';
 import { sanitizeForCustomer } from '../lib/errors.js';
-import { NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT } from '../lib/draft-failure-phrases.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 
 // CRUD for the drafts table, plus its approval lifecycle:
 // draft/edited -> submitted_for_approval -> approved -> implemented. There's
@@ -841,108 +841,46 @@ export async function getLiveDraftsByFindingId(siteId) {
 // across 6 findings). Every cycle spends an LLM generation plus a handful of
 // GitHub calls to reach the identical failure.
 //
-// Only ITEM-SPECIFIC failures count. Everything excluded below is a property
-// of the infrastructure or of a human decision, and counting any of it would
-// retire findings that have nothing wrong with them — the exact opposite of
-// the goal:
-//   - 'pr_closed_without_merge' / 'superseded': a human closed the PR or the
-//     work was replaced. The draft was fine; the decision was elsewhere.
-//     (This is the single largest bucket — 176 drafts from one closed PR.)
-//   - anything naming a rate limit: transient by definition.
-//   - 'Batch push/PR failed%': the batch's ONE shared push/PR failed, which
-//     fails every pending item at once regardless of their content. On
-//     2026-09-01 that abandoned 54 drafts in a single call — and crucially
-//     their text is sanitized ("This pull request could not be opened right
-//     now — our team has been notified. (ref: …)"), so it does NOT match the
-//     rate-limit filter above even when a rate limit was the true cause.
-//     Without this line the cap would hold precisely the findings this work
-//     exists to rescue.
-//   - 'Stuck at "…"%': the draft-state reset (lib/draft-ship-state.js), which
-//     is a bookkeeping action taken to allow a clean retry, not a verdict on
-//     whether the item can be fixed.
+// Only ITEM-SPECIFIC failures count — exactly the set attempt-classification.js's
+// classifyAbandonReason calls ITEM_DEFECT. Everything else (a human decision,
+// an infrastructure hiccup, a config gap a human still has to close, an
+// already-resolved item) is a property of something other than the item, and
+// counting any of it would retire findings that have nothing wrong with them
+// — the exact opposite of the goal.
+//
+// This used to be its own hand-maintained SQL exclusion list (NOT LIKE/NOT
+// ILIKE clauses plus bind-parameterized fragments for the ones containing an
+// apostrophe — confirmed live, 2026-09-03: an inlined apostrophe in one
+// produced `syntax error at or near "s"` and silently failed every
+// autonomous shipping run's failed-attempt count that day). That list and
+// classifyAbandonReason's RULES were two independent copies of the same
+// judgement and had already drifted: the SQL list never excluded "already
+// has an FAQPage schema" (an ALREADY_RESOLVED verdict, not a defect — ~30
+// live rows counted here that should not have been) and had no entry at all
+// for "No GitHub PAT set" (a NEEDS_HUMAN verdict once classify-attempt.js's
+// own rules were extended to cover it — see that file's history), so every
+// PAT-outage abandon was counted as a per-item defect and retired 11 findings
+// at the 2026-09-07 cap of 3 that had never actually failed on their own
+// merits. Delegating to the one shared classifier is what keeps this from
+// happening a third time.
 //
 // Windowed to 30 days so a finding that failed repeatedly months ago, under
 // long-since-changed code, is not retired forever on that evidence.
-// Reasons that must NEVER count. Each is a real, observed abandon reason that
-// says nothing about whether the ITEM can be fixed — counting any of them
-// retires findings that have nothing wrong with them.
-//
-// The list is deliberately explicit rather than clever. It grew from a
-// concrete failure: on 2026-09-01 the two analytics findings were held at 15
-// and 12 attempts, having been fixed in the meantime — 19 of those 27 were
-// "No markers configured", a config gap a human had since closed. The cap
-// would have permanently suppressed the very work that was now ready to ship.
-// A human closed the PR, or the work was replaced. The draft was fine; the
-// decision was elsewhere. (Largest bucket of all — 176 from one closed PR.)
-const UNCOUNTED_ABANDON_IN_CLAUSE = "abandoned_reason IN ('pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations')";
-
-// Literal, author-controlled NOT LIKE/NOT ILIKE exclusions — safe to inline
-// directly since every one of these is a fixed string written right here,
-// with no single quote in any of them.
-const UNCOUNTED_ABANDON_STATIC_NOT_LIKES = [
-  // Transient by definition.
-  "abandoned_reason NOT ILIKE '%rate limit%'",
-  // The batch's ONE shared push/PR failed, which fails every pending item at
-  // once regardless of content. Its text is sanitized, so it does not match
-  // the rate-limit filter even when a rate limit was the true cause.
-  "abandoned_reason NOT LIKE 'Batch push/PR failed%'",
-  // Same-day batch branch diverged from the default branch — infrastructure,
-  // and self-healing: the branch is date-keyed, so tomorrow forks fresh.
-  "abandoned_reason NOT LIKE '%batch branch%diverged%'",
-  // Bookkeeping, not verdicts: a draft-state reset (lib/draft-ship-state.js)
-  // or a recovery script rescuing a stranded row.
-  "abandoned_reason NOT LIKE 'Stuck at \"%'",
-  "abandoned_reason NOT LIKE 'Recovered:%'",
-];
-
-// CONFIG GAPS. These mean "waiting on a value or mapping a human supplies",
-// never "this item is unfixable" — and the moment that config lands, the
-// item must become eligible again immediately rather than staying retired
-// on the strength of failures whose cause is gone.
-//
-// NOT the "unverified placeholder field" case, deliberately: unlike a
-// missing marker/mapping, that failure recurs identically FOREVER unless a
-// human hand-edits the draft (trust-compliance.js files the finding
-// precisely so they can) — no config change ever resolves it on its own.
-// That IS the per-item "cannot be auto-completed" signal this cap exists to
-// catch, so it counts.
-//
-// DESIGN_NOT_REVIEWED_FRAGMENT is a REMOVED gate, not a config gap — commit
-// 8a32037 deleted the human design-review sign-off this reason came from, so
-// nothing produces it any more. Its old abandons must not keep counting
-// against findings whose one and only failure was a gate that no longer
-// exists.
-//
-// Unlike the static list above, these come from imported constants — real
-// English sentences, not SQL written by this file's own author — and one of
-// them CAN contain a single quote: DESIGN_NOT_REVIEWED_FRAGMENT is "This
-// site's design has not been reviewed yet". Inlining it via template
-// literal the way the static list above does breaks the query the moment
-// that apostrophe closes the LIKE pattern's string literal early —
-// confirmed live, 2026-09-03: this produced `syntax error at or near "s"`
-// and silently failed every autonomous shipping run's failed-attempt count.
-// Passed as bind parameters instead, so no fragment's exact wording — this
-// one's or any future one's — can ever break the query again.
-const UNCOUNTED_ABANDON_FRAGMENTS = [NO_MARKERS_CONFIGURED_FRAGMENT, NO_FILE_MAPPING_FRAGMENT, DESIGN_NOT_REVIEWED_FRAGMENT];
-
 export async function countFailedAttemptsByFinding(siteId) {
-  const staticNotLikes = UNCOUNTED_ABANDON_STATIC_NOT_LIKES.join('\n        AND ');
-  const fragmentNotLikes = UNCOUNTED_ABANDON_FRAGMENTS
-    .map((_, i) => `abandoned_reason NOT LIKE '%' || $${i + 2} || '%'`)
-    .join('\n        AND ');
   const { rows } = await query(
-    `SELECT finding_id, COUNT(*)::int AS attempts
+    `SELECT finding_id, abandoned_reason
        FROM drafts
       WHERE site_id = $1 AND finding_id IS NOT NULL AND status = 'abandoned'
         AND abandoned_reason IS NOT NULL
-        AND abandoned_at > now() - interval '30 days'
-        AND NOT (${UNCOUNTED_ABANDON_IN_CLAUSE})
-        AND ${staticNotLikes}
-        AND ${fragmentNotLikes}
-      GROUP BY finding_id`,
-    [siteId, ...UNCOUNTED_ABANDON_FRAGMENTS]
+        AND abandoned_at > now() - interval '30 days'`,
+    [siteId]
   );
-  return new Map(rows.map((r) => [r.finding_id, r.attempts]));
+  const counts = new Map();
+  for (const row of rows) {
+    if (classifyAbandonReason(row.abandoned_reason).retryPolicy !== RETRY_POLICY.ITEM_DEFECT) continue;
+    counts.set(row.finding_id, (counts.get(row.finding_id) || 0) + 1);
+  }
+  return counts;
 }
 
 // The file-level sibling to getDraftedFindingIds above: that function stops

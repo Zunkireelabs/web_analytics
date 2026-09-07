@@ -4,7 +4,7 @@
 // simplest and safest shape for a single-repo, PAT-scoped pilot (see
 // server/implementers/ for what calls these).
 
-import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken } from './credentials.js';
+import { resolveGithubToken, githubTokenEnvVar, isFineGrainedToken, usesGithubApp } from './credentials.js';
 
 const API_BASE = 'https://api.github.com';
 
@@ -75,11 +75,30 @@ const RATE_LIMIT_MAX_WAIT_MS = 60_000;
 export const RATE_LIMIT_RESERVE = 100;
 
 // Last rate-limit state GitHub reported, from whichever call saw it most
-// recently. Module-level because it is a property of the TOKEN's budget, not
-// of any one request, and every call in this file shares that budget.
+// recently — one entry per CREDENTIAL, not one shared value and not one per
+// site. It is a property of the token's budget, and every call authenticating
+// with that same token shares it — which used to mean "every call in this
+// file", back when every site shared one PAT. That stopped being true the
+// moment a second real tenant (client #2, 2026-09-07) got its own credential:
+// a single shared value would let one site's exhausted budget falsely halt
+// an unrelated site's run (or mask the first site's real exhaustion behind a
+// second site's healthy one), reported through auto-remediation.js's
+// pre-ship getLastKnownRateLimit() check. Keyed by rateLimitKey(site) below —
+// the resolved credential identity — rather than site.id, so two sites that
+// deliberately still share one PAT (the common case before a tenant gets its
+// own GitHub App installation) correctly see one shared, accurate budget,
+// exactly as GitHub itself enforces it.
 // `remaining: null` means no authenticated call has been made yet this
-// process — never treated as "plenty left".
-let lastRateLimit = { remaining: null, reset: null, at: null };
+// process on that credential — never treated as "plenty left".
+const lastRateLimitByCredential = new Map();
+
+function rateLimitKey(site) {
+  return usesGithubApp(site) ? `app:${site.github_app_installation_id}` : `pat:${githubTokenEnvVar(site)}`;
+}
+
+function getRateLimitState(site) {
+  return lastRateLimitByCredential.get(rateLimitKey(site)) || { remaining: null, reset: null, at: null };
+}
 
 // `res.headers.get()` returns null for a header that isn't there, and
 // `Number(null)` is 0 — NOT NaN. A `Number.isFinite` guard therefore does
@@ -103,7 +122,7 @@ function headerNumber(res, name) {
  * failed yet, so don't pre-emptively halt a healthy run), but any observed
  * value under the reserve does.
  */
-export function getLastKnownRateLimit() {
+export function getLastKnownRateLimit(site) {
   // `low` MUST expire. The budget refills at `reset`, but nothing re-reads it
   // on its own: auto-remediation's pre-check breaks the loop BEFORE making any
   // GitHub call, so a run that starts low makes zero requests, learns nothing,
@@ -111,10 +130,11 @@ export function getLastKnownRateLimit() {
   // Once latched, the autonomous loop could never recover from within itself.
   // A reset that has already passed means the observation is simply out of
   // date — report not-low and let the next real response say what's true.
-  const expired = lastRateLimit.reset != null && lastRateLimit.reset.getTime() <= Date.now();
+  const state = getRateLimitState(site);
+  const expired = state.reset != null && state.reset.getTime() <= Date.now();
   return {
-    ...lastRateLimit,
-    low: !expired && lastRateLimit.remaining != null && lastRateLimit.remaining < RATE_LIMIT_RESERVE,
+    ...state,
+    low: !expired && state.remaining != null && state.remaining < RATE_LIMIT_RESERVE,
   };
 }
 
@@ -127,16 +147,16 @@ export function getLastKnownRateLimit() {
 // discover-file-mapping.js's auto-heal), the very first item of a run would
 // leave every subsequent item's pre-check reading "low" and halt the run
 // after one ship. Tracking core only keeps this state meaning one thing.
-function recordRateLimitHeaders(res, { forSearch = false } = {}) {
+function recordRateLimitHeaders(site, res, { forSearch = false } = {}) {
   if (forSearch) return;
   const remaining = headerNumber(res, 'x-ratelimit-remaining');
   if (remaining === null) return;
   const reset = headerNumber(res, 'x-ratelimit-reset');
-  lastRateLimit = {
+  lastRateLimitByCredential.set(rateLimitKey(site), {
     remaining,
     reset: reset === null ? null : new Date(reset * 1000),
     at: new Date(),
-  };
+  });
 }
 
 // How long to wait before retrying, or null if this response is not a rate
@@ -180,8 +200,8 @@ async function rateLimitWaitMs(res) {
 // WITHOUT regex-matching a provider message that changes without notice —
 // see lib/failure-classification.js, which maps `rateLimited` onto its
 // EXTERNAL_SERVICE class (the one class it treats as auto-retryable).
-function rateLimitError(path, waitMs) {
-  const reset = lastRateLimit.reset;
+function rateLimitError(site, path, waitMs) {
+  const reset = getRateLimitState(site).reset;
   const err = new Error(
     `GitHub rate limit reached for ${path}${reset ? ` (resets ${reset.toISOString()})` : ''} — `
     + `retried ${RATE_LIMIT_MAX_RETRIES}x, still limited.`,
@@ -228,7 +248,7 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     } finally {
       clearTimeout(timeout);
     }
-    recordRateLimitHeaders(res, { forSearch });
+    recordRateLimitHeaders(site, res, { forSearch });
 
     const rateLimit = await rateLimitWaitMs(res);
     if (rateLimit == null) return res;
@@ -241,7 +261,7 @@ async function githubRequest(site, method, path, body, { forSearch = false } = {
     // already ruled out wastes wall-clock a cron pass can't spare, for no
     // chance of succeeding — the eventual throw was never in doubt.
     if (attempt >= RATE_LIMIT_MAX_RETRIES || trueWaitMs > attemptsLeft * RATE_LIMIT_MAX_WAIT_MS) {
-      throw rateLimitError(path, waitMs);
+      throw rateLimitError(site, path, waitMs);
     }
 
     console.warn(`[github] rate limited on ${method} ${path}; waiting ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})`);
