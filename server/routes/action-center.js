@@ -1311,7 +1311,7 @@ export async function runSafeFixesJob({ job, recs, pendingDraftFilePaths, site, 
     // and retrying through githubRequest's own backoff on each one, all the
     // way down a 60-item batch, instead of stopping after the first item that
     // proves the budget is gone.
-    if (getLastKnownRateLimit().low) {
+    if (getLastKnownRateLimit(site).low) {
       await appendJobLog(job.id, `GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${recs.length - shipped - failed} item(s) left untouched; they will be re-attempted next run.`);
       break;
     }

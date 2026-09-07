@@ -498,7 +498,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // to notice is before the attempt. The items left here stay open and
     // untouched for the next pass — nothing is consumed, so this costs one
     // deferred day at worst, against the whole-run collapse it prevents.
-    if (getLastKnownRateLimit().low) {
+    if (getLastKnownRateLimit(site).low) {
       stoppedReason = 'github-rate-limited';
       console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
       break;
