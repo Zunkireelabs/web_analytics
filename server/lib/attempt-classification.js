@@ -56,10 +56,89 @@ export const RETRY_POLICY = {
   NEVER: 'never',
 };
 
+// The implementers' short, stable reason CODES (the `reason` half of their
+// `{ ok: false, reason, error }` contract), as opposed to the human-facing
+// prose every other rule in this file matches on.
+//
+// These reach classifyAbandonReason by a path the prose rules cannot serve:
+// auto-remediation.js records a REFUSAL's `err.reason` — the bare code — into
+// generator_outcomes.detail, deliberately, so code-self-repair.js can group
+// repeats of the same underlying problem. countRefusalsByRecommendation then
+// classifies that stored code to decide whether the refusal was the item's
+// own fault. A bare code matches none of the prose rules below, so every one
+// of them fell through to the ITEM_DEFECT default and counted against the
+// item — including the pure config/repo gaps that are definitionally NOT the
+// item's fault and that the prose rule at NO_FILE_MAPPING_FRAGMENT already
+// classifies correctly when it arrives as a sentence.
+//
+// Live consequence on site 1 (2026-09-07): the GA4 and Meta Pixel
+// analytics-install recommendations sat retired at 12 and 15 "honest
+// refusals", every one of them a `no-insertion-marker` — a missing marker
+// anchor, which audit-url-file-map.js reports as self-healing at apply time.
+// The items were never defective; the refusal cap had simply been counting a
+// config gap as the item's own failure since 2026-08-30.
+//
+// Only codes that say nothing about the ITEM belong here. Anything genuinely
+// item-specific is deliberately absent so it still reaches the ITEM_DEFECT
+// default and still retires normally — the caps exist for a reason.
+const CONFIG_GAP_REASON_CODES = new Set([
+  'no-file-mapping',
+  'no-insertion-marker',
+  'no-markers-configured',
+  'render-capabilities-not-configured',
+  'render-capability-unknown',
+  'not-configured',
+  'invalid-config',
+  'sanity-config-invalid',
+  'no-repo',
+]);
+
+const TRANSIENT_REASON_CODES = new Set([
+  'github-error',
+  'pr-open-failed',
+  'no-branch',
+  'batch-branch-conflicted',
+  'code-search-error',
+  'client-build-check-unavailable',
+  'client-build-check-pending',
+  'unreachable',
+  'homepage-unreachable',
+  'no-live-url',
+  // Draft LIFECYCLE state, not content. learned-repair.js already carries
+  // this exact judgement inline for its own cross-client reuse scoring
+  // ("ITEM-STATE refusals ... are plumbing/state noise on the target site,
+  // not a defect in the borrowed pattern") — it just had no way to share it
+  // with the refusal cap, so the same attempt counted as a defect here while
+  // being correctly excused there.
+  'awaiting-human-review',
+  'draft-reset',
+  // The design-review gate removed in commit 8a32037. The prose rule further
+  // down already excuses this one on the grounds that a dead gate must not
+  // keep suppressing findings; the bare code has to say the same thing, and
+  // is still the single largest code in site 1's live refusal log at 39 rows.
+  'design-unreviewed',
+]);
+
 // Ordered most-specific first. Each entry cites the observed abandon reason
 // it was written for; every one of these is a real string counted in the live
 // drafts table, not a hypothetical.
 const RULES = [
+  // ---- Implementer reason codes ---------------------------------------
+  // Exact match only: these are machine-written sentinels, never a substring
+  // of a human sentence, so equality keeps them from colliding with the
+  // prose rules further down.
+  {
+    match: (r) => CONFIG_GAP_REASON_CODES.has(r),
+    failureClass: FAILURE_CLASS.INVALID_INPUT,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This site’s repository configuration is missing something this fix needs.',
+  },
+  {
+    match: (r) => TRANSIENT_REASON_CODES.has(r),
+    failureClass: FAILURE_CLASS.EXTERNAL_SERVICE,
+    policy: RETRY_POLICY.RETRY,
+    summary: 'The attempt failed on infrastructure, not on the item itself.',
+  },
   // ---- Human decisions -----------------------------------------------
   // Exact-match sentinels written by the system itself, not prose.
   {

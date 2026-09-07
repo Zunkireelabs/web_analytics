@@ -5,6 +5,7 @@ let issued;
 
 let implementedFindingIdsRows = [];
 let pendingDraftFilePathsRows = [];
+let countFailedAttemptsRows = [];
 let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
 let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
 
@@ -41,8 +42,8 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2')) {
     return { rows: insertDraftConflict ? [insertDraftConflict] : [] };
   }
-  if (sql.startsWith('SELECT finding_id, COUNT(*)::int AS attempts')) {
-    return { rows: [{ finding_id: 'f1', attempts: 4 }] };
+  if (sql.startsWith('SELECT finding_id, abandoned_reason')) {
+    return { rows: countFailedAttemptsRows };
   }
   throw new Error(`drafts.test.js fake query: unhandled SQL shape: ${sql}`);
 }
@@ -232,70 +233,104 @@ describe('visible-FAQ cap/dedup queries cover both faq and qa-content', () => {
 // human had already closed. The cap would have permanently suppressed exactly
 // the work that had just been made possible.
 describe('countFailedAttemptsByFinding — what must never count as an item failure', () => {
-  beforeEach(() => { issued = []; });
+  beforeEach(() => { issued = []; countFailedAttemptsRows = []; });
 
-  const recordFor = async () => {
+  // The exclusion logic itself now lives in attempt-classification.js's
+  // classifyAbandonReason (RETRY_POLICY.ITEM_DEFECT is the only policy this
+  // function counts) — this file's own job is just fetching the raw rows and
+  // delegating. These tests exercise that delegation with real abandon-reason
+  // strings/codes, not the old hand-maintained SQL exclusion list, which had
+  // already drifted from classifyAbandonReason's rules before it was removed
+  // (see this function's own header comment for the two concrete gaps that
+  // drift produced live on site 1).
+  const countFor = async (rows) => {
+    countFailedAttemptsRows = rows;
     const { countFailedAttemptsByFinding } = await import('./drafts.js');
-    await countFailedAttemptsByFinding(1);
-    return issued.at(-1);
+    return countFailedAttemptsByFinding(1);
   };
-  const sqlFor = async () => (await recordFor()).sql;
 
   test('config gaps a human can close are excluded — the item becomes eligible the moment they do', async () => {
-    const { params } = await recordFor();
-    assert.ok(params.includes('No markers configured for'));
-    assert.ok(params.includes('No url_file_map entry matches'));
-  });
-
-  // Real incident, 2026-09-03: DESIGN_NOT_REVIEWED_FRAGMENT ("This site's
-  // design has not been reviewed yet") was inlined into the SQL text via
-  // template literal, same as the two config-gap fragments above. Its
-  // apostrophe closed the LIKE pattern's quoted string literal early,
-  // producing `syntax error at or near "s"` and silently failing every
-  // autonomous shipping run's failed-attempt count. Fixed by passing every
-  // fragment as a bind parameter instead of inlining it — this test proves
-  // a fragment WITH a quote in it can never do that again, not just that
-  // today's specific fragments happen to be quote-free.
-  test('a fragment containing a single quote (the removed design-review gate) is bound as a parameter, never inlined into the SQL text', async () => {
-    const { sql, params } = await recordFor();
-    assert.ok(params.includes("This site's design has not been reviewed yet"));
-    assert.doesNotMatch(sql, /site's/);
-    assert.match(sql, /NOT LIKE '%' \|\| \$\d+ \|\| '%'/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No markers configured for "/pricing" — add e.g. {"faq":"SEOAI:FAQ"} to url_file_map.pages[...].placements.' },
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No url_file_map entry matches "/pricing".' },
+      { finding_id: 'f1', abandoned_reason: 'no-insertion-marker' },
+      { finding_id: 'f1', abandoned_reason: 'no-file-mapping' },
+    ]);
+    assert.equal(m.has('f1'), false);
   });
 
   // The opposite of the case above: this one recurs identically FOREVER
   // unless a human hand-edits the draft (trust-compliance.js files the
   // finding specifically so they can) — no config change ever resolves it on
   // its own. That IS the per-item "cannot be auto-completed" signal the
-  // convergence cap exists to catch, so — unlike the two config gaps above —
-  // it counts.
+  // convergence cap exists to catch, so — unlike the config gaps above — it
+  // counts.
   test('an unverified-placeholder failure DOES count — nothing resolves it automatically', async () => {
-    const sql = await sqlFor();
-    assert.doesNotMatch(sql, /unverified placeholder field/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: refusing to publish an unverified placeholder field' },
+    ]);
+    assert.equal(m.get('f1'), 1);
   });
 
   test('human decisions and bookkeeping are excluded — neither is a verdict on the item', async () => {
-    const sql = await sqlFor();
-    assert.match(sql, /pr_closed_without_merge/);
-    assert.match(sql, /sent_back_to_recommendations/);
-    assert.match(sql, /Recovered:/);
-    assert.match(sql, /Stuck at/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'pr_closed_without_merge' },
+      { finding_id: 'f1', abandoned_reason: 'sent_back_to_recommendations' },
+      { finding_id: 'f1', abandoned_reason: 'Recovered: stranded at submitted_for_approval by the pre-fix swallow-and-strand gap (2026-08-25).' },
+      { finding_id: 'f1', abandoned_reason: 'Stuck at "branch_pushed" and not resumable — abandoned so a fresh draft can be generated.' },
+    ]);
+    assert.equal(m.has('f1'), false);
   });
 
   test('infrastructure failures that hit every pending item at once are excluded', async () => {
-    const sql = await sqlFor();
-    assert.match(sql, /rate limit/);
-    assert.match(sql, /Batch push\/PR failed/);
-    assert.match(sql, /batch branch.*diverged/);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'rate limit exceeded, retry later' },
+      { finding_id: 'f1', abandoned_reason: 'Batch push/PR failed: This pull request could not be opened right now — our team has been notified. (ref: abc123)' },
+      { finding_id: 'f1', abandoned_reason: "Auto-ship failed: Today's batch branch (action-center/batch-1-2026-08-30) has diverged from main." },
+    ]);
+    assert.equal(m.has('f1'), false);
+  });
+
+  // Real incident, 2026-09-07: this exact string was counted as a per-item
+  // defect by the old SQL list (no exclusion for it existed at all), which
+  // wrongly retired 11 findings at the convergence cap on drafts that had
+  // never actually failed on their own merits — the outage was in
+  // infrastructure (a duplicate, unmanaged app container racing the real
+  // deploy with no GITHUB_PAT in its environment), not in any of those items.
+  test('a GitHub-credentials outage is excluded — it says nothing about the item', async () => {
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: No GitHub PAT set in env var "GITHUB_PAT"' },
+    ]);
+    assert.equal(m.has('f1'), false);
+  });
+
+  // Real incident, 2026-09-01/2026-09-07: an item-specific defect (a schema
+  // mismatch, an anchor no longer found) DOES still count — only the reasons
+  // that say nothing about the item are excused, and this proves the fix
+  // didn't quietly stop counting real defects too.
+  test('a genuine item-specific defect still counts', async () => {
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'Auto-ship failed: 1 anchor(s) no longer found verbatim in src/pages/about.njk — the source may have changed.' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+    ]);
+    assert.equal(m.get('f1'), 2);
   });
 
   test('the count is windowed, so long-dead failures under changed code do not retire a finding forever', async () => {
-    assert.match(await sqlFor(), /abandoned_at > now\(\) - interval '30 days'/);
+    await countFor([{ finding_id: 'f1', abandoned_reason: 'invalid-edit' }]);
+    const { sql } = issued.find((i) => i.sql.startsWith('SELECT finding_id, abandoned_reason'));
+    assert.match(sql, /abandoned_at > now\(\) - interval '30 days'/);
   });
 
   test('returns a Map of finding_id -> attempts', async () => {
-    const { countFailedAttemptsByFinding } = await import('./drafts.js');
-    const m = await countFailedAttemptsByFinding(1);
+    const m = await countFor([
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f1', abandoned_reason: 'invalid-edit' },
+      { finding_id: 'f2', abandoned_reason: 'pr_closed_without_merge' },
+    ]);
     assert.equal(m.get('f1'), 4);
+    assert.equal(m.has('f2'), false);
   });
 });

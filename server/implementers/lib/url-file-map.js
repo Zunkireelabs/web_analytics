@@ -416,6 +416,31 @@ export function resolveSiteRootFile(site, key) {
   return site.url_file_map?.siteRoot?.[key] || null;
 }
 
+// Onboarding-declared author/org avatar assets — one entry per avatar image
+// a client site's own template renders, e.g.:
+//   siteRoot.authorAvatars: [
+//     { label: "Some Person", imagePath: "src/assets/images/team/person.webp", expectedFit: "circular-cover" },
+//     { label: "Org Team", imagePath: "src/assets/images/logo-round.svg", expectedFit: "contain" },
+//   ]
+// expectedFit is the human-declared truth about how the template actually
+// renders it — 'circular-cover' (rounded-full + object-cover, or any other
+// crop-to-fill treatment) or 'contain' (natural aspect ratio preserved).
+// audit-url-file-map.js uses this list plus avatar-aspect-check.js to catch
+// a non-square image declared 'circular-cover' onboarding-time, instead of
+// it being discovered by eye on a live page (see avatar-aspect-check.js's
+// module comment for the real incident this exists to stop from repeating).
+// Nothing here auto-discovers avatar assets — same manual-declaration
+// discipline as every other siteRoot/newContentTargets field in this file.
+//
+// Restored 2026-09-07: commit f717350 (a blog-image hotlinking revert) also
+// deleted this accessor, which that revert had nothing to do with, while
+// leaving its only caller in audit-url-file-map.js intact — so the whole
+// audit script crashed at import with "does not provide an export named
+// resolveAuthorAvatars" and no site could be audited at all.
+export function resolveAuthorAvatars(site) {
+  return site.url_file_map?.siteRoot?.authorAvatars || [];
+}
+
 // Common language name -> ISO 639-1 code, for targetLanguage values an LLM
 // might return as a full name (e.g. "Spanish") rather than a code. Best-
 // effort only — an unrecognized name falls back to a short slug rather than

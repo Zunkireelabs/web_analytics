@@ -34,17 +34,19 @@ let recs;
 let recorded;
 let recheckImpl;
 
-const UNCOUNTED_REASONS = new Set(['pr_closed_without_merge', 'superseded', 'sent_back_to_recommendations']);
+// Delegates to the real classifier rather than hand-copying its rules here —
+// store/drafts.js's countFailedAttemptsByFinding used to carry its own
+// independent SQL exclusion list, and that copy had already drifted from
+// classifyAbandonReason's rules before it was deleted in favor of calling
+// the classifier directly (see that function's own header comment). A
+// SECOND hand-copied list in this test file would only reintroduce the same
+// risk one level up.
+const { classifyAbandonReason, RETRY_POLICY } = await import('./attempt-classification.js');
 function countsFromDrafts() {
   const counts = new Map();
   for (const d of drafts) {
     if (d.status !== 'abandoned' || !d.abandoned_reason) continue;
-    const r = d.abandoned_reason;
-    if (UNCOUNTED_REASONS.has(r)) continue;
-    if (/rate limit/i.test(r)) continue;
-    if (r.startsWith('Batch push/PR failed')) continue;
-    if (/batch branch/i.test(r) && /diverged/i.test(r)) continue;
-    if (r.startsWith('Stuck at "') || r.startsWith('Recovered:')) continue;
+    if (classifyAbandonReason(d.abandoned_reason).retryPolicy !== RETRY_POLICY.ITEM_DEFECT) continue;
     counts.set(d.finding_id, (counts.get(d.finding_id) || 0) + 1);
   }
   return counts;
@@ -78,10 +80,12 @@ function fakeQuery(text, params = []) {
     const live = drafts.find((d) => d.finding_id === findingId && d.status !== 'abandoned');
     return { rows: live ? [{ ...live }] : [] };
   }
-  // countFailedAttemptsByFinding (store/drafts.js).
-  if (sql.startsWith('SELECT finding_id, COUNT(*)::int AS attempts FROM drafts')) {
-    const counts = countsFromDrafts();
-    return { rows: [...counts.entries()].map(([finding_id, attempts]) => ({ finding_id, attempts })) };
+  // countFailedAttemptsByFinding (store/drafts.js) — fetches raw rows now and
+  // classifies them in JS, same as countsFromDrafts above does for this
+  // test's own bookkeeping.
+  if (sql.startsWith('SELECT finding_id, abandoned_reason FROM drafts')) {
+    const abandoned = drafts.filter((d) => d.status === 'abandoned' && d.abandoned_reason);
+    return { rows: abandoned.map((d) => ({ finding_id: d.finding_id, abandoned_reason: d.abandoned_reason })) };
   }
   // countRecoveryCyclesByFinding (store/recommendation-attempts.js).
   if (sql.startsWith("SELECT finding_id, COUNT(*)::int AS cycles FROM recommendation_attempts")) {
