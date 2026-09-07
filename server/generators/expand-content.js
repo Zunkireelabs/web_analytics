@@ -251,6 +251,15 @@ export async function generate({ siteId, params }) {
     .slice(0, 4)
     .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
 
+  if (!sections.length) {
+    // The empty-section quality-gate check only inspects sections that
+    // exist — an empty array has none to flag, so `clean: true` would
+    // otherwise let a zero-section draft persist and sit stuck forever.
+    // Refuse here instead, same as the no-sources case above, so the
+    // generator's normal retry/reject loop handles it.
+    throw Object.assign(new Error('Content expansion produced no usable sections — the model returned an empty result or nothing matched the expected shape.'), { status: 400, userFacing: true, refusal: true, reason: 'expand-content-empty-sections' });
+  }
+
   const content = { page, sections, focus: focus || 'general' };
   const focusLabel = focus ? ` (${focus})` : '';
   return { content, summary: `${sections.length} expanded section(s) for ${page}${focusLabel}` };

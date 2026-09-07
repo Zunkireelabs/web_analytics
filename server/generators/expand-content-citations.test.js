@@ -235,6 +235,31 @@ describe('expand-content generator — external-citations, real path through Tav
     } finally { globalThis.fetch = original; }
   });
 
+  test('LLM returns zero usable sections: refuses honestly rather than persisting an empty draft (regression — sections=[] used to sail through the quality gate silently, since it only inspects sections that exist)', async () => {
+    const original = globalThis.fetch;
+    const originalLlmResponse = llmResponse;
+    _resetQuotaForTests();
+    const { fn } = mockFetch({
+      tavilyBody: {
+        results: [
+          { title: 'Real Source', url: 'https://real-source.example.com/article', content: 'A real extracted excerpt about renewable energy.' },
+        ],
+      },
+    });
+    globalThis.fetch = fn;
+    llmResponse = [];
+    try {
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: PAGE_URL, focus: 'external-citations' } }),
+        (err) => {
+          assert.equal(err.refusal, true);
+          assert.equal(err.reason, 'expand-content-empty-sections');
+          return true;
+        },
+      );
+    } finally { globalThis.fetch = original; llmResponse = originalLlmResponse; }
+  });
+
   test('competitor filtering runs BEFORE the model sees candidates: a filtered-out source never reaches the prompt, an allowed one does', async () => {
     const original = globalThis.fetch;
     _resetQuotaForTests();
