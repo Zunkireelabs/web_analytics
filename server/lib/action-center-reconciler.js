@@ -423,16 +423,25 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
       log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on re-check — closed, no longer needs a fix`);
       continue;
     }
-    if (!recheck.refreshed) {
+    if (!recheck.refreshed && !recheck.recheckedLive) {
       // Still detected but nothing to refresh (no structured params came
       // back from re-detection) — also not evidence either way. Leave it for
       // the next pass rather than spending a recovery cycle on a no-op.
+      //
+      // `recheckedLive` (set by recheckRecommendation's broken-link-fix
+      // branch) is the exception: that type has no params to refresh even
+      // on a genuine live re-check, so treating only `refreshed` as evidence
+      // would mean a permanently-dead external citation (DNS failure,
+      // expired cert) never accumulates a recovery cycle and never reaches
+      // blockRecommendation — it would loop here forever instead of ever
+      // escalating to a human.
       continue;
     }
 
-    // Fresh params are on the recommendation now. Abandon any draft still
-    // sitting against this finding so the next generation attempt is
-    // guaranteed to read them, not a draft built from the old ones.
+    // The recommendation now reflects a genuine live re-check (fresh params,
+    // when there were any to refresh). Abandon any draft still sitting
+    // against this finding so the next generation attempt is guaranteed to
+    // build from current evidence, not a draft built from the old attempt.
     const findingId = findingIds[0];
     const liveDraft = findingId ? await getDraftByFindingId(siteId, findingId) : null;
     if (liveDraft) {
@@ -452,10 +461,12 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
       // recovery is the opposite claim: the prior failures don't count
       // against the fresh evidence this attempt now has.
       retryPolicy: RETRY_POLICY.RETRY,
-      reason: `Re-analyzed against live content after ${attempts} failed attempt(s) on stale evidence; recommendation params refreshed for a fresh attempt.`,
+      reason: recheck.refreshed
+        ? `Re-analyzed against live content after ${attempts} failed attempt(s) on stale evidence; recommendation params refreshed for a fresh attempt.`
+        : `Re-checked live after ${attempts} failed attempt(s) — still confirmed the same issue against current content; no params to refresh, but this counts as a fresh recovery cycle.`,
     });
     result.recovered += 1;
-    log?.(`[reconciler] site ${siteId}: rec ${rec.id} recovered — re-detected live, params refreshed (recovery cycle ${cycles + 1}/${MAX_RECOVERY_CYCLES})`);
+    log?.(`[reconciler] site ${siteId}: rec ${rec.id} recovered — re-detected live${recheck.refreshed ? ', params refreshed' : ' (no params to refresh)'} (recovery cycle ${cycles + 1}/${MAX_RECOVERY_CYCLES})`);
   }
   return result;
 }
