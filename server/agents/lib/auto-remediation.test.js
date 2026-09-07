@@ -11,6 +11,11 @@ import assert from 'node:assert/strict';
 // location.
 const resolve = (p) => new URL(p, import.meta.url).href;
 
+// The credential-failure retry's real 2s wait would be paid by every test
+// that exercises it — set before the module under test is imported below, so
+// its constant picks this up.
+process.env.CREDENTIAL_RETRY_DELAY_MS = '0';
+
 let recommendations;
 let draftedFindingIds;
 let pendingDraftFilePaths;
@@ -704,6 +709,62 @@ describe('principled refusals vs systemic faults', () => {
 // conditions — a stale exact-match anchor, and a page/marker never onboarded
 // into url_file_map — repeatedly tripped the circuit breaker on site 1 and
 // halted otherwise-healthy runs with budget left unused.
+// Regression coverage for 2026-09-07: one ship attempt failed with "GitHub
+// App is not configured" while two sibling items in the SAME process
+// authenticated fine seconds apart, and the credential resolved cleanly on
+// every check afterwards. No code path explains that (dotenv is loaded before
+// any other import, nothing outside tests mutates those vars, appConfigured()
+// is a pure sync env read), so there is no root cause to fix — but the
+// CONSEQUENCE is fixable: without a retry, one unexplained blip abandons the
+// draft and parks the recommendation at NEEDS_HUMAN, which is deliberately
+// not auto-retryable, so a human has to notice and requeue it by hand.
+describe('shipDraftForRecommendation — credential failures get exactly one automatic retry', () => {
+  beforeEach(reset);
+
+  test('a credential failure that resolves on retry ships normally instead of parking at NEEDS_HUMAN', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return attempts === 1 ? 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64' : null;
+    };
+    recommendations = [rec(1, { type: 'meta-title' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 2, 'the failed attempt is retried exactly once');
+    assert.equal(result.shipped, 1, 'the retry succeeded, so the item ships in the same run — no human requeue needed');
+    assert.equal(result.failed, 0);
+    assert.equal(result.refused, 0);
+  });
+
+  test('a credential failure that persists is retried only ONCE, then reported honestly — a genuinely absent credential is never retried forever', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
+    };
+    recommendations = [rec(1, { type: 'meta-title' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 2, 'exactly one retry — never an unbounded loop against a credential that genuinely is not there');
+    assert.equal(result.shipped, 0, 'a genuinely missing credential still fails, and still surfaces for a human');
+  });
+
+  test('a NON-credential apply failure is never retried — only this specific class gets the second attempt', async () => {
+    let attempts = 0;
+    applyFailureMessageOn = () => {
+      attempts += 1;
+      return 'No markers configured for "https://example.com/" — add them to url_file_map.';
+    };
+    recommendations = [rec(1, { type: 'analytics-install' })];
+
+    await autoRemediateSafeRecommendations(1);
+
+    assert.equal(attempts, 1, 'an ordinary per-item config gap must not pay a second GitHub write attempt');
+  });
+});
+
 describe('shipDraftForRecommendation apply-failure classification', () => {
   beforeEach(reset);
 

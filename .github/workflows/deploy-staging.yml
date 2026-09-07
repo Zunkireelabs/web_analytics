@@ -250,6 +250,14 @@ jobs:
             # the Actions secret is GH_WEBHOOK_SECRET, renamed here to the
             # GITHUB_WEBHOOK_SECRET env var the app code expects.
             GITHUB_WEBHOOK_SECRET=${{ secrets.GH_WEBHOOK_SECRET }}
+            # Same idea, but for the GitHub App's own webhook (installation /
+            # installation_repositories events, server/routes/webhooks.js's
+            # /webhooks/github-app route) — a separate secret from the one
+            # above since it's a different trust boundary (one App-level
+            # webhook covering every client's installation, vs. a per-repo
+            # one). Actions secret is GH_APP_WEBHOOK_SECRET, same
+            # GITHUB_-prefix restriction as every other secret here.
+            GITHUB_APP_WEBHOOK_SECRET=${{ secrets.GH_APP_WEBHOOK_SECRET }}
 
             # ── Site identity ───────────────────────────────────────────────
             SITE_NAME=${{ vars.SITE_NAME }}

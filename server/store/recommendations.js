@@ -360,8 +360,15 @@ export async function markRecommendationsUnfixable(siteId, dropped) {
     // recommendation is blocked (our-config / awaiting-derivation / site-fact)
     // — an 'unfixable' row isn't blocked in that sense, it's terminal, and the
     // UI is expected to branch on status before ever looking at blocked_kind.
+    // risk_tier must move to 'manual' in the same statement — migration 108's
+    // recommendations_blocked_is_manual CHECK requires blocked_reason IS NULL
+    // OR risk_tier = 'manual', and this row is about to get a blocked_reason.
+    // Without it, any row whose risk_tier was 'safe' at the moment it became
+    // unfixable throws here and aborts the REST of syncFromGrounded for this
+    // site (closeStaleRecommendations et al. run first and are unaffected,
+    // but nothing after this call in the same site's sync executes).
     const { rowCount } = await query(
-      `UPDATE recommendations SET status = 'unfixable', blocked_reason = $4, updated_at = now()
+      `UPDATE recommendations SET status = 'unfixable', blocked_reason = $4, risk_tier = 'manual', updated_at = now()
        WHERE site_id = $1 AND page = $2 AND recommendation_type = $3 AND status = 'open'`,
       [siteId, page, generatorId, reason || 'This page no longer exists or cannot be resolved to a real source.']
     );

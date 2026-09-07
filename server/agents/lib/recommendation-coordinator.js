@@ -367,8 +367,15 @@ export async function recheckRecommendation(siteId, recommendationId, { refreshE
     }
     // broken-link-fix has no separate "fresh params" to pull beyond the href
     // itself, which recheckLink just confirmed is still broken — nothing to
-    // refresh, the existing params are already accurate.
-    return { status: 'open', changed: false, detail: result };
+    // refresh, the existing params are already accurate. `recheckedLive: true`
+    // still records that a genuine live re-check happened (as opposed to a
+    // no-op) — driveAutonomousRecovery (action-center-reconciler.js) needs
+    // that signal to ever count a recovery cycle for this recommendation
+    // type. Without it, a permanently-dead external citation/link (DNS
+    // failure, expired cert) can never accumulate the recovery cycles that
+    // lead to blockRecommendation, and loops through "still open, nothing to
+    // refresh" forever instead of ever escalating to a human.
+    return { status: 'open', changed: false, recheckedLive: true, detail: result };
   }
 
   if (!rec.page) return { status: 'open', changed: false, reason: 'site-level recommendation — re-checked automatically on the next full sync' };

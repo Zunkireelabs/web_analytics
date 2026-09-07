@@ -213,6 +213,26 @@ describe('pass 4 (driveAutonomousRecovery) — crossing the cap triggers autonom
     assert.equal(recovered.retry_policy, 'retry');
   });
 
+  test('regression: a broken-link-fix recheck (recheckedLive: true, no refreshed/freshParams) still counts as a recovery cycle', async () => {
+    // Without this, a permanently-dead external citation (DNS failure,
+    // expired cert) never accumulates recovery cycles and never reaches
+    // blockRecommendation — it loops here forever instead of ever
+    // escalating to a human. broken-link-fix's recheckRecommendation branch
+    // has no fresh params to report (the href doesn't change), so it can
+    // only signal genuine live re-detection via recheckedLive.
+    drafts = priorFailures('f2b', MAX_FAILED_ATTEMPTS);
+    recs = [{ id: 21, finding_id: 'f2b', finding_ids: ['f2b'], status: 'open', blocked_reason: null }];
+    recheckImpl = async () => ({ status: 'open', changed: false, recheckedLive: true, detail: { broken: true } });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.recovery.recovered, 1);
+    assert.equal(result.recovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+    const recovered = recorded.find((r) => r.finding_id === 'f2b' && r.outcome === 'recovered');
+    assert.ok(recovered, 'a broken-link-fix recheck without refreshed params must still record a recovery attempt');
+  });
+
   test('abandons any live draft still sitting on the finding so the next attempt reads the refreshed params', async () => {
     drafts = priorFailures('f3', MAX_FAILED_ATTEMPTS);
     drafts.push({ id: 999, site_id: SITE_ID, finding_id: 'f3', status: 'draft' });

@@ -5,6 +5,7 @@ import {
   createCommitObject, updateRef, commitFilesAtomic,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
 } from './client.js';
+import { clearInstallationTokenCache } from './app-auth.js';
 
 // Real HTTP calls need a resolvable token — githubTokenEnvVar defaults to
 // 'GITHUB_PAT' for a site with no per-site override (credentials.js).
@@ -458,5 +459,68 @@ describe('rate-limit state — the ways it must NOT latch', () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+// Regression coverage: authHeaders' missing-credential error must name the
+// credential actually missing, for all three real cases — a site on the
+// App path is not misdiagnosed as a PAT problem, a site on the PAT path is
+// not misdiagnosed as an App problem, and code search (which NEVER
+// consults the App path, even for a site that otherwise uses one — see
+// credentials.js's searchToken) is never told to "configure the App" when
+// the real gap is a missing classic PAT for search specifically.
+describe('authHeaders — missing-credential error names the right credential', () => {
+  const originalEnv = { ...process.env };
+  function resetEnv() {
+    for (const k of Object.keys(process.env)) if (!(k in originalEnv)) delete process.env[k];
+    Object.assign(process.env, originalEnv);
+  }
+  after(resetEnv);
+
+  test('PAT-path site with no PAT set: blames the PAT env var, not the App', async () => {
+    resetEnv();
+    delete process.env.GITHUB_PAT;
+    delete process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64;
+    const patSite = { id: 99, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: null };
+    await assert.rejects(
+      () => getBranchSha(patSite, 'main'),
+      (err) => { assert.match(err.message, /No GitHub PAT set in env var "GITHUB_PAT"/); return true; },
+    );
+  });
+
+  test('App-path site with the App unconfigured: blames GITHUB_APP_ID/PRIVATE_KEY, never the PAT', async () => {
+    resetEnv();
+    delete process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64;
+    process.env.GITHUB_PAT = 'irrelevant-should-not-be-named';
+    clearInstallationTokenCache();
+    const appSite = { id: 100, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: 12345 };
+    await assert.rejects(
+      () => getBranchSha(appSite, 'main'),
+      (err) => {
+        assert.match(err.message, /GitHub App is not configured/);
+        assert.doesNotMatch(err.message, /GITHUB_PAT\b/, 'must not blame the PAT env var when the site is on the App path');
+        return true;
+      },
+    );
+  });
+
+  test('code search with no search-specific PAT, even on an otherwise-fully-configured App site: blames the search PAT, never the App', async () => {
+    resetEnv();
+    process.env.GITHUB_APP_ID = 'irrelevant-app-is-fine';
+    process.env.GITHUB_APP_PRIVATE_KEY_B64 = 'irrelevant-app-is-fine';
+    delete process.env.GITHUB_PAT_SEARCH;
+    delete process.env.GITHUB_SEARCH_PAT;
+    clearInstallationTokenCache();
+    const appSite = { id: 101, repo_owner: 'acme', repo_name: 'site', github_app_installation_id: 12345 };
+    await assert.rejects(
+      () => searchCodeForString(appSite, 'needle'),
+      (err) => {
+        assert.match(err.message, /GITHUB_PAT_SEARCH/);
+        assert.doesNotMatch(err.message, /GitHub App is not configured/, 'the App being unconfigured is not the problem here — it is fully configured and irrelevant to search');
+        return true;
+      },
+    );
   });
 });

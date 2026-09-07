@@ -50,6 +50,17 @@ const SOURCE = 'auto-remediation';
 // one says the system is working and correctly has nothing to say.
 const CONSECUTIVE_REFUSAL_LIMIT = 8;
 
+// The credential-resolution failures worth one automatic in-run retry before
+// they become a real outcome — see shipDraftForRecommendation's own comment
+// for the incident this answers. Matches client.js's authHeaders messages for
+// all three credential paths (App, per-site PAT, code-search PAT), since any
+// of them failing once and then resolving is the same "unexplained blip"
+// shape, and one retry distinguishes that from a genuinely absent credential.
+const CREDENTIAL_FAILURE_PATTERN = /GitHub App is not configured|No GitHub PAT set in env var|No classic PAT with .*scope set for code search/i;
+// Env-overridable purely so tests don't pay the real wait; same pattern as
+// the budget constants below.
+const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?? 2000);
+
 // Stage 3-4 of Generate -> Validate -> Auto-fix -> Validate again -> Action
 // Center: closes the loop risk-tiers.js opened. A 'safe'-tier recommendation
 // doesn't need a human to click anything — generateDraft() already runs the
@@ -887,7 +898,36 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
     throw err;
   }
 
-  const approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+  let approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+
+  // A credential failure gets exactly ONE immediate in-run retry before it is
+  // allowed to become a real outcome.
+  //
+  // Why, given credentials don't normally fluctuate: on 2026-09-07 a single
+  // ship attempt failed with "GitHub App is not configured" while two sibling
+  // items in the SAME process, seconds apart, authenticated fine — and the
+  // credential resolved cleanly on every subsequent check. No code path
+  // explains that (index.js loads dotenv before any other import, nothing
+  // outside tests ever mutates these vars, and appConfigured() is a pure
+  // synchronous env read), so there is no root cause to fix here. What CAN be
+  // fixed is the consequence: without this, one unexplained blip abandons a
+  // draft and parks the recommendation at NEEDS_HUMAN — deliberately not
+  // auto-retryable, since a genuinely absent credential must not be retried
+  // forever — meaning a human has to notice and requeue it by hand.
+  //
+  // One retry costs one API call and settles it either way: it succeeds (the
+  // blip was real and transient, and the item ships normally), or it fails
+  // identically (the credential is genuinely missing, and the existing
+  // NEEDS_HUMAN classification is correct and now better evidenced).
+  if (!approved.branch_name && CREDENTIAL_FAILURE_PATTERN.test(approved.apply_error || '')) {
+    console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
+    await new Promise((r) => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
+    approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
+    if (approved.branch_name) {
+      console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
+    }
+  }
+
   if (!approved.branch_name) {
     const message = approved.apply_error || 'Approved but no branch was pushed';
     const err = new Error(message);

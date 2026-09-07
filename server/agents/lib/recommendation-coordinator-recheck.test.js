@@ -60,11 +60,18 @@ describe('recheckRecommendation — existing behavior is unchanged when refreshE
     assert.equal(mergedCalls.length, 0);
   });
 
-  test('broken-link-fix: still broken leaves it open, unchanged, no merge attempted', async () => {
+  test('broken-link-fix: still broken leaves it open, unchanged, no merge attempted — but does report recheckedLive: true', async () => {
     recById = { id: 2, status: 'open', recommendation_type: 'broken-link-fix', params: { href: 'https://dead.example/' } };
     recheckLinkImpl = () => ({ broken: true });
     const result = await recheckRecommendation(1, 2, { refreshEvidence: true });
-    assert.deepEqual(result, { status: 'open', changed: false, detail: { broken: true } });
+    // Regression: recheckedLive: true must be set even though there is
+    // nothing to merge — action-center-reconciler.js's driveAutonomousRecovery
+    // needs this signal to ever count a recovery cycle for a broken-link-fix
+    // finding. Without it, a permanently-dead external citation (DNS
+    // failure, expired cert) can never accumulate enough recovery cycles to
+    // reach blockRecommendation, and loops here forever instead of ever
+    // escalating to a human.
+    assert.deepEqual(result, { status: 'open', changed: false, recheckedLive: true, detail: { broken: true } });
     assert.equal(mergedCalls.length, 0, 'broken-link-fix has no fresh params to merge — the href itself was just reconfirmed');
   });
 
