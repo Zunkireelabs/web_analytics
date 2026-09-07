@@ -35,12 +35,40 @@ const STOPWORDS = new Set([
   'how', 'what', 'why', 'guide', 'understanding', 'exploring', 'unlocking',
 ]);
 
+// Place names are strong, common Pexels keywords for travel/scenery
+// photography, not for whatever industry the post is actually about. A
+// title's own place name is often a deliberate local-SEO keyword (e.g. "IT
+// Companies in Nepal", a genuine target keyword for a Nepal-based tech
+// company) and must never by itself be enough to win a match against a
+// temple/mountain/street photo that has nothing to do with the post's real
+// subject. Stripped from both the text sent to Pexels and the terms scored,
+// so the search and the relevance check run on what the post is actually
+// about, not on where its target market happens to be.
+const LOCATION_TERMS = new Set([
+  'nepal', 'nepali', 'nepalese', 'kathmandu', 'pokhara', 'lalitpur', 'bhaktapur',
+  'pashupatinath', 'himalaya', 'himalayan', 'himalayas', 'everest', 'annapurna',
+]);
+
 function significantWords(text) {
   return (text || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w) && !LOCATION_TERMS.has(w));
+}
+
+// Removes only place-name words from the text actually sent to Pexels'
+// search endpoint, leaving everything else — including short-but-meaningful
+// words like "AI" that significantWords' length filter drops for scoring
+// purposes — intact. Scoring and search must strip location terms the same
+// way, but search must not also inherit scoring's unrelated length/stopword
+// filtering, or a core topic keyword like "AI" would silently stop reaching
+// Pexels at all.
+function stripLocationWords(text) {
+  return (text || '')
+    .split(/\s+/)
+    .filter((w) => !LOCATION_TERMS.has(w.toLowerCase().replace(/[^a-z0-9]/g, '')))
+    .join(' ');
 }
 
 // Generic stock-photo filler that photographers tag literally as such — a
@@ -134,8 +162,12 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
   for (const query of list) {
     const terms = significantWords(query);
     if (!terms.length) continue;
+    // Strip place names from the text actually sent to Pexels too, not just
+    // from scoring — otherwise a location word in the title (see
+    // LOCATION_TERMS) still floods the candidate pool with travel photos
+    // before relevance scoring ever gets a say.
     // eslint-disable-next-line no-await-in-loop
-    const photos = await fetchCandidates(query, perPage);
+    const photos = await fetchCandidates(stripLocationWords(query), perPage);
     let best = null;
     let bestScore = -Infinity;
     for (const photo of photos) {

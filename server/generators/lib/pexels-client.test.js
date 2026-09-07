@@ -157,6 +157,24 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(fetchSpy.mock.callCount(), 1, 'the broader fallback query must never be fetched once the title query already won');
   });
 
+  test('a place name in the title must not win a match against unrelated travel/scenery photos', async () => {
+    // The reported incident: "Exploring the Best IT Companies in Nepal" (a
+    // real local-SEO title) matched a Pashupatinath/mountain photo purely on
+    // the word "Nepal" — Pexels' own catalog for that word skews travel, not
+    // tech. The title's remaining words ("best", "companies") don't overlap
+    // with travel-photo alt text, so it must fall through to the fallback.
+    global.fetch = mockFetchReturning({
+      'Exploring the Best IT Companies in': [
+        photo({ alt: 'Spectacular view of snow-capped Machhapuchchhre peak surrounded by clouds in Nepal', url: 'https://images.pexels.com/photos/1/mountain.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring the Best IT Companies in Nepal', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
+  });
+
   test('excludePhotoIds skips a photo already used elsewhere on the site, even if it would otherwise win', async () => {
     global.fetch = mockFetchReturning({
       'How to Build a RAG Pipeline': [
