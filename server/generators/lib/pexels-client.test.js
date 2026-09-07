@@ -141,6 +141,34 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
   });
 
+  test('never selects a photo of a real third-party brand\'s storefront, even on a strong keyword match', async () => {
+    // The reported incident: "Exploring AI Store Innovations in Nepal"
+    // matched a Google Store storefront photo purely on the word "store" —
+    // a real, unrelated company's branded signage is a brand-safety problem
+    // regardless of score.
+    global.fetch = mockFetchReturning({
+      'Exploring AI Store Innovations': [
+        photo({ alt: 'Google Store storefront with Pixel 10 phones displayed in the window', url: 'https://images.pexels.com/photos/1/googlestore.jpeg' }),
+        photo({ alt: 'Modern AI-powered retail store innovation with digital displays', url: 'https://images.pexels.com/photos/2/aistore.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring AI Store Innovations']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/aistore.jpeg');
+  });
+
+  test('never selects a photo of a real brand\'s signage just because the title has a superlative like "best"', async () => {
+    // The reported incident: "Exploring the Best IT Companies in Nepal"
+    // matched a Seattle's Best Coffee sign purely on the word "best".
+    global.fetch = mockFetchReturning({
+      'Exploring the Best IT Companies': [
+        photo({ alt: "Seattle's Best Coffee sign mounted on a building exterior", url: 'https://images.pexels.com/photos/1/coffeesign.jpeg' }),
+        photo({ alt: 'Best IT companies team collaborating in a modern office', url: 'https://images.pexels.com/photos/2/itteam.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Exploring the Best IT Companies']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/itteam.jpeg');
+  });
+
   test('returns null rather than throwing when every query comes back empty', async () => {
     global.fetch = mockFetchReturning({});
     assert.equal(await searchImage(['nothing matches this']), null);

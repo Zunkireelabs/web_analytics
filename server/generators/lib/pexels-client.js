@@ -113,6 +113,38 @@ function hasSensitiveContent(altText) {
   return SENSITIVE_CONTENT_PATTERN.test(altText || '');
 }
 
+// Hard exclusion, same reasoning as SENSITIVE_CONTENT_TERMS above but for a
+// different failure: a title's own ordinary English words ("store", "best")
+// can match Pexels alt text that only contains them because the photo is of
+// a real third-party company's storefront/signage — "Exploring AI Store
+// Innovations in Nepal" matched a Google Store photo on "store", and
+// "Exploring the Best IT Companies in Nepal" matched a Seattle's Best Coffee
+// sign on "best". Publishing a real, unrelated brand's storefront on a
+// client's own blog is a brand-safety problem regardless of how well the
+// surrounding words score, so any of these full brand names/phrases in a
+// candidate's alt text disqualifies it outright, the same way a sensitive-
+// content term does. Deliberately specific multi-word phrases (never a bare
+// generic word like "best" or "store" alone) so this can't gut ordinary
+// matches that just happen to use common retail vocabulary.
+const BRAND_NAME_TERMS = [
+  'google store', 'apple store', 'microsoft store', 'samsung store', 'sony store',
+  "seattle's best coffee", 'starbucks', 'best buy', "mcdonald's", 'burger king',
+  'kfc', 'subway restaurant', 'whole foods', "trader joe's", 'walmart', 'target store',
+  'costco', 'nordstrom', '7-eleven', 'ikea', 'nike store', 'adidas store',
+  'coca-cola', 'pepsi', 'amazon fulfillment', 'facebook', 'instagram logo',
+  'netflix', 'disney store', 'gucci', 'chanel', 'zara store', 'h&m store',
+  'toyota', 'honda', 'bmw', 'mercedes-benz', 'audi', 'tesla showroom',
+];
+
+const BRAND_NAME_PATTERN = new RegExp(
+  `\\b(${BRAND_NAME_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function hasBrandMention(altText) {
+  return BRAND_NAME_PATTERN.test(altText || '');
+}
+
 function scoreCandidate(photo, queryTerms) {
   if (!photo?.alt) return 0;
   const altWords = new Set(significantWords(photo.alt));
@@ -209,6 +241,7 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
     for (const photo of photos) {
       if (excludePhotoIds?.has(photo.id)) continue;
       if (hasSensitiveContent(photo.alt)) continue;
+      if (hasBrandMention(photo.alt)) continue;
       const score = scoreCandidate(photo, terms);
       if (score > bestScore) { bestScore = score; best = photo; }
     }
