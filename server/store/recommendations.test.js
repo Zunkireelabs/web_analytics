@@ -243,6 +243,13 @@ describe('markRecommendationsUnfixable — direct evidence, not absence of it', 
     assert.equal(count, 1);
   });
 
+  test('regression: also sets risk_tier to manual in the same statement — migration 108\'s recommendations_blocked_is_manual CHECK (blocked_reason IS NULL OR risk_tier = \'manual\') otherwise throws for any row whose risk_tier was not already \'manual\' (e.g. \'safe\'), aborting the rest of syncFromGrounded for the site', async () => {
+    const dropped = [{ generatorId: 'alt-text', page: 'https://x.com/docs/gone/', reason: 'gone' }];
+    await markRecommendationsUnfixable(1, dropped);
+    const update = issued.find((q) => q.sql.includes("status = 'unfixable'"));
+    assert.match(update.sql, /risk_tier\s*=\s*'manual'/, 'must set risk_tier = manual in the same UPDATE that sets blocked_reason');
+  });
+
   test('an empty drop list is a no-op — no query issued', async () => {
     issued = [];
     await markRecommendationsUnfixable(1, []);
