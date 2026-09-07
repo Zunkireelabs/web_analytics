@@ -26,7 +26,16 @@ const API_BASE = 'https://api.github.com';
 
 async function authHeaders(site, { forSearch = false } = {}) {
   const token = await resolveGithubToken(site, { forSearch });
-  if (!token) throw new Error(`No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`);
+  if (!token) {
+    // A null token on the App path means GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64
+    // are unset (see credentials.js's usesGithubApp/appConfigured) — naming the
+    // PAT env var here would blame the wrong credential and send whoever reads
+    // this error looking in the wrong place.
+    const message = usesGithubApp(site)
+      ? 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64'
+      : `No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`;
+    throw new Error(message);
+  }
   return {
     Authorization: `token ${token}`,
     Accept: 'application/vnd.github+json',

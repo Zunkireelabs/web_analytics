@@ -247,7 +247,7 @@ const RULES = [
     summary: 'This site’s repository mapping is missing an entry this fix needs.',
   },
   {
-    match: (r) => /no github pat set/i.test(r) || /bad credentials/i.test(r) || /token .*expired/i.test(r),
+    match: (r) => /no github pat set/i.test(r) || /github app is not configured/i.test(r) || /bad credentials/i.test(r) || /token .*expired/i.test(r),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
     summary: 'This site’s GitHub credentials are missing or no longer valid.',

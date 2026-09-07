@@ -94,6 +94,18 @@ test('a rate limit is transient wherever it appears', () => {
   assert.equal(retryPolicy, RETRY_POLICY.RETRY);
 });
 
+test('an unconfigured GitHub App is a missing-credential wait, same as a missing PAT', () => {
+  // Regression: client.js used to blame "No GitHub PAT set" even when the site
+  // is on the App path (github_app_installation_id set) and the real gap is
+  // GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 — this pattern must classify the
+  // same way the PAT message always has, not fall through to a generator defect.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
 test('bookkeeping resets are not verdicts', () => {
   // 31 live rows from the one-off stranded-draft recovery script.
   assert.equal(
