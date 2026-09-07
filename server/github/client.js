@@ -27,14 +27,29 @@ const API_BASE = 'https://api.github.com';
 async function authHeaders(site, { forSearch = false } = {}) {
   const token = await resolveGithubToken(site, { forSearch });
   if (!token) {
-    // A null token on the App path means GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64
-    // are unset (see credentials.js's usesGithubApp/appConfigured) — naming the
-    // PAT env var here would blame the wrong credential and send whoever reads
-    // this error looking in the wrong place.
-    const message = usesGithubApp(site)
-      ? 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64'
-      : `No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`;
-    throw new Error(message);
+    // Code search NEVER consults the App path (credentials.js's searchToken
+    // — a fine-grained/App token silently returns 0 results from GitHub's
+    // search API), so usesGithubApp(site) is irrelevant here even when the
+    // App itself is perfectly configured for every other operation. Blaming
+    // "GitHub App is not configured" in that case would send whoever reads
+    // this error looking at the wrong credential entirely.
+    let message;
+    if (forSearch) {
+      message = `No classic PAT with "repo" scope set for code search — set ${githubTokenEnvVar(site)}_SEARCH (or the global GITHUB_SEARCH_PAT) to enable the code-search fallback.`;
+    } else if (usesGithubApp(site)) {
+      // A null token on the App path means GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64
+      // are unset (see credentials.js's usesGithubApp/appConfigured) — naming
+      // the PAT env var here would blame the wrong credential instead.
+      message = 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
+    } else {
+      message = `No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`;
+    }
+    // Tagged so a caller wrapping this in its own safeMessage() fallback
+    // (which always substitutes its own fixed string — see errors.js —
+    // never the real message) can still tell "genuinely unconfigured
+    // credential" apart from "real transient failure" and choose an
+    // accurate fallback instead of a generic one for both.
+    throw Object.assign(new Error(message), { reason: 'missing-credential' });
   }
   return {
     Authorization: `token ${token}`,
