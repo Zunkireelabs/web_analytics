@@ -77,6 +77,42 @@ function stripLocationWords(text) {
 // since a real match can still legitimately carry one of these words.
 const GENERIC_STOCK_TERMS = new Set(['isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space']);
 
+// Hard exclusion, not a scoring penalty — a title containing an emotionally
+// loaded word like "struggles" or "challenges" can score a real, high
+// relevance match against a photo whose alt text uses the same word for a
+// completely different (and often sensitive/inappropriate) reason: this is
+// how "Navigating Challenges: The Struggles of AI Companies in Nepal" landed
+// a wheelchair-on-stairs accessibility-struggle photo as a blog's featured
+// image. No score is high enough to excuse this category ever appearing on
+// a client site, so a candidate matching any of these is dropped from the
+// pool entirely, before scoring runs — the query can still win on its
+// OTHER significant words against a different, real candidate, or fall
+// through to a later, broader query exactly as an empty-result page would.
+const SENSITIVE_CONTENT_TERMS = new Set([
+  'wheelchair', 'wheelchairs', 'disability', 'disabled', 'disabilities',
+  'amputee', 'amputation', 'prosthetic', 'prosthesis', 'crutches',
+  'injury', 'injured', 'wound', 'wounded', 'bleeding', 'blood',
+  'hospital', 'patient', 'ambulance', 'emergency', 'surgery', 'ill', 'illness',
+  'funeral', 'coffin', 'grave', 'grief', 'grieving', 'mourning', 'crying',
+  'depression', 'depressed', 'suicide', 'self-harm', 'addiction',
+  'violence', 'violent', 'abuse', 'assault', 'war', 'weapon', 'gun', 'combat',
+  'refugee', 'poverty', 'homeless', 'starvation', 'famine', 'disaster',
+  'nude', 'naked', 'nudity',
+]);
+
+// Word-boundary substring matching directly on the raw alt text, not
+// tokenized like significantWords — a multi-word term like "self-harm"
+// would never survive significantWords' punctuation-stripping into a single
+// token, and this check must not miss it.
+const SENSITIVE_CONTENT_PATTERN = new RegExp(
+  `\\b(${[...SENSITIVE_CONTENT_TERMS].map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function hasSensitiveContent(altText) {
+  return SENSITIVE_CONTENT_PATTERN.test(altText || '');
+}
+
 function scoreCandidate(photo, queryTerms) {
   if (!photo?.alt) return 0;
   const altWords = new Set(significantWords(photo.alt));
@@ -172,6 +208,7 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
     let bestScore = -Infinity;
     for (const photo of photos) {
       if (excludePhotoIds?.has(photo.id)) continue;
+      if (hasSensitiveContent(photo.alt)) continue;
       const score = scoreCandidate(photo, terms);
       if (score > bestScore) { bestScore = score; best = photo; }
     }

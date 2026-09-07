@@ -111,6 +111,36 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(result.url, 'https://images.pexels.com/photos/2/dentist.jpeg');
   });
 
+  test('never selects a sensitive/inappropriate photo, even when it scores well on keyword overlap', async () => {
+    // The reported incident: "Navigating Challenges: The Struggles of AI
+    // Companies in Nepal" matched a wheelchair-on-stairs accessibility photo
+    // purely because its alt text also contains "struggles"/"challenges" —
+    // a real keyword overlap, but never an acceptable blog image. No score
+    // excuses this category; the query must fall through to its only other
+    // (non-sensitive) candidate instead.
+    global.fetch = mockFetchReturning({
+      'Navigating Challenges: The Struggles of AI Companies': [
+        photo({ alt: 'Man in a wheelchair struggling with the challenges of climbing stairs', url: 'https://images.pexels.com/photos/1/wheelchair.jpeg' }),
+        photo({ alt: 'Software companies team navigating challenges and struggles together', url: 'https://images.pexels.com/photos/2/team.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Navigating Challenges: The Struggles of AI Companies']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/team.jpeg');
+  });
+
+  test('falls through to a later query when every candidate on the first is sensitive content', async () => {
+    global.fetch = mockFetchReturning({
+      'Overcoming Struggles': [
+        photo({ alt: 'Person in a wheelchair struggling on a staircase', url: 'https://images.pexels.com/photos/1/wheelchair.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Overcoming Struggles', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
+  });
+
   test('returns null rather than throwing when every query comes back empty', async () => {
     global.fetch = mockFetchReturning({});
     assert.equal(await searchImage(['nothing matches this']), null);
