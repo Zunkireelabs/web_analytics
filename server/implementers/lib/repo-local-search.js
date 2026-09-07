@@ -39,7 +39,14 @@ const EXCLUDED_DIR_PREFIXES = ['node_modules/', '.git/', 'dist/', 'build/', '_si
 // One marketing/content site's worth of template files, generously — bounds
 // worst-case Contents API calls per search the same way
 // CODE_SEARCH_MAX_CANDIDATES bounds /search/code's own result count.
-export const MAX_LOCAL_SEARCH_FILES = 80;
+//
+// 250, not a rounder-looking 100: zunkireelabs-web (this app's own first
+// real client, confirmed live 2026-09-07) has 204 real candidate files on
+// its own — an 80-file bound left 8 of 16 broken-link-fix items unable to
+// be fully verified on a single real site. 250 covers that with headroom
+// while staying a genuinely bounded number, not "the whole repo" (430 files
+// total, most of them not real candidates at all).
+export const MAX_LOCAL_SEARCH_FILES = 250;
 
 function hasContentExtension(path) {
   const dot = path.lastIndexOf('.');
