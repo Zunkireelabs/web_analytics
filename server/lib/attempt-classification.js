@@ -247,10 +247,25 @@ const RULES = [
     summary: 'This site’s repository mapping is missing an entry this fix needs.',
   },
   {
-    match: (r) => /no github pat set/i.test(r) || /github app is not configured/i.test(r) || /bad credentials/i.test(r) || /token .*expired/i.test(r),
+    match: (r) => /no github pat set/i.test(r) || /github app is not configured/i.test(r) || /bad credentials/i.test(r) || /token .*expired/i.test(r) || /no classic pat with .*scope set for code search/i.test(r),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
     summary: 'This site’s GitHub credentials are missing or no longer valid.',
+  },
+  {
+    // The repository-local search fallback (repo-local-search.js) is
+    // deliberately bounded (MAX_LOCAL_SEARCH_FILES real candidate files per
+    // search) rather than a repo-wide grep — for a repo with more real
+    // template/markup candidates than that bound, "not found in what was
+    // scanned" is not the same claim as "confirmed absent from the whole
+    // repo". Auto-retrying this forever would waste the same bounded scan
+    // on the same unindexed files every time with no new evidence; treated
+    // as needing a human (a bigger bound, a url_file_map entry, or manual
+    // confirmation) rather than a transient or per-item defect.
+    match: (r) => /could not be fully verified as absent from the repo/i.test(r),
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This repository has more real candidate files than the bounded local search can scan in one pass — needs a url_file_map entry or manual confirmation.',
   },
   {
     // A REMOVED gate (commit 8a32037). Nothing produces this any more, but

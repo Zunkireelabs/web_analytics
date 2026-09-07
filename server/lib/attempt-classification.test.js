@@ -106,6 +106,35 @@ test('an unconfigured GitHub App is a missing-credential wait, same as a missing
   assert.equal(isAutoRetryable(retryPolicy), false);
 });
 
+test('a missing code-search PAT is a config wait, not a per-item content defect', () => {
+  // Regression: before this rule existed, "No file could be found... code
+  // search fallback failed: No classic PAT with repo scope set for code
+  // search" had no matching rule and fell through to the unrecognized-text
+  // default (ITEM_DEFECT) — wrongly implying each individual broken-link-fix
+  // item was itself broken, when the real cause is a single missing
+  // site-wide credential (GITHUB_PAT_SEARCH / GITHUB_SEARCH_PAT) that blocks
+  // every broken-link-fix needing the code-search fallback identically.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://crm.zunkiree.com" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — code search fallback failed: No classic PAT with "repo" scope set for code search — set GITHUB_PAT_SEARCH (or the global GITHUB_SEARCH_PAT) to enable the code-search fallback..',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('an incomplete bounded repository search waits on a human, not a per-item defect or an infinite silent retry', () => {
+  // Regression: the repository-local search fallback (repo-local-search.js)
+  // is deliberately bounded — for a repo with more real candidate files
+  // than that bound, "not found in what was scanned" must never be reported
+  // as a confident per-item defect (implying THIS href is definitely
+  // nowhere), nor silently retried forever against the same unscanned
+  // files with no new evidence.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://dead.example/" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 3 repository-local search candidate(s), none matched. The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
 test('bookkeeping resets are not verdicts', () => {
   // 31 live rows from the one-off stranded-draft recovery script.
   assert.equal(

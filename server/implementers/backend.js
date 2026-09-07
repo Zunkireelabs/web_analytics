@@ -1,6 +1,7 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
+import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
@@ -442,7 +443,7 @@ async function previewLiveDuplicateIdFix(site, draft) {
   return { ok: true, filePath, live: true, changedRegions };
 }
 
-const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case calls on the rate-limited search fallback
+const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case file-content fetches from the repo-local search fallback
 
 // One readable sentence summarizing every attempt across both layers, for
 // the single `error` string surfaced to a human — full per-attempt detail
@@ -452,18 +453,18 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
   const noAnchor = sourceAttempts.length - noMapping;
   const dataSourceAttempts = attempted.filter((a) => a.matchedVia === 'link-data-source');
-  const searchAttempts = attempted.filter((a) => a.matchedVia === 'code-search');
-  const searchError = searchAttempts.find((a) => a.reason === 'code-search-error');
+  const searchAttempts = attempted.filter((a) => a.matchedVia === 'repo-local-search');
+  const searchError = searchAttempts.find((a) => a.reason === 'repo-local-search-error');
 
   const sourceSummary = `${sourcePages.length} known source page(s) (${noMapping} have no url_file_map entry; ${noAnchor} mapped file(s) don't contain this link)`;
   const dataSourceSummary = dataSourceAttempts.length
     ? `; also checked ${dataSourceAttempts.length} configured data-array source(s), none matched`
     : '';
   const searchSummary = searchError
-    ? `code search fallback failed: ${searchError.error}`
+    ? `repository-local search fallback failed: ${searchError.error}`
     : searchAttempts.length
-      ? `also checked ${searchAttempts.length} GitHub code-search candidate(s), none matched`
-      : 'code search fallback found no candidates';
+      ? `also checked ${searchAttempts.length} repository-local search candidate(s), none matched`
+      : 'repository-local search fallback found no candidates';
 
   return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary} — ${searchSummary}.`;
 }
@@ -592,49 +593,79 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   if (files.length) return { ok: true, files, attempted };
 
   // Layer 2: only when Layer 1 found ZERO matches anywhere — last resort,
-  // never speculative. GitHub's code search has its own, stricter rate
-  // limit than the Contents API, so a failure here degrades to "no
-  // candidates" rather than failing the whole preview/apply.
+  // never speculative.
   //
-  // GitHub code search is a literal-text search — searching only the
-  // absolute href never surfaces a file that hardcodes the same link
-  // site-relative (the exact form stripLink's own hrefVariants already
-  // knows how to match once a file IS fetched), so every variant gets its
-  // own query, deduped, up to the same overall candidate cap.
-  const candidates = new Set();
-  for (const variant of hrefVariants(href)) {
-    if (candidates.size >= CODE_SEARCH_MAX_CANDIDATES) break;
-    try {
-      const found = await searchCodeForString(site, variant, { maxResults: CODE_SEARCH_MAX_CANDIDATES - candidates.size });
-      found.forEach((f) => candidates.add(f));
-    } catch (err) {
-      const { message } = safeMessage('backend.computeBrokenLinkFixMerge', err, 'the code search fallback is temporarily unavailable');
-      attempted.push({ matchedVia: 'code-search', reason: 'code-search-error', error: message });
-    }
+  // Repository-local search (Git Trees + Contents API), not GitHub's
+  // /search/code: every site here authenticates as a GitHub App
+  // installation, and App tokens silently return empty results from
+  // /search/code on private repos — a real GitHub platform limitation
+  // (github.com/orgs/community/discussions/113651), not something fixable
+  // by using the App "correctly". A separate classic PAT could work around
+  // it, but that would mean provisioning and trusting a second, differently
+  // -scoped credential just for this one fallback; the Trees/Contents APIs
+  // this app already relies on everywhere else are fully App-compatible, so
+  // this searches those instead, bounded to real candidate files (see
+  // repo-local-search.js) rather than a raw repo-wide grep.
+  //
+  // Every href variant is searched in the SAME pass (one tree fetch, one
+  // bounded set of file fetches) — literal-text matching, so searching only
+  // the absolute href would never surface a file that hardcodes the same
+  // link site-relative (the exact form stripLink's own hrefVariants already
+  // knows how to match once a file IS fetched).
+  let candidates = new Set();
+  let coverageIncomplete = false;
+  try {
+    const priorityDirs = [...new Set(
+      attempted.filter((a) => a.filePath).map((a) => a.filePath.slice(0, a.filePath.lastIndexOf('/') + 1)).filter(Boolean)
+    )];
+    const result = await searchRepoLocalForStrings(site, beforeRef, hrefVariants(href), { priorityDirs });
+    candidates = new Set(result.matches.slice(0, CODE_SEARCH_MAX_CANDIDATES));
+    coverageIncomplete = result.truncatedCoverage;
+  } catch (err) {
+    // A missing credential (client.js's authHeaders) is a permanent
+    // site-wide config gap, not a transient outage — using a generic
+    // "temporarily unavailable" fallback for both used to make every
+    // broken-link-fix needing this fallback retry forever under a message
+    // that looked like it would resolve on its own, and fall through
+    // attempt-classification.js's unrecognized-text default (ITEM_DEFECT)
+    // instead of the NEEDS_HUMAN this genuinely is.
+    const fallback = err.reason === 'missing-credential' ? err.message : 'the repository-local search fallback is temporarily unavailable';
+    const { message } = safeMessage('backend.computeBrokenLinkFixMerge', err, fallback);
+    attempted.push({ matchedVia: 'repo-local-search', reason: 'repo-local-search-error', error: message });
   }
 
   for (const filePath of candidates) {
     if (seenPaths.has(filePath)) continue;
     seenPaths.add(filePath);
     const file = await getFileContent(site, filePath, beforeRef);
-    if (!file) { attempted.push({ filePath, matchedVia: 'code-search', reason: 'file-not-found' }); continue; }
+    if (!file) { attempted.push({ filePath, matchedVia: 'repo-local-search', reason: 'file-not-found' }); continue; }
     const conflict = detectConflictMarkers(file.content);
-    if (conflict) { attempted.push({ filePath, matchedVia: 'code-search', reason: conflict.reason, error: conflict.error }); continue; }
+    if (conflict) { attempted.push({ filePath, matchedVia: 'repo-local-search', reason: conflict.reason, error: conflict.error }); continue; }
     const stripped = stripLink(file.content, href);
-    if (!stripped.ok) { attempted.push({ filePath, matchedVia: 'code-search', reason: stripped.reason, error: stripped.error }); continue; }
+    if (!stripped.ok) { attempted.push({ filePath, matchedVia: 'repo-local-search', reason: stripped.reason, error: stripped.error }); continue; }
     files.push({
       filePath, oldContent: file.content, newContent: stripped.newContent,
       changedRegions: [{ field: 'href', before: href, after: null }],
-      matchedVia: 'code-search',
+      matchedVia: 'repo-local-search',
     });
   }
 
   if (files.length) return { ok: true, files, attempted };
 
+  // coverageIncomplete: the bounded local search could not scan every real
+  // candidate file (GitHub's own tree truncation, or this search's own file
+  // cap) and found nothing in what it did scan. That is NOT the same claim
+  // as "this href is hardcoded nowhere in the repo" — reported as its own
+  // reason so it classifies as an external/coverage limitation rather than
+  // a confident per-item defect (attempt-classification.js).
   return {
     ok: false,
-    reason: attempted.length && attempted.every((a) => a.reason === 'no-file-mapping') ? 'no-file-mapping' : 'no-match',
-    error: summarizeBrokenLinkAttempts(sourcePages, href, attempted),
+    reason: attempted.length && attempted.every((a) => a.reason === 'no-file-mapping')
+      ? 'no-file-mapping'
+      : coverageIncomplete ? 'search-coverage-incomplete' : 'no-match',
+    error: coverageIncomplete
+      ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
+      : summarizeBrokenLinkAttempts(sourcePages, href, attempted),
     attempted,
   };
 }
