@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Daily GSC + GA4 analytics agent and dashboard",
   "scripts": {
-    "test": "node --experimental-test-module-mocks --test server/",
+    "test": "DATABASE_URL=postgres://test:test@localhost:5432/test node --experimental-test-module-mocks --test server/",
     "migrate": "node server/migrations/run.js",
     "get-token": "node server/scripts/get-oauth-token.js",
     "ingest": "node server/scripts/ingest.js",
