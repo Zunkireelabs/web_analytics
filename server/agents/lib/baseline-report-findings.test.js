@@ -86,7 +86,17 @@ describe('baseline report — the day-0 audit actually names what is missing', (
     const ai = savedSnapshot.issuesSnapshot.aiVisibility;
     assert.equal(ai.available, true);
     assert.equal(ai.overall, 44);
-    assert.equal(ai.categories.entities, 0);
+
+    // Banding is computed in code, never left to the model: the first real
+    // Admizz report labelled schema 25 and faq 30 "Partial" in its table
+    // while the prose below correctly called faq 30 a gap.
+    const byName = Object.fromEntries(ai.categories.map((c) => [c.category, c]));
+    assert.equal(byName['Entity markup'].score, 0);
+    assert.equal(byName['Entity markup'].status, 'Missing');
+    assert.equal(byName['Schema markup'].status, 'Missing', '25 is Missing, not Partial');
+    assert.equal(byName['FAQ coverage'].status, 'Missing', '30 is Missing, not Partial');
+    assert.equal(byName['Citation readiness'].status, 'Good');
+    assert.equal(ai.categories[0].category, 'Entity markup', 'worst gap leads the table');
   });
 
   test('a site whose GEO audit has not run reports unavailable rather than a fabricated score', async () => {
@@ -99,6 +109,7 @@ describe('baseline report — the day-0 audit actually names what is missing', (
     geoRuns = [GEO_RUN];
     await buildBaselineReport(1);
     assert.match(capturedUser, /Missing alt text/, 'the model must receive the real defect labels');
-    assert.match(capturedUser, /"entities":0/, 'and the real AI-visibility categories');
+    assert.match(capturedUser, /"category":"Entity markup","score":0,"status":"Missing"/,
+      'the model receives the pre-computed status so it cannot re-derive it wrongly');
   });
 });

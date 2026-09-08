@@ -103,13 +103,49 @@ function summarizeAuditFindings(auditFindings) {
 // geo-audit-report.js), never recomputed or estimated here. Absent when the
 // audit hasn't run for this site yet, and the narrative is told to say so
 // rather than imply a score exists.
+// Banding is done HERE, in code, not by the model. Asking the narrative to
+// apply "0-39 Missing / 40-69 Partial / 70-100 Good" to seven numbers is
+// asking an LLM to do arithmetic, and it got it wrong on the first real
+// Admizz report: schema 25 and faq 30 were both labelled "Partial" in the
+// table while the prose one paragraph below correctly called faq 30 a gap.
+// Understating a client's real deficit — and contradicting itself doing so
+// — is exactly the failure a measurement document cannot have.
+const AI_STATUS_BANDS = [
+  { max: 39, label: 'Missing' },
+  { max: 69, label: 'Partial' },
+  { max: 100, label: 'Good' },
+];
+
+function aiCategoryStatus(score) {
+  return AI_STATUS_BANDS.find((b) => score <= b.max)?.label || 'Good';
+}
+
+// Readable category names, so the client-facing table doesn't print raw
+// internal keys ("llmsReadiness", "geoSignals").
+const AI_CATEGORY_LABELS = {
+  faq: 'FAQ coverage',
+  schema: 'Schema markup',
+  entities: 'Entity markup',
+  geoSignals: 'Local/GEO signals',
+  llmsReadiness: 'AI crawler access (llms.txt)',
+  citationReadiness: 'Citation readiness',
+  structuredContent: 'Structured content',
+};
+
 function summarizeAiVisibility(geoRun) {
   const score = geoRun?.facts?.siteScore;
   if (!score || score.overall == null) return { available: false };
+  const categories = Object.entries(score.categories || {})
+    .map(([key, value]) => ({
+      category: AI_CATEGORY_LABELS[key] || key,
+      score: value,
+      status: aiCategoryStatus(Number(value) || 0),
+    }))
+    .sort((a, b) => a.score - b.score); // worst first — the gaps are the point
   return {
     available: true,
     overall: score.overall,
-    categories: score.categories || {},
+    categories,
     measuredAt: geoRun.created_at || null,
   };
 }
@@ -122,7 +158,16 @@ function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRu
       total: recommendations.length,
       byPriority,
       items: recommendations.slice(0, 50).map((r) => ({
-        page: r.page, type: r.recommendation_type, issue: r.issue, priority: r.priority,
+        // `page` is only a real URL for page-scoped recommendations. For a
+        // net-new page it carries an internal generator PARAMETER instead
+        // (a real observed value: "landing::Kathmandu"), which the narrative
+        // then rendered as a markdown link — shipping an internal identifier
+        // and a dead link into the first document a client ever reads.
+        // Passed through only when it is genuinely a URL.
+        page: /^https?:\/\//i.test(r.page || '') ? r.page : null,
+        type: r.recommendation_type,
+        issue: r.issue,
+        priority: r.priority,
       })),
     },
     fullSiteAudit: auditRun
@@ -209,8 +254,9 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
     '## How AI Search Engines See You Today\n' +
     'Use issuesSnapshot.aiVisibility. If available is false, say plainly that this measurement has not run yet ' +
     'and skip the rest of this section — never imply a score. If available: lead with the overall score out of ' +
-    '100, then a markdown table of every category with a plain-English status word (0-39 "Missing", 40-69 ' +
-    '"Partial", 70-100 "Good"). Then 2-3 sentences a non-technical owner understands: AI assistants and AI ' +
+    '100, then a markdown table with columns Area | Score | Status, one row per entry in aiVisibility.categories ' +
+    'IN THE ORDER GIVEN (worst first), copying its category, score and status values EXACTLY — the status word is ' +
+    'already computed for you, never re-derive or soften it. Then 2-3 sentences a non-technical owner understands: AI assistants and AI ' +
     'Overviews increasingly answer questions directly instead of sending a click, and these categories are what ' +
     'decides whether this site can be read, understood and cited by them. Call out the WORST categories by name ' +
     'and what each one concretely means is absent (e.g. entity markup at 0 means AI engines have nothing telling ' +
@@ -224,7 +270,10 @@ async function generateNarrative(site, kpiSnapshot, issuesSnapshot) {
     'affect the most pages and why each matters for being found.\n' +
     '## Issues We Found\n' +
     'A short intro sentence, then a bullet list of the real issues from openRecommendations (group by priority, ' +
-    'most important first; mention the full-site-audit status honestly if it was not yet available).\n' +
+    'most important first; mention the full-site-audit status honestly if it was not yet available). Write each ' +
+    'one in plain client-facing language: describe the issue, and never paste an internal identifier, generator ' +
+    'name, or parameter. Only link a page when its `page` field is a real URL — when page is null, describe the ' +
+    'issue in words with no link at all.\n' +
     '## Your Starting Point\n' +
     '2-3 sentences: this is the measured state of the site today, and every future report is compared against ' +
     'these exact numbers. State it as a baseline for measurement — do not promise improvements.';
