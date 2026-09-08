@@ -37,6 +37,9 @@ import {
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
+import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
+import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
+import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -279,7 +282,7 @@ router.get('/action-center/generators', async (req, res, next) => {
 // wait budget in ms — dataAnalyst.js's "Generate Content Draft" button uses a
 // short one so a mid-derivation click gets a real result instead of an
 // immediate "come back later", without hanging the request for minutes.
-export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
+export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false, enforceDesignIntegrity = true } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -417,16 +420,81 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // generator's output is validated, whether called from the manual UI,
   // the MCP tool, or the unattended execution-engine/auto-remediation
   // chains — a future generator gets this for free just by existing.
-  const MAX_GENERATION_ATTEMPTS = 2;
+  // Three attempts, not two, because a retry is no longer a coin flip: the
+  // second and third carry a real, specific correction derived from what
+  // the gate just found (design-repair-feedback.js), so an extra attempt is
+  // a genuinely different try rather than the same dice re-rolled.
+  const MAX_GENERATION_ATTEMPTS = 3;
+  const canonicalTemplate = canonicalTemplateForFeedback(effectiveSite, generatorId, PAGE_TEMPLATE_TYPES_FOR_GENERATOR);
   let content, summary, gateResult;
   let firstAttemptIssues = null;
+  let designCorrections = null;
+  let profileRepairAttempted = false;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = await runQualityGate(content, generatorId, siteId);
+    // The repair channel. A generator that doesn't read designCorrections
+    // simply ignores it and the attempt behaves exactly as it always did —
+    // this is additive, not a contract every generator must now satisfy.
+    ({ content, summary } = await generator.generate({
+      siteId,
+      params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
+    }));
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
+
+    // DIAGNOSE -> ROUTE TO WHATEVER CAN ACTUALLY FIX IT.
+    //
+    // Not every design mismatch lives in the generated content. A
+    // `design-role-mismatch` is a defect in the SITE'S STORED DESIGN
+    // PROFILE (design-drift.js's verifyProfileRoles never reads the draft),
+    // so regenerating cannot change the verdict — left to the content loop
+    // it would burn every attempt and then block, which is exactly the
+    // outcome this loop exists to prevent. Route it to the deterministic
+    // profile role correction instead, then revalidate against the
+    // corrected profile.
+    //
+    // Tried at most once: the repair is deterministic, so if it didn't fix
+    // the profile the first time it will not fix it on a second run.
+    if (attempt < MAX_GENERATION_ATTEMPTS && !profileRepairAttempted && hasProfileLevelMismatch(gateResult.issues)) {
+      profileRepairAttempted = true;
+      const { repaired, site: refreshedSite } = await repairProfileLevelMismatch(siteId, {
+        repairSites: repairDesignProfileRolesForSites,
+        fetchSite: getSiteById,
+        loadSiteRow: async (id) => (await pgQuery('select * from sites where id = $1', [id])).rows[0] || null,
+      });
+      if (repaired && refreshedSite) {
+        console.warn(`[action-center] ${generatorId}: design profile role mismatch repaired for site ${siteId}, revalidating`);
+        // Carry forward whatever the just-resolved profile now says, while
+        // keeping the canonical page template this call may have composed.
+        effectiveSite = {
+          ...refreshedSite,
+          url_file_map: {
+            ...refreshedSite.url_file_map,
+            siteRoot: {
+              ...refreshedSite.url_file_map?.siteRoot,
+              pageTemplates: effectiveSite?.url_file_map?.siteRoot?.pageTemplates
+                || refreshedSite.url_file_map?.siteRoot?.pageTemplates,
+            },
+          },
+        };
+      }
+    }
+
+    // CONTENT-LEVEL repair. Where this used to discard the gate's findings
+    // and re-roll blindly, it now turns them into an instruction naming
+    // exactly what was wrong and restating the site's own design language,
+    // and hands that to the generator for the next attempt. Only a mismatch
+    // that survives every attempt is refused below.
     if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
+      designCorrections = buildCorrectionFeedback(gateResult.issues, {
+        site: effectiveSite,
+        canonicalTemplate,
+      }) || designCorrections;
+      console.warn(
+        `[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating`
+        + `${designCorrections ? ' with a design/structure correction' : ''}:`,
+        gateResult.issues,
+      );
     }
   }
   if (!gateResult.clean) {
@@ -598,7 +666,13 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
 router.post('/action-center/generate', async (req, res, next) => {
   try {
     const { generatorId, params, source, findingId } = req.body || {};
-    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId }));
+    // A MANUAL generate is never withheld over a design mismatch. Someone is
+    // sitting there waiting to look at the output; handing them nothing is
+    // strictly worse than handing them a draft with the mismatch reported on
+    // it, which they can then read, edit, or discard. The design gate stays
+    // enforcing on the unattended path (generateDraft's default), where
+    // refusing to ship really is the only protection a live site has.
+    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId, enforceDesignIntegrity: false }));
   } catch (e) {
     if (e.status === 400 || e.status === 404) {
       const message = e.userFacing ? e.message : sanitizeForCustomer(e.message, 'This recommendation could not be generated right now — try again shortly.');
@@ -608,10 +682,28 @@ router.post('/action-center/generate', async (req, res, next) => {
   }
 });
 
+// geo-audit produces a READ-ONLY markdown report, not an applicable change,
+// so it has nothing for this pipeline to open a PR for. Over its entire
+// lifetime 70 of 71 geo-audit drafts ended 'abandoned' with reason
+// 'sent_back_to_recommendations' and not one was ever implemented — it was
+// pure clutter in a list whose whole purpose is "changes waiting to ship".
+//
+// Hidden here, at the Action Center listing only, rather than by stopping
+// its generation: the weekly audit still runs (job.js's runGeoAuditIfDue),
+// still saves its agent_runs snapshot for the Command Center, and its draft
+// row is still what agents/lib/agent-status.js reads the site's GEO score
+// from. Removing the draft would blank that score; hiding the row from this
+// one list costs nothing and loses nothing.
+//
+// An explicit ?actionType=geo-audit request is still honoured, so anything
+// asking for it by name (or a human debugging) can still reach it.
+const ACTION_CENTER_HIDDEN_ACTION_TYPES = new Set(['geo-audit']);
+
 router.get('/action-center/drafts', async (req, res, next) => {
   try {
     const { actionType, status } = req.query;
-    res.json(await listDrafts(req.siteId, { actionType, status }));
+    const drafts = await listDrafts(req.siteId, { actionType, status });
+    res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
   } catch (e) { next(e); }
 });
 

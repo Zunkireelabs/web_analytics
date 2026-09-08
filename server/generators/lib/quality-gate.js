@@ -9,6 +9,7 @@ import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
+import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
@@ -79,7 +80,14 @@ const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-poli
 // design/voice grounding on the way in via server/llm.js's callLLM). A
 // purely technical generator's output (JSON-LD, meta values, a redirect
 // rule) has no design surface to be inconsistent with.
-export async function runQualityGate(content, generatorId, siteId) {
+// `site` is optional and only used by the structure-conformance check,
+// which needs the site's persisted canonical page template (a plain read of
+// url_file_map, no fetch of its own). Callers that already hold an
+// effectiveSite snapshot — routes/action-center.js's generateDraft, which
+// may have just composed that very template — pass it so the check sees the
+// same template the generator was actually given. A caller with no site
+// simply skips the check, exactly as before it existed.
+export async function runQualityGate(content, generatorId, siteId, { site = null, enforceDesignIntegrity } = {}) {
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
@@ -115,7 +123,17 @@ export async function runQualityGate(content, generatorId, siteId) {
     // drift.js) — a generator with no design surface has nothing for this to
     // check. See design-integrity-guard.js for the log-only -> enforce
     // rollout this implements (DESIGN_INTEGRITY_ENFORCE).
-    ...(needsDesignConsistencyCheck ? (await findDesignIntegrityIssues(generatorId, siteId)).issues : []),
+    ...(needsDesignConsistencyCheck
+      ? (await findDesignIntegrityIssues(generatorId, siteId,
+        enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity })).issues
+      : []),
+    // Did the generator actually FOLLOW the structural guidance it was
+    // given? Everything above checks the content in isolation; this is the
+    // only check that compares it against this site's own canonical page
+    // template. Its issues carry a `correction`, so generateDraft repairs
+    // them by regenerating with that feedback rather than refusing the
+    // draft — see design-repair-feedback.js.
+    ...(site ? checkStructureConformance(content, generatorId, site).issues : []),
   ];
   // An issue with `blocking: false` (design-integrity-guard.js's log-only
   // mode) is deliberately still visible in `issues` — it just doesn't fail

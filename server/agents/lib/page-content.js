@@ -648,21 +648,34 @@ export function analyzePage(html, pageUrl) {
     if ($el.find('p, div, li').length > 0) return;
     const rawText = $el.text();
     const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
-    const pipeLines = lines.filter((l) => (l.match(/\|/g) || []).length >= 2);
-    if (pipeLines.length < 3) return;
+    const pipeLineIdx = [];
+    lines.forEach((l, i) => { if ((l.match(/\|/g) || []).length >= 2) pipeLineIdx.push(i); });
+    if (pipeLineIdx.length < 3) return;
+    const pipeLines = pipeLineIdx.map((i) => lines[i]);
+    // A real, common shape: an intro/lead-in sentence written in the SAME
+    // paragraph as the table (e.g. "...here's a breakdown: | Feature | ..."),
+    // which used to make the whole block "irregular" and unfixable even
+    // though the table itself is perfectly clean. Safe to extract only when
+    // every pipe-shaped line forms ONE CONTIGUOUS run — prose strictly
+    // before and/or after the run, never interleaved between table lines,
+    // which has no reliable boundary and stays 'irregular' exactly as before.
+    const contiguous = pipeLineIdx.every((idx, k) => k === 0 || idx === pipeLineIdx[k - 1] + 1);
     const dataRows = pipeLines.filter((l) => !isSeparatorRow(parsePipeRow(l))).map(parsePipeRow);
     // "Clean" (safe to deterministically rebuild as a real <table>) only
-    // when EVERY line in the block is table-shaped (no prose mixed in) and
-    // every real row has the same column count — anything less regular is
-    // still detected and reported, just not auto-rebuildable without
-    // guessing at structure.
-    const clean = pipeLines.length === lines.length && dataRows.length >= 2
+    // when the table lines form one contiguous run and every real row has
+    // the same column count — anything less regular is still detected and
+    // reported, just not auto-rebuildable without guessing at structure.
+    const clean = contiguous && dataRows.length >= 2
       && dataRows.every((r) => r.length === dataRows[0].length && r.length >= 2);
+    const beforeText = clean ? (lines.slice(0, pipeLineIdx[0]).join(' ').trim() || null) : null;
+    const afterText = clean ? (lines.slice(pipeLineIdx[pipeLineIdx.length - 1] + 1).join(' ').trim() || null) : null;
     rawTextTableBlocks.push({
       anchorHtml: $.html(el) || '',
       snippet: pipeLines.slice(0, 3).join(' / ').slice(0, 200),
       clean,
       rows: clean ? dataRows : null,
+      beforeText, // real lead-in prose (if any) that precedes the table lines, verbatim — never invented
+      afterText, // real trailing prose (if any) that follows the table lines, verbatim — never invented
       tag: el.tagName || 'div',
     });
   });
@@ -820,7 +833,7 @@ export function analyzePage(html, pageUrl) {
     malformedTables, // transient — real {reason, anchorHtml, snippet}[]; anchorHtml is the exact removal anchor
     removableMalformedTables, // transient — subset of malformedTables whose reason has a safe auto-fix (no-rows/empty-row only)
     rawTextTableCount,
-    rawTextTableBlocks, // transient — real {anchorHtml, snippet, clean, rows, tag}[]; rows only set when clean
+    rawTextTableBlocks, // transient — real {anchorHtml, snippet, clean, rows, beforeText, afterText, tag}[]; rows/beforeText/afterText only set when clean
     faqMainEntityCount,
     faqVisibleQuestionCount,
     faqVisibleItems, // transient — real [{question, answer}], answer null when not confidently extractable

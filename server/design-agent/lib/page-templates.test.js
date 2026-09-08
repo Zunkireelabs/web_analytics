@@ -186,3 +186,80 @@ describe('PAGE_TEMPLATE_TYPES_FOR_GENERATOR', () => {
     }
   });
 });
+
+// The scenario: a site with real, established pages but NO page of the
+// requested type yet — "the site has no blog template", "the site has no
+// related-resources section". The old behavior refused, which left the
+// generator to invent a generic shape that visibly did not belong to the
+// site. A site that has never published a blog still HAS a design language;
+// the first blog should be built out of it, and then BECOME the canonical
+// blog template every later blog reuses.
+describe('resolveOrCreateCanonicalPageTemplate — no pattern for this type yet, infer from the site itself', () => {
+  const ESTABLISHED = {
+    patterns: {
+      service: {
+        sectionOrder: ['hero', 'problem', 'capabilities', 'proof', 'cta'],
+        textHierarchy: [{ role: 'heading' }, { role: 'body' }, { role: 'cta' }],
+      },
+      homepage: { sectionOrder: ['hero', 'cta'], textHierarchy: [{ role: 'heading' }] },
+    },
+  };
+
+  test('composes a blog template from the site\'s own most-established page shape, and persists it', async () => {
+    const site = siteWith(ESTABLISHED);
+    const saved = [];
+    const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article', 'blog-listing'], {
+      saveConfig: async (a) => saved.push(a),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'composed');
+    assert.equal(result.pageType, 'blog-article', 'the template is stored under the type that was actually requested');
+    // Grounded in the site's OWN richest real pattern, not the thin one and
+    // not an invented shape.
+    assert.deepEqual(result.template.sectionOrder, ['hero', 'problem', 'capabilities', 'proof', 'cta']);
+    assert.deepEqual(result.template.textRoles, ['heading', 'body', 'cta']);
+    assert.equal(result.template.inferredFromPageType, 'service', 'provenance is recorded honestly, never passed off as a real observation of this type');
+
+    // PERSISTED — this is what makes the first blog establish the convention
+    // every later blog reuses, instead of each one re-deciding.
+    assert.equal(saved.length, 1);
+    assert.ok(saved[0].urlFileMap.siteRoot.pageTemplates['blog-article']);
+  });
+
+  test('a later blog REUSES that established template rather than re-inferring', async () => {
+    const first = siteWith(ESTABLISHED);
+    const saved = [];
+    const a = await resolveOrCreateCanonicalPageTemplate(first, ['blog-article'], { saveConfig: async (x) => saved.push(x) });
+
+    const second = siteWith({ ...ESTABLISHED, pageTemplates: { 'blog-article': a.template } });
+    const savedAgain = [];
+    const b = await resolveOrCreateCanonicalPageTemplate(second, ['blog-article'], { saveConfig: async (x) => savedAgain.push(x) });
+
+    assert.equal(b.source, 'existing');
+    assert.deepEqual(b.template, a.template);
+    assert.equal(savedAgain.length, 0, 'reuse must not rewrite the stored template');
+  });
+
+  test('a real observed pattern for the type always wins over inference', async () => {
+    const site = siteWith({
+      patterns: {
+        ...ESTABLISHED.patterns,
+        'blog-article': { sectionOrder: ['title', 'body', 'author'], textHierarchy: [{ role: 'heading' }] },
+      },
+    });
+    const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article'], { saveConfig: async () => {} });
+    assert.deepEqual(result.template.sectionOrder, ['title', 'body', 'author']);
+    assert.equal(result.template.inferredFromPageType, undefined, 'a directly observed pattern is never marked inferred');
+  });
+
+  test('the guidance text tells the generator to BUILD the first one in the site\'s language, not to copy a type that does not exist', async () => {
+    const site = siteWith(ESTABLISHED);
+    const result = await resolveOrCreateCanonicalPageTemplate(site, ['blog-article'], { saveConfig: async () => {} });
+    const text = pageTemplateGuidanceText(result.template);
+    assert.match(text, /has no published "blog-article" page yet/);
+    assert.match(text, /its own "service" pages/);
+    assert.match(text, /rather than inventing a generic layout/);
+    assert.match(text, /hero -> problem -> capabilities -> proof -> cta/);
+  });
+});

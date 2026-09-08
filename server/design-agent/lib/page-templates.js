@@ -63,6 +63,59 @@ function firstMatchingPattern(patterns, candidateTypes) {
   return null;
 }
 
+// The site's OWN most-established page shape, whatever page type it happens
+// to belong to — the widest real evidence available about how this site
+// builds a page. Picked by section count as a proxy for "most fully
+// developed", so a rich service/landing page wins over a thin one-section
+// page that happens to sort first.
+// Inference needs a real design language to copy, not a scrap. A pattern of
+// one lone section describes almost nothing about how this site builds a
+// page, and treating it as the canonical shape for a whole new page type
+// would be inventing a structure while appearing to be grounded — exactly
+// what this module's grounding rule forbids. Below this floor there is no
+// usable evidence and the honest answer is still to refuse.
+const MIN_SECTIONS_TO_INFER_FROM = 2;
+
+function mostEstablishedPattern(patterns) {
+  let best = null;
+  for (const [type, p] of Object.entries(patterns || {})) {
+    if (!p?.sectionOrder?.length || p.sectionOrder.length < MIN_SECTIONS_TO_INFER_FROM) continue;
+    if (!best || p.sectionOrder.length > best.pattern.sectionOrder.length) best = { type, pattern: p };
+  }
+  return best;
+}
+
+// A site with no observed pattern for the requested page type used to get
+// NOTHING — resolveOrCreateCanonicalPageTemplate returned
+// 'no-real-pattern-for-type', pageStructureGuidance returned null, and the
+// generator fell back to inventing its own generic shape. That is the exact
+// failure behind "the site has no blog template, so the first blog looks
+// like a generic AI page instead of part of this website".
+//
+// A site that has never published a blog still HAS a design language: the
+// section rhythm, text-role vocabulary and heading hierarchy every one of
+// its other pages already uses. Inferring the new page type's shape from
+// that is still grounded — every value below is copied from a real observed
+// pattern on THIS site, never invented — it is simply grounded in the
+// site's other pages rather than in pages of this type, which do not exist
+// yet. `inferredFrom` records that honestly so the provenance is never
+// mistaken for a direct observation of this page type.
+function inferTemplateFromDesignLanguage(patterns, requestedType) {
+  const source = mostEstablishedPattern(patterns);
+  if (!source) return null;
+  const textRoles = [...new Set((source.pattern.textHierarchy || []).map((h) => h.role).filter(Boolean))];
+  if (!source.pattern.sectionOrder?.length && !textRoles.length) return null;
+  return {
+    type: requestedType,
+    pattern: {
+      sectionOrder: source.pattern.sectionOrder || [],
+      textHierarchy: source.pattern.textHierarchy || [],
+      notes: `Inferred from this site's own "${source.type}" pages — the site has no published "${requestedType}" page yet, so its established design language is the grounding.`,
+    },
+    inferredFrom: source.type,
+  };
+}
+
 /**
  * Compose (on first use) or reuse (on every later use) this site's canonical
  * page template for one page TYPE — not one generatorId, so two generators
@@ -92,7 +145,13 @@ export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes,
   // never stuck reusing the less-specific fallback just because an entry
   // for it happens to exist. Only THIS type's own persisted entry is ever a
   // reuse candidate.
-  const match = firstMatchingPattern(patterns, candidateTypes);
+  // Direct observation of this page type first; only when the site has
+  // genuinely never published one do we fall back to inferring its shape
+  // from the site's own established design language (see
+  // inferTemplateFromDesignLanguage). Inference is deliberately the second
+  // choice, never a shortcut past real evidence.
+  const match = firstMatchingPattern(patterns, candidateTypes)
+    || inferTemplateFromDesignLanguage(patterns, candidateTypes[0]);
   if (!match) return { ok: false, reason: 'no-real-pattern-for-type', template: null };
 
   const existing = existingTemplates[match.type];
@@ -112,6 +171,12 @@ export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes,
     sectionOrder: match.pattern.sectionOrder || [],
     textRoles: [...new Set((match.pattern.textHierarchy || []).map((h) => h.role).filter(Boolean))],
     notes: match.pattern.notes || null,
+    // Honest provenance: set only when this shape came from the site's OTHER
+    // page types rather than from real pages of this one. Persisted like any
+    // other canonical entry, so the FIRST page of a new type establishes the
+    // template and every later page of that type reuses it — the site grows
+    // its own blog/resources convention instead of re-inventing one per page.
+    ...(match.inferredFrom ? { inferredFromPageType: match.inferredFrom } : {}),
     derivedFromProfileVersion: profile.derivedAt,
     derivedAt: new Date().toISOString(),
   };
@@ -136,7 +201,12 @@ export async function resolveOrCreateCanonicalPageTemplate(site, candidateTypes,
  */
 export function pageTemplateGuidanceText(template) {
   if (!template) return null;
-  const lines = [`This site's own real "${template.pageType}" pages follow this structure — match it where the target content allows, rather than inventing an unrelated layout:`];
+  const lines = [template.inferredFromPageType
+    // The site has no page of this type yet, so the instruction is not
+    // "copy this type's pages" but "build the first one out of the design
+    // language the rest of the site already established".
+    ? `This site has no published "${template.pageType}" page yet. Build this one so it belongs to the site: follow the same structure its own "${template.inferredFromPageType}" pages use, rather than inventing a generic layout:`
+    : `This site's own real "${template.pageType}" pages follow this structure — match it where the target content allows, rather than inventing an unrelated layout:`];
   if (template.sectionOrder?.length) lines.push(`Section order: ${template.sectionOrder.join(' -> ')}.`);
   if (template.textRoles?.length) lines.push(`Text roles this site actually uses on such pages: ${template.textRoles.join(', ')}.`);
   if (template.notes) lines.push(`Notes from the site's own real pages: ${template.notes}`);

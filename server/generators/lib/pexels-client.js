@@ -75,7 +75,21 @@ function stripLocationWords(text) {
 // clean relevance score on "isolated on white background" is still a bad
 // featured image for a blog post. Penalized rather than excluded outright,
 // since a real match can still legitimately carry one of these words.
-const GENERIC_STOCK_TERMS = new Set(['isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space']);
+// The literal "toy robot" cliché this file's own top comment describes as
+// the original bug is still reachable through the FALLBACK query alone:
+// 'artificial intelligence technology' has only 3 significant terms, so a
+// candidate sharing just ONE generic word ("technology", "innovation") with
+// it already scores ~0.33-0.38 — enough to clear MIN_RELEVANCE_SCORE — and
+// Pexels' own top results for that query are dominated by humanoid-robot
+// stock photography. 'robot'/'humanoid'/etc. are penalized the same way as
+// the other generic-stock terms here: a real, specific match (e.g. a title
+// genuinely about robotics) can still win on its OTHER significant words,
+// but this can no longer be the entire reason a fallback-query candidate
+// clears the bar.
+const GENERIC_STOCK_TERMS = new Set([
+  'isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space',
+  'robot', 'robots', 'robotic', 'humanoid', 'cyborg', 'android', 'futuristic',
+]);
 
 // Hard exclusion, not a scoring penalty — a title containing an emotionally
 // loaded word like "struggles" or "challenges" can score a real, high
@@ -143,6 +157,37 @@ const BRAND_NAME_PATTERN = new RegExp(
 
 function hasBrandMention(altText) {
   return BRAND_NAME_PATTERN.test(altText || '');
+}
+
+// Hard exclusion, same reasoning as SENSITIVE_CONTENT_TERMS/BRAND_NAME_TERMS
+// above: a Nepal-based tenant's post can score a real relevance match
+// against a photo that has nothing to do with the post's actual business
+// topic, purely because Pexels' catalog for Nepal-adjacent search terms
+// skews toward tourism/culture cliché photography — a mountain temple, a
+// weaver at a loom, someone's hands shaping pottery, a coffee-shop
+// interior. LOCATION_TERMS already stops a bare place name from winning a
+// match on its own, but a candidate can still clear the bar on OTHER
+// overlapping words while its alt text is unmistakably one of these
+// clichés — real reported complaint: a business/technology post ending up
+// illustrated with generic Nepali scenery, a cafe interior, or an
+// artisan's-hands-at-work photo, none of which represent the actual post.
+const OFF_TOPIC_CLICHE_TERMS = [
+  'temple', 'monastery', 'stupa', 'pagoda', 'prayer flag', 'prayer flags',
+  'trekking', 'sherpa', 'himalayan peak', 'mountain village', 'rural village',
+  'traditional village', 'rice paddy', 'rice terrace',
+  'cafe', 'coffee shop', 'espresso', 'cappuccino', 'latte', 'barista', 'coffee cup',
+  'handicraft', 'handicrafts', 'artisan', 'artisans', 'craftsman', 'craftswoman',
+  'handloom', 'handwoven', 'weaving', 'loom', 'pottery', 'potter', 'wood carving',
+  'woodcarving', 'embroidery', 'basket weaving', 'handmade craft',
+];
+
+const OFF_TOPIC_CLICHE_PATTERN = new RegExp(
+  `\\b(${OFF_TOPIC_CLICHE_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+  'i'
+);
+
+function isOffTopicCliche(altText) {
+  return OFF_TOPIC_CLICHE_PATTERN.test(altText || '');
 }
 
 function scoreCandidate(photo, queryTerms) {
@@ -242,6 +287,7 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
       if (excludePhotoIds?.has(photo.id)) continue;
       if (hasSensitiveContent(photo.alt)) continue;
       if (hasBrandMention(photo.alt)) continue;
+      if (isOffTopicCliche(photo.alt)) continue;
       const score = scoreCandidate(photo, terms);
       if (score > bestScore) { bestScore = score; best = photo; }
     }

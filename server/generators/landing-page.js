@@ -11,7 +11,7 @@ export const meta = {
 
 // params: { market?: string, city?: string, topic?: string, context?: string (real supporting data, e.g. session growth) }
 export async function generate({ siteId, params }) {
-  const { market, city, topic, context } = params;
+  const { market, city, topic, context, designCorrections } = params;
   const target = city ? `${city}${market ? `, ${market}` : ''}` : (market || topic);
   if (!target) throw Object.assign(new Error('market, city, or topic is required'), { status: 400 });
 
@@ -41,7 +41,12 @@ export async function generate({ siteId, params }) {
     site = null;
   }
   const guidance = pageStructureGuidance(site, 'landing', { fallbackPageTypes: ['service', 'homepage'] });
-  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}${guidance ? `\n\n${guidance}` : ''}`;
+  // designCorrections is appended last so it is the most recent instruction
+  // the model reads — a previous attempt at THIS draft was checked against
+  // the site's own design and something didn't match. See
+  // generators/lib/design-repair-feedback.js and generateDraft's repair loop.
+  const user = `Target: ${target}${context ? `\nSupporting data: ${context}` : ''}${guidance ? `\n\n${guidance}` : ''}`
+    + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });

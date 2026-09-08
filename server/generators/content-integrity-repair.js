@@ -2,7 +2,7 @@ import { analyzePageUrl } from '../agents/lib/page-content.js';
 import { buildFontSizeOverrideRemoved } from '../agents/lib/font-consistency-analysis.js';
 import { getSiteById } from '../store/read.js';
 import { projectTable } from '../design-agent/lib/design-profile.js';
-import { buildTableHtml } from './lib/markdown-table-render.js';
+import { buildTableHtml, escapeHtml } from './lib/markdown-table-render.js';
 
 // Repairs the five defect shapes content-integrity.js/font-consistency.js
 // detect — broken/empty table markup, comparison content shipped as raw
@@ -187,7 +187,18 @@ export async function generate({ siteId, params }) {
     const site = await getSiteById(siteId).catch(() => null);
     const profile = site?.url_file_map?.siteRoot?.designProfile || null;
     const styles = projectTable(profile);
-    const replacement = `<${target.tag}>${buildTableHtml(target.rows, styles)}</${target.tag}>`;
+    const tableHtml = buildTableHtml(target.rows, styles);
+    // A real lead-in/trailing sentence sharing the block with the table
+    // (e.g. "...here's a breakdown: | Feature | ...") is kept, verbatim, as
+    // its own element around the new <table> rather than discarded — only
+    // the actual pipe-text rows are being converted here.
+    const replacement = target.beforeText || target.afterText
+      ? [
+          target.beforeText ? `<${target.tag}>${escapeHtml(target.beforeText)}</${target.tag}>` : '',
+          tableHtml,
+          target.afterText ? `<${target.tag}>${escapeHtml(target.afterText)}</${target.tag}>` : '',
+        ].filter(Boolean).join('')
+      : `<${target.tag}>${tableHtml}</${target.tag}>`;
     return {
       content: { page, fixType, anchorHtml: target.anchorHtml, replacement, rows: target.rows },
       summary: `Convert raw-text comparison content into a real table on ${page}`,

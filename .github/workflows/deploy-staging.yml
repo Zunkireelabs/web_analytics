@@ -112,6 +112,17 @@ jobs:
             GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
             GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
 
+            # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
+            # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — a
+            # Sanity token is scoped to one project/dataset, so a shared token
+            # would mean writing tenant A's generated content into tenant B's
+            # CMS (see server/sanity/credentials.js's own comment on this).
+            # Admizz Education (site #8862) is the first site using this;
+            # sites.sanity_write_token_env_var names which env var a given
+            # site reads, so adding a second site's token is just one more
+            # line here plus that column, no code change.
+            SANITY_WRITE_TOKEN_ADMIZZ=${{ secrets.SANITY_WRITE_TOKEN_ADMIZZ }}
+
             # ── AI Recommendation Agent (opt-in, real costed OpenAI probes) ──
             # Shares OPENAI_API_KEY above but requires this separate flag
             # before it fires (server/agents/ai-recommendation.js) — a

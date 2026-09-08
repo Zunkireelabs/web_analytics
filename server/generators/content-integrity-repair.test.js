@@ -133,6 +133,22 @@ describe('content-integrity-repair — raw-text-table', () => {
     } finally { restore(); }
   });
 
+  test('preserves a real lead-in sentence sharing the paragraph with the table, converting only the table rows', async () => {
+    const html = 'Here is a breakdown of the key differences:\n'
+      + '| Feature | AI-Native Search | Traditional Keyword Search |\n'
+      + '|---|---|---|\n'
+      + '| User Intent | Understands intent | Matches terms |\n'
+      + '| Response Type | Direct answers | Ranked links |';
+    const restore = stubFetchHtml(`<html><body>${GROUNDING}<p>${html}</p></body></html>`);
+    try {
+      const { content } = await generate({ params: { page: 'https://example.com/r', fixType: 'raw-text-table' } });
+      assert.match(content.replacement, /<p>Here is a breakdown of the key differences:<\/p>/);
+      assert.match(content.replacement, /<table>/);
+      assert.match(content.replacement, /<th>Feature<\/th>/);
+      assert.deepEqual(content.rows[0], ['Feature', 'AI-Native Search', 'Traditional Keyword Search']);
+    } finally { restore(); }
+  });
+
   test('refuses an irregular block (mixed prose + pipes) rather than guessing structure', async () => {
     const restore = stubFetchHtml(
       `<html><body>${GROUNDING}<p>Some prose here.\nFeature | Plan A\nMore prose in between.\nPrice | $10 | $20 | extra</p></body></html>`,

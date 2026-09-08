@@ -1,6 +1,51 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues } from './marker-merge.js';
+import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml } from './marker-merge.js';
+
+// Regression coverage for the zunkireelabs-web PR #87 incident: two
+// independent title drafts (one landed on main, one on the batch branch)
+// each cleanly replaced the same LINE marker's line in place — no single
+// commit ever produced a duplicate. It was git's own "clean" merge of the
+// two, sync'd by getOrInitBatchBranch (github-ops.js), that left both
+// `title:` lines behind as invalid YAML. findMarkerCorruption is the
+// content-level check that catches that outcome after the fact.
+describe('findMarkerCorruption', () => {
+  test('finds nothing wrong in a normal, single-occurrence LINE marker', () => {
+    const content = '---\nlayout: base.njk\ntitle: "Hello" # SEOAI:TITLE\n---\n';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a duplicated LINE marker, the actual PR #87 shape', () => {
+    const content = [
+      '---',
+      'layout: base.njk',
+      'title: "AI Search Playbook for Product Teams | Zunkiree Labs" # SEOAI:TITLE',
+      'title: "Zunkiree Labs: AI Search Playbook for Product Teams" # SEOAI:TITLE',
+      'description: x',
+      '---',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), ['TITLE']);
+  });
+
+  test('finds nothing wrong in a normal, balanced BLOCK marker', () => {
+    const content = '<!-- SEOAI:FAQ:START -->hi<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a BLOCK marker with two START tags (or any start/end mismatch)', () => {
+    const content = '<!-- SEOAI:FAQ:START -->a<!-- SEOAI:FAQ:START -->b<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), ['FAQ']);
+  });
+
+  test('a file with several distinct, healthy markers stays clean', () => {
+    const content = [
+      'title: "T" # SEOAI:TITLE',
+      '<!-- SEOAI:FAQ:START -->x<!-- SEOAI:FAQ:END -->',
+      '{/* SEOAI:SCHEMA:START */}y{/* SEOAI:SCHEMA:END */}',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+});
 
 describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {
@@ -693,5 +738,65 @@ describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
     const { content, inserted } = ensureMarkers(file, { links: 'LINKS' }, 'page.jsx');
     assert.deepEqual(inserted, []);
     assert.equal(content, file);
+  });
+});
+
+// Regression coverage for a real design-breakdown that shipped autonomously:
+// renderExpandedHtml already received the site's own captured table styling
+// and passed it to renderComparisonTable (the STRUCTURED table path), but
+// never to markdownToHtml — so the same comparison content, written by the
+// model as MARKDOWN instead (which its own prompt invites), rendered as a
+// bare class-less <table>. On a Tailwind site that is a visibly foreign
+// block sitting beside a correctly-styled one on the same page.
+describe('renderExpandedHtml — a markdown table gets the site\'s own table styling', () => {
+  const STYLE = {
+    wrapper: 'overflow-x-auto', table: 'w-full acme-table', thead: 'acme-head',
+    tbody: 'acme-body', th: 'acme-th', td: 'acme-td', tdFirst: 'acme-td-first',
+  };
+  const SECTIONS = [{
+    heading: 'Comparison',
+    body: 'Here is a breakdown:\n\n| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed | Fast | Slow |\n| Cost | Low | High |',
+  }];
+
+  test('applies the tenant\'s real captured classes, the same ones a structured table gets', () => {
+    const html = renderExpandedHtml(SECTIONS, undefined, STYLE);
+    assert.match(html, /<table class="w-full acme-table">/);
+    assert.match(html, /<th class="acme-th">Feature<\/th>/);
+    assert.match(html, /<td class="acme-td-first">Speed<\/td>/, 'the row-label column uses the site\'s own first-cell class');
+    assert.match(html, /<td class="acme-td">Fast<\/td>/);
+    assert.match(html, /<div class="overflow-x-auto">/);
+    assert.doesNotMatch(html, /\| --- \|/, 'no raw markdown table syntax survives into the page');
+  });
+
+  test('a site with no captured table still renders a real, bare table (never another tenant\'s look)', () => {
+    const html = renderExpandedHtml(SECTIONS, undefined, {});
+    assert.match(html, /<table><thead><tr><th>Feature<\/th>/);
+    assert.doesNotMatch(html, /acme/);
+  });
+
+  test('a table collapsed onto ONE line still renders as a real table, not literal pipes', () => {
+    // The rows arrive joined by spaces with no newlines at all, so the
+    // line-based detection has no next line to test for a separator row.
+    const collapsed = [{
+      heading: 'Comparison',
+      body: 'Here is a breakdown: | Feature | Ours | Theirs | |---|---|---| | Speed | Fast | Slow | | Cost | Low | High |',
+    }];
+    const html = renderExpandedHtml(collapsed, undefined, STYLE);
+    assert.match(html, /<table class="w-full acme-table">/);
+    assert.match(html, /<th class="acme-th">Feature<\/th>/);
+    assert.match(html, /<td class="acme-td">Fast<\/td>/);
+    assert.doesNotMatch(html, /\|---\|/, 'no raw separator syntax survives');
+    assert.match(html, /Here is a breakdown:/, 'the real lead-in sentence is preserved');
+  });
+
+  test('a normal row with an empty middle cell is NOT mistaken for collapsed rows', () => {
+    // "| A |  | C |" also has two pipes separated only by spaces; without the
+    // separator-run guard this would be split into bogus rows.
+    const withEmptyCell = [{
+      heading: 'Comparison',
+      body: '| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed |  | Slow |',
+    }];
+    const html = renderExpandedHtml(withEmptyCell, undefined, STYLE);
+    assert.match(html, /<td class="acme-td-first">Speed<\/td><td class="acme-td"><\/td><td class="acme-td">Slow<\/td>/);
   });
 });
