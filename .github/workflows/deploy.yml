@@ -95,6 +95,13 @@ jobs:
             GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
             GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
 
+            # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
+            # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — see
+            # server/sanity/credentials.js's own comment on why a shared token
+            # would mean writing tenant A's content into tenant B's CMS.
+            # Admizz Education (site #8862) is the first site using this.
+            SANITY_WRITE_TOKEN_ADMIZZ=${{ secrets.SANITY_WRITE_TOKEN_ADMIZZ }}
+
             # ── Email ────────────────────────────────────────────────────────
             SMTP_HOST=${{ vars.SMTP_HOST }}
             SMTP_PORT=${{ vars.SMTP_PORT }}
