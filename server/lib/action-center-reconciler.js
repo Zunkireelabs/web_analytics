@@ -36,10 +36,18 @@
 //     lib/draft-ship-state.js already treats them as untouchable and the
 //     lifecycle derivation surfaces them as 'blocked' so they are visible
 //     rather than reclaimed out from under the reviewer.
-//   - It never asks GitHub anything. PR truth already has an owner —
+//   - It never POLLS GitHub for PR truth. That already has an owner —
 //     checkDraftPrStatus, driven by the webhook and the :20 hourly poll. A
 //     second poller would double the API spend against the same rate limit
 //     that already abandoned 113 drafts in one hour on 2026-09-01.
+//     Pass 0 (recoverUnopenedBatchPrs, added 2026-09-08) is the one deliberate
+//     exception and is not a poller: it reads a branch only when this site
+//     actually holds drafts stuck at 'branch_pushed' with no PR — i.e. only
+//     when there is specific work to finish — and it asks the one question no
+//     existing owner answers, "are these commits really on GitHub?", because
+//     the alternative was throwing away pushed work on a guess. It skips
+//     itself entirely while the credential's budget is low, so it can never
+//     be the thing that exhausts it.
 import { query } from '../db.js';
 import { markDraftAbandoned, countFailedAttemptsByFinding, getDraftByFindingId } from '../store/drafts.js';
 import { reopenRecommendation, blockRecommendation, closeRecommendation, listOpenRecommendations } from '../store/recommendations.js';
@@ -60,6 +68,7 @@ import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap } from '../agents/lib/ship
 // its own doc comment in recommendation-coordinator.js for why this, and not
 // a second live-content reader, is the right thing to call from here.
 import { recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { recoverUnopenedBatchPrs } from './batch-pr-recovery.js';
 
 // How long a draft may sit without progress before its recommendation is
 // taken back. Long enough that nothing in flight is disturbed — a normal
@@ -475,11 +484,31 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
 // exactly what it would do and writes nothing, which is how this gets
 // verified against production data before being trusted to run unattended.
 export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, apply = true, log = console.log } = {}) {
+  // Pass 0 — finish work that is ALREADY on GitHub before any later pass is
+  // allowed to throw it away. Ordering is the whole point: pass 2 below
+  // reclaims a 'branch_pushed' draft purely on lack of progress, and a batch
+  // whose commits landed but whose PR call failed looks identical to one that
+  // never pushed at all. Running the reclaim first meant every such batch was
+  // abandoned and regenerated from scratch the next day, forever — the commits
+  // discarded, the model spend repeated, and the recommendation's card
+  // reporting "tried 7 times". lib/batch-pr-recovery.js settles which of the
+  // two it is against GitHub and opens the one missing PR, so pass 2 only
+  // ever sees genuinely dead work.
+  //
+  // openDraftPr is injected rather than imported: it lives in the Express
+  // route module, which imports far more of the app than a janitor should
+  // pull in, and a static import here would make routes/action-center.js and
+  // this file a cycle.
+  const prRecovery = await recoverUnopenedBatchPrs(siteId, {
+    apply,
+    log,
+    openPr: async (id, draftId) => (await import('../routes/action-center.js')).openDraftPr(id, draftId),
+  });
   const itemDefects = await reconcileStuckApprovedDrafts(siteId, { apply, log });
   const stalled = await reclaimStalledDrafts(siteId, { idleHours, apply, log });
   const failures = await classifyUnrecordedFailures(siteId, { apply, log });
   const recovery = await driveAutonomousRecovery(siteId, { apply, log });
-  return { siteId, stalled, failures, itemDefects, recovery };
+  return { siteId, prRecovery, stalled, failures, itemDefects, recovery };
 }
 
 // Every site, one at a time. Sequential on purpose: this shares a connection

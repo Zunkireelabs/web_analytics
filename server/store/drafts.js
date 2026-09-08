@@ -935,3 +935,26 @@ export async function getDraftByFindingId(siteId, findingId) {
   );
   return rows[0] || null;
 }
+
+// Clears a 'branch_pushed' draft's apply_error once its commit has been
+// CONFIRMED present on the branch (lib/batch-pr-recovery.js verifies this
+// against GitHub's compare API before calling).
+//
+// Not cosmetic. recordMergeFailure above writes apply_error for BOTH halves
+// of finalizeBatchPr — the push that never landed and the PR that never
+// opened — and lib/draft-ship-state.js reads apply_error on this status as
+// proof the commit does not exist, which is only true of the first. That
+// conflation is what sent a fully-pushed batch back to be regenerated from
+// scratch every day. Once the commit is confirmed on the branch, the error is
+// stale by definition: the only thing still outstanding is the PR, which is
+// what AWAITING_PR means. So the pass that established the truth writes it
+// down, rather than every later reader re-deriving it from an error string.
+export async function clearApplyErrorForPushedDraft(siteId, id) {
+  const { rows } = await query(
+    `UPDATE drafts SET apply_error = NULL, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed' AND pr_number IS NULL
+     RETURNING *`,
+    [siteId, id]
+  );
+  return rows[0] || null;
+}
