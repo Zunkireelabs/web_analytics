@@ -31,8 +31,25 @@ import { getDesignProfile, verifyProfileRoles, DESIGN_CONTEXT_GENERATOR_IDS } fr
 //    runQualityGate.clean becomes false — the draft is refused and stays
 //    open for a human to repair/retry, same as any other Quality Gate
 //    failure, never silently shipped.
+// ── Enforcement is now ON by default ────────────────────────────────────
+// The staged rollout above was written when a gate failure meant a flat
+// refusal, so enforcing early risked trading "ships something slightly off"
+// for "ships nothing at all". That tradeoff no longer applies: a design or
+// structure mismatch is now DIAGNOSED and routed back to the generator for
+// bounded, real repair attempts before anything is refused (see
+// generators/lib/design-repair-feedback.js and the repair loop in
+// routes/action-center.js's generateDraft). This gate is the FINAL safety
+// check after repair has genuinely been tried and failed — not the
+// mechanism that does the fixing — so a mismatch reaching it has already
+// survived every automatic correction the system can make, and must not
+// ship to a live customer site.
+//
+// DESIGN_INTEGRITY_ENFORCE=false remains as an escape hatch: if a thin
+// design-profile capture ever makes this fire on genuinely fine content,
+// unsetting enforcement drops it straight back to log-only (the issue is
+// still recorded and visible in Action Center) without a code change.
 export function designIntegrityEnforced() {
-  return process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+  return process.env.DESIGN_INTEGRITY_ENFORCE !== 'false';
 }
 
 /**

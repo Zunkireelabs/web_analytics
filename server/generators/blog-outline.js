@@ -91,7 +91,7 @@ async function expandSections(sections, topic) {
 
 // params: { topic: string, context?: string, start?: string, end?: string }
 export async function generate({ siteId, params }) {
-  const { topic, context } = params;
+  const { topic, context, designCorrections } = params;
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
@@ -136,7 +136,13 @@ export async function generate({ siteId, params }) {
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
     `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
-    (structureGuidance ? `\n\n${structureGuidance}` : '');
+    (structureGuidance ? `\n\n${structureGuidance}` : '')
+    // A previous attempt at THIS draft was generated and checked against the
+    // site's own design, and something didn't match. Appended last so it is
+    // the most recent instruction the model reads — see
+    // generators/lib/design-repair-feedback.js and the repair loop in
+    // routes/action-center.js's generateDraft.
+    + (designCorrections ? `\n\n${designCorrections}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });

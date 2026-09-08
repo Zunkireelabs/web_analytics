@@ -37,6 +37,7 @@ import {
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
+import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -417,16 +418,42 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   // generator's output is validated, whether called from the manual UI,
   // the MCP tool, or the unattended execution-engine/auto-remediation
   // chains — a future generator gets this for free just by existing.
-  const MAX_GENERATION_ATTEMPTS = 2;
+  // Three attempts, not two, because a retry is no longer a coin flip: the
+  // second and third carry a real, specific correction derived from what
+  // the gate just found (design-repair-feedback.js), so an extra attempt is
+  // a genuinely different try rather than the same dice re-rolled.
+  const MAX_GENERATION_ATTEMPTS = 3;
+  const canonicalTemplate = canonicalTemplateForFeedback(effectiveSite, generatorId, PAGE_TEMPLATE_TYPES_FOR_GENERATOR);
   let content, summary, gateResult;
   let firstAttemptIssues = null;
+  let designCorrections = null;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
-    ({ content, summary } = await generator.generate({ siteId, params: params || {} }));
-    gateResult = await runQualityGate(content, generatorId, siteId);
+    // The repair channel. A generator that doesn't read designCorrections
+    // simply ignores it and the attempt behaves exactly as it always did —
+    // this is additive, not a contract every generator must now satisfy.
+    ({ content, summary } = await generator.generate({
+      siteId,
+      params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
+    }));
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
+
+    // DIAGNOSE -> ROUTE BACK. Where this used to discard the gate's findings
+    // and re-roll blindly, it now turns them into an instruction naming
+    // exactly what was wrong and restating the site's own design language,
+    // and hands that to the generator for the next attempt. Only a mismatch
+    // that survives every attempt is refused below.
     if (attempt < MAX_GENERATION_ATTEMPTS) {
-      console.warn(`[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating:`, gateResult.issues);
+      designCorrections = buildCorrectionFeedback(gateResult.issues, {
+        site: effectiveSite,
+        canonicalTemplate,
+      }) || designCorrections;
+      console.warn(
+        `[action-center] ${generatorId} draft failed the Quality Gate (attempt ${attempt}), regenerating`
+        + `${designCorrections ? ' with a design/structure correction' : ''}:`,
+        gateResult.issues,
+      );
     }
   }
   if (!gateResult.clean) {
