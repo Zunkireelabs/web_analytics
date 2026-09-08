@@ -202,6 +202,20 @@ function extractBlocksInPage() {
     return (el && el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
   }
 
+  // Full, untruncated outerHTML — unlike classesOf's 300-char class-string
+  // summary, this has to stay byte-for-byte complete: it becomes the exact
+  // anchor consistency-check.js's table/typography findings are matched and
+  // patched against (see content-integrity-repair.js's 'table-style-drift'/
+  // 'typography-drift' fixTypes), the same exact-anchor discipline
+  // font-consistency-capture.js already established for its own outerHtml
+  // field. A live DOM capture, not a second static fetch, on purpose: a
+  // static re-fetch can miss classes a client-side hydration step added or
+  // removed after load, which would make the "anchor" this repair patches
+  // not the actual live markup a visitor sees.
+  function outerHtmlOf(el) {
+    return (el && typeof el.outerHTML === 'string') ? el.outerHTML : '';
+  }
+
   function unwrap(el) {
     // <header>/<nav>/<main>/<footer> are landmarks, not visual blocks — the
     // block boundaries that matter are their own direct children.
@@ -256,9 +270,11 @@ function extractBlocksInPage() {
       headingText: heading ? heading.textContent.trim().slice(0, 200) : null,
       headingStyle: styleOf(heading),
       headingClasses: classesOf(heading),
+      headingOuterHtml: outerHtmlOf(heading),
       bodyText: body ? body.textContent.trim().slice(0, 300) : null,
       bodyStyle: styleOf(body),
       bodyClasses: classesOf(body),
+      bodyOuterHtml: outerHtmlOf(body),
       ctaText: cta ? cta.textContent.trim().slice(0, 60) : null,
       ctaTag: cta ? cta.tagName.toLowerCase() : null,
       ctaClasses: classesOf(cta),
@@ -276,6 +292,7 @@ function extractBlocksInPage() {
         wrapper: classesOf(table), headerCell: classesOf(tableHeaderCell),
         row: classesOf(tableBodyRow), cell: classesOf(tableBodyCell),
       },
+      tableOuterHtml: outerHtmlOf(table),
       linkClasses: classesOf(pickLink(el)),
     });
   }

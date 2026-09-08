@@ -90,6 +90,15 @@ export const api = {
   // other caller (and every non-internal user) omits it and hits the plain
   // session-scoped route exactly as before.
   growthReport: (siteId) => (siteId ? req(`/internal/growth-report/${siteId}`) : req('/growth-report')),
+  // The client-facing "day 0" document — same client/internal pair pattern
+  // as growthReport above. downloadUrl is a plain href (not fetched via
+  // req()) since it needs to trigger a browser file download, not a JSON
+  // response; session cookies cover auth the same way any other same-origin
+  // GET does.
+  baselineReport: (siteId) => (siteId ? req(`/internal/baseline-report/${siteId}`) : req('/baseline-report')),
+  baselineReportDownloadUrl: (siteId) =>
+    `${import.meta.env.BASE_URL}api${siteId ? `/internal/baseline-report/${siteId}/download` : '/baseline-report/download'}`,
+  generateBaselineReport: (siteId) => req(`/internal/baseline-report/${siteId}/generate`, { method: 'POST' }),
   growthTargets: {
     set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
     setBatch: (targets) => req('/growth-targets/batch', { method: 'POST', body: JSON.stringify({ targets }) }),

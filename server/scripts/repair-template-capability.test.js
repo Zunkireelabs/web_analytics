@@ -31,8 +31,10 @@ let site;
 let recs;
 let gapResult; // what the mocked classifyCapabilityGap returns
 let updateSiteRepoConfigCalls;
-let githubCalls; // { createBranch, commitFilesAtomic, openPullRequest } call logs
-let existingPrsForBranch; // what listOpenPullRequestsForBranch returns — [] unless a test sets otherwise
+let githubCalls; // { createBranch, commitFilesAtomic, openPullRequest } call logs — unused by this script any more, kept only so the low-level github/client.js mock's shape stays harmless if ever called
+let existingPrsForBranch; // legacy fixture, no longer consulted (nothing here opens a PR directly any more)
+let queueCalls; // [{siteId, opts}] passed to store/shipping-queue.js's enqueue
+let queuePreparedCalls; // [{id, opts}] passed to markPrepared
 
 const realDb = await import(resolve('../db.js'));
 mock.module(resolve('../db.js'), {
@@ -73,6 +75,26 @@ mock.module(resolve('../github/client.js'), {
     openPullRequest: async (...a) => { githubCalls.openPullRequest.push(a); return { url: 'https://github.com/acme/site/pull/1', number: 1 }; },
     listOpenPullRequestsForBranch: async (...a) => { githubCalls.listOpenPullRequestsForBranch.push(a); return existingPrsForBranch; },
     defaultBranchName: () => 'main',
+  },
+});
+
+// The whole point of this suite's post-fix contract: repair-template-capability.js
+// no longer creates a branch, commits, or opens a PR itself — it queues its
+// already-validated edits (see the module's own comment) for the shared
+// 07:00 shipping run to include in ITS ONE PR. Faked here the same way
+// repair-site-content-live.test.js fakes it for content-repair.
+let nextQueueId = 1;
+mock.module(resolve('../store/shipping-queue.js'), {
+  namedExports: {
+    enqueue: async (siteId, opts) => {
+      const row = { id: nextQueueId++, site_id: siteId, state: 'queued', ...opts };
+      queueCalls.push({ siteId, opts });
+      return { row, created: true };
+    },
+    markPrepared: async (id, opts) => {
+      queuePreparedCalls.push({ id, opts });
+      return { id, state: 'prepared', ...opts };
+    },
   },
 });
 
@@ -203,6 +225,8 @@ beforeEach(() => {
   updateSiteRepoConfigCalls = [];
   githubCalls = { createBranch: [], commitFilesAtomic: [], openPullRequest: [], listOpenPullRequestsForBranch: [] };
   existingPrsForBranch = [];
+  queueCalls = [];
+  queuePreparedCalls = [];
   gapResult = { classification: 'safe-capability-gap', siblingLabel: 'src/_includes/layouts/other.njk', siblingSlot: { fieldExpr: 'item.expandedContent', raw: 'slot' }, anchorEnd: 5 };
   capabilityRepairJobResult = null;
   capabilityRepairCalls = [];
@@ -217,49 +241,35 @@ beforeEach(() => {
 });
 
 describe('repairTemplateCapabilitiesForSite — orchestration (classification logic is mocked, already tested elsewhere)', () => {
-  test('a safe-capability-gap opens a real PR via the GitHub REST client directly — no local build in between', async () => {
+  test('a safe-capability-gap QUEUES its edits for the shared shipping run — no branch/PR of its own', async () => {
     const report = await repairTemplateCapabilitiesForSite(1);
-    assert.equal(githubCalls.createBranch.length, 1);
-    assert.equal(githubCalls.commitFilesAtomic.length, 1);
-    assert.equal(githubCalls.openPullRequest.length, 1);
-    assert.equal(report.prsCreated.length, 1);
-    assert.equal(report.prsCreated[0].url, 'https://github.com/acme/site/pull/1');
+    assert.equal(githubCalls.createBranch.length, 0, 'must never create its own branch any more');
+    assert.equal(githubCalls.openPullRequest.length, 0, 'must never open its own PR any more');
+    assert.equal(queueCalls.length, 1);
+    assert.equal(queueCalls[0].opts.source, 'template-capability-repair');
+    assert.equal(queueCalls[0].opts.kind, 'file-edits');
+    assert.equal(queueCalls[0].opts.params.edits.length, 1);
+    assert.equal(queueCalls[0].opts.params.edits[0].path, 'src/_includes/layouts/service.njk');
+    assert.equal(queuePreparedCalls.length, 1, 'already validated above — marked prepared immediately, no separate preparation pass needed');
+    assert.equal(report.queued.state, 'prepared');
   });
 
-  // The branch this opens onto is date-scoped, not per-run — a second
-  // capability-repair fix landing the same calendar day must commit onto
-  // the SAME branch as an earlier one and reuse ITS already-open PR,
-  // never call openPullRequest a second time (GitHub 422s "a pull request
-  // already exists for ..." on that, which would previously crash the
-  // whole run AFTER the new commit had already landed, before this
-  // function ever reached its own url_file_map DB write below).
-  test('reuses an already-open PR for today\'s branch instead of opening a second one', async () => {
-    existingPrsForBranch = [{ number: 7, html_url: 'https://github.com/acme/site/pull/7' }];
-    const report = await repairTemplateCapabilitiesForSite(1);
-    assert.equal(githubCalls.createBranch.length, 1, 'createBranch is still called — it no-ops on "already exists"');
-    assert.equal(githubCalls.commitFilesAtomic.length, 1, 'the new fix still gets committed onto the existing branch');
-    assert.equal(githubCalls.openPullRequest.length, 0, 'never opens a second PR for the same branch');
-    assert.equal(report.prsCreated.length, 1);
-    assert.equal(report.prsCreated[0].url, 'https://github.com/acme/site/pull/7');
-    assert.equal(report.prsCreated[0].number, 7);
-    assert.equal(report.prsCreated[0].reused, true);
-  });
-
-  test('dry-run classifies and reports, but never touches any GitHub write endpoint', async () => {
+  test('dry-run classifies and reports, but never queues or touches any GitHub write endpoint', async () => {
     const report = await repairTemplateCapabilitiesForSite(1, { dryRun: true });
     assert.equal(githubCalls.createBranch.length, 0);
     assert.equal(githubCalls.commitFilesAtomic.length, 0);
     assert.equal(githubCalls.openPullRequest.length, 0);
-    assert.equal(report.prsCreated.length, 0);
+    assert.equal(queueCalls.length, 0);
+    assert.equal(report.queued, undefined);
     assert.equal(updateSiteRepoConfigCalls.length, 0);
   });
 
-  test('a plumbing-gap (slot already exists, only config is missing) writes url_file_map directly and opens no PR at all', async () => {
+  test('a plumbing-gap (slot already exists, only config is missing) writes url_file_map directly and queues nothing', async () => {
     gapResult = { classification: 'plumbing-gap', ownSlot: { fieldExpr: 'item.expandedContent' }, anchorSlots: [] };
     const report = await repairTemplateCapabilitiesForSite(1);
     assert.equal(githubCalls.createBranch.length, 0);
-    assert.equal(githubCalls.openPullRequest.length, 0);
-    assert.equal(report.prsCreated.length, 0);
+    assert.equal(queueCalls.length, 0);
+    assert.equal(report.queued, undefined);
     assert.equal(report.plumbingGapsFixed.length, 1);
     assert.equal(updateSiteRepoConfigCalls.length, 1);
   });
@@ -284,7 +294,7 @@ describe('repairTemplateCapabilitiesForSite — orchestration (classification lo
   test('no blocked recommendations at all is a clean no-op', async () => {
     recs = [];
     const report = await repairTemplateCapabilitiesForSite(1);
-    assert.equal(report.prsCreated.length, 0);
+    assert.equal(report.queued, undefined);
     assert.equal(githubCalls.createBranch.length, 0);
   });
 
@@ -307,7 +317,7 @@ describe('repairTemplateCapabilitiesForSite — live architectural-gap execution
     site.auto_remediation_enabled = true;
   });
 
-  test('a validated repair folds both file edits into the SAME PR as any other gap — no separate PR of its own', async () => {
+  test('a validated repair queues both file edits as ONE shared-queue item — no PR of its own', async () => {
     capabilityRepairJobResult = {
       filesChanged: [
         { path: 'src/_includes/layouts/service.njk', newContent: TEMPLATE_AFTER },
@@ -318,11 +328,12 @@ describe('repairTemplateCapabilitiesForSite — live architectural-gap execution
     assert.equal(report.architecturalGapsRepaired.length, 1);
     assert.equal(report.architecturalGapsRepaired[0].fieldName, 'expandedContent');
     assert.equal(report.architecturalGapsBlocked.length, 0);
-    // Exactly ONE PR for the whole run, covering both files — not a second,
-    // separate PR "merely because a capability repair was performed".
-    assert.equal(githubCalls.openPullRequest.length, 1);
-    assert.equal(githubCalls.commitFilesAtomic.length, 1);
-    const [, , files] = githubCalls.commitFilesAtomic[0];
+    // No PR/branch of its own — the edits are handed to the shared queue as
+    // ONE item covering both files, for the 07:00 shipping run's single PR.
+    assert.equal(githubCalls.openPullRequest.length, 0);
+    assert.equal(githubCalls.commitFilesAtomic.length, 0);
+    assert.equal(queueCalls.length, 1);
+    const files = queueCalls[0].opts.params.edits;
     assert.deepEqual(files.map((f) => f.path).sort(), ['src/_data/servicesShared.js', 'src/_includes/layouts/service.njk']);
     assert.equal(updateSiteRepoConfigCalls.length, 1);
     assert.equal(capabilityRepairRecordCalls.length, 1);

@@ -1,5 +1,5 @@
 import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
-import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, countDraftsBySourceToday, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
+import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
@@ -19,6 +19,11 @@ import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
+import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
+import { countDraftsBySourcesToday } from '../../store/drafts.js';
+import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, QUEUE_STATES } from '../../store/shipping-queue.js';
+import { recordFixOutcome } from '../../agent-memory.js';
+import { sanitizeForCustomer } from '../../lib/errors.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -110,30 +115,15 @@ const CREDENTIAL_RETRY_DELAY_MS = Number(process.env.CREDENTIAL_RETRY_DELAY_MS ?
 // findings and an ANALYST lane for forward-looking growth and prevention, and
 // they are counted separately so each stays observable on its own.
 //
-//   Analytics: targets ANALYTICS_TARGET (60) and may stretch to
-//              ANALYTICS_MAX (100) when enough valid, high-quality work
-//              exists. When fewer than the target exist, the day simply
-//              ships every valid finding there is — the target is an
-//              intention, never a quota, and nothing is ever manufactured or
-//              quality-relaxed to reach it.
-//   Analyst:   up to ANALYST_MAX (20), and NOT expected to fill. Only items
-//              that clear the evidence bar take these slots; an empty analyst
-//              lane on a quiet day is the system working, not underperforming.
-//
-// Both lanes draw from what is genuinely eligible, so the real composition
-// follows the work: 100+20, 80+20, 40+20, 10+15, or 0+12 are all valid days.
-// COMBINED_MAX (120) is the only hard stop.
-//
-// Why a hard stop at all: every shipped item costs several GitHub API calls
-// against a 5,000/hour token budget that is SHARED across sites, and rate
-// limiting is already the single largest abandon cause in the live drafts
-// table. github/client.js reads the real headers and auto-remediation stops
-// the run when the remaining budget falls under RATE_LIMIT_RESERVE, so the
-// ceiling is a second belt on top of a working brace — not the only defence.
-const ANALYTICS_TARGET = Number(process.env.AUTO_REMEDIATION_ANALYTICS_TARGET) || 60;
-const ANALYTICS_MAX = Number(process.env.AUTO_REMEDIATION_ANALYTICS_MAX) || 100;
-const ANALYST_MAX = Number(process.env.AUTO_REMEDIATION_ANALYST_MAX) || 20;
-const COMBINED_MAX = Number(process.env.AUTO_REMEDIATION_COMBINED_MAX) || 120;
+// The actual sizing arithmetic lives in lib/autonomous-quota.js — a single,
+// pure, unit-tested module shared by every autonomous producer (see that
+// file's own header for the full numbers and why 100 is an absolute ceiling
+// across both lanes AND every autonomous source, not per-lane). This module
+// used to own its own copy of these constants (ANALYTICS_MAX=100,
+// COMBINED_MAX=120), which made "100 + 20 = 120" a documented, intentional
+// possibility — directly contradicting "100 is the absolute hard ceiling
+// across ALL autonomous sources." laneBudgets() below is what makes that
+// combination structurally unreachable instead of merely undocumented.
 
 export async function autoRemediateSafeRecommendations(siteId, {
   globalRemaining = Infinity,
@@ -171,7 +161,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     getPendingDraftFilePaths(siteId),
-    countDraftsBySourceToday(siteId, SOURCE, site.timezone || 'UTC'),
+    // Counted across EVERY autonomous shipping lane (auto-remediation,
+    // analyst-keyword-gap, learned-repair, content-repair, design-agent —
+    // see AUTONOMOUS_DRAFT_SOURCES), not just this one. Two lanes each
+    // measuring only their own spend against the shared ceiling is exactly
+    // how "100 total" used to become "100 + 20" in practice.
+    countDraftsBySourcesToday(siteId, AUTONOMOUS_DRAFT_SOURCES, site.timezone || 'UTC'),
     // Phase 5: real outcome history for this site, read once per run. A
     // generator whose recent real attempts have repeatedly failed or been
     // rejected is excluded here — not just reported differently elsewhere —
@@ -292,51 +287,48 @@ export async function autoRemediateSafeRecommendations(siteId, {
     console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
   }
 
-  // Lane sizing. `site.auto_remediation_daily_limit` is honoured as an
-  // explicit per-site override of the Analytics target when set, so an
-  // operator can still hold one tenant lower without touching this logic.
-  //
-  // The override caps the SURGE ceiling too, not just the target — an
-  // operator setting daily_limit=3 (or 0, to pause a tenant entirely) means
-  // "never more than this for this site," and Math.max(analyticsTarget,
-  // ANALYTICS_MAX) used to silently ignore that: any override below 100
-  // still let the day surge to the GLOBAL 100-item max whenever enough
-  // candidates existed, which defeated the one thing an explicit override
-  // exists to do. Only the unset (default) case gets the global surge
-  // ceiling; an explicit override IS the ceiling.
-  const dailyLimitOverride = site.auto_remediation_daily_limit;
-  const analyticsTarget = dailyLimitOverride ?? ANALYTICS_TARGET;
-  const analyticsMax = dailyLimitOverride != null ? dailyLimitOverride : ANALYTICS_MAX;
+  // Lane sizing — delegated entirely to lib/autonomous-quota.js's
+  // laneBudgets(), the single place both numbers (60/20 normal, 100 hard
+  // ceiling across every autonomous source) are decided. `site.
+  // auto_remediation_daily_limit` still works as an explicit per-site
+  // override (laneBudgets' siteLimitOverride) — it can only ever TIGHTEN the
+  // day, never raise it past the platform's hard ceiling, which is what
+  // makes an operator's override actually mean "never more than this."
+  // Fetched here, BEFORE budget sizing, so their demand is real input to
+  // laneBudgets — not an afterthought squeezed into whatever headroom
+  // happened to survive ordinary analytics selection. Without this, a day
+  // with zero open recommendations but real queued learned-repair/
+  // file-edits work computed remaining=0 from analyticsCandidates=0 alone
+  // and returned before the drain code below ever ran, silently leaving
+  // genuinely prepared, already-validated work unshipped.
+  const learnedRepairQueueItems = (await listQueueItemsByState(siteId, QUEUE_STATES.QUEUED)).filter((r) => r.source === 'learned-repair');
+  // Every producer that queues its own PRE-COMPUTED, already-validated file
+  // edits rather than a draft — content-repair (repair-site-content-live.js)
+  // and template-capability-repair (repair-template-capability.js). Both
+  // share the identical shape (params.edits, params.commitMessage) and the
+  // identical drain treatment below, so they are not distinguished by
+  // source here — only by `kind`.
+  const fileEditsQueueItems = (await listQueueItemsByState(siteId, QUEUE_STATES.PREPARED)).filter((r) => r.kind === 'file-edits');
+  const sharedQueueDemand = learnedRepairQueueItems.length + fileEditsQueueItems.length;
 
-  // The analyst lane never exceeds the evidence available for it. Sized from
-  // real candidates, so it is empty on a day with nothing forward-looking to
-  // do rather than being padded from the analytics backlog.
-  const analystLane = Math.min(ANALYST_MAX, decliningCandidates.length);
-
-  // Analytics stretches toward its max only on genuinely eligible work — the
-  // count here is post-pacing, post-convergence, post-refusal, so "enough
-  // valid work" means exactly that.
-  const analyticsCandidates = candidates.length - decliningCandidates.length;
-  const analyticsLane = Math.min(analyticsMax, Math.max(0, analyticsCandidates));
-
-  // COMBINED_MAX is applied to the TOTAL, and the analyst lane is protected
-  // when the two together would breach it: analytics backlog is effectively
-  // unbounded (236 eligible expand-content items alone), so letting it absorb
-  // the ceiling first would silently close the analyst lane on exactly the
-  // busy days prevention matters most.
-  const analystBudget = Math.min(analystLane, COMBINED_MAX);
-  const analyticsBudget = Math.min(analyticsLane, COMBINED_MAX - analystBudget);
-  const dailyLimit = analyticsBudget + analystBudget;
+  const analyticsCandidates = candidates.length - decliningCandidates.length + sharedQueueDemand;
+  const { analyticsBudget, analystBudget, dailyLimit, remaining, ceiling, target } = laneBudgets({
+    analyticsCandidates,
+    analystCandidates: decliningCandidates.length,
+    siteLimitOverride: site.auto_remediation_daily_limit,
+    spentToday,
+    globalRemaining,
+  });
 
   console.log(
-    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget}/${analyticsMax} `
-    + `(target ${analyticsTarget}, ${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
-    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${COMBINED_MAX}.`
+    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget} `
+    + `(${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
+    + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${ceiling} (spent today across every `
+    + `autonomous lane: ${spentToday}).`
   );
-  if (analyticsCandidates < analyticsTarget) {
-    console.log(`[auto-remediation] site ${siteId}: only ${analyticsCandidates} valid analytics finding(s) available — shipping all of them rather than padding to the ${analyticsTarget} target.`);
+  if (dailyLimit < target) {
+    console.log(`[auto-remediation] site ${siteId}: only ${dailyLimit} genuinely eligible item(s) available against the ${target} normal target — shipping all of them rather than padding to reach it.`);
   }
-  const remaining = Math.max(0, Math.min(dailyLimit - spentToday, globalRemaining));
   if (remaining === 0) {
     // A dailyLimit of 0 from zero genuinely eligible candidates is not the
     // same fact as a real budget cap being reached — nothing was ever
@@ -466,9 +458,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return null;
   };
 
-  const batching = queue.length > 0 || backfillPool.length > 0;
+  // SHARED QUEUE DRAIN — the other autonomous producers that no longer open
+  // their own PR (learned-repair.js, repair-site-content-live.js). Their
+  // work was already decided/prepared earlier in the day (see
+  // store/shipping-queue.js) and fetched above (feeding laneBudgets, so a
+  // day with real queued work but zero ordinary recommendations still gets a
+  // nonzero budget); this run's job is only to fold whatever fits in today's
+  // remaining headroom into THIS SAME batch, so the platform still produces
+  // exactly one PR. How many actually get DRAINED is capped by real
+  // remaining headroom computed AFTER the main loop below (`remaining -
+  // attempted`), since backfill can consume budget unpredictably up to
+  // `remaining` and headroom must never be over-estimated before that's known.
+  const batching = queue.length > 0 || backfillPool.length > 0 || learnedRepairQueueItems.length > 0 || fileEditsQueueItems.length > 0;
   if (batching) beginBatchPush(site, branchName);
   const pending = []; // { rec, draft }
+  // Non-draft-backed batch members — content-repair's file-edits. Tracked
+  // separately from `pending` because finalizeBatchPr's draftIds must be
+  // real `drafts` table rows (it feeds pending[0].draft.id to openDraftPr);
+  // these never create one.
+  const shippedFileEditsQueueIds = [];
   let prUrl = null;
   // A mutable work queue: quarantine backfilling appends to it in place, so
   // the loop below stays a single straightforward pass over `workQueue`
@@ -691,6 +699,100 @@ export async function autoRemediateSafeRecommendations(siteId, {
     }
   }
 
+  // SHARED QUEUE DRAIN, continued: fold whatever real headroom is left after
+  // the ordinary analytics/analyst loop above into THIS SAME batch. Headroom
+  // is computed here, not before the loop, because backfill can consume
+  // budget unpredictably up to `remaining` — only after the loop finishes is
+  // "how much is actually left today" a real number.
+  let queueHeadroom = Math.max(0, remaining - attempted);
+
+  // learned-repair: a queued INTENT, not yet generated. This run doubles as
+  // both preparation and shipping for this lane (see learned-repair.js's own
+  // module comment) — generation happens right here, through the exact same
+  // shipDraftForRecommendation pipeline every ordinary item in this run
+  // already used, so a borrowed repair gets the same Quality Gate,
+  // design-verification and failure handling as anything else.
+  for (const item of learnedRepairQueueItems) {
+    if (queueHeadroom <= 0) break;
+    queueHeadroom--;
+    attempted++;
+    try {
+      const approved = await shipDraftForRecommendation(siteId, {
+        generatorId: item.generator_id, params: item.params, findingId: item.finding_id,
+        source: SOURCE, findingOrigin: 'learned-repair', memoryRefId: item.memory_ref_id,
+        waitForDesignAgent: true, deferPr: true, batchBranch: branchName,
+      });
+      if (approved.alreadyShipped) {
+        // A prior run's commit for this same finding already reached
+        // 'branch_pushed'/beyond — nothing new to ship, but the queue row
+        // must still leave 'queued' or it would sit there forever.
+        await markQueueItemShipped(item.id).catch(() => {});
+        continue;
+      }
+      pending.push({
+        rec: { id: null, recommendation_type: item.generator_id, finding_ids: [item.finding_id] },
+        draft: approved,
+        learnedRepairQueueId: item.id,
+        memoryRefId: item.memory_ref_id,
+      });
+    } catch (err) {
+      failed++;
+      console.warn(`[auto-remediation] site ${siteId}: learned-repair queue item ${item.id} (${item.generator_id}) could not be prepared, leaving it for the Action Center:`, err.message);
+      // ITEM-STATE refusals say nothing about whether the borrowed repair
+      // itself is portable — see learned-repair.js's identical prior
+      // reasoning, preserved here since this is now where that ship attempt
+      // actually happens.
+      const isItemStateRefusal = err.reason === 'awaiting-human-review' || err.reason === 'draft-reset';
+      await releaseQueueItem(item.id, { retryable: isItemStateRefusal, error: String(err.message || '').slice(0, 500) }).catch(() => {});
+      if (!isItemStateRefusal) {
+        await recordFixOutcome({
+          memoryRefId: item.memory_ref_id, outcome: 'failure', agentId: 'learned-repair',
+          generatorId: item.generator_id, siteId,
+          notes: `cross-client repair failed: ${sanitizeForCustomer(err.message, '(internal error — see server logs)')}`,
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // FILE-EDITS lanes (content-repair, template-capability-repair): edits
+  // already computed and validated by their own producer — nothing left to
+  // generate, only to push onto the same batch commit chain. Not gated by
+  // queueHeadroom in the same per-slot sense as generator-produced work (both
+  // are small, fixed-volume correctness/unblocking repairs — see their own
+  // high fixed `score` at enqueue time) but still count toward
+  // `attempted`/the shared ceiling like every other autonomous item, so a
+  // pathological day can't use them to bypass the 100-item hard stop.
+  // Whether the batch branch already has a real ref on GitHub. pushDraftBranch
+  // creates it for real (not deferred — only the FINAL ref move at
+  // endBatchPush is deferred) the first time `exists` is false; every push
+  // after that first one, in this run, MUST pass exists:true or it tries to
+  // re-create an already-existing branch. `pending.length > 0` here already
+  // reflects every earlier real push this run (the ordinary analytics/
+  // analyst loop and the learned-repair drain above), so it is the correct
+  // starting value.
+  let branchExistsOnGithub = pending.length > 0;
+  for (const item of fileEditsQueueItems) {
+    if (queueHeadroom <= 0) break;
+    queueHeadroom--;
+    attempted++;
+    try {
+      const files = (item.params?.edits || []).map(({ path, content }) => ({ path, content }));
+      const pushed = await pushDraftBranch(
+        site,
+        { id: `${item.source}-${item.id}`, action_type: item.source },
+        files,
+        { branchName, exists: branchExistsOnGithub },
+      );
+      if (!pushed.ok) throw new Error(pushed.error || `${item.source} push failed`);
+      branchExistsOnGithub = true;
+      shippedFileEditsQueueIds.push(item.id);
+    } catch (err) {
+      failed++;
+      console.warn(`[auto-remediation] site ${siteId}: ${item.source} queue item ${item.id} could not be pushed onto the batch, leaving it for the next run:`, err.message);
+      await releaseQueueItem(item.id, { retryable: true, error: String(err.message || '').slice(0, 500) }).catch(() => {});
+    }
+  }
+
   // One real push + one PR open for the whole run (see beginBatchPush
   // above), instead of one of each per item. Every `pending` item's commit
   // already landed locally; this either confirms all of them together as
@@ -727,7 +829,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
       if (transient) stoppedReason = 'github-rate-limited';
-      await Promise.all(pending.map(async ({ rec, draft }) => {
+      await Promise.all(pending.map(async ({ rec, draft, learnedRepairQueueId, memoryRefId }) => {
         // A transient failure is not scored against the generator either:
         // generator-learning.js reads these outcomes to decide what to trust,
         // and a rate limit says nothing about whether this generator's output
@@ -742,17 +844,37 @@ export async function autoRemediateSafeRecommendations(siteId, {
         await record.catch((recordErr) => {
           console.error(`[auto-remediation] could not ${transient ? 'mark retryable' : 'abandon'} draft ${draft.id} after batch push/PR failure:`, recordErr.message);
         });
+        if (learnedRepairQueueId) {
+          await releaseQueueItem(learnedRepairQueueId, { retryable: transient, error: finalization.error }).catch(() => {});
+          if (!transient) {
+            recordFixOutcome({
+              memoryRefId, outcome: 'failure', agentId: 'learned-repair', generatorId: rec.recommendation_type, siteId,
+              notes: `batch push/PR failed: ${sanitizeForCustomer(finalization.error, '(internal error — see server logs)')}`,
+            }).catch(() => {});
+          }
+        }
       }));
-    } else if (pending.length > 0) {
+      if (shippedFileEditsQueueIds.length) {
+        await Promise.all(shippedFileEditsQueueIds.map((id) => releaseQueueItem(id, { retryable: transient, error: finalization.error }).catch(() => {})));
+      }
+    } else if (pending.length > 0 || shippedFileEditsQueueIds.length > 0) {
       prUrl = finalization.prUrl;
-      for (const { rec, draft } of pending) {
+      for (const { rec, draft, learnedRepairQueueId, memoryRefId } of pending) {
         shipped++;
         // Phase 5: best-effort, never awaited into the failure path — a
         // logging problem must not turn a real shipped fix into a reported
         // failure. recordOutcome already swallows its own errors internally.
         recordOutcome(siteId, rec.recommendation_type, 'shipped', { recommendationId: rec.id, draftId: draft.id }).catch(() => {});
+        if (learnedRepairQueueId) {
+          markQueueItemShipped(learnedRepairQueueId).catch(() => {});
+          recordFixOutcome({ memoryRefId, outcome: 'success', agentId: 'learned-repair', generatorId: rec.recommendation_type, siteId }).catch(() => {});
+        }
       }
-      console.log(`[auto-remediation] site ${siteId}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s)).`);
+      for (const id of shippedFileEditsQueueIds) {
+        shipped++;
+        markQueueItemShipped(id).catch(() => {});
+      }
+      console.log(`[auto-remediation] site ${siteId}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s), ${shippedFileEditsQueueIds.length} file-edits item(s)).`);
     }
   }
 

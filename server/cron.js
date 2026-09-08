@@ -5,6 +5,7 @@ import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
 import { reapStaleAuditRuns } from './store/audit-runs.js';
 import { reconcileAllSites } from './lib/action-center-reconciler.js';
+import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 
 // Schedule the daily job. The container's TZ env var makes "07:00" local to the
 // site timezone, so it runs after GSC/GA4 have settled for the target dates.
@@ -21,6 +22,18 @@ export function startCron() {
   cron.schedule(
     schedule,
     async () => {
+      // Locked for the run's whole duration (detection through shipping) —
+      // not per sub-step — so a second scheduler hitting this same minute
+      // (e.g. a laptop dev server left running alongside the VPS's own cron,
+      // the actual 2026-09-08 incident) finds the lock held and skips the
+      // entire pass rather than racing one step of it.
+      const { ran } = await withJobLock(jobKeyFor('daily-job', 'all-sites'), () => runDailyJobBody());
+      if (!ran) console.log('[cron] daily job skipped — another process already holds the lock');
+    },
+    { timezone: tz }
+  );
+
+  async function runDailyJobBody() {
       const startedAt = new Date().toISOString();
       console.log(`[cron] daily job started ${startedAt}`);
       try {
@@ -32,14 +45,17 @@ export function startCron() {
 
       // Shared-template ('site-fact') capability repair, right after
       // detection and before shipping — it reads that run's freshly-blocked
-      // recommendations and opens its own PR directly (see job.js's own
-      // comment on why this is a separate step from the shipping run
-      // below, which only ships already-drafted/approved recommendations).
+      // recommendations and QUEUES its edits (store/shipping-queue.js), the
+      // same as repair-site-content-live.js below; it no longer opens a PR
+      // of its own. Still run as a separate step BEFORE the shipping run,
+      // because unblocking a capability gap here is what lets this same
+      // morning's shipping run actually draft the recommendations it was
+      // blocking.
       console.log(`[cron] template-capability repair run started ${new Date().toISOString()}`);
       try {
         const results = await runTemplateCapabilityRepairForAllSites();
-        const prsOpened = results.reduce((n, r) => n + (r.prsCreated?.length || 0), 0);
-        console.log(`[cron] template-capability repair run finished — ${prsOpened} PR(s) opened across ${results.length} site(s)`);
+        const queued = results.filter((r) => r.queued).length;
+        console.log(`[cron] template-capability repair run finished — ${queued} site(s) queued for the shared shipping run across ${results.length} site(s)`);
       } catch (err) {
         console.error('[cron] template-capability repair run error:', err.message);
       }
@@ -69,8 +85,11 @@ export function startCron() {
       try {
         const results = await runContentRepairForAllSites();
         const filesRepaired = results.reduce((n, r) => n + (r.changedFiles?.length || 0), 0);
-        const prsOpened = results.filter((r) => r.prCreated).length;
-        console.log(`[cron] content repair run finished — ${filesRepaired} file(s) repaired, ${prsOpened} PR(s) opened across ${results.length} site(s)`);
+        // Queued, not PR'd — see repair-site-content-live.js's own module
+        // comment. Its edits ship in the SAME single PR the shipping run
+        // below opens, alongside every other autonomous lane.
+        const queued = results.filter((r) => r.queued).length;
+        console.log(`[cron] content repair run finished — ${filesRepaired} file(s) repaired, ${queued} site(s) queued for the shared shipping run across ${results.length} site(s)`);
       } catch (err) {
         console.error('[cron] content repair run error:', err.message);
       }
@@ -114,18 +133,24 @@ export function startCron() {
       // must not cost every OTHER site its PRs, which is the same per-tenant
       // isolation runAutoRemediationForAllSites already applies internally.
       if (!process.env.SHIP_CRON_SCHEDULE) {
-        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
-        try {
-          const results = await runAutoRemediationForAllSites();
-          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
-          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
-        } catch (err) {
-          console.error('[cron] autonomous shipping run error:', err.message);
-        }
+        // Same lock key the standalone shipping cron and its :35 catch-up
+        // guard use below — chained mode still shares the underlying
+        // GitHub-token-spending work, so it must never overlap either of
+        // them even though this call is nested inside the daily-job lock,
+        // not the shipping one.
+        const { ran: shipRan } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), async () => {
+          console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+          try {
+            const results = await runAutoRemediationForAllSites();
+            const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+            console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+          } catch (err) {
+            console.error('[cron] autonomous shipping run error:', err.message);
+          }
+        });
+        if (!shipRan) console.log('[cron] autonomous shipping run (chained) skipped — another process already holds the lock');
       }
-    },
-    { timezone: tz }
-  );
+  }
 
   console.log(`[cron] daily job scheduled "${schedule}" (${tz})`);
 
@@ -289,7 +314,11 @@ export function startCron() {
       const hourInTz = nowInTz.getHours();
       if (hourInTz < 7) return; // before scheduled time — nothing to recover
 
-      await runHourlyCatchupForAllSites(tz);
+      // Same lock as the daily job itself: this guard's whole reason to
+      // exist is recovering a MISSED run, so it must never overlap a run
+      // already in progress (this process's own, or another process's).
+      const { ran } = await withJobLock(jobKeyFor('daily-job', 'all-sites'), () => runHourlyCatchupForAllSites(tz));
+      if (!ran) console.log('[cron] hourly catch-up guard skipped — daily job lock held');
     } catch (err) {
       console.error('[cron] hourly guard error:', err.message);
     }
@@ -310,14 +339,17 @@ export function startCron() {
     console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
   } else {
     cron.schedule(shipSchedule, async () => {
-      console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
-      try {
-        const results = await runAutoRemediationForAllSites();
-        const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
-        console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
-      } catch (err) {
-        console.error('[cron] autonomous shipping run error:', err.message);
-      }
+      const { ran } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), async () => {
+        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+        try {
+          const results = await runAutoRemediationForAllSites();
+          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+        } catch (err) {
+          console.error('[cron] autonomous shipping run error:', err.message);
+        }
+      });
+      if (!ran) console.log('[cron] autonomous shipping run skipped — another process already holds the lock');
     }, { timezone: tz });
     console.log(`[cron] autonomous shipping scheduled "${shipSchedule}" (${tz})`);
   }
@@ -331,7 +363,8 @@ export function startCron() {
   // in the job, not here, because it depends on each site's timezone.
   cron.schedule('35 * * * *', async () => {
     try {
-      await runAutoRemediationCatchupForAllSites(tz);
+      const { ran } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), () => runAutoRemediationCatchupForAllSites(tz));
+      if (!ran) console.log('[cron] autonomous shipping catch-up skipped — shipping lock held');
     } catch (err) {
       console.error('[cron] autonomous shipping catch-up error:', err.message);
     }

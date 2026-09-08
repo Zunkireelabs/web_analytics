@@ -37,6 +37,14 @@ export const VERIFIABLE_GENERATOR_IDS = new Set([
   'canonical', 'open-graph', 'breadcrumbs', 'qa-content',
 ]);
 
+// analytics-install (trust-compliance.js) is verified differently from the
+// set above — not a tag re-check (recommendationsFor/contentGapsFor have no
+// concept of "GA4/Pixel installed"), but a literal, direct check that the
+// SPECIFIC configured tracking ID this draft shipped is now really present in
+// the live page's HTML — see fix-verification.js's verifyAnalyticsInstall.
+// Reuses this same scheduling table/machinery rather than a bespoke one.
+const TRACKING_ID_VERIFIABLE_GENERATOR_IDS = new Set(['analytics-install']);
+
 export function isVerifiableDraft(draft) {
   // finding_origin (migration 119) is the real detecting agent, preserved
   // separately from `source` (which auto-remediation.js/execution-engine
@@ -44,7 +52,20 @@ export function isVerifiableDraft(draft) {
   // `source` for rows with no recorded origin (pre-migration rows, or a
   // caller with no separate origin to give, e.g. a manual click where
   // `source` already IS the real detecting agent).
-  return VERIFIABLE_SOURCES.has(draft.finding_origin || draft.source)
+  const origin = draft.finding_origin || draft.source;
+
+  if (TRACKING_ID_VERIFIABLE_GENERATOR_IDS.has(draft.action_type)) {
+    // A placeholder draft (no real ID known at generation time) has nothing
+    // to verify yet — never schedule a check for a script that was never
+    // installed with a real tracking ID in the first place.
+    return origin === 'trust-compliance'
+      && !!draft.finding_id
+      && !!draft.input?.page
+      && !!draft.input?.trackingId
+      && !draft.content?.placeholderFields?.length;
+  }
+
+  return VERIFIABLE_SOURCES.has(origin)
     && !!draft.finding_id
     && VERIFIABLE_GENERATOR_IDS.has(draft.action_type)
     && !!draft.input?.page;

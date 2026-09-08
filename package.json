@@ -52,6 +52,7 @@
     "googleapis": "^144.0.0",
     "http-proxy-middleware": "^3.0.7",
     "lucide-react": "^1.23.0",
+    "marked": "^18.0.12",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.16",
     "openai": "^4.77.0",

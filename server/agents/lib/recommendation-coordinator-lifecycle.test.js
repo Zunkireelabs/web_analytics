@@ -75,3 +75,74 @@ describe('syncFromGrounded — droppedRecommendations reach markRecommendationsU
     assert.equal(markedUnfixable, null);
   });
 });
+
+// The tracking-ID staleness bug (2026-09-08): analytics-install's finding id
+// (`trust-compliance:ga4:missing`) is deterministic and stays IDENTICAL every
+// day the tracker remains uninstalled, so re-detecting the exact same finding
+// used to early-return before ever calling mergeIntoRecommendation — the only
+// place params get refreshed. A recommendation created before the site's real
+// GA4 ID was configured in the database therefore never picked that ID up
+// through ordinary daily sync; only the failure-triggered recovery path
+// (action-center-reconciler.js, gated behind MAX_FAILED_ATTEMPTS) eventually
+// forced a refresh. Confirmed live: recommendation #47 on site 1 carried no
+// trackingId for 17 days and 15 failed drafts before that recovery path
+// finally set it. syncFromGrounded must merge fresh params on EVERY sync,
+// whether or not the finding id changed.
+describe('syncFromGrounded — repeat-finding params refresh (tracking-ID staleness fix)', () => {
+  test('a recommendation with an unchanged finding id still gets fresh params merged', async () => {
+    openRecommendation = {
+      id: 47,
+      finding_ids: ['trust-compliance:ga4:missing'],
+      detecting_agents: ['trust-compliance'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'trust-compliance:ga4:missing',
+        generatorId: 'analytics-install',
+        source: 'trust-compliance',
+        reason: 'No Google Analytics detected',
+        // The whole point: trackingId is now populated because the site's
+        // real config was read fresh this sync, even though the finding id
+        // itself is identical to yesterday's.
+        params: { provider: 'ga4', page: 'https://zunkireelabs.com/', trackingId: 'G-2ZQRDS0D14' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['trust-compliance:ga4:missing']),
+    });
+
+    assert.equal(merged.length, 1, 'mergeIntoRecommendation must be called even for an already-seen finding id');
+    assert.equal(merged[0].id, 47);
+    assert.deepEqual(merged[0].params, { provider: 'ga4', page: 'https://zunkireelabs.com/', trackingId: 'G-2ZQRDS0D14' });
+    assert.equal(refreshed.length, 0, 'the old block-state-only refresh path is fully replaced by the merge, not run twice');
+  });
+
+  test('a genuinely new finding id on an existing recommendation still merges (unchanged behavior)', async () => {
+    openRecommendation = {
+      id: 9,
+      finding_ids: ['expand-content:/blog/a/:thin'],
+      detecting_agents: ['content-gap'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'expand-content:/blog/a/:thin-v2',
+        generatorId: 'expand-content',
+        source: 'content-gap',
+        reason: 'still thin',
+        params: { page: '/blog/a/' },
+        priority: 'low',
+      }],
+      detectedKeys: new Set(['expand-content:/blog/a/:thin-v2']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].findingId, 'expand-content:/blog/a/:thin-v2');
+  });
+});

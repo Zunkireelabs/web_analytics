@@ -49,3 +49,38 @@ describe('isVerifiableDraft — finding_origin vs source', () => {
     assert.equal(isVerifiableDraft(draft({ finding_origin: 'opportunity', input: {} })), false);
   });
 });
+
+// analytics-install (trust-compliance.js) is verified by a different
+// mechanism (a literal tracking-ID presence check, not a tag re-derivation —
+// see agents/lib/fix-verification.js's verifyAnalyticsInstall), but reuses
+// this same eligibility gate.
+function analyticsDraft(overrides = {}) {
+  return {
+    source: 'auto-remediation', finding_origin: 'trust-compliance', finding_id: 'trust-compliance:analytics:missing',
+    action_type: 'analytics-install',
+    input: { page: 'https://x.com/', provider: 'ga4', trackingId: 'G-ABC123' },
+    content: { trackingId: 'G-ABC123', placeholderFields: [] },
+    ...overrides,
+  };
+}
+
+describe('isVerifiableDraft — analytics-install (tracking-ID verification)', () => {
+  test('a real, non-placeholder analytics-install draft is verifiable', () => {
+    assert.equal(isVerifiableDraft(analyticsDraft()), true);
+  });
+
+  test('a placeholder draft (no real ID yet) is never scheduled — nothing to verify', () => {
+    const d = analyticsDraft({ content: { trackingId: '[NEEDS INPUT — not verifiable from real site data]', placeholderFields: ['trackingId'] } });
+    assert.equal(isVerifiableDraft(d), false);
+  });
+
+  test('an analytics-install draft from a non-trust-compliance origin is not verifiable', () => {
+    assert.equal(isVerifiableDraft(analyticsDraft({ finding_origin: null, source: 'action-center' })), false);
+  });
+
+  test('still requires finding_id, page, and a real input trackingId', () => {
+    assert.equal(isVerifiableDraft(analyticsDraft({ finding_id: null })), false);
+    assert.equal(isVerifiableDraft(analyticsDraft({ input: { page: 'https://x.com/' } })), false);
+    assert.equal(isVerifiableDraft(analyticsDraft({ input: { trackingId: 'G-ABC123' } })), false);
+  });
+});

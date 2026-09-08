@@ -163,7 +163,7 @@ export async function processOneJob({
     // persister decide" shape as the two branches above.
     if (job.params?.mode === 'consistency-scan' && outcome?.consistencyFindings) {
       const result = await persistConsistency(job.site_id, outcome.consistencyFindings);
-      await appendJobLog(job.id, `Consistency scan: ${outcome.pagesScanned} page(s) scanned, ${outcome.consistencyFindings.length} finding(s) across ${result.pagesWithFindings} page(s), ${result.created} recommendation(s) created (${result.skipped} already open).`);
+      await appendJobLog(job.id, `Consistency scan: ${outcome.pagesScanned} page(s) scanned, ${result.totalFindings} finding(s) across ${result.pagesWithFindings} page(s) — ${result.automatable} routed to a generator (content-integrity-repair), ${result.manualCreated} new manual-review recommendation(s) created (${result.manualSkipped} already open).`);
     }
 
     await appendJobLog(job.id, 'Job completed');

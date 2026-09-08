@@ -110,7 +110,12 @@ export function compareSectionsToProfile(profile, segmentedPages) {
           findings.push({
             id: TABLE_FINDING, pageUrl: page.url, pageType: page.pageType,
             sectionRole: section.role, sectionOrder: section.order,
-            evidence: { sectionClasses: table.classes.wrapper, siteConvention: profile.components.table.wrapper },
+            // outerHtml is the live-captured anchor a routed fix patches
+            // against (see design-consistency.js) — absent (never
+            // fabricated) whenever capture.js couldn't resolve a table
+            // element to capture it from, which correctly leaves this
+            // finding unroutable rather than routed against a guessed anchor.
+            evidence: { sectionClasses: table.classes.wrapper, siteConvention: profile.components.table.wrapper, outerHtml: table.outerHtml || '' },
           });
         }
       }
@@ -140,9 +145,12 @@ export function compareSectionsToProfile(profile, segmentedPages) {
             findings.push({
               id: TYPOGRAPHY_FINDING, pageUrl: page.url, pageType: page.pageType,
               sectionRole: section.role, sectionOrder: section.order,
+              // outerHtml: same live-captured-anchor discipline as the table
+              // finding above.
               evidence: {
                 textRole: item.role, sectionClasses: item.classes,
                 siteConvention: item.role === 'body' ? profile.typography.body : profile.typography.heading.item,
+                outerHtml: item.outerHtml || '',
               },
             });
           }

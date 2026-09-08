@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 // Runs the full content-repair pipeline (cap enforcement, marker-styling
 // re-render, blog front-matter contract, placeholder removal) against a
-// tenant's REAL repo via the GitHub API, and opens one PR if anything changed.
+// tenant's REAL repo via the GitHub API, and — if anything changed — QUEUES
+// the computed, validated edits onto the shared shipping queue
+// (store/shipping-queue.js, migration 148) rather than committing or opening
+// a PR itself. The 07:00 auto-remediation run drains that queue into its own
+// one build/one commit/one PR batch. This used to open its own separate PR
+// directly; that was one of two autonomous producers bypassing the shared
+// shipping pipeline (the other was learned-repair.js), which is why the
+// daily ceiling and "one PR per day" could both be silently exceeded.
 //
 // WHY THIS EXISTS
 //
@@ -45,13 +52,14 @@ import { mkdtemp, rm, mkdir, writeFile as fsWriteFile, readFile as fsReadFile } 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { getSiteById } from '../store/read.js';
-import { getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic } from '../github/client.js';
-import { baseBranch, getOrInitBatchBranch, openPrForBranch } from '../implementers/lib/github-ops.js';
+import { getRepoTree, getFileContent } from '../github/client.js';
+import { baseBranch } from '../implementers/lib/github-ops.js';
 import { enforceVisibleFaqCap } from './enforce-visible-faq-cap.js';
 import { repairSiteMarkerStyling } from './repair-site-marker-styling.js';
 import { repairNewContentFrontmatter } from './repair-newcontent-frontmatter.js';
 import { stripPlaceholderContent } from './strip-placeholder-content.js';
 import { fixCollectionSelfInclusion } from './fix-collection-self-inclusion.js';
+import { enqueue as enqueueShippingWork, markPrepared as markShippingWorkPrepared } from '../store/shipping-queue.js';
 
 // Everything these repairs touch lives under src/ — SEOAI markers, Eleventy
 // data files, blog front matter. Materializing only this subtree (not the
@@ -121,43 +129,50 @@ export async function repairSiteContentLive(siteId, { dryRun = false } = {}) {
     report.changedFiles = edits.map((e) => e.path);
     if (!edits.length || dryRun) return report;
 
-    // SAME branch/PR the Action Center's own daily batch uses
-    // (github-ops.js's batchBranchName/getOrInitBatchBranch), not a separate
-    // `content-repair/DATE` branch of its own. This runs first in the
-    // morning cron sequence (see cron.js — role correction, then content
-    // repair, then auto-remediation), so on a normal day this is the commit
-    // that CREATES today's shared branch, and whatever Action Center ships
-    // afterward lands as later commits on the same branch/PR. On a day
-    // Action Center ships nothing, openPrForBranch below still guarantees a
-    // real PR exists for this repair alone — the two orderings converge on
-    // one shared PR either way because openPrForBranch always checks for an
-    // already-open PR on the branch and reuses it rather than opening a
-    // second one.
+    // QUEUED, not committed here. This used to open its own
+    // `content-repair/DATE` PR directly against GitHub — the exact
+    // "no autonomous production generator may open its own PR" bypass the
+    // shared shipping queue (migration 148, store/shipping-queue.js) exists
+    // to close. The repair work above (fetch, diff, validate) IS the
+    // preparation step — it is real, already-computed, already-validated
+    // file content — so it goes straight to 'prepared' with the edits
+    // carried in `params`, ready for the 07:00 shipping run to commit onto
+    // whatever ONE shared batch branch that run creates and to include in
+    // its ONE PR, alongside Analytics/Analyst/learned-repair work. No commit,
+    // no branch, no PR happens in this function anymore.
     //
-    // Previously this repair opened its own separate `content-repair/DATE`
-    // PR with a hand-written body listing every changed file. That
-    // descriptive text now lives in the commit message instead (still
-    // fully visible to a reviewer, same as every Action Center commit on
-    // this branch already works) — the PR itself carries generic batch
-    // wording once shared, exactly like every other day's Action Center PR.
-    const { branchName, exists, conflicted } = await getOrInitBatchBranch(site);
-    if (conflicted) { report.skipped = 'batch-branch-conflicted'; return report; }
-    if (!exists) {
-      const fromSha = await getBranchSha(site, ref);
-      await createBranch(site, branchName, fromSha);
-    }
-    await commitFilesAtomic(site, branchName, edits,
-      `Repair shipped content to match the site's own design (${edits.length} file(s))\n\n`
+    // The commit message content (previously a hand-written PR body) is
+    // preserved as `summary` in params, so the shipping run's own commit
+    // message can still describe exactly what changed.
+    const commitMessage = `Repair shipped content to match the site's own design (${edits.length} file(s))\n\n`
       + 'No text changed. Re-renders SEOAI-marker and data-array content through this site\'s current '
       + 'component templates, enforces visible_faq_cap, aligns generated blog front matter with its '
       + 'directory\'s own contract, and removes any section that still carries an unresolved citation '
       + 'or an invented competitor.\n\n'
       + `${edits.map((e) => `- ${e.path}`).join('\n')}\n\n`
-      + 'See server/scripts/repair-site-content-live.js.');
+      + 'See server/scripts/repair-site-content-live.js.';
 
-    const pr = await openPrForBranch(site, null, branchName);
-    if (!pr.ok) { report.skipped = 'pr-open-failed'; report.error = pr.error; return report; }
-    report.prCreated = { url: pr.prUrl, number: pr.prNumber, reused: pr.reused };
+    const { row } = await enqueueShippingWork(siteId, {
+      source: 'content-repair', lane: 'analytics', kind: 'file-edits',
+      params: { edits, commitMessage },
+      // High, fixed priority: this is a correctness repair (shipped content
+      // not matching the site's own design), not a growth optimization, and
+      // small in volume (one run per site per day) — it should not have to
+      // out-compete the analytics backlog's ordinary scoring to actually ship.
+      score: 1_000_000,
+    });
+    if (row) {
+      // Preparation (generation-equivalent) already succeeded above — mark
+      // it 'prepared' immediately rather than waiting for a separate pass to
+      // claim and redo work that is already done. A re-run of this repair
+      // against a row already 'prepared'/'shipping' finds enqueue() a no-op
+      // (the dedupe key is stable per site — see dedupeKeyFor's kind:'draft'
+      // hash fallback) and markPrepared on an already-'shipping' row is
+      // guarded by its own WHERE state <> 'shipped' clause, so a duplicate
+      // cron firing can never double-queue or clobber an in-flight batch.
+      const prepared = await markShippingWorkPrepared(row.id, { filePaths: edits.map((e) => e.path), score: 1_000_000 });
+      report.queued = { id: row.id, state: prepared?.state || row.state };
+    }
     return report;
   } finally {
     await rm(tempDir, { recursive: true, force: true });

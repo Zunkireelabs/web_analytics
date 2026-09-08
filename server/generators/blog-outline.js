@@ -5,6 +5,7 @@ import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/pag
 import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -127,9 +128,15 @@ export async function generate({ siteId, params }) {
     'list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
     '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+  // DESIGN CONTEXT REACHES GENERATION HERE, same as landing-page.js — this
+  // site's own real, canonical (or live-observed) blog-article structure
+  // guides section shape/count for a post about a topic the site has never
+  // covered, instead of every generated post reinventing its own shape.
+  const structureGuidance = pageStructureGuidance(site, 'blog-article', { fallbackPageTypes: ['blog-listing'] });
   const user = `Topic: ${topic}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
-    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
+    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 2500, generatorId: meta.id, siteId });

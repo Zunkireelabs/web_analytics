@@ -23,6 +23,7 @@ import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
 import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
+import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
@@ -281,6 +282,16 @@ async function runBaselineSequence(siteId, site) {
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
 
+  // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
+  // a single LLM call, not a slow crawl, so this is awaited like
+  // ingestion/analysis above rather than fire-and-forget like the full site
+  // audit below. A failure here must never fail onboarding itself; staff can
+  // retry via the "Generate Now" route or generate-baseline-report.js.
+  const baselineReport = await buildBaselineReport(siteId).catch((err) => {
+    console.error(`[clients] site ${siteId} baseline report generation failed:`, err.message);
+    return null;
+  });
+
   // Real "where you stand today" findings for Milestones — fire-and-forget
   // like the manual /site-audit trigger: resolves once the audit_runs row
   // exists, the actual crawl+audit keeps running well past this request's
@@ -296,7 +307,7 @@ async function runBaselineSequence(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore,
+    discovery, ingestion, analysis, healthScore, baselineReport,
   };
 }
 

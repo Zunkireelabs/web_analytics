@@ -23,6 +23,7 @@ import { callLLMForJson } from '../../llm.js';
 // gives keyword-gap-approved recommendations the exact same
 // Design-fit-before-Action-Center guarantee with no new code of its own.
 import { generateDraft } from '../../routes/action-center.js';
+import { countDraftsBySourceToday } from '../../store/drafts.js';
 
 // Maps an Analyst (data-analyst-agent) insight onto the existing Action
 // Center draft-generation pipeline — a completely separate system keyed by
@@ -867,6 +868,32 @@ export function isoWeekStart(d = new Date()) {
   return utc.toISOString().slice(0, 10);
 }
 
+// THE source string every draft this pipeline creates is tagged with (see
+// createActionCenterRecommendationForGap's generateDraft call). Deliberately
+// distinct from auto-remediation.js's 'auto-remediation' so the two lanes
+// stay separately attributable — which is exactly why this one needs its own
+// cap below rather than inheriting that one's.
+const GAP_DRAFT_SOURCE = 'analyst-keyword-gap';
+
+// Daily ceiling for THIS pipeline. It had none at all until now, and that was
+// a real hole in the platform's shipping limits rather than a deliberate
+// exemption: auto-remediation.js caps itself by counting drafts with
+// source='auto-remediation' (countDraftsBySourceToday), and job.js's
+// platform-wide AUTO_REMEDIATION_GLOBAL_DAILY_CEILING counts the same source
+// — so every draft opened here was invisible to both, and a single Monday
+// ship cycle could open unbounded PRs no limit ever saw. The per-gap evidence
+// gates above (two observations, non-decreasing demand, one-week-old) bound
+// WHICH gaps qualify, but nothing bounded HOW MANY shipped in one pass.
+//
+// 20/day matches the analyst allocation auto-remediation.js already reserves
+// for evidence-driven work (its ANALYST_MAX), so the two analyst-side lanes
+// carry the same daily weight rather than one being implicitly unlimited.
+// Over-cap gaps are NOT dropped: they stay 'pending_review' (the status
+// change below only happens for gaps this pass actually ships), so the next
+// run reconsiders them with their evidence intact — carried forward, exactly
+// like auto-remediation's own over-budget candidates.
+const CONTENT_GAP_DAILY_MAX = Number(process.env.ANALYST_CONTENT_GAP_DAILY_MAX || 20);
+
 export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
   const gaps = await getKeywordGaps(siteId, 'pending_review');
@@ -904,6 +931,12 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     hasStableOrGrowingDemand(gap)
   );
 
+  // Measured once, before the loop, against drafts THIS pipeline already
+  // opened today (its own source, its own lane). A dryRun still reports what
+  // it would have been bounded to, so the cap is visible without shipping.
+  const spentToday = dryRun ? 0 : await countDraftsBySourceToday(siteId, GAP_DRAFT_SOURCE, resolvedSite?.timezone || 'UTC');
+  let remaining = Math.max(0, CONTENT_GAP_DAILY_MAX - spentToday);
+
   const results = [];
   for (const gap of candidates) {
     const eligibility = gapDraftEligibility(gap);
@@ -933,16 +966,33 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
       continue;
     }
 
+    // Budget checked HERE, after every cheap disqualification above, so a
+    // pass full of non-eligible or landing-page gaps doesn't burn budget it
+    // never spent. Deferred gaps keep status 'pending_review' (the approve
+    // below is what would have moved them), so nothing is lost — the next
+    // run picks them up with their evidence and week attribution unchanged.
+    if (remaining <= 0) {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'daily-cap-reached', generatorId: eligibility.generatorId, deferred: true });
+      continue;
+    }
+
     // Same order as the human-approval PUT route (server/routes/keywords.js):
     // persist the status change first, then hand the FRESH row (not the
     // pre-fetch snapshot) to createActionCenterRecommendationForGap, so it
     // never operates on stale field values.
     const updated = await updateKeywordGapStatus(siteId, gap.id, 'approved');
     const outcome = await createActionCenterRecommendationForGap(siteId, updated || gap);
+    remaining -= 1;
     results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, ...outcome });
   }
 
-  return { siteId: resolvedSite?.id ?? siteId, pending: gaps.length, candidates: candidates.length, shipped: results.filter((r) => r.qualified && !dryRun).length, dryRun, results };
+  return {
+    siteId: resolvedSite?.id ?? siteId, pending: gaps.length, candidates: candidates.length,
+    shipped: results.filter((r) => r.qualified && !dryRun).length,
+    deferred: results.filter((r) => r.deferred).length,
+    dailyLimit: CONTENT_GAP_DAILY_MAX, spentToday,
+    dryRun, results,
+  };
 }
 
 function analystReason(insight, predicted) {

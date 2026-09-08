@@ -48,6 +48,9 @@ let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the
 let recordedOutcomes; // Phase 5: [{generatorId, outcome}] recorded via the mocked recordOutcome below
 let learnedMap; // Phase 5: generatorId -> {demote, ...} fed to classifyRecommendation via the mocked getLearnedConfidenceMap
 let onboardingPending; // two-stage onboarding: whether the whole-site analysis job is still in flight
+let learnedRepairQueueItems; // rows store/shipping-queue.js's listByState(QUEUED) would return, filtered to source='learned-repair' by the code under test
+let contentRepairQueueItems; // rows store/shipping-queue.js's listByState(PREPARED) would return, filtered to source='content-repair'/kind='file-edits'
+let contentRepairPushOn; // (queueId) => boolean — simulates a specific content-repair item's pushDraftBranch call failing
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
@@ -81,6 +84,12 @@ function reset() {
   approveOpensPr = false;
   recordedOutcomes = [];
   learnedMap = new Map();
+  learnedRepairQueueItems = [];
+  contentRepairQueueItems = [];
+  contentRepairPushOn = () => false;
+  calls.queueShipped = [];
+  calls.queueReleased = [];
+  calls.fixOutcomes = [];
 }
 let generateAttempts;
 reset();
@@ -103,6 +112,7 @@ mock.module(resolve('../../store/drafts.js'), {
     getDraftedFindingIds: async () => draftedFindingIds,
     getPendingDraftFilePaths: async () => pendingDraftFilePaths,
     countDraftsBySourceToday: async () => spentToday,
+    countDraftsBySourcesToday: async () => spentToday,
     hasRecentDraftOfType: async (siteId, actionType, days) => days > 0 && recentDraftTypes.has(actionType),
     submitDraftForApproval: async (siteId, draftId) => (stuckDraftStatus ? null : { id: draftId }),
     getDraft: async (siteId, draftId) => ({ id: draftId, status: stuckDraftStatus || 'draft', branch_name: stuckDraftBranch }),
@@ -147,6 +157,41 @@ mock.module(resolve('./generator-learning.js'), {
 mock.module(resolve('../../implementers/lib/onboarding-readiness.js'), {
   namedExports: { isOnboardingAnalysisPending: async () => onboardingPending },
 });
+// The shared shipping queue's other lanes — learned-repair's queued intents
+// and content-repair's already-prepared file edits (see store/shipping-queue.js,
+// migration 148). This module's own real logic (dedupe, state transitions)
+// is covered directly by store/shipping-queue.test.js; what's under test
+// here is auto-remediation's OWN decision to drain them into this run's
+// single batch, so every export is a thin fake driven by the fixtures above.
+mock.module(resolve('../../store/shipping-queue.js'), {
+  namedExports: {
+    QUEUE_STATES: { QUEUED: 'queued', PREPARING: 'preparing', PREPARED: 'prepared', SHIPPING: 'shipping', SHIPPED: 'shipped', FAILED: 'failed', SUPERSEDED: 'superseded' },
+    // The fixtures (learnedRepairQueueItems/contentRepairQueueItems) list only
+    // the fields each test cares about — `source`/`kind` are stamped on here
+    // rather than repeated in every fixture literal, since the code under
+    // test filters listByState's result by exactly those two fields (real
+    // store rows are not source-scoped by the query itself; that filtering
+    // is the auto-remediation.js code's own job, which this proves by
+    // requiring it to actually happen).
+    listByState: async (siteId, state) => (
+      state === 'queued' ? learnedRepairQueueItems.map((r) => ({ source: 'learned-repair', ...r }))
+        : state === 'prepared' ? contentRepairQueueItems.map((r) => ({ source: 'content-repair', kind: 'file-edits', ...r }))
+          : []
+    ),
+    markShipped: async (id) => { calls.queueShipped.push(id); },
+    releaseItem: async (id, opts) => { calls.queueReleased.push({ id, ...opts }); },
+  },
+});
+mock.module(resolve('../../agent-memory.js'), {
+  namedExports: {
+    recordFixOutcome: async (args) => { calls.fixOutcomes.push(args); return 1; },
+    // Not exercised by this file (nothing here ever gets far enough to look
+    // one up — that's learned-repair-intercept.test.js's own contract), but
+    // learned-repair.js imports it at module load time, and something in
+    // this test's own graph now transitively imports learned-repair.js.
+    findPortableRepairs: async () => { throw new Error('must not be reached from auto-remediation.test.js'); },
+  },
+});
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: {
     generateDraft: async (siteId, { generatorId, findingId, findingOrigin }) => {
@@ -185,8 +230,22 @@ mock.module(resolve('../../routes/action-center.js'), {
         : { id: draftId, branch_name: `auto/${draftId}` };
     },
     // The manual "Push Branch" retry the unattended path now reuses to
-    // resume a draft stranded at 'approved' by a failed apply().
-    pushDraftBranch: async (siteId, draftId) => {
+    // resume a draft stranded at 'approved' by a failed apply(). This same
+    // mocked export also stands in for github-ops.js's real pushDraftBranch
+    // in its OTHER call shape — the file-edits queue drain (content-repair,
+    // template-capability-repair) calls it as (site, draftLike, files,
+    // target) directly, never through the resume-a-stranded-draft path
+    // above, so the two are told apart by arity. draftLike.id is
+    // `${source}-${queueId}` (auto-remediation.js's own format), so the
+    // numeric id is whatever trails the LAST hyphen.
+    pushDraftBranch: async (a, b, files, target) => {
+      if (files !== undefined) {
+        const queueId = Number(String(b.id).split('-').pop());
+        calls.branchPushRetries.push(b.id);
+        if (contentRepairPushOn(queueId)) return { ok: false, error: `simulated push failure for file-edits item ${queueId}` };
+        return { ok: true, branchName: target.branchName };
+      }
+      const draftId = b;
       calls.branchPushRetries.push(draftId);
       return { id: draftId, branch_name: `retry/${draftId}` };
     },
@@ -604,6 +663,134 @@ describe('batched PR opening', () => {
     assert.equal(result.failed, 1);
     assert.deepEqual(calls.retryable, []);
     assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1']);
+  });
+});
+
+// The shared shipping queue drain — learned-repair's queued intents and
+// content-repair's already-prepared file edits join THIS SAME batch, rather
+// than either one opening its own PR (the two bypasses closed by routing
+// both through store/shipping-queue.js). See that module and
+// learned-repair.js/repair-site-content-live.js's own module comments.
+describe('shared shipping queue drain — learned-repair', () => {
+  beforeEach(reset);
+
+  test('a queued learned-repair item is generated, shipped, and joins the SAME single PR as ordinary work', async () => {
+    recommendations = [rec(1)];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: { page: '/lr' }, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1, 'still exactly one PR for the whole run');
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds.sort(), ['d-f1', 'd-lr-1'].sort(), 'the learned-repair draft rides in the SAME batch as ordinary analytics work');
+    assert.equal(result.shipped, 2, 'both the ordinary recommendation and the learned-repair item count as shipped');
+    assert.deepEqual(calls.queueShipped, [501], 'the queue row is marked shipped once the batch PR is confirmed open');
+    assert.equal(calls.fixOutcomes.length, 1);
+    assert.deepEqual(calls.fixOutcomes[0], { memoryRefId: 42, outcome: 'success', agentId: 'learned-repair', generatorId: 'alt-text', siteId: 1 });
+  });
+
+  test('a learned-repair item ships even on a day with ZERO ordinary analytics work — the batch still begins for it alone', async () => {
+    recommendations = [];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-lr-1']);
+    assert.equal(result.shipped, 1);
+  });
+
+  test('a failed learned-repair generation is released back to the queue and recorded as a failed reuse against its memory', async () => {
+    recommendations = [];
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'broken-gen', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+    failOn = (type) => type === 'broken-gen';
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.failed, 1);
+    assert.equal(calls.queueShipped.length, 0);
+    assert.equal(calls.queueReleased.length, 1);
+    assert.equal(calls.queueReleased[0].id, 501);
+    assert.equal(calls.queueReleased[0].retryable, false);
+    assert.equal(calls.fixOutcomes.length, 1);
+    assert.equal(calls.fixOutcomes[0].outcome, 'failure');
+    assert.equal(calls.fixOutcomes[0].memoryRefId, 42);
+  });
+
+  test('learned-repair items respect the same remaining daily budget — never bypass it', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1)]; // consumes the only slot
+    learnedRepairQueueItems = [{ id: 501, generator_id: 'alt-text', finding_id: 'lr-1', params: {}, memory_ref_id: 42 }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.shipped, 1, 'only the one budgeted item ships');
+    assert.equal(calls.queueShipped.length, 0, 'the learned-repair item is left queued, not drained past the ceiling');
+    assert.equal(calls.queueReleased.length, 0, 'left untouched (still queued) — not released as a failure either, since it was never attempted');
+  });
+});
+
+describe('shared shipping queue drain — content-repair', () => {
+  beforeEach(reset);
+
+  test('a prepared content-repair file-edit item is pushed onto the batch and ships in the same PR, without ever becoming a draft', async () => {
+    recommendations = [rec(1)];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }], commitMessage: 'repair' } }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-f1'], 'content-repair never creates a drafts row, so it never appears in draftIds');
+    assert.ok(calls.branchPushRetries.includes('content-repair-701'), 'its files are pushed onto the same batch branch');
+    assert.equal(result.shipped, 2, 'the ordinary recommendation and the content-repair edit both count as shipped');
+    assert.deepEqual(calls.queueShipped, [701]);
+  });
+
+  test('content-repair alone (no ordinary work, no learned-repair) still produces exactly one PR', async () => {
+    recommendations = [];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }] } }];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1);
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, [], 'no draft-backed items this run');
+    assert.equal(result.shipped, 1);
+    assert.deepEqual(calls.queueShipped, [701]);
+  });
+
+  test('a failed content-repair push is released back to the queue as retryable, not abandoned', async () => {
+    recommendations = [];
+    contentRepairQueueItems = [{ id: 701, params: { edits: [{ path: 'src/a.njk', content: 'x' }] } }];
+    contentRepairPushOn = (id) => id === 701;
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.failed, 1);
+    assert.equal(calls.queueShipped.length, 0);
+    assert.equal(calls.queueReleased.length, 1);
+    assert.equal(calls.queueReleased[0].id, 701);
+    assert.equal(calls.queueReleased[0].retryable, true, 'a push failure is a plumbing issue, not evidence the repair itself was wrong');
+  });
+
+  // The third PR-bypass closed: repair-template-capability.js used to open
+  // its OWN dedicated branch/PR directly. It now queues exactly like
+  // content-repair (same kind:'file-edits' shape), so it drains through the
+  // identical code path — proven here with a DIFFERENT source, alongside a
+  // content-repair item in the same run, to show both coexist in one batch.
+  test('a template-capability-repair file-edit item ships in the SAME batch as a content-repair item and ordinary work', async () => {
+    recommendations = [rec(1)];
+    contentRepairQueueItems = [
+      { id: 701, source: 'content-repair', params: { edits: [{ path: 'src/a.njk', content: 'x' }] } },
+      { id: 702, source: 'template-capability-repair', params: { edits: [{ path: 'src/layouts/service.njk', content: 'y' }] } },
+    ];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(calls.batchFinalizeCalls.length, 1, 'still exactly one PR for the whole run');
+    assert.deepEqual(calls.batchFinalizeCalls[0].draftIds, ['d-f1']);
+    assert.ok(calls.branchPushRetries.includes('content-repair-701'));
+    assert.ok(calls.branchPushRetries.includes('template-capability-repair-702'));
+    assert.equal(result.shipped, 3, 'the ordinary recommendation plus both file-edits items');
+    assert.deepEqual(calls.queueShipped.sort(), [701, 702]);
   });
 });
 

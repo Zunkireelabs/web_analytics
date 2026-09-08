@@ -287,6 +287,98 @@ describe('content-integrity-repair — font-size-override', () => {
   });
 });
 
+describe('content-integrity-repair — table-style-drift / typography-drift (design-consistency routing)', () => {
+  test('table-style-drift swaps only the class attribute, leaving the rest of the anchor untouched', async () => {
+    const { content, summary } = await generate({
+      params: {
+        page: 'https://example.com/pricing', fixType: 'table-style-drift',
+        sectionClasses: 'old-table plain', siteConvention: 'table w-full border',
+        outerHtml: '<table class="old-table plain"><tbody><tr><td>1</td></tr></tbody></table>',
+      },
+    });
+    assert.equal(content.fixType, 'table-style-drift');
+    assert.equal(content.anchorHtml, '<table class="old-table plain"><tbody><tr><td>1</td></tr></tbody></table>');
+    assert.equal(content.replacement, '<table class="table w-full border"><tbody><tr><td>1</td></tr></tbody></table>');
+    assert.match(summary, /table's styling/i);
+  });
+
+  test('typography-drift swaps a heading\'s class attribute the same way', async () => {
+    const { content } = await generate({
+      params: {
+        page: 'https://example.com/about', fixType: 'typography-drift',
+        sectionClasses: 'text-sm text-gray-500', siteConvention: 'text-3xl font-bold',
+        outerHtml: '<h2 class="text-sm text-gray-500">About us</h2>',
+      },
+    });
+    assert.equal(content.replacement, '<h2 class="text-3xl font-bold">About us</h2>');
+  });
+
+  test('class-token order/whitespace differences from detection do not block the match — same tokens, different order, still matches', async () => {
+    const { content } = await generate({
+      params: {
+        page: 'https://example.com/about', fixType: 'typography-drift',
+        sectionClasses: 'text-gray-500 text-sm', // reversed order vs. the live anchor below
+        siteConvention: 'text-3xl font-bold',
+        outerHtml: '<p class="text-sm  text-gray-500">Body copy</p>',
+      },
+    });
+    assert.equal(content.replacement, '<p class="text-3xl font-bold">Body copy</p>');
+  });
+
+  test('requires outerHtml', async () => {
+    await assert.rejects(
+      () => generate({ params: { page: 'https://example.com/x', fixType: 'table-style-drift', sectionClasses: 'a', siteConvention: 'b' } }),
+      /no live-captured section markup/i,
+    );
+  });
+
+  test('requires siteConvention', async () => {
+    await assert.rejects(
+      () => generate({ params: { page: 'https://example.com/x', fixType: 'table-style-drift', sectionClasses: 'a', outerHtml: '<table class="a"></table>' } }),
+      /no real site design convention/i,
+    );
+  });
+
+  test('refuses when the anchor\'s current class no longer matches what detection observed — the page changed since the scan ran', async () => {
+    await assert.rejects(
+      () => generate({
+        params: {
+          page: 'https://example.com/x', fixType: 'typography-drift',
+          sectionClasses: 'stale-class', siteConvention: 'new-class',
+          outerHtml: '<h2 class="a-completely-different-class">Hi</h2>',
+        },
+      }),
+      /no longer matches what design-consistency detected/i,
+    );
+  });
+
+  test('refuses when the anchor has no class attribute at all', async () => {
+    await assert.rejects(
+      () => generate({
+        params: {
+          page: 'https://example.com/x', fixType: 'table-style-drift',
+          sectionClasses: 'a', siteConvention: 'b', outerHtml: '<table><tbody></tbody></table>',
+        },
+      }),
+      /no longer matches what design-consistency detected/i,
+    );
+  });
+
+  test('does not fetch the page at all — grounded in the live-captured outerHtml, same discipline as font-size-override', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('should not be called'); };
+    try {
+      const { content } = await generate({
+        params: {
+          page: 'https://example.com/x', fixType: 'table-style-drift',
+          sectionClasses: 'old', siteConvention: 'new', outerHtml: '<table class="old"></table>',
+        },
+      });
+      assert.equal(content.replacement, '<table class="new"></table>');
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
+
 describe('content-integrity-repair — duplicate-faq', () => {
   test('removes the later of two containers whose questions substantially overlap', async () => {
     const html = `<html><body>${GROUNDING}

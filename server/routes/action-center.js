@@ -36,6 +36,7 @@ import {
 } from '../store/drafts.js';
 import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mode.js';
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
+import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -43,7 +44,7 @@ import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
 import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
-import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } from '../implementers/lib/github-ops.js';
+import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush, openPrForBranch } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
 import { getUserById } from '../store/users.js';
@@ -369,6 +370,40 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
     if (!verification.ok) {
       console.warn(`[action-center] ${generatorId} has no verified Design Context yet (${verification.reason}) — generating with the default fallback template.`);
+    }
+
+    // CANONICAL PAGE TEMPLATE, stage — the page-TYPE-level sibling of the
+    // componentTemplate resolution just above. For a net-new-WHOLE-PAGE
+    // generator (design-agent/lib/page-templates.js's
+    // PAGE_TEMPLATE_TYPES_FOR_GENERATOR), find-or-compose this site's
+    // canonical structural template BEFORE the generator ever runs, exactly
+    // the same "first use pays the derivation cost, every later use of the
+    // same type reuses it" contract componentTemplates already gives faq/
+    // expand-content/qa-content/internal-links/content-wrapper. Persisted by
+    // resolveOrCreateCanonicalPageTemplate itself (not here), so the very
+    // next generateDraft call for this site+type — even from a different
+    // process — sees it too. Never a gate: a site with no usable design
+    // profile yet, or genuinely no real pattern for this page type, simply
+    // generates with no structural guidance, same as before this existed.
+    const pageTemplateTypes = PAGE_TEMPLATE_TYPES_FOR_GENERATOR[generatorId];
+    if (pageTemplateTypes) {
+      const pageTemplateResult = await resolveOrCreateCanonicalPageTemplate(effectiveSite, pageTemplateTypes)
+        .catch((err) => { console.error(`[action-center] canonical page-template resolution failed for ${generatorId}:`, err.message); return null; });
+      if (pageTemplateResult?.ok && pageTemplateResult.template) {
+        effectiveSite = {
+          ...effectiveSite,
+          url_file_map: {
+            ...effectiveSite.url_file_map,
+            siteRoot: {
+              ...effectiveSite.url_file_map?.siteRoot,
+              pageTemplates: {
+                ...effectiveSite.url_file_map?.siteRoot?.pageTemplates,
+                [pageTemplateResult.pageType]: pageTemplateResult.template,
+              },
+            },
+          },
+        };
+      }
     }
   }
 
@@ -1130,18 +1165,50 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
 // strand-and-hide concern approveAndPublishDraftUnattended's own doc
 // comment describes: a 'branch_pushed' draft nobody ever finalizes would
 // otherwise permanently hide its recommendation from future runs.
-export async function finalizeBatchPr(site, branchName, draftIds) {
-  const pushResult = await endBatchPush(site, branchName);
+// dpOpenDraftPr/dpMarkDraftPrOpened/dpOpenPrForBranch: injectable, same DI
+// convention as approveAndPublishDraftUnattended just above — lets this
+// function's own decision (which of the two PR-opening paths to take, and
+// what happens on each failure) be tested directly against real, small fakes
+// instead of module-mocking action-center.js's own huge import graph (which
+// breaks under --experimental-test-module-mocks the same way documented
+// elsewhere in this repo — see action-center-batch-pr-finalize.test.js).
+export async function finalizeBatchPr(site, branchName, draftIds, {
+  dpOpenDraftPr = openDraftPr,
+  dpMarkDraftPrOpened = markDraftPrOpened,
+  dpOpenPrForBranch = openPrForBranch,
+  dpEndBatchPush = endBatchPush,
+} = {}) {
+  const pushResult = await dpEndBatchPush(site, branchName);
   if (!pushResult.ok) return { ok: false, error: pushResult.error, rateLimited: pushResult.rateLimited === true };
-  if (pushResult.pushed === 0 || draftIds.length === 0) {
+  if (pushResult.pushed === 0) {
     return { ok: true, pushed: 0, prNumber: null, prUrl: null };
   }
   try {
-    const first = await openDraftPr(site.id, draftIds[0]);
-    const prNumber = first.pr_number;
-    const prUrl = first.pr_url;
-    for (const id of draftIds.slice(1)) {
-      await markDraftPrOpened(site.id, id, { prNumber, prUrl, rollbackSnapshot: null });
+    let prNumber; let prUrl;
+    if (draftIds.length > 0) {
+      const first = await dpOpenDraftPr(site.id, draftIds[0]);
+      prNumber = first.pr_number;
+      prUrl = first.pr_url;
+      for (const id of draftIds.slice(1)) {
+        await dpMarkDraftPrOpened(site.id, id, { prNumber, prUrl, rollbackSnapshot: null });
+      }
+    } else {
+      // Real commits landed on this batch branch with no `drafts` row behind
+      // ANY of them — the shape a content-repair-only day produces (its
+      // file-edits are queued and pushed straight from
+      // server/lib/shipping-queue-drain.js, never through the drafts table
+      // at all; see store/shipping-queue.js). Before this branch existed,
+      // `draftIds.length === 0` short-circuited above and returned
+      // prUrl: null even though pushResult.pushed was > 0 — a real pushed
+      // branch with no PR, exactly the stranded shape
+      // lib/batch-pr-recovery.js exists to recover FROM, created here
+      // instead of by an outage. Opened generically, the same way
+      // repair-site-content-live.js used to open its own separate PR before
+      // it was routed through the shared queue.
+      const pr = await dpOpenPrForBranch(site, null, branchName);
+      if (!pr.ok) throw Object.assign(new Error(pr.error || 'Batch PR could not be opened'), { rateLimited: pr.rateLimited === true });
+      prNumber = pr.prNumber;
+      prUrl = pr.prUrl;
     }
     return { ok: true, pushed: pushResult.pushed, prNumber, prUrl };
   } catch (err) {

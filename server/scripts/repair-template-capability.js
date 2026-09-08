@@ -37,9 +37,9 @@ import { query } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { updateSiteRepoConfig } from '../db.js';
 import {
-  getRepoTree, getFileContent, getBranchSha, createBranch, commitFilesAtomic, openPullRequest, defaultBranchName,
-  listOpenPullRequestsForBranch,
+  getRepoTree, getFileContent, defaultBranchName,
 } from '../github/client.js';
+import { enqueue as enqueueShippingWork, markPrepared as markShippingWorkPrepared } from '../store/shipping-queue.js';
 import {
   classifyCapabilityGap, buildTemplatePatch, deriveAdapterConfig, getGeneratorValueKey, parseAiManagedSlots,
   findSlotForGenerator, fieldNameFromExpr,
@@ -326,7 +326,11 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
     // Net-new-content generatorIds (FRONTEND_ACTION_TYPES) healed via
     // autoHealNewContentTarget — PASS 0b below. List of actionType strings.
     contentTargetsHealed: [],
-    filesChanged: [], prsCreated: [], refusals: [],
+    // `queued` is set (not an array — see the push+PR section below) only
+    // when this run's edits were actually handed to the shared shipping
+    // queue; undefined otherwise. Replaces the old `prsCreated` array — this
+    // script no longer opens a PR itself, so there is nothing to list.
+    filesChanged: [], refusals: [],
   };
 
   if (!recs.length) {
@@ -725,48 +729,48 @@ export async function repairTemplateCapabilitiesForSite(siteId, {
     });
   }
 
-  // ---- Push + PR the template edits (if any), BEFORE touching our own DB ----
+  // ---- Queue the template edits (if any), BEFORE touching our own DB ----
   //
-  // No local clone, no local build — this pushes real content straight
-  // through the same GitHub REST client every other implementer in this
-  // codebase already uses, and lets the CLIENT's own CI (the
-  // "rendering-validation" GitHub Actions workflow, installed once via
-  // scripts/install-rendering-workflow.js) build and report back on the
-  // PR itself, same trust boundary as rendering-gate.js's Phase 2
-  // (checkClientBuildStatus) for every other draft. A failed build shows up
-  // as a failed check on the PR — visible to the human who reviews it
-  // before merging, never silently hidden, just not pre-empted locally.
+  // This used to push straight to its own dedicated branch
+  // (`action-center/template-capability-repair-DATE`) and open its own PR —
+  // a THIRD autonomous producer bypassing the shared shipping queue, on top
+  // of the two closed earlier (learned-repair.js, repair-site-content-live.js).
+  // The validation work is unchanged and still happens entirely HERE, before
+  // this point: `runCapabilityRepairJob`'s real Design Agent session, the
+  // client's own CI build, and the independent re-parse of the resulting
+  // slot (`findSlotForGenerator`) all already ran above — this is exactly
+  // the "already prepared and validated" contract the queue expects. What no
+  // longer happens here is opening a branch/PR at all: the edits are handed
+  // to store/shipping-queue.js and the 07:00 shipping run commits them onto
+  // the SAME shared batch branch/PR every other autonomous lane uses.
   if (pendingTemplateEdits.size) {
+    const files = [...pendingTemplateEdits.entries()].map(([path, edit]) => ({ path, content: edit.source }));
+    const gapSummaries = [...pendingTemplateEdits.values()].flatMap((e) => e.appliedGaps)
+      .map((g) => `- \`${g.generatorId}\` on pattern \`${site.url_file_map.patterns[g.patternIdx].match}\` (${g.pages.size} page(s))`).join('\n');
+    const commitMessage = 'Add AI-managed content slot(s), derived from an existing sibling route\n\n'
+      + 'Automatically derived — either from an existing sibling route\'s own established AI-managed-slot pattern '
+      + 'in this repo, or (where no sibling existed) by a Design Agent job that inspected this repo, added the '
+      + 'smallest new field + rendering slot, and validated it against this repo\'s own real build before this '
+      + `commit was queued. No fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n`
+      + 'See server/scripts/repair-template-capability.js.';
+
     if (!args.dryRun) {
-      const branchName = `action-center/template-capability-repair-${new Date().toISOString().slice(0, 10)}`;
-      const fromSha = await getBranchSha(site, ref);
-      await createBranch(site, branchName, fromSha);
-      const files = [...pendingTemplateEdits.entries()].map(([path, edit]) => ({ path, content: edit.source }));
-      await commitFilesAtomic(site, branchName, files,
-        'Add AI-managed content slot(s), derived from an existing sibling route\n\nOpened by the Action Center\'s template capability repair — never auto-merged.');
-      const gapSummaries = [...pendingTemplateEdits.values()].flatMap((e) => e.appliedGaps)
-        .map((g) => `- \`${g.generatorId}\` on pattern \`${site.url_file_map.patterns[g.patternIdx].match}\` (${g.pages.size} page(s))`).join('\n');
-      // Same branch is reused for every capability-repair fix opened THIS
-      // CALENDAR DAY (branchName is date-scoped, not per-run) — a second run
-      // on the same day commits its own additional fix(es) onto whatever is
-      // already there. GitHub 422s "a PR already exists for this head" on a
-      // second openPullRequest for the same branch, so check for one first
-      // and reuse it — same pattern github-ops.js's openPrForBranch/
-      // openRollbackPr and install-rendering-workflow.js already use for
-      // exactly this "many things can land on today's one shared branch"
-      // shape, which this script had simply never adopted.
-      const existingPrs = await listOpenPullRequestsForBranch(site, branchName);
-      const pr = existingPrs.length
-        ? { url: existingPrs[0].html_url, number: existingPrs[0].number }
-        : await openPullRequest(site, {
-          branch: branchName,
-          title: 'Add AI-managed content slot(s) for previously-blocked recommendations',
-          body: `Automatically derived — either from an existing sibling route's own established AI-managed-slot pattern in this repo, or (where no sibling existed) by a Design Agent job that inspected this repo, added the smallest new field + rendering slot, and validated it against this repo's own real build before this PR was ever opened. No fabricated content, no routing changes.\n\nThis unblocks:\n${gapSummaries}\n\n**This PR does not merge itself** — check this PR's own CI status before merging. Once merged, the corresponding recommendations become draftable in the Action Center.`,
-        });
-      report.prsCreated.push({ url: pr.url, number: pr.number, files: files.map((f) => f.path), reused: existingPrs.length > 0 });
+      const { row } = await enqueueShippingWork(site.id, {
+        source: 'template-capability-repair', lane: 'analytics', kind: 'file-edits',
+        params: { edits: files, commitMessage },
+        // Same fixed-high-priority reasoning as content-repair: this fixes a
+        // structural blocker on OTHER recommendations (every rec it
+        // unblocks stays stuck until this ships), not routine growth work,
+        // and it is bounded in daily volume.
+        score: 1_000_000,
+      });
+      if (row) {
+        const prepared = await markShippingWorkPrepared(row.id, { filePaths: files.map((f) => f.path), score: 1_000_000 });
+        report.queued = { id: row.id, state: prepared?.state || row.state };
+      }
       report.filesChanged.push(...files.map((f) => f.path));
     } else {
-      console.log('[dry-run] Would open a PR with:', [...pendingTemplateEdits.keys()]);
+      console.log('[dry-run] Would queue for the shared shipping run:', [...pendingTemplateEdits.keys()]);
     }
   }
 
