@@ -4,7 +4,8 @@ import { query } from '../db.js';
 import {
   enqueue, listByState, getQueueItem, claimForPreparation, markPrepared,
   claimForShipping, markShipped, releaseItem, markSuperseded, releaseStaleClaims,
-  countShippedToday, countShippedTodayAllSites, listInFlightBatchItems, dedupeKeyFor, QUEUE_STATES,
+  countShippedToday, countShippedTodayAllSites, countShippedFileEditsToday, countShippedFileEditsTodayAllSites,
+  listInFlightBatchItems, dedupeKeyFor, QUEUE_STATES,
 } from './shipping-queue.js';
 
 // Integration coverage against the real DB (migration 148/149), same
@@ -262,6 +263,50 @@ describe('countShippedToday / countShippedTodayAllSites — the shared ceiling\'
     await markShipped(r2.id);
 
     const after = await countShippedTodayAllSites();
+    assert.equal(after, before + 2);
+  });
+});
+
+describe('countShippedFileEditsToday / countShippedFileEditsTodayAllSites — the uncounted-lane guard', () => {
+  test('counts shipped kind:file-edits rows, but not shipped kind:draft rows', async () => {
+    const siteId = await makeSite();
+    const fileEdits = await enqueue(siteId, {
+      source: 'content-repair', kind: 'file-edits', params: { edits: [{ path: 'a.njk', content: 'a' }] },
+    });
+    const draftKind = await enqueue(siteId, { source: 'learned-repair', kind: 'draft', generatorId: 'alt-text', findingId: 'fe-1' });
+
+    await markPrepared(fileEdits.row.id, { draftId: null, filePaths: ['a.njk'] });
+    await markShipped(fileEdits.row.id);
+    await markPrepared(draftKind.row.id, { draftId: 99, filePaths: [] });
+    await markShipped(draftKind.row.id);
+
+    const count = await countShippedFileEditsToday(siteId, 'UTC');
+    assert.equal(count, 1, 'the kind:draft row already produced a real drafts row counted elsewhere — counting it here too would double-count the same fix');
+  });
+
+  test('a queued/prepared (not yet shipped) file-edits row is not counted', async () => {
+    const siteId = await makeSite();
+    await enqueue(siteId, {
+      source: 'template-capability-repair', kind: 'file-edits', params: { edits: [{ path: 'b.njk', content: 'b' }] },
+    });
+
+    const count = await countShippedFileEditsToday(siteId, 'UTC');
+    assert.equal(count, 0, 'queued/prepared work is not shipped work');
+  });
+
+  test('countShippedFileEditsTodayAllSites sums the file-edits lane across sites', async () => {
+    const siteA = await makeSite();
+    const siteB = await makeSite();
+    const before = await countShippedFileEditsTodayAllSites();
+
+    const { row: r1 } = await enqueue(siteA, { source: 'content-repair', kind: 'file-edits', params: { edits: [{ path: 'c.njk', content: 'c' }] } });
+    await markPrepared(r1.id, { draftId: null, filePaths: ['c.njk'] });
+    await markShipped(r1.id);
+    const { row: r2 } = await enqueue(siteB, { source: 'template-capability-repair', kind: 'file-edits', params: { edits: [{ path: 'd.njk', content: 'd' }] } });
+    await markPrepared(r2.id, { draftId: null, filePaths: ['d.njk'] });
+    await markShipped(r2.id);
+
+    const after = await countShippedFileEditsTodayAllSites();
     assert.equal(after, before + 2);
   });
 });

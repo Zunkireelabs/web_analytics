@@ -35,6 +35,8 @@ import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
+import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
+import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -1057,18 +1059,28 @@ export async function fetchAnalystInsights(siteId) {
 // Seeded from a real count of today's already-shipped drafts (not reset to
 // 0) so the hourly catch-up loop below correctly resumes the same day's
 // running total rather than re-granting a fresh ceiling every time it fires.
-// Counts EVERY autonomous shipping lane, not just auto-remediation's. The
-// content-gap lane (analyst-seo-mapping.js's qualifyAndShipContentGaps,
-// source 'analyst-keyword-gap') is a real second producer of real PRs, and
-// counting only the first meant a ceiling of N could still be exceeded by
-// whatever that lane shipped the same day — a ceiling that isn't a ceiling.
-const AUTONOMOUS_DRAFT_SOURCES = ['auto-remediation', 'analyst-keyword-gap'];
-
+// Counts EVERY autonomous shipping lane, not just auto-remediation's — the
+// same canonical source list agents/lib/auto-remediation.js sizes its own
+// per-site budget against (server/lib/autonomous-quota.js), imported rather
+// than re-listed here: a locally re-declared copy previously went stale and
+// silently dropped 'learned-repair', 'content-repair',
+// 'template-capability-repair' and 'design-agent' from the platform-wide
+// ceiling while the per-site budget still counted them.
 async function globalRemainingSeed() {
   const ceiling = Number(process.env.AUTO_REMEDIATION_GLOBAL_DAILY_CEILING);
   if (!Number.isFinite(ceiling) || ceiling < 0) return Infinity;
-  const alreadyShipped = await countDraftsBySourceTodayAllSites(AUTONOMOUS_DRAFT_SOURCES);
-  return Math.max(0, ceiling - alreadyShipped);
+  // Drafts-table spend (auto-remediation, analyst-keyword-gap, learned-repair
+  // once shipped, design-agent) plus the file-edits queue's own spend
+  // (content-repair, template-capability-repair — see
+  // store/shipping-queue.js's countShippedFileEditsTodayAllSites for why that
+  // second count exists and why it is scoped to kind:'file-edits' only, to
+  // avoid double-counting learned-repair's shipped queue rows against the
+  // drafts row that same fix already produced).
+  const [draftsShipped, fileEditsShipped] = await Promise.all([
+    countDraftsBySourceTodayAllSites(AUTONOMOUS_DRAFT_SOURCES),
+    countShippedFileEditsTodayAllSites(),
+  ]);
+  return Math.max(0, ceiling - draftsShipped - fileEditsShipped);
 }
 
 // Runs server/scripts/repair-template-capability.js's core for every

@@ -21,6 +21,7 @@ let draftedFindingIds;
 let pendingDraftFilePaths;
 let site;
 let spentToday;
+let fileEditsSpentToday; // countShippedFileEditsToday's return — the file-edits-only slice of spentToday
 let recentDraftTypes; // action_types with a draft inside the pacing window
 const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
 // When set, submitDraftForApproval refuses (as it really does for any status
@@ -59,6 +60,7 @@ function reset() {
   draftedFindingIds = new Set();
   pendingDraftFilePaths = new Set();
   spentToday = 0;
+  fileEditsSpentToday = 0;
   recentDraftTypes = new Set();
   calls.generated = [];
   calls.approved = [];
@@ -180,6 +182,10 @@ mock.module(resolve('../../store/shipping-queue.js'), {
     ),
     markShipped: async (id) => { calls.queueShipped.push(id); },
     releaseItem: async (id, opts) => { calls.queueReleased.push({ id, ...opts }); },
+    // The file-edits-only slice of today's shared-ceiling spend (see
+    // store/shipping-queue.js's own comment on why this is scoped to
+    // kind:'file-edits' and kept separate from countDraftsBySourcesToday).
+    countShippedFileEditsToday: async () => fileEditsSpentToday,
   },
 });
 mock.module(resolve('../../agent-memory.js'), {
@@ -451,6 +457,41 @@ describe('auto-remediation — daily budget', () => {
     site.auto_remediation_daily_limit = 0;
     recommendations = [rec(1)];
     const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'budget-exhausted');
+    assert.equal(calls.generated.length, 0);
+  });
+
+  // The bug this guards: content-repair and template-capability-repair ship
+  // file edits straight through shipping_queue and never create a `drafts`
+  // row, so countDraftsBySourcesToday alone is structurally blind to them.
+  // countShippedFileEditsToday (mocked here as fileEditsSpentToday) is the
+  // queue's own count of exactly that slice, and it must fold into the same
+  // budget as ordinary drafts — otherwise those two sources could each ship
+  // right up to the ceiling independently and the combined day would exceed
+  // it.
+  test('file-edits work already shipped today (content-repair / template-capability-repair) consumes the same shared budget as drafts', async () => {
+    site.auto_remediation_daily_limit = 3;
+    spentToday = 1; // one ordinary draft already shipped
+    fileEditsSpentToday = 2; // two file-edits items already shipped, never a drafts row
+    recommendations = [rec(1), rec(2), rec(3)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.spentToday, 3, 'drafts (1) + file-edits (2) must be summed, not just the drafts half');
+    assert.equal(result.shipped, 0, 'limit 3 minus 3 already spent (across both lanes) leaves zero room');
+    assert.equal(result.stoppedReason, 'budget-exhausted');
+    assert.equal(calls.generated.length, 0);
+  });
+
+  test('file-edits spend alone can exhaust the day\'s budget with zero drafts shipped', async () => {
+    site.auto_remediation_daily_limit = 2;
+    spentToday = 0;
+    fileEditsSpentToday = 2;
+    recommendations = [rec(1), rec(2)];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.spentToday, 2);
     assert.equal(result.stoppedReason, 'budget-exhausted');
     assert.equal(calls.generated.length, 0);
   });

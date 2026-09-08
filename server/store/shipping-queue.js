@@ -272,6 +272,40 @@ export async function countShippedTodayAllSites() {
   return rows[0]?.n ?? 0;
 }
 
+/**
+ * How much file-edits work (content-repair, template-capability-repair) this
+ * site has shipped today, in ITS OWN timezone.
+ *
+ * Scoped to `kind = 'file-edits'` specifically, not every shipped row: a
+ * `kind = 'draft'` item (learned-repair) is shipped THROUGH
+ * shipDraftForRecommendation, which also writes a real `drafts` row that
+ * countDraftsBySourcesToday already counts — summing this function's
+ * unfiltered sibling (countShippedToday) into that count would count the
+ * same fix twice. `kind = 'file-edits'` items never create a `drafts` row at
+ * all (see repair-site-content-live.js / repair-template-capability.js), so
+ * this is the one slice of the queue the drafts-based count can never see.
+ */
+export async function countShippedFileEditsToday(siteId, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM shipping_queue
+      WHERE site_id = $1 AND state = $2 AND kind = 'file-edits' AND shipped_at IS NOT NULL
+        AND (shipped_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, QUEUE_STATES.SHIPPED, timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
+/** Platform-wide sibling of countShippedFileEditsToday — UTC, for the global ceiling. */
+export async function countShippedFileEditsTodayAllSites() {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM shipping_queue
+      WHERE state = $1 AND kind = 'file-edits' AND shipped_at IS NOT NULL
+        AND (shipped_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
+    [QUEUE_STATES.SHIPPED]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 /** Items already claimed by a batch that never finished — the recovery entry point. */
 export async function listInFlightBatchItems(siteId, batchId) {
   const { rows } = await query(

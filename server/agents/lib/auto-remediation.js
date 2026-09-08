@@ -21,7 +21,7 @@ import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PL
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
 import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
 import { countDraftsBySourcesToday } from '../../store/drafts.js';
-import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, QUEUE_STATES } from '../../store/shipping-queue.js';
+import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
 
@@ -157,16 +157,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' });
   }
 
-  const [rows, draftedFindingIds, pendingDraftFilePaths, spentToday, learnedMap] = await Promise.all([
+  const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
     getPendingDraftFilePaths(siteId),
-    // Counted across EVERY autonomous shipping lane (auto-remediation,
-    // analyst-keyword-gap, learned-repair, content-repair, design-agent —
-    // see AUTONOMOUS_DRAFT_SOURCES), not just this one. Two lanes each
-    // measuring only their own spend against the shared ceiling is exactly
-    // how "100 total" used to become "100 + 20" in practice.
+    // Counted across EVERY autonomous shipping lane that ends in a real
+    // `drafts` row (auto-remediation, analyst-keyword-gap, learned-repair,
+    // design-agent — see AUTONOMOUS_DRAFT_SOURCES). Two lanes each measuring
+    // only their own spend against the shared ceiling is exactly how "100
+    // total" used to become "100 + 20" in practice.
     countDraftsBySourcesToday(siteId, AUTONOMOUS_DRAFT_SOURCES, site.timezone || 'UTC'),
+    // content-repair and template-capability-repair ship file edits straight
+    // through shipping_queue (kind: 'file-edits') and never create a `drafts`
+    // row at all — countDraftsBySourcesToday above is structurally blind to
+    // them. countShippedFileEditsToday is the queue's own count of exactly
+    // that slice, and only that slice: `kind: 'draft'` queue items
+    // (learned-repair) are deliberately excluded here because they already
+    // land in draftsSpentToday once shipped, and summing both counts would
+    // count the same fix twice.
+    countShippedFileEditsToday(siteId, site.timezone || 'UTC'),
     // Phase 5: real outcome history for this site, read once per run. A
     // generator whose recent real attempts have repeatedly failed or been
     // rejected is excluded here — not just reported differently elsewhere —
@@ -174,6 +183,10 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // only change what gets displayed.
     getLearnedConfidenceMap(siteId).catch(() => new Map()),
   ]);
+  // The shared ceiling's real spend for today: every autonomous fix shipped
+  // by ANY source, whether it produced a `drafts` row or a file-edits queue
+  // row, counted exactly once each (see the two comments above).
+  const spentToday = draftsSpentToday + fileEditsSpentToday;
   // blocked_reason is checked HERE rather than trusted to be reflected in
   // risk_tier. The previous comment argued the check was redundant because
   // recommendation-coordinator.js demotes every blocked recommendation to
