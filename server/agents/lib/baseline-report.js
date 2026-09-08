@@ -56,6 +56,26 @@ function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings) {
   };
 }
 
+// The onboarding audit (startFullSiteAudit's fire-and-forget crawl) usually
+// hasn't finished by the time runBaselineSequence freezes the day-0 report,
+// so it's common for the frozen narrative to say the audit "wasn't yet
+// available." Called once from bulk-audit.js right after an
+// triggeredBy: 'onboarding' run completes: if the site's frozen baseline
+// still shows that gap, this fills it in with the now-real findings — the
+// one deliberate exception to "never recomputed automatically afterward"
+// above, since the audit that just finished IS day 0's audit, just late.
+// A no-op once the baseline already has real audit data (manual re-audits
+// weeks later must never overwrite the frozen day-0 snapshot).
+export async function refreshBaselineReportIfPending(siteId) {
+  const existing = await getBaselineReport(siteId);
+  if (!existing) return null;
+  const auditSnapshot = existing.issues_snapshot?.fullSiteAudit;
+  // `available` only means "some audit_runs row existed to report on" — a
+  // failed/reaped run still sets it true, so the real signal is status.
+  if (auditSnapshot?.status === 'completed') return null;
+  return buildBaselineReport(siteId);
+}
+
 export async function buildBaselineReport(siteId) {
   const site = await getSiteById(siteId);
   if (!site) return null;

@@ -8,6 +8,7 @@ import { listAgentMeta } from '../registry.js';
 import { createPageCache } from './fetch-cache.js';
 import { computeHealthScore } from './health-score.js';
 import { safeMessage } from '../../lib/errors.js';
+import { refreshBaselineReportIfPending } from './baseline-report.js';
 import {
   createAuditRun, updateAuditRunProgress, completeAuditRun, saveAuditPageFindingsBatch, updateAuditPageFinding,
   getAuditPageFindings, isAuditRunCancelRequested,
@@ -172,6 +173,7 @@ export async function runFullSiteAudit(siteId, {
 
     if (!pages.length) {
       await completeAuditRun(auditRun.id, { status: 'completed', agentIdsRun: [] });
+      if (triggeredBy === 'onboarding') await topUpOnboardingBaseline(siteId);
       return { auditRunId: auditRun.id, pagesDiscovered: 0, pagesAudited: 0, findingsWritten: 0 };
     }
 
@@ -296,12 +298,21 @@ export async function runFullSiteAudit(siteId, {
       }
     })();
     await completeAuditRun(auditRun.id, { status: 'completed', agentIdsRun: agentIds, healthScore });
+    if (triggeredBy === 'onboarding') await topUpOnboardingBaseline(siteId);
     return { auditRunId: auditRun.id, pagesDiscovered: pages.length, pagesAudited, findingsWritten, healthScore };
   } catch (err) {
     const { message } = safeMessage(`bulk-audit:${auditRun.id}`, err, 'This audit run could not finish — our team has been notified.');
     await completeAuditRun(auditRun.id, { status: 'failed', errorMessage: message }).catch(() => {});
     throw err;
   }
+}
+
+// Best-effort: a frozen day-0 baseline that never gets its real audit
+// findings filled in is a worse outcome than this failing silently.
+async function topUpOnboardingBaseline(siteId) {
+  await refreshBaselineReportIfPending(siteId).catch((err) => {
+    console.error(`[bulk-audit] site ${siteId} baseline report top-up failed:`, err.message);
+  });
 }
 
 // Fire-and-forget variant for the HTTP trigger (server/routes/site-audit.js):

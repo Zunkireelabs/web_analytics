@@ -37,7 +37,8 @@ import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup } from './job.js';
-import { reapStaleAuditRuns } from './store/audit-runs.js';
+import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
+import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
 import { pool } from './db.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -213,8 +214,25 @@ httpServer.listen(port, () => {
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
   runStartupCatchup();
   // Reap any audit_runs left stuck 'running' by a previous process that
-  // died/restarted mid-audit (non-blocking).
+  // died/restarted mid-audit (non-blocking). An onboarding-triggered audit
+  // reaped this way gets auto-retried (capped) so a deploy landing mid-crawl
+  // doesn't strand a new client's Milestones baseline on "audit not
+  // available" forever — see baseline-report.js's onboarding top-up.
+  const MAX_ONBOARDING_AUDIT_ATTEMPTS = 3;
   reapStaleAuditRuns()
-    .then((reaped) => { if (reaped.length) console.log(`[server] reaped ${reaped.length} stale audit run(s)`); })
+    .then(async (reaped) => {
+      if (reaped.length) console.log(`[server] reaped ${reaped.length} stale audit run(s)`);
+      for (const run of reaped) {
+        if (run.triggered_by !== 'onboarding') continue;
+        const attempts = await countAuditRunsByTrigger(run.site_id, 'onboarding');
+        if (attempts >= MAX_ONBOARDING_AUDIT_ATTEMPTS) {
+          console.warn(`[server] site ${run.site_id} onboarding audit has failed ${attempts} times — not auto-retrying further`);
+          continue;
+        }
+        console.log(`[server] retrying reaped onboarding audit for site ${run.site_id} (attempt ${attempts + 1})`);
+        startFullSiteAudit(run.site_id, { triggeredBy: 'onboarding' })
+          .catch((err) => console.error(`[server] retry of onboarding audit for site ${run.site_id} failed to start:`, err.message));
+      }
+    })
     .catch((err) => console.error('[server] reapStaleAuditRuns failed:', err.message));
 });
