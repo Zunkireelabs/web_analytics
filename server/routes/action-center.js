@@ -682,10 +682,28 @@ router.post('/action-center/generate', async (req, res, next) => {
   }
 });
 
+// geo-audit produces a READ-ONLY markdown report, not an applicable change,
+// so it has nothing for this pipeline to open a PR for. Over its entire
+// lifetime 70 of 71 geo-audit drafts ended 'abandoned' with reason
+// 'sent_back_to_recommendations' and not one was ever implemented — it was
+// pure clutter in a list whose whole purpose is "changes waiting to ship".
+//
+// Hidden here, at the Action Center listing only, rather than by stopping
+// its generation: the weekly audit still runs (job.js's runGeoAuditIfDue),
+// still saves its agent_runs snapshot for the Command Center, and its draft
+// row is still what agents/lib/agent-status.js reads the site's GEO score
+// from. Removing the draft would blank that score; hiding the row from this
+// one list costs nothing and loses nothing.
+//
+// An explicit ?actionType=geo-audit request is still honoured, so anything
+// asking for it by name (or a human debugging) can still reach it.
+const ACTION_CENTER_HIDDEN_ACTION_TYPES = new Set(['geo-audit']);
+
 router.get('/action-center/drafts', async (req, res, next) => {
   try {
     const { actionType, status } = req.query;
-    res.json(await listDrafts(req.siteId, { actionType, status }));
+    const drafts = await listDrafts(req.siteId, { actionType, status });
+    res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
   } catch (e) { next(e); }
 });
 
