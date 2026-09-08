@@ -1,4 +1,5 @@
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
+import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
@@ -371,8 +372,26 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       const filePath = resolveFile(site, page);
       if (filePath) {
         const ref = baseBranch(site);
-        const exists = await cachedFetchFile(site, filePath, ref);
-        if (!exists && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+        const file = await cachedFetchFile(site, filePath, ref);
+        if (!file && !unverifiableFiles.has(`${filePath}@${ref}`)) return { drop: 'file-missing', blockedReason: null };
+
+        // A file that already carries an FAQPage schema block can never take
+        // a faq/qa-content draft: render-mode inspection (render-inspector.js)
+        // treats an existing schema as 'strong' evidence and forces
+        // schema-only mode, and marker-merge.js's suppressSchema then finds
+        // nothing left to publish — a guaranteed, permanent failure, not a
+        // transient one. This is the /resources/?type=report vs ?type=ebook
+        // vs ?type=webinar shape (see faq-render-mode.js's own comment): three
+        // distinct GSC URLs that all resolve to the SAME file (resolveFile
+        // matches on pathname only, ignoring the query string), so the first
+        // one to ship its schema poisons the other two forever. Dropped here,
+        // before an LLM draft is even generated, instead of discovering the
+        // same dead end at apply time — see store/drafts.js's redraft-churn
+        // comment (24 attempts across 6 findings historically for exactly
+        // this failure).
+        if (file && INSPECTABLE_ACTION_TYPES.includes(generatorId) && hasExistingFaqSchema(file.content)) {
+          return { drop: 'faq-schema-already-present', blockedReason: null };
+        }
       }
     }
 
