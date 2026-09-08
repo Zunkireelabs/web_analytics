@@ -31,7 +31,19 @@ jobs:
     needs: checks
     environment: staging
     steps:
-      - name: Deploy via SSH
+      # Split into two SSH steps (2026-09-08): the single combined script
+      # below this point used to run bootstrap + both .env writes + the
+      # build/deploy/cron logic as one `script:` block. GitHub Actions
+      # compiles a string containing multiple ${{ }} substitutions into one
+      # composite expression, and that block's ~25.7k characters exceeded
+      # the platform's 21000-character max expression length — every push
+      # to stage failed at parse time with "Exceeded max expression length
+      # 21000" before any job even started. Splitting the script across two
+      # steps keeps each step's composite expression comfortably under the
+      # cap. Each step is its own SSH session, so anything that depends on
+      # being inside $DIR (git state, cwd) must re-`cd` at the top of the
+      # next step — it does not carry over from the previous one.
+      - name: Bootstrap checkout and write app .env
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -316,6 +328,19 @@ jobs:
             DATA_ANALYST_AGENT_INTERNAL_URL=http://data-analyst-agent-stage:8000
             DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
             ENVEOF
+
+      - name: Write data-analyst-agent .env, build, and deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 35m
+          script: |
+            set -eo pipefail
+
+            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            cd "$DIR"
 
             # ── Data Analyst Agent's own .env (data-analyst-agent/) ──────────
             # Staging points this service straight at the same shared Neon
