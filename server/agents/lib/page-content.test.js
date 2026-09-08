@@ -553,6 +553,62 @@ describe('analyzePage — structured-data repair signals', () => {
   });
 });
 
+// Regression coverage for a real production bug: a comparison table shipped
+// as raw pipe-delimited text still failed content-integrity-repair.js's
+// raw-text-table fix whenever the table shared its <p> with an ordinary
+// lead-in sentence ("...here's a breakdown: | Feature | ...") — a real,
+// common shape a writer/LLM produces — because the old `clean` check
+// required the ENTIRE block to be table-shaped, no prose at all.
+describe('analyzePage — rawTextTableBlocks (raw-text-table detection)', () => {
+  const PAGE_URL = 'https://example.com/resources/report';
+
+  test('a pure pipe-table block (no prose) is still clean, with no before/after text', () => {
+    const html = '<html><body><p>Feature | Plan A | Plan B\nPrice | $10 | $20\nSupport | Email | Phone</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, null);
+    assert.equal(block.afterText, null);
+    assert.deepEqual(block.rows[0], ['Feature', 'Plan A', 'Plan B']);
+  });
+
+  test('a lead-in sentence sharing the paragraph with the table is extracted, not treated as irregular', () => {
+    const html = '<html><body><p>Here is a breakdown of the key differences:\n'
+      + '| Feature | AI-Native Search | Traditional Keyword Search |\n'
+      + '|---|---|---|\n'
+      + '| User Intent | Understands intent | Matches terms |\n'
+      + '| Response Type | Direct answers | Ranked links |'
+      + '</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, 'Here is a breakdown of the key differences:');
+    assert.equal(block.afterText, null);
+    assert.deepEqual(block.rows[0], ['Feature', 'AI-Native Search', 'Traditional Keyword Search']);
+    assert.deepEqual(block.rows[1], ['User Intent', 'Understands intent', 'Matches terms']);
+  });
+
+  test('trailing prose after the table is captured as afterText', () => {
+    const html = '<html><body><p>'
+      + '| Feature | Plan A | Plan B |\n'
+      + '| Price | $10 | $20 |\n'
+      + '| Support | Email | Phone |\n'
+      + 'Contact sales for enterprise pricing.'
+      + '</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    const block = a.rawTextTableBlocks[0];
+    assert.equal(block.clean, true);
+    assert.equal(block.beforeText, null);
+    assert.equal(block.afterText, 'Contact sales for enterprise pricing.');
+  });
+
+  test('prose interleaved BETWEEN table rows (not just around them) stays irregular', () => {
+    const html = '<html><body><p>Some prose here.\nFeature | Plan A | Extra\nMore prose in between.\nPrice | $10 | $20\nSupport | Email | Phone</p></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.rawTextTableBlocks.find((b) => b.clean), undefined);
+  });
+});
+
 // Regression coverage for the wrong-@type bug: inferSchemaType used to end in
 // `return 'Article'`, so every page that didn't match one of five hardcoded
 // ENGLISH path words got an Article recommendation — and since the `schema`
