@@ -142,6 +142,24 @@ const DEFAULT_SLOT_BY_ACTION_TYPE = {
   'analytics-install': 'head',
 };
 
+// analytics-install's marker names are NOT a per-tenant naming choice the
+// way TITLE/FAQ/SCHEMA arguably are — there is exactly one field per
+// provider (marker-merge.js's ANALYTICS_PROVIDER_FIELDS), fixed by the
+// generator itself, and no tenant has ever had a reason to want a different
+// name for "the GA4 install marker." Requiring every newly onboarded site to
+// hand-author `defaults.placements["analytics-install"].markers` before its
+// own already-configured ga4_measurement_id/facebook_pixel_id could ever
+// actually install is exactly the class of pointless manual step the rest
+// of this module's `defaults.placements` inheritance already exists to
+// avoid — so it's the ONE built-in platform default here, used only as the
+// last resort (a site-level, page-level, or pattern-level config a human
+// (or discovery) actually wrote always wins — see the resolution order
+// below). A site that genuinely wants different marker names still can, by
+// configuring `defaults.placements["analytics-install"]` explicitly.
+const PLATFORM_DEFAULT_MARKERS = {
+  'analytics-install': { analyticsScriptGa4: 'ANALYTICSSCRIPTGA4', analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL' },
+};
+
 // Single source of truth for "where does this (page, action type) land."
 // Resolution order, highest priority first:
 //   1. page-level `pages[url].placements[actionType]` — { slot?, markers }
@@ -185,7 +203,7 @@ export function resolvePlacement(site, pageUrl, actionType) {
 
   if (entry?.markers) return { slot: defaultSlot, markers: entry.markers };
 
-  return { slot: defaultSlot, markers: null };
+  return { slot: defaultSlot, markers: PLATFORM_DEFAULT_MARKERS[actionType] || null };
 }
 
 // Marker names for a splice-based merge (meta-title/faq — see

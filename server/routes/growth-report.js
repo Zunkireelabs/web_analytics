@@ -4,6 +4,9 @@ import { buildGrowthReport, getMetricLatestValue, GROWTH_TARGET_METRICS } from '
 import { setGrowthTarget, getGrowthTargetHistory } from '../store/growth-targets.js';
 import { getSiteById } from '../store/read.js';
 import { runAiRecommendationIfDue } from '../job.js';
+import { buildBaselineReport } from '../agents/lib/baseline-report.js';
+import { getBaselineReport } from '../store/baseline-reports.js';
+import { renderBaselineReportHtml, renderBaselineReportPdf } from '../report/baseline-pdf.js';
 
 // Client-facing — the logged-in client's own site only (req.siteId from
 // session), unlike Phase 4's staff-only /internal/clients/:id/review which
@@ -29,6 +32,68 @@ router.get('/growth-report', async (req, res, next) => {
 router.get('/internal/growth-report/:siteId', requirePlatformRole('platform_admin'), async (req, res, next) => {
   try {
     res.json(await buildGrowthReport(req.params.siteId));
+  } catch (e) { next(e); }
+});
+
+function slugify(name) {
+  return String(name || 'site').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'site';
+}
+
+function baselineReportJson(row) {
+  if (!row) return { available: false, message: 'No baseline report yet — check back once onboarding finishes, or ask staff to generate one.' };
+  return {
+    available: true,
+    generatedAt: row.generated_at,
+    kpiSnapshot: row.kpi_snapshot,
+    issuesSnapshot: row.issues_snapshot,
+    narrativeMd: row.narrative_md,
+  };
+}
+
+async function sendBaselineReportPdf(res, siteId) {
+  const [site, row] = await Promise.all([getSiteById(siteId), getBaselineReport(siteId)]);
+  if (!site || !row) return res.status(404).json({ error: 'No baseline report available for this site yet.' });
+  const html = renderBaselineReportHtml(row, site);
+  const pdf = await renderBaselineReportPdf(html);
+  res.set({
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': `attachment; filename="${slugify(site.name)}-baseline-report.pdf"`,
+  });
+  res.send(pdf);
+}
+
+// The client-facing "day 0" document (server/agents/lib/baseline-report.js) —
+// mirrors the growth-report client/internal route pair above exactly (same
+// requirePlatformRole gate for the cross-tenant staff view).
+router.get('/baseline-report', async (req, res, next) => {
+  try { res.json(baselineReportJson(await getBaselineReport(req.siteId))); }
+  catch (e) { next(e); }
+});
+
+router.get('/internal/baseline-report/:siteId', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try { res.json(baselineReportJson(await getBaselineReport(req.params.siteId))); }
+  catch (e) { next(e); }
+});
+
+router.get('/baseline-report/download', async (req, res, next) => {
+  try { await sendBaselineReportPdf(res, req.siteId); }
+  catch (e) { next(e); }
+});
+
+router.get('/internal/baseline-report/:siteId/download', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try { await sendBaselineReportPdf(res, req.params.siteId); }
+  catch (e) { next(e); }
+});
+
+// Backfill for a site onboarded before this feature existed, or a retry if
+// the automatic generation in runBaselineSequence (server/routes/clients.js)
+// failed. Same generator either way, so a UI click and
+// generate-baseline-report.js produce an identical report.
+router.post('/internal/baseline-report/:siteId/generate', requirePlatformRole('platform_admin'), async (req, res, next) => {
+  try {
+    const site = await getSiteById(req.params.siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found.' });
+    res.json(baselineReportJson(await buildBaselineReport(req.params.siteId)));
   } catch (e) { next(e); }
 });
 

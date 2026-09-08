@@ -640,3 +640,32 @@ export async function listOpenPullRequestsForBranch(site, branch) {
   if (!res.ok) throw new Error(`listOpenPullRequestsForBranch failed (${res.status}): ${await res.text()}`);
   return res.json();
 }
+
+// Commit SUBJECTS on `branch` that are not on the repo's base branch — i.e.
+// exactly what this branch would contribute if a PR were opened for it.
+//
+// Exists so a recovery pass can answer "did this specific draft's commit
+// actually reach GitHub?" with EVIDENCE rather than by reading an error
+// string. That distinction is the whole bug this was written for: a batch
+// whose endBatchPush succeeded but whose PR call then failed leaves drafts
+// carrying a PR-stage error, and lib/draft-ship-state.js reads any
+// apply_error on 'branch_pushed' as proof the commit was never pushed — true
+// for a push-stage failure, false here, and the difference decides between
+// re-opening one PR and regenerating every draft from scratch.
+//
+// pushDraftBranch writes the subject `Action Center: apply <type> draft #<id>`,
+// so the draft id is recoverable from the subject alone; no commit sha needs
+// to be persisted for this to work on rows that predate it.
+//
+// Uses /compare rather than /commits so the answer is inherently "ahead of
+// base" — a branch sitting exactly at base returns an empty list instead of
+// base's entire history, which is the honest reading of "this branch has
+// nothing to open a PR for".
+export async function listCommitSubjectsAheadOfBase(site, branch, { base = null } = {}) {
+  const from = base || defaultBranchName(site);
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(from)}...${encodeURIComponent(branch)}`);
+  if (res.status === 404) return null; // branch (or base) is gone — caller decides
+  if (!res.ok) throw new Error(`listCommitSubjectsAheadOfBase failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return (data.commits || []).map((c) => (c.commit?.message || '').split('\n')[0]);
+}

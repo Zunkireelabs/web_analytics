@@ -2,6 +2,7 @@ import { getSearchPerformanceRange, getSiteById } from '../store/read.js';
 import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
 
 // New file, not an extension of blog-outline.js — blog-outline's content
 // shape is explicitly an OUTLINE (sections of heading+notes, no real prose),
@@ -87,9 +88,14 @@ export async function generate({ siteId, params }) {
     'relevant (choosing ONLY from that list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", ' +
     '"heading": "...", "directAnswer": "...", "supportingSections": [{"heading": "...", "body": "..."}], ' +
     '"suggestedFaqTopics": ["...", "..."], "suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+  // DESIGN CONTEXT REACHES GENERATION HERE — a direct-answer section is
+  // structurally closest to this site's own real FAQ-shaped content
+  // (answer-first, supporting sections), so 'faq' is the primary match.
+  const structureGuidance = pageStructureGuidance(site, 'faq', { fallbackPageTypes: ['other'] });
   const user = `Query: ${query}${context ? `\nContext: ${context}` : ''}` +
     (groundingExcerpt ? `\n\nReal site content (from ${homepage}):\n${groundingExcerpt}` : '') +
-    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}`;
+    `\n\nInternal link candidates:\n${candidates.join('\n') || '(none available)'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '');
   let parsed;
   try {
     parsed = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });

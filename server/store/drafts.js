@@ -566,7 +566,11 @@ export async function markDraftImplemented(siteId, id) {
       draftId: draft.id,
       pageUrl: draft.input.page,
       generatorId: draft.action_type,
-      queryText: draft.input.query ?? null,
+      // For analytics-install there is no ranking query — queryText instead
+      // carries the exact tracking ID this draft shipped, which is what
+      // verifyAnalyticsInstall re-checks for on the live page (see
+      // isVerifiableDraft's TRACKING_ID_VERIFIABLE_GENERATOR_IDS branch).
+      queryText: draft.input.query ?? draft.input.trackingId ?? null,
       // finding_origin (migration 119) carries the real detecting agent
       // through any shipping mechanism (auto-remediation/execution-engine
       // both overwrite draft.source with their own mechanism label) — fall
@@ -685,6 +689,23 @@ export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC')
   return rows[0]?.n ?? 0;
 }
 
+// Multi-source sibling of countDraftsBySourceToday, for one site. Backs the
+// shared daily ceiling (server/lib/autonomous-quota.js): "spent today" has
+// to mean every autonomous lane together — auto-remediation, the content-gap
+// lane, learned-repair, content-repair — not just whichever one is asking,
+// or two lanes shipping 60 each would each independently believe they were
+// "within budget". Accepts an array so a caller never has to sum several
+// single-source calls itself and risk a source someone forgot to add.
+export async function countDraftsBySourcesToday(siteId, sources, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = ANY($2)
+        AND (created_at AT TIME ZONE $3)::date = (now() AT TIME ZONE $3)::date`,
+    [siteId, Array.isArray(sources) ? sources : [sources], timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 // Same shape as countDraftsBySourceToday, summed across every site — backs
 // job.js's optional AUTO_REMEDIATION_GLOBAL_DAILY_CEILING. Per-site budgets
 // each use their own timezone (a site's "today" is meaningful to that
@@ -692,11 +713,17 @@ export async function countDraftsBySourceToday(siteId, source, timezone = 'UTC')
 // timezone to prefer, so this uses UTC as a fixed, if slightly coarse,
 // "today" for the platform-wide ceiling — a blunt additional safety net on
 // top of the precise per-site budgets, not a replacement for them.
+// Accepts one source or several. Several matters because there is more than
+// one autonomous shipping lane writing drafts — 'auto-remediation' and
+// analyst-seo-mapping.js's 'analyst-keyword-gap' — and a platform-wide
+// ceiling that counted only the first would let the second ship past it
+// unseen, which is exactly what it did until this took an array.
 export async function countDraftsBySourceTodayAllSites(source) {
+  const sources = Array.isArray(source) ? source : [source];
   const { rows } = await query(
     `SELECT COUNT(*)::int AS n FROM drafts
-      WHERE source = $1 AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
-    [source]
+      WHERE source = ANY($1) AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date`,
+    [sources]
   );
   return rows[0]?.n ?? 0;
 }
@@ -932,6 +959,29 @@ export async function getDraftByFindingId(siteId, findingId) {
   const { rows } = await query(
     "SELECT * FROM drafts WHERE site_id = $1 AND finding_id = $2 AND status != 'abandoned' ORDER BY created_at DESC LIMIT 1",
     [siteId, findingId]
+  );
+  return rows[0] || null;
+}
+
+// Clears a 'branch_pushed' draft's apply_error once its commit has been
+// CONFIRMED present on the branch (lib/batch-pr-recovery.js verifies this
+// against GitHub's compare API before calling).
+//
+// Not cosmetic. recordMergeFailure above writes apply_error for BOTH halves
+// of finalizeBatchPr — the push that never landed and the PR that never
+// opened — and lib/draft-ship-state.js reads apply_error on this status as
+// proof the commit does not exist, which is only true of the first. That
+// conflation is what sent a fully-pushed batch back to be regenerated from
+// scratch every day. Once the commit is confirmed on the branch, the error is
+// stale by definition: the only thing still outstanding is the PR, which is
+// what AWAITING_PR means. So the pass that established the truth writes it
+// down, rather than every later reader re-deriving it from an error string.
+export async function clearApplyErrorForPushedDraft(siteId, id) {
+  const { rows } = await query(
+    `UPDATE drafts SET apply_error = NULL, updated_at = now()
+     WHERE site_id = $1 AND id = $2 AND status = 'branch_pushed' AND pr_number IS NULL
+     RETURNING *`,
+    [siteId, id]
   );
   return rows[0] || null;
 }

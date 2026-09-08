@@ -30,13 +30,26 @@ if (!process.env.DATABASE_URL) {
 // chokepoint every DB access — test or not — actually goes through, so no
 // individual test file's guard (present, absent, or silently shadowed)
 // matters.
+//
+// package.json's `test` script sets a local DATABASE_URL for the run, and
+// that is not redundant with this check — the two solve opposite halves.
+// This throw is the BACKSTOP (no test run may ever touch a real database);
+// the script is the ERGONOMICS. Without the script, the guard fires for
+// every developer who has a working .env, which is all of them: `npm test`
+// reported over a hundred failing files, one per file, each aborting at
+// import with the message below buried in TAP comment lines — long enough
+// to read as "this repo's test suite is broken" rather than "point it at a
+// local database". It was read exactly that way on 2026-09-08. Do not remove
+// the env var from the test script to "clean it up"; do not remove this
+// throw because the script makes it look unnecessary.
 if (process.env.NODE_TEST_CONTEXT) {
   const dbHost = new URL(process.env.DATABASE_URL).hostname;
   if (!/^(localhost|127\.0\.0\.1|::1)$/i.test(dbHost)) {
     throw new Error(
       `Refusing to run tests against a non-local DATABASE_URL (host: ${dbHost}). ` +
-      'Tests must run against a local database — set DATABASE_URL=postgres://test:test@localhost:5432/test ' +
-      'before running tests, or make sure nothing else in your shell/.env has already set it to a real one.'
+      'Tests must run against a local database. `npm test` sets one itself, so seeing this means the suite ' +
+      'was started some other way (a bare `node --test`, or an IDE runner) — run `npm test`, or set ' +
+      'DATABASE_URL=postgres://test:test@localhost:5432/test for the command yourself.'
     );
   }
 }
@@ -268,6 +281,34 @@ export async function updateSiteLearnedRepair({ siteId, enabled }) {
   const { rows } = await query(
     `UPDATE sites SET learned_repair_enabled = $1 WHERE id = $2 RETURNING *`,
     [enabled, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// The site's own real GA4 Measurement ID / Meta (Facebook) Pixel ID
+// (migrations 130/135) — read live at draft time by
+// generators/analytics-install.js so a client can add/correct either ID at
+// any point and have the very next draft use it, no re-detection needed.
+// Until this existed there was no route/UI that ever set these two columns
+// at all (only a raw SQL UPDATE could) — the same class of gap
+// design_agent_enabled had, for the same reason: nothing wired the DB
+// column to anything a person could actually use.
+// Either field is nullable — passing null clears that one ID without
+// touching the other; passing undefined leaves it unchanged (Field()'s
+// unfilled-input contract, same as every other optional PATCH here).
+export async function updateSiteAnalyticsIds({ siteId, ga4MeasurementId, facebookPixelId }) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+  if (ga4MeasurementId !== undefined) set('ga4_measurement_id', ga4MeasurementId || null);
+  if (facebookPixelId !== undefined) set('facebook_pixel_id', facebookPixelId || null);
+  if (!fields.length) throw new Error('updateSiteAnalyticsIds: nothing to update.');
+  values.push(siteId);
+  const { rows } = await query(
+    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+    values
   );
   if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
   return rows[0];

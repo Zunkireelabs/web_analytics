@@ -2,6 +2,7 @@ import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/pag
 import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { findRealFaqDataSource } from './lib/faq-data-source.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
 
 export const meta = {
   id: 'faq',
@@ -39,6 +40,8 @@ export async function generate({ siteId, params }) {
   const subject = query || topic;
   if (!subject) throw Object.assign(new Error('query or topic is required'), { status: 400 });
 
+  const site = await getSiteById(siteId).catch(() => null);
+
   // Prefer the page's own REAL, already-existing FAQ data over LLM
   // fabrication whenever one exists — never invent a second, possibly
   // mismatched FAQ for a page that already answers these questions for
@@ -50,7 +53,6 @@ export async function generate({ siteId, params }) {
   // backing data file), refuse outright rather than risk the same
   // mismatch — see faq-data-source.js's return contract.
   if (page) {
-    const site = await getSiteById(siteId).catch(() => null);
     const dataSource = await findRealFaqDataSource(site, page);
     if (dataSource?.ok) {
       const items = dataSource.items;
@@ -85,6 +87,12 @@ export async function generate({ siteId, params }) {
   }
 
   const pageGuidance = schemaType ? PAGE_PURPOSE_GUIDANCE[schemaType] : null;
+  // DESIGN CONTEXT REACHES GENERATION HERE — this site's own real FAQ
+  // structure (how many questions it typically shows, what text roles the
+  // page uses) informs the generated Q&A set. The actual accordion/list
+  // MARKUP still comes from componentTemplates' projectFaq at render time —
+  // this only shapes the CONTENT decision, not the styling.
+  const structureGuidance = pageStructureGuidance(site, 'faq');
 
   const system = 'You are a content strategist. Given a real target query/topic and (if available) the page\'s ' +
     'real body text, draft 4-6 FAQ question/answer pairs a reader would realistically ask. Ground every answer ' +
@@ -93,7 +101,8 @@ export async function generate({ siteId, params }) {
     'page content is given, write general informational answers about the topic only. ' +
     (pageGuidance ? `${pageGuidance} ` : '') +
     'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
-  const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}`;
+  const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '');
   let items;
   try {
     items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });

@@ -197,9 +197,18 @@ export function isRepairEligible(generatorId) {
 const DRY_RUN = () => process.env.LEARNED_REPAIR_DRY_RUN === '1';
 
 export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
-  const { shipDraftForRecommendation } = deps.ship
-    ? { shipDraftForRecommendation: deps.ship }
-    : await import('./auto-remediation.js');
+  // QUEUES, never ships directly. This used to call shipDraftForRecommendation
+  // itself, which generates, approves and pushes a real branch/PR right here
+  // — a second autonomous producer opening its own production PR, completely
+  // independent of the 07:00 shared batch's daily ceiling and "one PR" rule.
+  // It now only records the INTENT (source='learned-repair', migration 148);
+  // auto-remediation.js's run drains 'queued' learned-repair items through
+  // the exact same shipDraftForRecommendation pipeline, inside its own
+  // batch, so this becomes one more contributor to the single daily PR
+  // instead of a bypass of it.
+  const { enqueue: enqueueShippingWork } = deps.enqueue
+    ? { enqueue: deps.enqueue }
+    : await import('../../store/shipping-queue.js');
 
   const site = await getSiteById(siteId);
 
@@ -310,44 +319,26 @@ export async function interceptWithLearnedRepairs(siteId, grounded, deps = {}) {
     }
 
     try {
-      await shipDraftForRecommendation(siteId, {
-        generatorId: item.generatorId, params: item.params,
-        findingId: item.id, source: 'learned-repair', findingOrigin: item.source || null, memoryRefId: chosen.id,
-        // Unattended cron pass — see auto-remediation.js's identical option.
-        waitForDesignAgent: true,
+      // recordFixOutcome for a failed apply used to happen HERE, at
+      // generation time. It now happens where generation actually happens —
+      // auto-remediation.js's drain-and-ship step for 'learned-repair' queue
+      // items — since that is the point a real ship attempt (and therefore a
+      // real success/failure about the borrowed repair's portability) exists
+      // at all. Enqueueing itself basically cannot fail in a way that says
+      // anything about the repair (it is a DB insert), so nothing here
+      // distinguishes item-state refusals from real failures — that
+      // distinction is preserved at the point it now belongs.
+      const { row, created } = await enqueueShippingWork(siteId, {
+        source: 'learned-repair', lane: 'analytics', kind: 'draft',
+        generatorId: item.generatorId, findingId: item.id, params: item.params,
+        memoryRefId: chosen.id,
       });
-      repaired.add(item.id);
-      console.log(`[learned-repair] site ${siteId} repaired "${item.tag}" (${item.generatorId}) from memory #${chosen.id} — PR opened, awaiting human merge.`);
+      if (row) {
+        repaired.add(item.id);
+        console.log(`[learned-repair] site ${siteId} queued a repair for "${item.tag}" (${item.generatorId}) from memory #${chosen.id}${created ? '' : ' (already queued)'} — ships in the next shared 07:00 batch.`);
+      }
     } catch (err) {
-      // A borrowed repair that fails on a foreign site is real evidence
-      // against its portability, recorded immediately rather than waiting for
-      // the 48h live re-check that will now never run (no draft reached
-      // 'implemented'). Two of these flip the memory to flagged_for_review,
-      // and findPortableRepairs' failed_reuse_count = 0 rule disqualifies it
-      // from cross-client reuse after even one.
-      console.warn(`[learned-repair] site ${siteId} could not apply memory #${chosen.id} to "${item.tag}", leaving it for the Action Center:`, err.message);
-      // ITEM-STATE refusals ('awaiting-human-review': a person is mid-review
-      // of this exact draft; 'draft-reset': a stranded row was reset for a
-      // clean retry — see auto-remediation.js's draftShipState handling) say
-      // nothing about whether this MEMORY's repair is portable. They are
-      // plumbing/state noise on the target site, not a defect in the
-      // borrowed pattern. Recording them as a genuine 'failure' would
-      // penalize a real, working repair for hitting someone else's mid-review
-      // draft — two of these flip the memory to flagged_for_review and
-      // disqualify it from further cross-client reuse for a reason that has
-      // nothing to do with the repair itself.
-      const isItemStateRefusal = err.reason === 'awaiting-human-review' || err.reason === 'draft-reset';
-      if (isItemStateRefusal) continue;
-      // reuse_history is persisted (agent_fix_memory), not just logged — the
-      // raw exception text stops at the console.warn above. sanitizeForCustomer
-      // is the same persistence-boundary net server/lib/errors.js already
-      // documents for drafts/agent-runs/audit-runs; this notes field is the
-      // same kind of boundary, just on a different table.
-      await recordFixOutcome({
-        memoryRefId: chosen.id, outcome: 'failure', agentId: 'learned-repair',
-        generatorId: item.generatorId, siteId,
-        notes: `cross-client repair failed: ${sanitizeForCustomer(err.message, '(internal error — see server logs)')}`,
-      }).catch(() => {});
+      console.error(`[learned-repair] site ${siteId} could not queue a repair for "${item.tag}" from memory #${chosen.id}:`, err.message);
     }
   }
 

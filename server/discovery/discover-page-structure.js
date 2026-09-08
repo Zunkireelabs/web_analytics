@@ -48,6 +48,18 @@ const CONFIG_FILENAMES = new Set([
   'postcss.config.js', 'tailwind.config.js', '.gitignore', '.dockerignore',
 ]);
 
+// Next.js App Router file-convention names (framework spec, not a per-tenant
+// guess — see filesystem-routes.js's own module comment for the same
+// distinction). `layout`/`template`/`default` wrap every page beneath them
+// in the directory tree, so editing one has the same blast radius as a
+// shared include; `middleware` runs for the whole matched route tree;
+// `route` is an API handler, never a page at all. Left unclassified here,
+// every one of these would fall through to `page-content` by extension
+// alone (same `.tsx` as the real `page.tsx` beside it) and be graded
+// low-risk — exactly the miscalibration this module exists to prevent.
+const NEXTJS_SHARED_FILE = /^(layout|template|default|middleware)\.(jsx?|tsx?|mjs)$/;
+const NEXTJS_NON_PAGE_FILE = /^(loading|error|not-found|route)\.(jsx?|tsx?|mjs)$/;
+
 function segments(path) { return path.split('/').filter(Boolean); }
 function extname(path) {
   const base = path.slice(path.lastIndexOf('/') + 1);
@@ -82,6 +94,12 @@ export function classifyFile(path, { templateExtensions = [] } = {}) {
   if (segs.some((s) => DATA_SEGMENTS.has(s))) {
     const which = segs.find((s) => DATA_SEGMENTS.has(s));
     return { role: 'data-source', reason: `lives in a "${which}" directory — typically the source for generated pages` };
+  }
+  if (NEXTJS_SHARED_FILE.test(filename)) {
+    return { role: 'shared-infrastructure', reason: `Next.js App Router "${filename}" wraps every page beneath it in the directory tree (or, for middleware, the whole matched route) — not itself a page` };
+  }
+  if (NEXTJS_NON_PAGE_FILE.test(filename)) {
+    return { role: 'other', reason: `Next.js App Router "${filename}" is a route-level convention file (an API handler, or a UI state for its sibling page.tsx), never a page of its own` };
   }
   if (templateExtensions.includes(ext)) return { role: 'page-content', reason: `page-bearing template/content file (${ext})` };
   return { role: 'other', reason: 'not recognised as page-bearing, shared, or data' };

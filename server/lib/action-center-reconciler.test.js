@@ -33,6 +33,7 @@ let drafts;
 let recs;
 let recorded;
 let recheckImpl;
+let passOrder;
 
 // Delegates to the real classifier rather than hand-copying its rules here —
 // store/drafts.js's countFailedAttemptsByFinding used to carry its own
@@ -66,6 +67,9 @@ function fakeQuery(text, params = []) {
   }
   // Pass 2 (reclaimStalledDrafts) — not under test here; always empty.
   if (sql.startsWith('SELECT id, finding_id, status, action_type, branch_name, updated_at FROM drafts')) {
+    // Pass 2's stall-reclaim SELECT. Its position relative to pass 0 is the
+    // whole point of that fix, so note when it runs.
+    passOrder.push('stall-reclaim');
     return { rows: [] };
   }
   // Pass 3 (classifyUnrecordedFailures) — abandoned drafts with no attempt row yet.
@@ -154,6 +158,18 @@ mock.module(resolve('../db.js'), {
 mock.module(resolve('../agents/lib/recommendation-coordinator.js'), {
   namedExports: { recheckRecommendation: async (siteId, id, opts) => recheckImpl(siteId, id, opts) },
 });
+// Pass 0 is mocked wholesale for the same reason recheckRecommendation is:
+// its own behavior has its own test file (batch-pr-recovery.test.js). What
+// matters HERE is only that the reconciler runs it, and runs it BEFORE the
+// stall reclaim — see the ordering test at the end of this file.
+mock.module(resolve('./batch-pr-recovery.js'), {
+  namedExports: {
+    recoverUnopenedBatchPrs: async (siteId) => {
+      passOrder.push('pr-recovery');
+      return { branches: 0, opened: 0, adopted: 0, abandoned: 0, skipped: 0, details: [] };
+    },
+  },
+});
 const { reconcileSite } = await import('./action-center-reconciler.js');
 const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS } = await import('../agents/lib/ship-pacing.js');
 const { NO_FILE_MAPPING_FRAGMENT } = await import('./draft-failure-phrases.js');
@@ -176,6 +192,7 @@ beforeEach(() => {
   drafts = [];
   recs = [];
   recorded = [];
+  passOrder = [];
   recheckImpl = async () => { throw new Error('recheckRecommendation must not be called for this test'); };
 });
 
@@ -407,5 +424,23 @@ describe('pass 1 (reconcileStuckApprovedDrafts) — abandons an ITEM_DEFECT appr
 
     assert.equal(result.itemDefects.drafts.length, 0);
     assert.equal(drafts[0].status, 'approved');
+  });
+});
+
+// The ordering IS the fix. Pass 2 reclaims a 'branch_pushed' draft purely on
+// lack of progress, and a batch whose commits landed but whose PR call failed
+// is indistinguishable from one that never pushed — so running the reclaim
+// first threw away real, pushed commits and regenerated them the next day,
+// every day. Measured on site 1, 2026-09-08: 21 drafts, two branches, both
+// with real commits ahead of main and one already carrying an open PR.
+describe('pass 0 (batch-PR recovery) — ordering', () => {
+  test('finishes already-pushed work BEFORE the stall reclaim is allowed to bin it', async () => {
+    await reconcileSite(1, { apply: true, log: null });
+    assert.equal(passOrder[0], 'pr-recovery', 'pass 0 must run first');
+    assert.ok(passOrder.includes('stall-reclaim'));
+    assert.ok(
+      passOrder.indexOf('pr-recovery') < passOrder.indexOf('stall-reclaim'),
+      'a reclaim that runs first destroys the very work pass 0 exists to finish',
+    );
   });
 });

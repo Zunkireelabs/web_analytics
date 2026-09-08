@@ -228,3 +228,50 @@ describe('createRecommendationGates — Design Agent status enrichment (honest b
     assert.doesNotMatch(result.blockedReason || '', /Design Agent/, 'the page-mapping reason must win — no point discussing a template for a page we cannot even locate a file for');
   });
 });
+
+describe('createRecommendationGates — faq/qa-content vs an already-schema\'d file', () => {
+  // Mirrors the /resources/?type=report vs ?type=ebook vs ?type=webinar
+  // shape: several distinct GSC URLs that all resolve (resolveFile matches on
+  // pathname only) to the SAME file.
+  const mappedSite = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', url_file_map: { pages: { '/resources/': { file: 'src/pages/resources.njk' } } } };
+
+  test('drops a qa-content candidate whose file already carries an FAQPage schema', async () => {
+    const gates = createRecommendationGates(1, mappedSite, {
+      ...neutralDeps(), fetchFile: async () => ({ content: '<script type="application/ld+json">{"@type":"FAQPage"}</script>' }),
+    });
+
+    const result = await gates.evaluate('qa-content', { page: 'https://acme.com/resources/?type=ebook' });
+
+    assert.equal(result.drop, 'faq-schema-already-present');
+  });
+
+  test('drops a faq candidate the same way', async () => {
+    const gates = createRecommendationGates(1, mappedSite, {
+      ...neutralDeps(), fetchFile: async () => ({ content: '{"@type": "FAQPage"}' }),
+    });
+
+    const result = await gates.evaluate('faq', { page: 'https://acme.com/resources/?type=webinar' });
+
+    assert.equal(result.drop, 'faq-schema-already-present');
+  });
+
+  test('does not drop when the file has no FAQPage schema yet', async () => {
+    const gates = createRecommendationGates(1, mappedSite, {
+      ...neutralDeps(), fetchFile: async () => ({ content: '<div>no schema here</div>' }),
+    });
+
+    const result = await gates.evaluate('qa-content', { page: 'https://acme.com/resources/?type=report' });
+
+    assert.equal(result.drop, null);
+  });
+
+  test('does not drop a non-faq generator sharing the same schema\'d file', async () => {
+    const gates = createRecommendationGates(1, mappedSite, {
+      ...neutralDeps(), fetchFile: async () => ({ content: '<script type="application/ld+json">{"@type":"FAQPage"}</script>' }),
+    });
+
+    const result = await gates.evaluate('meta-title', { page: 'https://acme.com/resources/?type=ebook' });
+
+    assert.equal(result.drop, null);
+  });
+});

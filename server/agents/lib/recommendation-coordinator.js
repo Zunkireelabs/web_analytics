@@ -109,8 +109,19 @@ export function recommendationPageKey(item) {
   // silently disappear into finding_ids. Also fixes a latent version of the
   // same bug for font-consistency.js's font-size-override fixType, which
   // only ever proposed page alone before this.
+  //
+  // 'table-style-drift'/'typography-drift' (routed from
+  // agents/lib/design-consistency.js) sharpen this further: a single page
+  // can have SEVERAL independently-drifted sections of the identical
+  // fixType — e.g. two different tables, or a heading AND a body both
+  // failing typography-drift in different sections — which page::fixType
+  // alone would still collapse onto one row. sectionOrder+textRole (present
+  // only on these two fixTypes' params; undefined for the other five, so
+  // their key is unchanged) is the same per-section discriminator
+  // consistency-check.js's own Finding shape already carries.
   if (item.generatorId === 'content-integrity-repair') {
-    return `${item.params?.page || ''}::${item.params?.fixType || ''}`;
+    const { page, fixType, sectionOrder, textRole } = item.params || {};
+    return `${page || ''}::${fixType || ''}::${sectionOrder ?? ''}::${textRole ?? ''}`;
   }
   // blog-image (agents/blog-image.js) has no live URL to key on — the
   // detector found this post by its real repo path, which is already
@@ -152,7 +163,7 @@ export const DEDUP_IDENTITY = {
   'blog-outline': 'topic',
   'landing-page': 'topic|city|market',
   'comparison-page': 'topic',
-  'content-integrity-repair': 'fixType',
+  'content-integrity-repair': 'fixType|sectionOrder|textRole',
   'blog-image': 'filePath',
 };
 
@@ -212,24 +223,30 @@ export async function syncFromGrounded(siteId, grounded) {
     const page = recommendationPageKey(item);
     const existing = await findOpenRecommendation(siteId, page, item.generatorId);
     if (existing) {
-      if (existing.finding_ids.includes(item.id)) {
-        // Nothing new about the *finding* — finding ids are deterministic
-        // (e.g. `geo-signals:${page}:${label}`), so re-detecting the same
-        // issue yields the same id every run and re-merging it is churn.
-        //
-        // Block state is a different thing entirely: it is recomputed from
-        // live site and repo state on every sync, not carried by the finding.
-        // Returning early here meant that for any recommendation the agents
-        // keep re-detecting — which is most of them — the block never
-        // refreshed in either direction. A template that got verified stayed
-        // blocked; a row corrupted to 'safe' by migration 078 stayed
-        // corrupted. Refresh just that, then skip the merge as before.
-        await refreshRecommendationBlockState(existing.id, {
-          blockedReason: item.blockedReason ?? null,
-          riskTier: blockedRiskTier(item),
-        });
-        continue;
-      }
+      // ALWAYS merge, even when the *finding* itself is unchanged (same
+      // deterministic id as yesterday). This used to early-return here on
+      // the reasoning that a re-detected finding has nothing new to say —
+      // true of the finding, false of its PARAMS. A detecting agent
+      // recomputes params fresh every run from live/current state (e.g.
+      // trust-compliance.js reads sites.ga4_measurement_id fresh each sync),
+      // but analytics-install's finding id
+      // (`trust-compliance:${provider}:missing`) never changes while the
+      // tracker stays uninstalled — so under the old early return, a
+      // recommendation created before an ID was configured in the database
+      // NEVER picked up that ID through normal daily sync, only through the
+      // failure-triggered recovery cycle in action-center-reconciler.js
+      // (bounded, only reached after MAX_FAILED_ATTEMPTS worth of real
+      // failures). Confirmed live: recommendation #47/#48 on site 1 carried
+      // no trackingId from 2026-08-21 through 15 failed drafts, and only
+      // gained one on 2026-09-07 when the recovery path finally forced a
+      // refresh — 17 days and 15 wasted attempts a plain sync should have
+      // avoided. mergeIntoRecommendation's `params = COALESCE($5, params)`
+      // already replaces params wholesale with the fresh value (same
+      // semantics expected_impact/confidence use), so calling it
+      // unconditionally is exactly "recompute this recommendation's facts
+      // from what was just re-detected" — never a data loss, since a
+      // detecting agent that found nothing new about params still passes its
+      // current, correct params, not a blank.
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,

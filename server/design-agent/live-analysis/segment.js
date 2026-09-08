@@ -52,9 +52,15 @@ function textHierarchyOf(block) {
       tag: `h${block.headingLevel}`,
       style: block.headingStyle,
       classes: block.headingClasses || '',
+      // Full live-captured outerHTML, threaded through untouched from
+      // capture.js — the exact anchor a typography-drift finding's
+      // recommended fix (content-integrity-repair.js's 'typography-drift'
+      // fixType) patches against. See capture.js's outerHtmlOf for why this
+      // must be the live DOM's markup, not a re-derived one.
+      outerHtml: block.headingOuterHtml || '',
     });
   }
-  if (block.bodyText) items.push({ role: 'body', text: block.bodyText, tag: 'p', style: block.bodyStyle, classes: block.bodyClasses || '' });
+  if (block.bodyText) items.push({ role: 'body', text: block.bodyText, tag: 'p', style: block.bodyStyle, classes: block.bodyClasses || '', outerHtml: block.bodyOuterHtml || '' });
   if (block.ctaText) items.push({ role: 'cta', text: block.ctaText, tag: block.ctaTag, style: null, classes: block.ctaClasses || '' });
   // capture.js's pickLink() already excludes anything button-shaped (a
   // background color, or a btn/button class) so this is real inline-link
@@ -79,7 +85,7 @@ function componentsOf(block) {
   if (block.cardLike) out.push({ type: 'card', classes: block.cardClasses });
   if (block.ctaText) out.push({ type: 'button', classes: block.ctaClasses });
   if (block.listClasses?.wrapper) out.push({ type: 'list', classes: block.listClasses });
-  if (block.tableLike) out.push({ type: 'table', classes: block.tableClasses });
+  if (block.tableLike) out.push({ type: 'table', classes: block.tableClasses, outerHtml: block.tableOuterHtml || '' });
   if (block.imageCount > 0) out.push({ type: 'imagery', classes: '' });
   return out;
 }

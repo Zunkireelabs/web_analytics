@@ -212,6 +212,29 @@ describe('auto-configure projection', () => {
 
   test('only an allow-listed key may ever be written automatically', () => {
     // Layout templates, componentTemplates and build config must not appear.
-    assert.deepEqual([...AUTO_WRITABLE].sort(), ['patterns', 'renderCapabilities']);
+    assert.deepEqual([...AUTO_WRITABLE].sort(), ['pages', 'patterns', 'renderCapabilities']);
+  });
+
+  test('static-routes projects exact pages{} entries, skipping any URL already resolvable', () => {
+    const finding = {
+      category: 'static-routes',
+      finding: { routes: [{ route: '/about', file: 'src/app/about/page.tsx' }, { route: '/', file: 'src/app/page.tsx' }] },
+    };
+    const existing = { pages: { '/': { file: 'src/app/CUSTOM.tsx' } } };
+    const p = projectFinding(finding, existing);
+    assert.equal(p.key, 'pages');
+    assert.deepEqual(p.next['/about'], { file: 'src/app/about/page.tsx' });
+    assert.equal(p.next['/'].file, 'src/app/CUSTOM.tsx', 'an already-resolvable route must never be overwritten');
+    assert.deepEqual(p.additions, [{ route: '/about', file: 'src/app/about/page.tsx' }]);
+  });
+
+  test('a component template language (jsx/tsx) is recorded as markdown: false, never left unset', () => {
+    const p = projectFinding(
+      { category: 'technology', finding: { id: 'nextjs', templateLanguages: [{ id: 'jsx' }] } },
+      {}
+    );
+    assert.equal(p.key, 'renderCapabilities');
+    assert.deepEqual(p.next.extensions['.tsx'], { markdown: false });
+    assert.deepEqual(p.next.extensions['.jsx'], { markdown: false });
   });
 });

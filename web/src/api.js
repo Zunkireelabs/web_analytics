@@ -90,6 +90,15 @@ export const api = {
   // other caller (and every non-internal user) omits it and hits the plain
   // session-scoped route exactly as before.
   growthReport: (siteId) => (siteId ? req(`/internal/growth-report/${siteId}`) : req('/growth-report')),
+  // The client-facing "day 0" document — same client/internal pair pattern
+  // as growthReport above. downloadUrl is a plain href (not fetched via
+  // req()) since it needs to trigger a browser file download, not a JSON
+  // response; session cookies cover auth the same way any other same-origin
+  // GET does.
+  baselineReport: (siteId) => (siteId ? req(`/internal/baseline-report/${siteId}`) : req('/baseline-report')),
+  baselineReportDownloadUrl: (siteId) =>
+    `${import.meta.env.BASE_URL}api${siteId ? `/internal/baseline-report/${siteId}/download` : '/baseline-report/download'}`,
+  generateBaselineReport: (siteId) => req(`/internal/baseline-report/${siteId}/generate`, { method: 'POST' }),
   growthTargets: {
     set: (body) => req('/growth-targets', { method: 'POST', body: JSON.stringify(body) }),
     setBatch: (targets) => req('/growth-targets/batch', { method: 'POST', body: JSON.stringify({ targets }) }),
@@ -150,6 +159,7 @@ export const api = {
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
+    setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
     // Design-integrity gate: what the design agent found on this site's real
     // pages and what it would write, plus the current sign-off state
     // (server/agents/lib/design-review.js's buildDesignReviewReport).

@@ -1,6 +1,6 @@
 import { getDueVerifications, recordVerificationOutcome } from '../../store/fix-verifications.js';
 import { getWatchlistItemById, setWatchlistStatus } from '../../store/watchlist.js';
-import { analyzePageUrl, recommendationsFor, contentGapsFor } from './page-content.js';
+import { analyzePageUrl, recommendationsFor, contentGapsFor, fetchHtml } from './page-content.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 import { getSiteById } from '../../store/read.js';
@@ -8,6 +8,7 @@ import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { computeSiteFingerprint } from './site-fingerprint.js';
 import { getOrClassifyPageContentType } from './page-content-classifier.js';
 import { problemSignatureFor, buildRepairRecipe, tagsForGenerator } from './learned-repair.js';
+import { findOpenRecommendation, closeRecommendation } from '../../store/recommendations.js';
 
 // Which real tag(s) a given generatorId's draft was meant to resolve, per
 // source agent (the same generatorId can mean different things from different
@@ -128,7 +129,46 @@ async function portabilityFor(row) {
   return hasRequired ? { fingerprint, recipe } : { fingerprint: null, recipe: null };
 }
 
+// analytics-install's own re-check: not a tag re-derivation (recommendation-
+// sFor/contentGapsFor have no concept of "GA4/Pixel installed"), but a
+// direct, literal check that the EXACT tracking ID this draft shipped —
+// stashed in row.query at schedule time (see fix-verifications.js's
+// isVerifiableDraft + drafts.js's markDraftImplemented) — now appears in the
+// live page's real HTML. Closing the recommendation is gated on this outcome
+// alone: a merged PR or an 'implemented' draft says only that the change was
+// applied, never that it is actually live and working — this is the "did it
+// really work" evidence the user-facing recommendation card is closed on.
+async function verifyAnalyticsInstall(row) {
+  const trackingId = row.query;
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) {
+    await recordVerificationOutcome(row.id, 'unreachable', { error: fetched.error });
+    return { id: row.id, outcome: 'unreachable' };
+  }
+
+  const installed = !!trackingId && fetched.html.includes(trackingId);
+  const outcome = installed ? 'verified-fixed' : 'still-present';
+  await recordVerificationOutcome(row.id, outcome, { trackingId, page: row.page_url });
+  await learnFromOutcome(row, outcome, []);
+
+  if (outcome === 'verified-fixed') {
+    // The recommendation that originated this draft — same (site, page,
+    // recommendationType) key trust-compliance.js's own finding uses, so
+    // this is closing the actual row a human sees in the Action Center, not
+    // a different one. findOpenRecommendation returns null if it was
+    // already closed some other way (e.g. the slower closeStaleRecommend-
+    // ations sweep beat this to it) — nothing to do in that case.
+    const rec = await findOpenRecommendation(row.site_id, row.page_url, row.generator_id);
+    if (rec) await closeRecommendation(rec.id);
+  } else if (row.watchlist_item_id) {
+    await reopenIfClosed(row.site_id, row.watchlist_item_id);
+  }
+  return { id: row.id, outcome };
+}
+
 async function verifyOne(row) {
+  if (row.generator_id === 'analytics-install') return verifyAnalyticsInstall(row);
+
   const fetched = await analyzePageUrl(row.page_url);
   if (!fetched.ok) {
     await recordVerificationOutcome(row.id, 'unreachable', { error: fetched.error });

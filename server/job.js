@@ -35,6 +35,8 @@ import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
+import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
+import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
 import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -1057,11 +1059,28 @@ export async function fetchAnalystInsights(siteId) {
 // Seeded from a real count of today's already-shipped drafts (not reset to
 // 0) so the hourly catch-up loop below correctly resumes the same day's
 // running total rather than re-granting a fresh ceiling every time it fires.
+// Counts EVERY autonomous shipping lane, not just auto-remediation's — the
+// same canonical source list agents/lib/auto-remediation.js sizes its own
+// per-site budget against (server/lib/autonomous-quota.js), imported rather
+// than re-listed here: a locally re-declared copy previously went stale and
+// silently dropped 'learned-repair', 'content-repair',
+// 'template-capability-repair' and 'design-agent' from the platform-wide
+// ceiling while the per-site budget still counted them.
 async function globalRemainingSeed() {
   const ceiling = Number(process.env.AUTO_REMEDIATION_GLOBAL_DAILY_CEILING);
   if (!Number.isFinite(ceiling) || ceiling < 0) return Infinity;
-  const alreadyShipped = await countDraftsBySourceTodayAllSites('auto-remediation');
-  return Math.max(0, ceiling - alreadyShipped);
+  // Drafts-table spend (auto-remediation, analyst-keyword-gap, learned-repair
+  // once shipped, design-agent) plus the file-edits queue's own spend
+  // (content-repair, template-capability-repair — see
+  // store/shipping-queue.js's countShippedFileEditsTodayAllSites for why that
+  // second count exists and why it is scoped to kind:'file-edits' only, to
+  // avoid double-counting learned-repair's shipped queue rows against the
+  // drafts row that same fix already produced).
+  const [draftsShipped, fileEditsShipped] = await Promise.all([
+    countDraftsBySourceTodayAllSites(AUTONOMOUS_DRAFT_SOURCES),
+    countShippedFileEditsTodayAllSites(),
+  ]);
+  return Math.max(0, ceiling - draftsShipped - fileEditsShipped);
 }
 
 // Runs server/scripts/repair-template-capability.js's core for every
@@ -1069,12 +1088,16 @@ async function globalRemainingSeed() {
 // capability-repair story, distinct from autoHealFileMapping/
 // autoHealNewContentTarget (implementers/lib/discover-*.js, already run
 // inline inside every recommendation-gates.js pass, no separate cron entry
-// needed). This one opens its own PR directly (bypassing the drafts table
-// entirely — see that file's own doc comment on why), so it gets its own
-// step here rather than folding into runAutoRemediationForAllSites, which
-// only ever ships already-drafted, already-approved recommendations.
+// needed). It still gets its own step here, run BEFORE
+// runAutoRemediationForAllSites in the same morning chain (see cron.js) —
+// not because it opens its own PR any more (it doesn't: like
+// repair-site-content-live.js, its edits are queued via
+// store/shipping-queue.js and shipped in the SAME single batch/PR the
+// shipping run below opens), but because unblocking a capability gap here is
+// what lets THIS SAME morning's auto-remediation pass actually draft the
+// recommendations that gap was blocking.
 // Per-site error isolation, same as every other *ForAllSites function: one
-// site's repo/PR failure must never cost every other site its own run.
+// site's repo failure must never cost every other site its own run.
 export async function runTemplateCapabilityRepairForAllSites() {
   const { repairTemplateCapabilitiesForSite } = await import('./scripts/repair-template-capability.js');
   const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
@@ -1082,10 +1105,10 @@ export async function runTemplateCapabilityRepairForAllSites() {
   for (const site of sites) {
     try {
       const report = await repairTemplateCapabilitiesForSite(site.id);
-      const prCount = report.prsCreated.length;
+      const queuedCount = report.queued ? 1 : 0;
       const fixedCount = report.plumbingGapsFixed.length + report.safeCapabilityGapsRepaired.length;
-      if (prCount || fixedCount) {
-        console.log(`[job] template-capability-repair site ${site.id} "${site.name}": ${fixedCount} config fix(es), ${prCount} PR(s) opened, ${report.architecturalGapsBlocked.length} still needing a human decision.`);
+      if (queuedCount || fixedCount) {
+        console.log(`[job] template-capability-repair site ${site.id} "${site.name}": ${fixedCount} config fix(es), ${queuedCount ? 'queued for the shared shipping run' : 'nothing queued'}, ${report.architecturalGapsBlocked.length} still needing a human decision.`);
       }
       results.push({ siteId: site.id, ...report });
     } catch (err) {
@@ -1125,6 +1148,14 @@ export async function runDesignProfileRoleCorrectionForAllSites() {
 // visible_faq_cap enforcement, blog front-matter contract, directory-collection
 // self-inclusion, and unresolved-placeholder/fabricated-competitor removal),
 // now automated. See scripts/repair-site-content-live.js's own module comment.
+//
+// Queues, never ships. repairSiteContentLive computes and validates its
+// edits here but no longer commits or opens a PR — it enqueues them onto the
+// shared shipping queue (source='content-repair', migration 148) for the
+// 07:00 auto-remediation run to include in that day's ONE batch/commit/PR
+// alongside every other autonomous lane. This is one of the two
+// previously-independent PR-opening paths closed for "one build, one
+// commit, one PR" (the other is learned-repair.js).
 export async function runContentRepairForAllSites() {
   const { repairSiteContentLive } = await import('./scripts/repair-site-content-live.js');
   const sites = (await listSites()).filter((s) => s.repo_owner && s.repo_name);
@@ -1132,8 +1163,8 @@ export async function runContentRepairForAllSites() {
   for (const site of sites) {
     try {
       const report = await repairSiteContentLive(site.id);
-      if (report.prCreated) {
-        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, PR ${report.prCreated.url}`);
+      if (report.queued) {
+        console.log(`[job] content-repair site ${site.id} "${site.name}": ${report.changedFiles.length} file(s) repaired, queued (shipping_queue #${report.queued.id}) for the 07:00 shared shipping run — no PR opened here.`);
       }
       results.push(report);
     } catch (err) {

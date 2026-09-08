@@ -102,6 +102,7 @@ export async function buildRecommendations(siteId) {
     'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
     'adapter-data-not-ready': 'The configured data source has no entry for this page and none is expected to appear.',
+    'faq-schema-already-present': 'This page\'s file already carries an FAQPage schema (often from another query-string variant of the same shared template) — a new FAQ/Q&A draft would have nothing left to publish.',
     'auto-computed-by-layout': 'This page\'s canonical/Open Graph tags are already computed automatically by its shared layout template from the page\'s own title, description, and URL — there is no per-page value to write and no fix needed.',
   };
 

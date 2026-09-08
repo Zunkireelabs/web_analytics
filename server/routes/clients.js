@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { requireAuth, requirePlatformRole } from './login.js';
 
-import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
+import { createClientSite, updateSiteConnection, updateSiteRepoConfig, updateSiteOauthPolicy, updateSiteVisibleFaqCap, updateSiteLearnedRepair, updateSiteVisibleFaqBaseline, updateSiteAuthorProfile, updateSiteAutoRemediation, updateSiteDesignReview, updateSiteAnalyticsIds, suspendSite, reactivateSite, softDeleteSite, hardDeleteSite } from '../db.js';
 import {
   getDesignProfile, siteHasUsableDesignProfile, designReviewFingerprint,
   verifyProfileRoles, checkTypographyRole, TYPOGRAPHY_ROLE_SOURCE, observedClassesByRole,
@@ -23,9 +23,12 @@ import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
 import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
+import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
 import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { runDiscovery } from '../discovery/run-discovery.js';
+import { auditSite } from '../scripts/audit-url-file-map.js';
 
 // Client provisioning, exposed as real routes for the first time this
 // session — previously only reachable via server/scripts/create-client.js /
@@ -74,6 +77,8 @@ router.get('/internal/clients', async (req, res, next) => {
       requireVisibleByline: s.require_visible_byline,
       autoRemediationEnabled: s.auto_remediation_enabled,
       autoRemediationDailyLimit: s.auto_remediation_daily_limit,
+      ga4MeasurementId: s.ga4_measurement_id,
+      facebookPixelId: s.facebook_pixel_id,
       status: s.status,
       deactivatedAt: s.deactivated_at,
       deletedAt: s.deleted_at,
@@ -277,6 +282,16 @@ async function runBaselineSequence(siteId, site) {
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
 
+  // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
+  // a single LLM call, not a slow crawl, so this is awaited like
+  // ingestion/analysis above rather than fire-and-forget like the full site
+  // audit below. A failure here must never fail onboarding itself; staff can
+  // retry via the "Generate Now" route or generate-baseline-report.js.
+  const baselineReport = await buildBaselineReport(siteId).catch((err) => {
+    console.error(`[clients] site ${siteId} baseline report generation failed:`, err.message);
+    return null;
+  });
+
   // Real "where you stand today" findings for Milestones — fire-and-forget
   // like the manual /site-audit trigger: resolves once the audit_runs row
   // exists, the actual crawl+audit keeps running well past this request's
@@ -292,7 +307,7 @@ async function runBaselineSequence(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore,
+    discovery, ingestion, analysis, healthScore, baselineReport,
   };
 }
 
@@ -452,6 +467,28 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     queueDesignAgentDerivationForSite(site).catch((err) =>
       console.error(`[clients] could not queue design-profile derivation for site ${site.id}:`, err.message)
     );
+
+    // Automatic repo discovery (mirrors connect-repo.js's CLI path — see its
+    // own comment): inspects the connected repo, detects its real framework
+    // and routing structure, and writes only what it can prove by reading
+    // the result back through the production resolvers. Runs whether or not
+    // this request supplied a hand-authored urlFileMap, so a UI-driven
+    // connect gets the same automatic mapping the CLI does — no separate
+    // manual step. Best-effort: must not fail the connect-repo request.
+    try {
+      const discovery = await runDiscovery(site);
+      if (discovery.ok) site = (await getSiteById(siteId)) || site;
+    } catch (err) {
+      console.error(`[clients] repo discovery failed for site ${site.id}:`, err.message);
+    }
+    // Same config-completeness check connect-repo.js's CLI already ran
+    // automatically — this HTTP route never had it, so a UI-driven connect
+    // could look "done" while still missing every generator's target.
+    try {
+      await auditSite(siteId);
+    } catch (err) {
+      console.error(`[clients] config-completeness check failed for site ${site.id}:`, err.message);
+    }
 
     await recordAuditEvent(req, {
       action: 'tenant.repo_connected',
@@ -748,6 +785,67 @@ router.post('/internal/clients/:id/author-profile', async (req, res, next) => {
       id: site.id, authorName: site.author_name, authorRole: site.author_role,
       authorUrl: site.author_url, requireVisibleByline: site.require_visible_byline,
     });
+  } catch (e) { next(e); }
+});
+
+// The site's own real GA4 Measurement ID / Meta (Facebook) Pixel ID
+// (migrations 130/135) — read live at draft time by
+// generators/analytics-install.js. Until this route existed, nothing in the
+// product could set either column (same gap design_agent_enabled had — a DB
+// column with no route/UI ever wired to it), so a tenant's Action Center
+// could never actually install analytics even once these were configured,
+// because they were never configured through anything but a hand-written
+// SQL UPDATE.
+const GA4_MEASUREMENT_ID_PATTERN = /^G-[A-Z0-9]+$/i;
+const FACEBOOK_PIXEL_ID_PATTERN = /^\d{10,20}$/;
+
+// Exported (same pattern as validateAutoRemediationRequest above) so the
+// shape rules are unit-testable without an Express request. Same
+// idPattern/idHint generators/analytics-install.js itself validates against
+// at draft time — a value rejected here would only ever have shipped a
+// tracking script that silently collects nothing, so it's worth refusing at
+// the door instead of at the far end of a PR.
+export function validateAnalyticsIdsRequest({ ga4MeasurementId, facebookPixelId }) {
+  if (ga4MeasurementId && !GA4_MEASUREMENT_ID_PATTERN.test(ga4MeasurementId.trim())) {
+    return 'ga4MeasurementId must look like a GA4 Measurement ID, e.g. "G-XXXXXXXXXX".';
+  }
+  if (facebookPixelId && !FACEBOOK_PIXEL_ID_PATTERN.test(facebookPixelId.trim())) {
+    return 'facebookPixelId must be a numeric Meta Pixel ID, e.g. "123456789012345".';
+  }
+  return null;
+}
+
+router.post('/internal/clients/:id/analytics-ids', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { ga4MeasurementId, facebookPixelId } = req.body || {};
+    // Empty string clears the field (routed through as null by
+    // updateSiteAnalyticsIds) — only a genuinely non-empty value is shape-
+    // checked, same "don't validate what you're not keeping" rule the rest
+    // of this route file already follows.
+    const invalid = validateAnalyticsIdsRequest({ ga4MeasurementId, facebookPixelId });
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const site = await updateSiteAnalyticsIds({
+      siteId,
+      ga4MeasurementId: ga4MeasurementId !== undefined ? (ga4MeasurementId ? ga4MeasurementId.trim() : null) : undefined,
+      facebookPixelId: facebookPixelId !== undefined ? (facebookPixelId ? facebookPixelId.trim() : null) : undefined,
+    });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.analytics_ids_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: site.name,
+      metadata: { ga4MeasurementIdSet: !!site.ga4_measurement_id, facebookPixelIdSet: !!site.facebook_pixel_id },
+      success: true,
+    });
+
+    res.json({ id: site.id, ga4MeasurementId: site.ga4_measurement_id, facebookPixelId: site.facebook_pixel_id });
   } catch (e) { next(e); }
 });
 

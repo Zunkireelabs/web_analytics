@@ -20,54 +20,62 @@ const SITE = {
 let currentSite;
 let repoFiles;
 let fileContents;
-let githubCalls;
-let existingPrsForBranch;
+let queueRows; // in-memory fake of shipping_queue, keyed by id
 
 mock.module(resolve('../store/read.js'), { namedExports: { getSiteById: async () => currentSite } });
 
-// Mocked at the LOWEST level (github/client.js) only. github-ops.js
-// (baseBranch/getOrInitBatchBranch/openPrForBranch) runs FOR REAL against
-// these mocks — this is deliberate: it's what proves the repair now lands
-// on the exact same shared batch branch/PR the Action Center itself uses,
-// rather than asserting against a second, hand-rolled mock of that
-// decision. Every real export is spread in first so github-ops.js's own
-// imports (mergeBranchFromBase, the file-overlay functions — unused by this
-// script but still imported by github-ops.js) resolve to something real.
+// Mocked at the LOWEST level (github/client.js) only — the repair still
+// fetches the real repo tree/file content to compute its diff. It no longer
+// creates a branch, commits, or opens a PR itself (see the module's own
+// comment: that step moved to the shared shipping queue), so this file no
+// longer needs to fake createBranch/commitFilesAtomic/openPullRequest — but
+// every real export is still spread in first, same as before, because
+// implementers/lib/github-ops.js (still imported here for baseBranch()) and
+// its own transitive imports (rendering-gate.js's getCheckRunsForRef, etc.)
+// need something real to resolve against.
 const realClient = await import(resolve('../github/client.js'));
 mock.module(resolve('../github/client.js'), {
   namedExports: {
     ...realClient,
     getRepoTree: async () => ({ files: repoFiles, truncated: false }),
     getFileContent: async (_s, p) => (fileContents[p] !== undefined ? { content: fileContents[p], sha: 's' } : null),
-    // 'main' (the base branch) always exists; anything else (today's batch
-    // branch, which getOrInitBatchBranch probes for) does not yet — same
-    // "always a fresh branch" starting state the tests below already
-    // assumed before this file existed on a shared branch.
-    getBranchSha: async (_s, ref) => {
-      if (ref !== 'main') throw new Error('404 Not Found');
-      return 'base-sha';
+  },
+});
+
+// Fakes store/shipping-queue.js's enqueue/markPrepared exactly as this
+// module calls them — proving the repair now QUEUES its already-computed,
+// already-validated edits instead of pushing a branch/PR directly.
+let nextId = 1;
+mock.module(resolve('../store/shipping-queue.js'), {
+  namedExports: {
+    enqueue: async (siteId, opts) => {
+      const row = { id: nextId++, site_id: siteId, state: 'queued', ...opts };
+      queueRows.push(row);
+      return { row, created: true };
     },
-    createBranch: async (...a) => { githubCalls.createBranch.push(a); },
-    commitFilesAtomic: async (...a) => { githubCalls.commitFilesAtomic.push(a); },
-    openPullRequest: async (...a) => { githubCalls.openPullRequest.push(a); return { url: 'https://github.com/acme/x/pull/1', number: 1 }; },
-    listOpenPullRequestsForBranch: async () => existingPrsForBranch,
-    defaultBranchName: () => 'main',
+    markPrepared: async (id, { filePaths, score }) => {
+      const row = queueRows.find((r) => r.id === id);
+      if (!row) return null;
+      row.state = 'prepared';
+      row.file_paths = filePaths;
+      row.score = score;
+      return row;
+    },
   },
 });
 
 const { repairSiteContentLive } = await import(resolve('./repair-site-content-live.js'));
-const { batchBranchName } = await import(resolve('../implementers/lib/github-ops.js'));
 
 beforeEach(() => {
   currentSite = SITE;
   repoFiles = [];
   fileContents = {};
-  githubCalls = { createBranch: [], commitFilesAtomic: [], openPullRequest: [] };
-  existingPrsForBranch = [];
+  queueRows = [];
+  nextId = 1;
 });
 
 describe('repairSiteContentLive', () => {
-  test('the real incident: a QACONTENT region using the old unstyled shape gets restyled and committed', async () => {
+  test('the real incident: a QACONTENT region using the old unstyled shape is queued for the shared shipping run, not committed directly', async () => {
     repoFiles = ['src/pages/team.njk'];
     fileContents = {
       'src/pages/team.njk': [
@@ -80,42 +88,39 @@ describe('repairSiteContentLive', () => {
 
     const report = await repairSiteContentLive(1);
 
-    assert.equal(githubCalls.commitFilesAtomic.length, 1);
-    const [, , files] = githubCalls.commitFilesAtomic[0];
-    assert.equal(files.length, 1);
-    assert.match(files[0].content, /expandAll/, 'restyled through the site\'s real accordion, not left as qa-content');
-    assert.ok(report.prCreated.url);
     assert.deepEqual(report.changedFiles, ['src/pages/team.njk']);
+    assert.equal(report.prCreated, null, 'this function must never open its own PR anymore');
+    assert.ok(report.queued, 'the computed edit is queued for the shared shipping run');
+    assert.equal(report.queued.state, 'prepared', 'already computed and validated — ready to ship, no further generation needed');
 
-    // The whole point of routing this through github-ops.js: it lands on
-    // the SAME branch name the Action Center's own daily batch uses for
-    // this site, not a separate content-repair-only branch — so whichever
-    // of the two runs first that day, the other's commits join the same
-    // branch and the same PR.
-    const [, branchArg] = githubCalls.createBranch[0];
-    assert.equal(branchArg, batchBranchName(SITE));
+    assert.equal(queueRows.length, 1);
+    const row = queueRows[0];
+    assert.equal(row.source, 'content-repair');
+    assert.equal(row.kind, 'file-edits');
+    assert.equal(row.params.edits.length, 1);
+    assert.match(row.params.edits[0].content, /expandAll/, 'restyled through the site\'s real accordion, not left as qa-content');
+    assert.match(row.params.commitMessage, /Repair shipped content/);
   });
 
-  test('the blog-index self-inclusion bug is fixed as part of the same run', async () => {
+  test('the blog-index self-inclusion bug is fixed as part of the same computed diff', async () => {
     repoFiles = ['src/blog/blog.json', 'src/blog/index.njk'];
     fileContents = {
       'src/blog/blog.json': '{ "layout": "blog-post.njk", "tags": ["blog"] }',
       'src/blog/index.njk': '---\nlayout: base.njk\ntitle: "AI Blog"\npermalink: /blog/\n---\n<h1>Blog</h1>',
     };
     await repairSiteContentLive(1);
-    const [, , files] = githubCalls.commitFilesAtomic[0];
-    const indexFile = files.find((f) => f.path === 'src/blog/index.njk');
-    assert.ok(indexFile);
-    assert.match(indexFile.content, /eleventyExcludeFromCollections: true/);
+    const indexEdit = queueRows[0].params.edits.find((f) => f.path === 'src/blog/index.njk');
+    assert.ok(indexEdit);
+    assert.match(indexEdit.content, /eleventyExcludeFromCollections: true/);
   });
 
-  test('nothing to fix commits nothing and opens no PR', async () => {
+  test('nothing to fix queues nothing', async () => {
     repoFiles = ['src/pages/about.njk'];
     fileContents = { 'src/pages/about.njk': '---\ntitle: "About"\n---\n<p>Clean content, nothing to repair.</p>' };
     const report = await repairSiteContentLive(1);
-    assert.equal(githubCalls.commitFilesAtomic.length, 0);
-    assert.equal(githubCalls.openPullRequest.length, 0);
+    assert.equal(queueRows.length, 0);
     assert.equal(report.prCreated, null);
+    assert.equal(report.queued, undefined);
     assert.deepEqual(report.changedFiles, []);
   });
 
@@ -123,7 +128,7 @@ describe('repairSiteContentLive', () => {
     currentSite = { id: 2 };
     const report = await repairSiteContentLive(2);
     assert.equal(report.skipped, 'no-repo');
-    assert.equal(githubCalls.commitFilesAtomic.length, 0);
+    assert.equal(queueRows.length, 0);
   });
 
   test('a site with no stored component templates is a no-op, not a crash', async () => {
@@ -132,7 +137,7 @@ describe('repairSiteContentLive', () => {
     assert.equal(report.skipped, 'no-component-templates');
   });
 
-  test('dry run finds work but writes nothing', async () => {
+  test('dry run finds work but queues nothing', async () => {
     repoFiles = ['src/blog/blog.json', 'src/blog/index.njk'];
     fileContents = {
       'src/blog/blog.json': '{ "tags": ["blog"] }',
@@ -140,24 +145,11 @@ describe('repairSiteContentLive', () => {
     };
     const report = await repairSiteContentLive(1, { dryRun: true });
     assert.ok(report.changedFiles.length > 0);
-    assert.equal(githubCalls.commitFilesAtomic.length, 0);
+    assert.equal(queueRows.length, 0);
     assert.equal(report.prCreated, null);
   });
 
-  test('reuses an already-open PR on the same day\'s branch', async () => {
-    repoFiles = ['src/blog/blog.json', 'src/blog/index.njk'];
-    fileContents = {
-      'src/blog/blog.json': '{ "tags": ["blog"] }',
-      'src/blog/index.njk': '---\nlayout: base.njk\npermalink: /blog/\n---\nbody',
-    };
-    existingPrsForBranch = [{ html_url: 'https://github.com/acme/x/pull/7', number: 7 }];
-    const report = await repairSiteContentLive(1);
-    assert.equal(githubCalls.openPullRequest.length, 0);
-    assert.equal(report.prCreated.number, 7);
-    assert.equal(report.prCreated.reused, true);
-  });
-
-  test('only files that actually changed are committed, not everything fetched', async () => {
+  test('only files that actually changed are queued, not everything fetched', async () => {
     repoFiles = ['src/pages/clean.njk', 'src/blog/blog.json', 'src/blog/index.njk'];
     fileContents = {
       'src/pages/clean.njk': '---\ntitle: "Clean"\n---\n<p>Nothing wrong here.</p>',
@@ -165,8 +157,7 @@ describe('repairSiteContentLive', () => {
       'src/blog/index.njk': '---\nlayout: base.njk\npermalink: /blog/\n---\nbody',
     };
     await repairSiteContentLive(1);
-    const [, , files] = githubCalls.commitFilesAtomic[0];
-    assert.equal(files.length, 1);
-    assert.equal(files[0].path, 'src/blog/index.njk');
+    assert.equal(queueRows[0].params.edits.length, 1);
+    assert.equal(queueRows[0].params.edits[0].path, 'src/blog/index.njk');
   });
 });
