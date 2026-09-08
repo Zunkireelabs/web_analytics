@@ -99,3 +99,29 @@ describe('design-integrity-guard — runQualityGate integration', () => {
     assert.equal(result.clean, true);
   });
 });
+
+// A manual generate must never be withheld over a design mismatch: a person
+// clicked the button and is waiting to look at the result, so refusing to
+// produce anything is the one outcome that helps nobody. The mismatch is
+// still reported on the draft — it just doesn't withhold the draft itself.
+// Enforcement is for the UNATTENDED path, where "don't ship it" is the only
+// protection a live customer site has.
+describe('design-integrity-guard — manual generation is never blocked', () => {
+  test('enforce:false reports the mismatch but leaves it non-blocking', async () => {
+    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, {
+      fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE),
+      enforce: false,
+    });
+    assert.equal(issues.length, 1, 'the mismatch is still surfaced, not hidden');
+    assert.equal(issues[0].patternId, 'design-role-mismatch');
+    assert.equal(issues[0].blocking, false);
+  });
+
+  test('enforce:true (the unattended default) still blocks', async () => {
+    const { issues } = await findDesignIntegrityIssues('blog-outline', 1, {
+      fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE),
+      enforce: true,
+    });
+    assert.equal(issues[0].blocking, true);
+  });
+});

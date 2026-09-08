@@ -59,7 +59,7 @@ export function designIntegrityEnforced() {
  * context, or one outside DESIGN_CONTEXT_GENERATOR_IDS, the same visible-
  * content set withDesignContext already scopes to), this is a no-op.
  */
-export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite = getSiteById } = {}) {
+export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite = getSiteById, enforce = designIntegrityEnforced() } = {}) {
   if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return { issues: [] };
 
   let site;
@@ -76,7 +76,14 @@ export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite
   const verdict = verifyProfileRoles(profile);
   if (verdict.ok) return { issues: [] };
 
-  const blocking = designIntegrityEnforced();
+  // `enforce` is false for a MANUAL generate: a person clicked the button and
+  // is waiting to look at the result, so refusing to produce anything is the
+  // one outcome that helps nobody — they get no draft, no diff, and nothing
+  // to judge. The mismatch is still reported and still visible on the draft;
+  // it just doesn't withhold the draft itself. Enforcement is for the
+  // UNATTENDED path, where "don't ship it" is the only protection a live
+  // customer site has. See generateDraft's `enforceDesignIntegrity`.
+  const blocking = enforce;
   return {
     issues: [{
       path: verdict.field,

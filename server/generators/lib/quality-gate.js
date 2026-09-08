@@ -87,7 +87,7 @@ const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-poli
 // may have just composed that very template — pass it so the check sees the
 // same template the generator was actually given. A caller with no site
 // simply skips the check, exactly as before it existed.
-export async function runQualityGate(content, generatorId, siteId, { site = null } = {}) {
+export async function runQualityGate(content, generatorId, siteId, { site = null, enforceDesignIntegrity } = {}) {
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
@@ -123,7 +123,10 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // drift.js) — a generator with no design surface has nothing for this to
     // check. See design-integrity-guard.js for the log-only -> enforce
     // rollout this implements (DESIGN_INTEGRITY_ENFORCE).
-    ...(needsDesignConsistencyCheck ? (await findDesignIntegrityIssues(generatorId, siteId)).issues : []),
+    ...(needsDesignConsistencyCheck
+      ? (await findDesignIntegrityIssues(generatorId, siteId,
+        enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity })).issues
+      : []),
     // Did the generator actually FOLLOW the structural guidance it was
     // given? Everything above checks the content in isolation; this is the
     // only check that compares it against this site's own canonical page

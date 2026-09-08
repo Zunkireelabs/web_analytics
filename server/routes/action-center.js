@@ -280,7 +280,7 @@ router.get('/action-center/generators', async (req, res, next) => {
 // wait budget in ms — dataAnalyst.js's "Generate Content Draft" button uses a
 // short one so a mid-derivation click gets a real result instead of an
 // immediate "come back later", without hanging the request for minutes.
-export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false } = {}) {
+export async function generateDraft(siteId, { generatorId, params, source, findingOrigin, findingId, memoryRefId: presetMemoryRefId = null, waitForDesignAgent = false, enforceDesignIntegrity = true } = {}) {
   if (!generatorId) { const err = new Error('generatorId is required'); err.status = 400; throw err; }
   const generator = await getGenerator(generatorId);
   if (!generator) { const err = new Error(`Unknown generator "${generatorId}"`); err.status = 404; throw err; }
@@ -435,7 +435,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       siteId,
       params: { ...(params || {}), ...(designCorrections ? { designCorrections } : {}) },
     }));
-    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite });
+    gateResult = await runQualityGate(content, generatorId, siteId, { site: effectiveSite, enforceDesignIntegrity });
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
 
@@ -625,7 +625,13 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
 router.post('/action-center/generate', async (req, res, next) => {
   try {
     const { generatorId, params, source, findingId } = req.body || {};
-    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId }));
+    // A MANUAL generate is never withheld over a design mismatch. Someone is
+    // sitting there waiting to look at the output; handing them nothing is
+    // strictly worse than handing them a draft with the mismatch reported on
+    // it, which they can then read, edit, or discard. The design gate stays
+    // enforcing on the unattended path (generateDraft's default), where
+    // refusing to ship really is the only protection a live site has.
+    res.json(await generateDraft(req.siteId, { generatorId, params, source, findingId, enforceDesignIntegrity: false }));
   } catch (e) {
     if (e.status === 400 || e.status === 404) {
       const message = e.userFacing ? e.message : sanitizeForCustomer(e.message, 'This recommendation could not be generated right now — try again shortly.');
