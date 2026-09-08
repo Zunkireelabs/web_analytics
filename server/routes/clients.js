@@ -21,7 +21,7 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
-import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding } from '../job.js';
+import { runSiteDiscoveryIfDue, runDailyIngestForSite, runDailyAgentAnalysisForSite, queueDesignAgentDerivationForSite, queueDesignProfileDerivationForOnboarding, runGeoAuditIfDue } from '../job.js';
 import { buildReviewReport } from '../agents/lib/review-report.js';
 import { buildBaselineReport } from '../agents/lib/baseline-report.js';
 import { buildDesignReviewReport } from '../agents/lib/design-review.js';
@@ -281,6 +281,22 @@ async function runBaselineSequence(siteId, site) {
   const analysis = await runDailyAgentAnalysisForSite(site);
   const [execRun] = await getLatestAgentRuns(siteId, ['executive-report']);
   if (execRun) await setOnboardingBaseline(siteId, execRun.id);
+
+  // AI-visibility score for the baseline report's "How AI Search Engines
+  // See You" page — must run AFTER ingestion above (it reads this site's
+  // real GSC page performance, getSearchPerformanceRange) and BEFORE
+  // buildBaselineReport below (which reads this run back via
+  // getLatestAgentRuns). Otherwise every newly onboarded site's day-0
+  // report would show "not yet measured" for that page until the next
+  // Monday's weekly geo-audit cron caught up — the exact page this report
+  // exists to make a strong first impression with. Awaited, not fire-and-
+  // forget: it scores at most 20 already-fetched top pages (geo-audit.js's
+  // MAX_PAGES), not a full-site crawl, so it's the same order of latency as
+  // the ingestion/analysis steps already awaited above. Best-effort — same
+  // "must never fail onboarding itself" discipline as every step here.
+  await runGeoAuditIfDue(site).catch((err) => {
+    console.error(`[clients] site ${siteId} onboarding GEO audit failed:`, err.message);
+  });
 
   // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql) —
   // a single LLM call, not a slow crawl, so this is awaited like
