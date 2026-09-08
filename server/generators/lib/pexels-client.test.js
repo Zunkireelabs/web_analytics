@@ -254,6 +254,32 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(result, null);
   });
 
+  test('a cafe/coffee-shop photo does not win even if it scores well on unrelated overlapping words', async () => {
+    global.fetch = mockFetchReturning({
+      'Modern Business Culture in Practice': [
+        photo({ alt: 'A cozy cafe interior with a barista preparing espresso, modern culture in a coffee shop', url: 'https://images.pexels.com/photos/1/cafe.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Modern Business Culture in Practice', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
+  });
+
+  test('a handicraft/artisan-hands photo does not win as a stand-in for a Nepal-based business post', async () => {
+    global.fetch = mockFetchReturning({
+      'Growing Business Innovation in Nepal': [
+        photo({ alt: 'An artisan hand-weaving traditional handicraft on a loom, showing local craftsmanship and innovation', url: 'https://images.pexels.com/photos/1/handicraft.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'Artificial intelligence technology concept with neural network visualization', url: 'https://images.pexels.com/photos/2/ai.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['Growing Business Innovation in Nepal', 'artificial intelligence technology']);
+    assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
+  });
+
   test('excludePhotoIds skips a photo already used elsewhere on the site, even if it would otherwise win', async () => {
     global.fetch = mockFetchReturning({
       'How to Build a RAG Pipeline': [
