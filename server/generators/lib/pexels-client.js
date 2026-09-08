@@ -75,7 +75,21 @@ function stripLocationWords(text) {
 // clean relevance score on "isolated on white background" is still a bad
 // featured image for a blog post. Penalized rather than excluded outright,
 // since a real match can still legitimately carry one of these words.
-const GENERIC_STOCK_TERMS = new Set(['isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space']);
+// The literal "toy robot" cliché this file's own top comment describes as
+// the original bug is still reachable through the FALLBACK query alone:
+// 'artificial intelligence technology' has only 3 significant terms, so a
+// candidate sharing just ONE generic word ("technology", "innovation") with
+// it already scores ~0.33-0.38 — enough to clear MIN_RELEVANCE_SCORE — and
+// Pexels' own top results for that query are dominated by humanoid-robot
+// stock photography. 'robot'/'humanoid'/etc. are penalized the same way as
+// the other generic-stock terms here: a real, specific match (e.g. a title
+// genuinely about robotics) can still win on its OTHER significant words,
+// but this can no longer be the entire reason a fallback-query candidate
+// clears the bar.
+const GENERIC_STOCK_TERMS = new Set([
+  'isolated', 'clipart', 'vector', 'icon', 'template', 'mockup', 'copyspace', 'copy space',
+  'robot', 'robots', 'robotic', 'humanoid', 'cyborg', 'android', 'futuristic',
+]);
 
 // Hard exclusion, not a scoring penalty — a title containing an emotionally
 // loaded word like "struggles" or "challenges" can score a real, high

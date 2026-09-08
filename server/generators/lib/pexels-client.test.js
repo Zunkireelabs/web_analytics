@@ -233,6 +233,27 @@ describe('searchImage — real fetch behavior, mocked at the network boundary', 
     assert.equal(result.url, 'https://images.pexels.com/photos/2/ai.jpeg');
   });
 
+  test('a generic humanoid-robot cliché photo does not win off the fallback query on a single throwaway word', async () => {
+    // Real incident, live: the fallback query 'artificial intelligence
+    // technology' has only 3 significant terms, so a candidate sharing just
+    // ONE of them ("technology") already scored ~0.33-0.38 (with the
+    // landscape bonus) — clearing MIN_RELEVANCE_SCORE — and Pexels' own
+    // top results for that query are dominated by humanoid-robot stock
+    // photography having nothing to do with the actual post. This is the
+    // exact "toy robot" cliché this file's own top comment already
+    // describes as a fixed bug, reappearing through the fallback tier.
+    global.fetch = mockFetchReturning({
+      'A Niche Business Topic': [
+        photo({ alt: 'A completely unrelated close-up of tree bark', url: 'https://images.pexels.com/photos/1/bark.jpeg' }),
+      ],
+      'artificial intelligence technology': [
+        photo({ alt: 'A futuristic humanoid robot in an indoor setting, showcasing modern technology', url: 'https://images.pexels.com/photos/2/robot.jpeg' }),
+      ],
+    });
+    const result = await searchImage(['A Niche Business Topic', 'artificial intelligence technology']);
+    assert.equal(result, null);
+  });
+
   test('excludePhotoIds skips a photo already used elsewhere on the site, even if it would otherwise win', async () => {
     global.fetch = mockFetchReturning({
       'How to Build a RAG Pipeline': [

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { findMarkdownTables, buildTableHtml, projectMarkdownTablesInBody } from './markdown-table-render.js';
+import { findMarkdownTables, findFlattenedMarkdownTables, buildTableHtml, projectMarkdownTablesInBody } from './markdown-table-render.js';
 
 describe('findMarkdownTables', () => {
   test('parses a real GFM table into header + body rows', () => {
@@ -27,6 +27,39 @@ describe('findMarkdownTables', () => {
 
   test('a stray pipe with no separator line is not mistaken for a table', () => {
     assert.deepEqual(findMarkdownTables('| this looks like it might be a table row\nbut the next line is not a separator'), []);
+  });
+});
+
+// Regression coverage for a real production bug: a section body returned
+// from the model as a single JSON string arrived with its table's row
+// breaks collapsed to spaces, so the table shipped as raw pipe text with no
+// visible structure — findMarkdownTables' line-based scan never matches it
+// because there are no newlines to split rows on at all.
+describe('findFlattenedMarkdownTables', () => {
+  test('parses a table whose rows were joined onto one line by spaces', () => {
+    const body = 'Here is a breakdown: | Feature | AI-Native Search | Traditional Keyword Search | '
+      + '|---|---|---| | User Intent | Understands intent | Matches terms | | Response Type | Direct answers | Ranked links |';
+    const [table] = findFlattenedMarkdownTables(body);
+    assert.deepEqual(table.rows[0], ['Feature', 'AI-Native Search', 'Traditional Keyword Search']);
+    assert.deepEqual(table.rows[1], ['User Intent', 'Understands intent', 'Matches terms']);
+    assert.deepEqual(table.rows[2], ['Response Type', 'Direct answers', 'Ranked links']);
+  });
+
+  test('a genuine multi-line table (real newlines) is left for findMarkdownTables, not double-matched here', () => {
+    const body = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+    assert.deepEqual(findFlattenedMarkdownTables(body), []);
+  });
+
+  test('ordinary prose with a stray pipe or two is not mistaken for a flattened table', () => {
+    assert.deepEqual(findFlattenedMarkdownTables('The ratio is 1 | 2 in most cases, nothing more.'), []);
+  });
+
+  test('projectMarkdownTablesInBody converts a flattened table too', () => {
+    const body = 'Intro: | A | B | |---|---| | 1 | 2 |';
+    const out = projectMarkdownTablesInBody(body, null);
+    assert.match(out, /<table>/);
+    assert.match(out, /<th>A<\/th>/);
+    assert.doesNotMatch(out, /\|---\|---\|/);
   });
 });
 
