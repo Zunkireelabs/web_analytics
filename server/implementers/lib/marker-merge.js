@@ -615,7 +615,17 @@ function splitTableRow(line) {
 // through to the plain-paragraph case and shipped as one long line of
 // literal pipes and dashes straight to a live page (confirmed live:
 // zunkireelabs.com/locations/kathmandu/, PR #64 on zunkireelabs-web).
-function markdownTable(lines, startIndex) {
+// `style` is the SAME per-tenant table convention renderComparisonTable
+// below already applies (componentTemplates.table, captured from a real
+// table in the tenant's own repo). Without it, a comparison table the model
+// happened to write as MARKDOWN shipped as a bare, class-less <table> —
+// no borders, no padding, no header contrast — sitting directly beside a
+// STRUCTURED table on the same page that did carry the site's real classes.
+// On a Tailwind site that is a visibly foreign block, and it reached live
+// pages autonomously: the styling was threaded to the structured path and
+// silently not to this one, even though the same prompt produces both
+// shapes interchangeably.
+function markdownTable(lines, startIndex, style = {}) {
   const header = splitTableRow(lines[startIndex]);
   const rows = [];
   let i = startIndex + 2; // skip the header row and its separator row
@@ -623,9 +633,36 @@ function markdownTable(lines, startIndex) {
     rows.push(splitTableRow(lines[i]));
     i++;
   }
-  const th = header.map((c) => `<th>${markdownInline(c)}</th>`).join('');
-  const body = rows.map((r) => `<tr>${r.map((c) => `<td>${markdownInline(c)}</td>`).join('')}</tr>`).join('');
-  return { html: `<table><thead><tr>${th}</tr></thead><tbody>${body}</tbody></table>`, nextIndex: i };
+  const th = header.map((c) => `<th${attrIf(style.th)}>${markdownInline(c)}</th>`).join('');
+  const body = rows.map((r) => `<tr>${r.map((c, idx) => (
+    `<td${attrIf(idx === 0 ? (style.tdFirst || style.td) : style.td)}>${markdownInline(c)}</td>`
+  )).join('')}</tr>`).join('');
+  const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
+    + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
+  return { html: style.wrapper ? `<div class="${style.wrapper}">${html}</div>` : html, nextIndex: i };
+}
+
+// A table whose row breaks were lost, arriving as ONE line:
+// `| Feature | A | B | |---|---|---| | Row | x | y |`. The line-based
+// detection above cannot see it — there is no next line to test for a
+// separator row — so it fell through to the plain-paragraph branch and
+// shipped as literal pipes and dashes on a live page, exactly the failure
+// markdownTable itself was added to stop (see its comment above).
+//
+// The only place two pipes appear with nothing but spaces/tabs between them
+// in a well-formed pipe table is a row boundary: the previous row's closing
+// pipe followed by the next row's opening pipe (an interior cell separator
+// always has real content on at least one side). Newlines are deliberately
+// NOT matched, so an already-correct multi-line table is never touched.
+const COLLAPSED_TABLE_LINE_RE = /\|[ \t]*:?-{2,}/;
+const ROW_BOUNDARY_RE = /\|([ \t]+)\|/g;
+
+function reflowCollapsedTableRows(line) {
+  // Only a line carrying a separator run INSIDE it is treated as collapsed.
+  // A normal single row with an empty middle cell ("| A |  | C |") also has
+  // two pipes separated by spaces, and must never be split on that alone.
+  if (!COLLAPSED_TABLE_LINE_RE.test(line)) return [line];
+  return line.replace(ROW_BOUNDARY_RE, '|\n|').split('\n');
 }
 
 // generators/expand-content.js's SYSTEM_COMPARISON prompt asks for "a
@@ -640,7 +677,7 @@ function markdownTable(lines, startIndex) {
 // verbatim instead of being escaped and reparsed as prose.
 const HTML_BLOCK_RE = /^\s*<(table|div|section|ul|ol)\b/i;
 
-function markdownToHtml(text) {
+function markdownToHtml(text, tableStyle = {}) {
   if (HTML_BLOCK_RE.test(text)) return text.trim();
   const escaped = escapeHtml(text);
   const parts = [];
@@ -658,14 +695,17 @@ function markdownToHtml(text) {
       listItems = [];
     }
   };
-  const lines = escaped.split('\n');
+  // Split on real newlines first, then restore the row breaks of any table
+  // that arrived collapsed onto one line (reflowCollapsedTableRows) — after
+  // this, both shapes look identical to the line-based detection below.
+  const lines = escaped.split('\n').flatMap(reflowCollapsedTableRows);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const bullet = /^-\s+(.*)$/.exec(line);
     if (TABLE_ROW_RE.test(line) && TABLE_SEPARATOR_RE.test(lines[i + 1] || '')) {
       flushText();
       flushList();
-      const { html, nextIndex } = markdownTable(lines, i);
+      const { html, nextIndex } = markdownTable(lines, i, tableStyle);
       parts.push(html);
       i = nextIndex - 1; // for-loop's own i++ advances past the last consumed row
     } else if (bullet) {
@@ -761,7 +801,7 @@ function blockSafeRow(rowTemplate, body, slot) {
 
 export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, tableStyle = {}) {
   const rows = sections.map((s) => {
-    const body = markdownToHtml(s.body) + renderComparisonTable(s.table, tableStyle);
+    const body = markdownToHtml(s.body, tableStyle) + renderComparisonTable(s.table, tableStyle);
     return fillTemplate(blockSafeRow(template.row, body, 'BODY'), {
       HEADING: escapeHtml(s.heading), BODY: body,
     });
