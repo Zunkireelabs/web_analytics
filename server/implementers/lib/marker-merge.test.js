@@ -1,6 +1,51 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues } from './marker-merge.js';
+import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption } from './marker-merge.js';
+
+// Regression coverage for the zunkireelabs-web PR #87 incident: two
+// independent title drafts (one landed on main, one on the batch branch)
+// each cleanly replaced the same LINE marker's line in place — no single
+// commit ever produced a duplicate. It was git's own "clean" merge of the
+// two, sync'd by getOrInitBatchBranch (github-ops.js), that left both
+// `title:` lines behind as invalid YAML. findMarkerCorruption is the
+// content-level check that catches that outcome after the fact.
+describe('findMarkerCorruption', () => {
+  test('finds nothing wrong in a normal, single-occurrence LINE marker', () => {
+    const content = '---\nlayout: base.njk\ntitle: "Hello" # SEOAI:TITLE\n---\n';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a duplicated LINE marker, the actual PR #87 shape', () => {
+    const content = [
+      '---',
+      'layout: base.njk',
+      'title: "AI Search Playbook for Product Teams | Zunkiree Labs" # SEOAI:TITLE',
+      'title: "Zunkiree Labs: AI Search Playbook for Product Teams" # SEOAI:TITLE',
+      'description: x',
+      '---',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), ['TITLE']);
+  });
+
+  test('finds nothing wrong in a normal, balanced BLOCK marker', () => {
+    const content = '<!-- SEOAI:FAQ:START -->hi<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+
+  test('flags a BLOCK marker with two START tags (or any start/end mismatch)', () => {
+    const content = '<!-- SEOAI:FAQ:START -->a<!-- SEOAI:FAQ:START -->b<!-- SEOAI:FAQ:END -->';
+    assert.deepEqual(findMarkerCorruption(content), ['FAQ']);
+  });
+
+  test('a file with several distinct, healthy markers stays clean', () => {
+    const content = [
+      'title: "T" # SEOAI:TITLE',
+      '<!-- SEOAI:FAQ:START -->x<!-- SEOAI:FAQ:END -->',
+      '{/* SEOAI:SCHEMA:START */}y{/* SEOAI:SCHEMA:END */}',
+    ].join('\n');
+    assert.deepEqual(findMarkerCorruption(content), []);
+  });
+});
 
 describe('head-scoped fields (canonical, open-graph)', () => {
   test('isHeadScopedField identifies the right fields', () => {

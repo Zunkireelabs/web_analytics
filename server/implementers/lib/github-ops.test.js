@@ -17,6 +17,8 @@ const defaults = {
   updateRef: async () => { throw new Error('Bad credentials (401)'); },
   openPullRequest: async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); },
   getFileContent: async () => null,
+  mergeBranchFromBase: async () => ({ ok: true, conflicted: false, synced: false }),
+  compareCommits: async () => ({ files: [] }),
 };
 
 mock.module(resolve('../../github/client.js'), {
@@ -31,7 +33,8 @@ mock.module(resolve('../../github/client.js'), {
     beginFileOverlay: () => {},
     endFileOverlay: () => {},
     recordFileOverlayWrites: () => {},
-    mergeBranchFromBase: async () => ({ ok: true }),
+    mergeBranchFromBase: (...a) => defaults.mergeBranchFromBase(...a),
+    compareCommits: (...a) => defaults.compareCommits(...a),
     openPullRequest: (...a) => defaults.openPullRequest(...a),
     listOpenPullRequestsForBranch: async () => [],
     getPullRequest: async () => ({}),
@@ -43,7 +46,10 @@ mock.module(resolve('../../github/client.js'), {
   },
 });
 
-const { pushDraftBranch, openPrForBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush } = await import('./github-ops.js');
+const {
+  pushDraftBranch, openPrForBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush,
+  getOrInitBatchBranch, batchBranchConflictError,
+} = await import('./github-ops.js');
 
 const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main' };
 const draft = { id: 42, action_type: 'schema', branch_name: 'action-center/batch-1-2026-08-13', content: {} };
@@ -162,6 +168,127 @@ describe('family-write marker on same-day _data batches', () => {
       defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
       defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
       defaults.getFileContent = async () => null;
+    }
+  });
+});
+
+// Regression coverage for the PR #87 incident (zunkireelabs-web,
+// 2026-09-08): getOrInitBatchBranch's sync with main came back 201 (no
+// reported git conflict), yet left a duplicated `title:` line in the synced
+// file — invalid YAML that broke CI. A "clean" mergeBranchFromBase result
+// must not be trusted blindly; getOrInitBatchBranch now scans the files the
+// sync actually touched for marker corruption before reporting success.
+describe('getOrInitBatchBranch — post-sync marker corruption check', () => {
+  function resetDefaults() {
+    defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: false });
+    defaults.compareCommits = async () => ({ files: [] });
+    defaults.getFileContent = async () => null;
+  }
+
+  test('a branch that does not exist yet is reported as not existing, no sync attempted', async () => {
+    defaults.getBranchSha = async () => { const e = new Error('Not Found (404)'); throw e; };
+    let called = false;
+    defaults.mergeBranchFromBase = async () => { called = true; return { ok: true, synced: false }; };
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.exists, false);
+      assert.equal(info.conflicted, false);
+      assert.equal(called, false);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('a real git conflict (409) is reported conflicted, no corruption check attempted', async () => {
+    defaults.getBranchSha = async () => 'batch-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: false, conflicted: true });
+    let compareCalled = false;
+    defaults.compareCommits = async () => { compareCalled = true; return { files: [] }; };
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.conflicted, true);
+      assert.equal(info.corrupted, undefined);
+      assert.equal(compareCalled, false);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('nothing to sync (204) is reported clean without touching compareCommits', async () => {
+    defaults.getBranchSha = async () => 'batch-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: false });
+    let compareCalled = false;
+    defaults.compareCommits = async () => { compareCalled = true; return { files: [] }; };
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.conflicted, false);
+      assert.equal(compareCalled, false);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('a clean (201) sync that leaves no duplicated marker is reported clean', async () => {
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: true, sha: 'after-sha' });
+    defaults.compareCommits = async (s, base, head) => {
+      assert.equal(base, 'before-sha');
+      assert.equal(head, 'after-sha');
+      return { files: ['src/pages/resources/ai-search-playbook.njk'] };
+    };
+    defaults.getFileContent = async () => ({ content: 'title: "Hello" # SEOAI:TITLE\n', sha: 'x' });
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.conflicted, false);
+      assert.equal(info.corrupted, undefined);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('a clean (201) sync that duplicates a LINE marker is reported conflicted+corrupted — the actual PR #87 shape', async () => {
+    const path = 'src/pages/resources/ai-search-playbook.njk';
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: true, sha: 'after-sha' });
+    defaults.compareCommits = async () => ({ files: [path, 'unrelated/page.njk'] });
+    defaults.getFileContent = async (s, p) => (
+      p === path
+        ? { content: 'title: "A" # SEOAI:TITLE\ntitle: "B" # SEOAI:TITLE\n', sha: 'x' }
+        : { content: 'title: "fine" # SEOAI:TITLE\n', sha: 'y' }
+    );
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.conflicted, true);
+      assert.equal(info.corrupted, true);
+      assert.equal(info.corruptedFiles.length, 1);
+      assert.equal(info.corruptedFiles[0].path, path);
+      assert.deepEqual(info.corruptedFiles[0].markers, ['TITLE']);
+
+      const err = batchBranchConflictError(site, info);
+      assert.equal(err.ok, false);
+      assert.match(err.error, new RegExp(path.replace(/\//g, '\\/')));
+      assert.match(err.error, /TITLE/);
+    } finally {
+      resetDefaults();
+    }
+  });
+
+  test('a failure inside the corruption check itself never blocks an otherwise-clean sync', async () => {
+    defaults.getBranchSha = async () => 'before-sha';
+    defaults.mergeBranchFromBase = async () => ({ ok: true, conflicted: false, synced: true, sha: 'after-sha' });
+    defaults.compareCommits = async () => { throw new Error('transient GitHub 5xx'); };
+
+    try {
+      const info = await getOrInitBatchBranch(site);
+      assert.equal(info.conflicted, false);
+    } finally {
+      resetDefaults();
     }
   });
 });

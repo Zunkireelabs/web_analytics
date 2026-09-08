@@ -79,6 +79,64 @@ export function hasMarker(fileContent, name) {
   return !!findMarker(fileContent, name);
 }
 
+// Every marker token (LINE or BLOCK/JSX, any name) appearing anywhere in a
+// file, regardless of convention — the generic union of lineRegex/blockRegex/
+// jsxBlockRegex's marker syntax above, used only to COUNT occurrences rather
+// than to capture a value for replacement.
+const ANY_MARKER_TOKEN_RE = /#\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?|<!--\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*-->|\{\/\*\s*SEOAI:([A-Za-z0-9_-]+)(?::(START|END))?\s*\*\/\}/g;
+
+// Detects a marker left in a structurally invalid state: a LINE marker
+// (title's `field: "value" # SEOAI:NAME` convention) appearing more than
+// once, or a BLOCK/JSX marker whose START and END counts don't match (or
+// exceed one each) — real content, never just a false-positive substring
+// match, since every SEOAI: token this codebase ever writes is unique by
+// construction (spliceMarkers/ensureMarkers only ever touch an existing
+// marker in place or insert a genuinely missing one).
+//
+// Exists because of one concrete failure mode: getOrInitBatchBranch
+// (github-ops.js) syncs a shared per-day batch branch by merging the site's
+// default branch INTO it via GitHub's server-side merge endpoint. A REAL
+// same-line conflict (both branches edited the identical line differently)
+// correctly comes back 409 and is already handled. But two commits that
+// each replaced the SAME marker's line independently — one applied straight
+// to main, one applied to the batch branch, starting from the same original
+// line — can diff to non-overlapping hunks that git's merge algorithm
+// resolves cleanly, KEEPING BOTH lines: a duplicated `title:` key that's
+// invalid YAML, breaking every downstream build. Confirmed on
+// zunkireelabs-web PR #87 (2026-09-08): two independent meta-title drafts
+// (#1287 landed on `main`, #1430 landed on the batch branch) collided this
+// way — GitHub's merge returned 201 (no conflict reported), yet the
+// resulting front matter had two `title:` lines and broke Eleventy/CI. A
+// git-level "clean" merge is therefore not sufficient evidence the sync is
+// actually safe; this function is the content-level check that catches what
+// git's line-based diff cannot.
+export function findMarkerCorruption(fileContent) {
+  const lineCounts = new Map();
+  const blockCounts = new Map();
+  let m;
+  ANY_MARKER_TOKEN_RE.lastIndex = 0;
+  while ((m = ANY_MARKER_TOKEN_RE.exec(fileContent))) {
+    const name = m[1] ?? m[3] ?? m[5];
+    const kind = m[2] ?? m[4] ?? m[6]; // 'START' | 'END' | undefined (LINE marker)
+    if (!kind) {
+      lineCounts.set(name, (lineCounts.get(name) || 0) + 1);
+    } else {
+      const counts = blockCounts.get(name) || { start: 0, end: 0 };
+      counts[kind === 'START' ? 'start' : 'end'] += 1;
+      blockCounts.set(name, counts);
+    }
+  }
+
+  const corrupted = [];
+  for (const [name, count] of lineCounts) {
+    if (count > 1) corrupted.push(name);
+  }
+  for (const [name, { start, end }] of blockCounts) {
+    if (start > 1 || end > 1 || start !== end) corrupted.push(name);
+  }
+  return corrupted;
+}
+
 // Fields using the LINE convention (a single quoted front-matter value) —
 // established by this codebase's only real precedent, meta-title's `title`
 // field (see module comment above). Everything else is a BLOCK marker.

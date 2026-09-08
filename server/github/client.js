@@ -458,9 +458,28 @@ export async function mergeBranchFromBase(site, branch, base) {
     commit_message: `Sync ${branch} with ${base}`,
   });
   if (res.status === 204) return { ok: true, conflicted: false, synced: false };
-  if (res.status === 201) return { ok: true, conflicted: false, synced: true };
+  // `sha` (the new merge commit) lets the caller diff beforeSha...sha via
+  // compareCommits below to see exactly what the merge changed — a *clean*
+  // (non-409) git merge can still silently corrupt a marker-based field, see
+  // implementers/lib/marker-merge.js's findMarkerCorruption for why.
+  if (res.status === 201) return { ok: true, conflicted: false, synced: true, sha: (await res.json()).sha };
   if (res.status === 409) return { ok: false, conflicted: true };
   throw new Error(`mergeBranchFromBase failed (${res.status}): ${await res.text()}`);
+}
+
+// Files changed between two refs (commit SHAs, branch names, or tags) — used
+// by getOrInitBatchBranch (implementers/lib/github-ops.js) right after a
+// clean mergeBranchFromBase to see exactly which files that sync touched,
+// so they can be checked for marker corruption without re-scanning the
+// entire repo. GitHub's compare API caps `files` at 300 entries per
+// response (silently, via `.diff_url`) — acceptable here since a same-day
+// batch sync only ever touches the handful of files that day's drafts
+// wrote to, nothing close to that limit in practice.
+export async function compareCommits(site, base, head) {
+  const res = await githubRequest(site, 'GET', `/repos/${repoPath(site)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
+  if (!res.ok) throw new Error(`compareCommits failed (${res.status}): ${await res.text()}`);
+  const data = await res.json();
+  return { files: (data.files || []).map((f) => f.filename) };
 }
 
 // Atomically writes N files to `branch` as ONE commit via the Git Data API

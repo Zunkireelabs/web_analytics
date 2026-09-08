@@ -1,11 +1,12 @@
 import {
   getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef,
   openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent,
-  beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
+  beginFileOverlay, endFileOverlay, recordFileOverlayWrites, compareCommits,
 } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
 import { validateRenderingBatch } from './rendering-gate.js';
 import { actionScopeFor } from './action-scope.js';
+import { findMarkerCorruption } from './marker-merge.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -81,18 +82,59 @@ export function batchBranchName(site, date = new Date()) {
 // callers must fail fast on this rather than splice against stale content.
 export async function getOrInitBatchBranch(site, date = new Date()) {
   const branchName = batchBranchName(site, date);
-  let exists;
+  let beforeSha;
   try {
-    await getBranchSha(site, branchName);
-    exists = true;
+    beforeSha = await getBranchSha(site, branchName);
   } catch (err) {
-    if (/404|Not Found/i.test(err.message)) exists = false;
-    else throw err;
+    if (/404|Not Found/i.test(err.message)) return { branchName, exists: false, conflicted: false };
+    throw err;
   }
-  if (!exists) return { branchName, exists: false, conflicted: false };
 
   const synced = await mergeBranchFromBase(site, branchName, baseBranch(site));
-  return { branchName, exists: true, conflicted: !synced.ok };
+  if (!synced.ok) return { branchName, exists: true, conflicted: true };
+  if (!synced.synced) return { branchName, exists: true, conflicted: false };
+
+  // A 201 here only means git's own line-based merge found no OVERLAPPING
+  // hunk — it does NOT mean the result is semantically valid. See
+  // findMarkerCorruption's module comment (marker-merge.js) for the real
+  // incident (zunkireelabs-web PR #87) this guards against: two drafts
+  // independently replacing the same marker's line, one on each side of the
+  // merge, can "cleanly" merge into a duplicated line that's invalid content
+  // git never notices. Checked here, right after the sync, so a corrupted
+  // batch branch is caught before more drafts stack on top of it — not
+  // three checks and a human reviewer later, as it was on PR #87.
+  const corruptedFiles = await findSyncCorruption(site, branchName, beforeSha, synced.sha);
+  if (corruptedFiles.length) return { branchName, exists: true, conflicted: true, corrupted: true, corruptedFiles };
+
+  return { branchName, exists: true, conflicted: false };
+}
+
+// Scans only the files the sync itself touched (via compareCommits) rather
+// than the whole repo — a same-day batch branch only ever has a handful of
+// files in play. Best-effort: a failure IN the check (compareCommits/
+// getFileContent erroring) must never block a sync that git itself already
+// reported as clean, so it degrades to "no corruption found" rather than
+// throwing — same conservatism as every other honest-vs-silent tradeoff in
+// this file, just inverted, since blocking a healthy sync on this check's
+// own plumbing would be a worse outcome than occasionally missing a real
+// corruption.
+async function findSyncCorruption(site, branchName, beforeSha, afterSha) {
+  if (!afterSha || beforeSha === afterSha) return [];
+  let changed;
+  try {
+    changed = await compareCommits(site, beforeSha, afterSha);
+  } catch {
+    return [];
+  }
+
+  const corruptedFiles = [];
+  for (const path of changed.files) {
+    const file = await getFileContent(site, path, branchName).catch(() => null);
+    if (!file) continue;
+    const markers = findMarkerCorruption(file.content);
+    if (markers.length) corruptedFiles.push({ path, markers });
+  }
+  return corruptedFiles;
 }
 
 // Shared, consistent failure shape for every apply()/preview() call site
@@ -101,6 +143,13 @@ export async function getOrInitBatchBranch(site, date = new Date()) {
 // this app (e.g. render-mode-uncertain), so it flows through recordApply-
 // Failure/sendHttpError exactly like any other apply() failure.
 export function batchBranchConflictError(site, batchInfo) {
+  if (batchInfo.corrupted) {
+    const files = batchInfo.corruptedFiles.map(({ path, markers }) => `${path} (${markers.join(', ')})`).join('; ');
+    return {
+      ok: false, reason: 'batch-branch-conflicted',
+      error: `Today's batch branch (${batchInfo.branchName}) synced with ${baseBranch(site)} without a reported git conflict, but left a duplicated marker in: ${files} — likely two drafts independently editing the same field, one on each side of the sync. Resolve it manually on GitHub before more drafts can be pushed today.`,
+    };
+  }
   return {
     ok: false, reason: 'batch-branch-conflicted',
     error: `Today's batch branch (${batchInfo.branchName}) has diverged from ${baseBranch(site)} and couldn't be auto-synced — resolve the conflict manually on GitHub before more drafts can be pushed today.`,
