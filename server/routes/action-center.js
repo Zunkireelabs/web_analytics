@@ -38,6 +38,8 @@ import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mo
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
 import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
+import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
+import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
 import { resolveImplementerForApply, resolveImplementerForMerge } from '../implementers/resolve.js';
 import { resolveFile } from '../implementers/lib/url-file-map.js';
@@ -427,6 +429,7 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
   let content, summary, gateResult;
   let firstAttemptIssues = null;
   let designCorrections = null;
+  let profileRepairAttempted = false;
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     // The repair channel. A generator that doesn't read designCorrections
     // simply ignores it and the attempt behaves exactly as it always did —
@@ -439,7 +442,45 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
     if (attempt === 1 && !gateResult.clean) firstAttemptIssues = gateResult.issues;
     if (gateResult.clean) break;
 
-    // DIAGNOSE -> ROUTE BACK. Where this used to discard the gate's findings
+    // DIAGNOSE -> ROUTE TO WHATEVER CAN ACTUALLY FIX IT.
+    //
+    // Not every design mismatch lives in the generated content. A
+    // `design-role-mismatch` is a defect in the SITE'S STORED DESIGN
+    // PROFILE (design-drift.js's verifyProfileRoles never reads the draft),
+    // so regenerating cannot change the verdict — left to the content loop
+    // it would burn every attempt and then block, which is exactly the
+    // outcome this loop exists to prevent. Route it to the deterministic
+    // profile role correction instead, then revalidate against the
+    // corrected profile.
+    //
+    // Tried at most once: the repair is deterministic, so if it didn't fix
+    // the profile the first time it will not fix it on a second run.
+    if (attempt < MAX_GENERATION_ATTEMPTS && !profileRepairAttempted && hasProfileLevelMismatch(gateResult.issues)) {
+      profileRepairAttempted = true;
+      const { repaired, site: refreshedSite } = await repairProfileLevelMismatch(siteId, {
+        repairSites: repairDesignProfileRolesForSites,
+        fetchSite: getSiteById,
+        loadSiteRow: async (id) => (await pgQuery('select * from sites where id = $1', [id])).rows[0] || null,
+      });
+      if (repaired && refreshedSite) {
+        console.warn(`[action-center] ${generatorId}: design profile role mismatch repaired for site ${siteId}, revalidating`);
+        // Carry forward whatever the just-resolved profile now says, while
+        // keeping the canonical page template this call may have composed.
+        effectiveSite = {
+          ...refreshedSite,
+          url_file_map: {
+            ...refreshedSite.url_file_map,
+            siteRoot: {
+              ...refreshedSite.url_file_map?.siteRoot,
+              pageTemplates: effectiveSite?.url_file_map?.siteRoot?.pageTemplates
+                || refreshedSite.url_file_map?.siteRoot?.pageTemplates,
+            },
+          },
+        };
+      }
+    }
+
+    // CONTENT-LEVEL repair. Where this used to discard the gate's findings
     // and re-roll blindly, it now turns them into an instruction naming
     // exactly what was wrong and restating the site's own design language,
     // and hands that to the generator for the next attempt. Only a mismatch
