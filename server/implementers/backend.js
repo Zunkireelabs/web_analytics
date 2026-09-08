@@ -1,4 +1,4 @@
-import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources } from './lib/url-file-map.js';
+import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { getFileContent, searchCodeForString } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
@@ -43,25 +43,14 @@ export const meta = {
 // keeping its own independent, driftable copy of the list.
 export const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
 
-// The real field name buildMergeValues() (lib/marker-merge.js) expects for
-// each action type — used only to build an accurate, type-specific example
-// in the "no markers configured" error below, never hardcoded to one type
-// regardless of which draft actually triggered it. analytics-install has no
-// single static field — see ANALYTICS_PROVIDER_FIELDS (marker-merge.js):
-// each provider (ga4/facebook-pixel) gets its own field/marker so two
-// analytics-install drafts for different providers don't clobber each
-// other's marker on apply.
-const MARKER_FIELD_BY_ACTION_TYPE = {
-  'meta-title': 'title',
-  faq: 'faq',
-  schema: 'schema',
-  'internal-links': 'links',
-  canonical: 'canonical',
-  'open-graph': 'openGraph',
-  'expand-content': 'expandedContent',
-  'qa-content': 'qaContent',
-};
-
+// MARKER_FIELD_BY_ACTION_TYPE (imported above, from url-file-map.js — the
+// same table PLATFORM_DEFAULT_MARKERS now builds its defaults from) is used
+// here only to build an accurate, type-specific example in the "no markers
+// configured" error below, never hardcoded to one type regardless of which
+// draft actually triggered it. analytics-install has no single static field
+// — see ANALYTICS_PROVIDER_FIELDS (marker-merge.js): each provider
+// (ga4/facebook-pixel) gets its own field/marker so two analytics-install
+// drafts for different providers don't clobber each other's marker on apply.
 function markerConfigExample(actionType, provider) {
   const field = actionType === 'analytics-install'
     ? (ANALYTICS_PROVIDER_FIELDS[provider] || Object.values(ANALYTICS_PROVIDER_FIELDS).join('" and "'))

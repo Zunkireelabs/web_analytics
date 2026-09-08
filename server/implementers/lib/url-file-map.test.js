@@ -12,21 +12,37 @@ import {
 // failed every time someone tried to apply it ("No url_file_map entry
 // matches..."). isPageMapped is the pre-check that lets
 // agents/lib/recommendations.js skip creating that recommendation at all.
-// analytics-install's marker names have exactly one field per provider and
-// no tenant has a real reason to want a different name for it — so unlike
-// every other action type, it falls back to a built-in platform default
-// rather than requiring a human to hand-author `defaults.placements` before
-// an already-configured ga4_measurement_id/facebook_pixel_id can ever
-// actually install. Real incident: site #8862 had both IDs configured in
-// the database but no placements config at all, so every analytics-install
-// draft failed "no markers configured" regardless.
-describe('resolveMarkers — analytics-install has a built-in platform default', () => {
+// None of these marker names are a genuine per-tenant naming choice — there
+// is exactly one real field per action type, fixed by the generator itself,
+// and no tenant has a real reason to want a different name for e.g. "the FAQ
+// marker" — so every marker-merge action type falls back to a built-in
+// platform default rather than requiring a human to hand-author
+// `defaults.placements` first. Real incidents this generalizes:
+// site #8862 had ga4/facebook-pixel IDs configured in the database but no
+// placements config at all, so every analytics-install draft failed "no
+// markers configured" regardless (fixed first, for that one action type
+// only) — then the SAME site, being the first Next.js/App-Router site ever
+// connected, hit the identical failure for all 9 other marker-merge action
+// types, because only Zunkiree Labs (Eleventy) had ever hand-authored a
+// `defaults.placements` block. Generalizing the platform default to every
+// marker-merge type (not just analytics-install) is the actual fix — see
+// MARKER_FIELD_BY_ACTION_TYPE in url-file-map.js.
+describe('resolveMarkers — every marker-merge action type has a built-in platform default', () => {
   test('falls back to the platform default when nothing is configured', () => {
     const site = { url_file_map: {} };
     assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), {
       analyticsScriptGa4: 'ANALYTICSSCRIPTGA4',
       analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL',
     });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'meta-title'), { title: 'TITLE' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'faq'), { faq: 'FAQ' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'schema'), { schema: 'SCHEMA' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'internal-links'), { links: 'INTERNALLINKS' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'canonical'), { canonical: 'CANONICAL' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'open-graph'), { openGraph: 'OPENGRAPH' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'expand-content'), { expandedContent: 'EXPANDEDCONTENT' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'qa-content'), { qaContent: 'QACONTENT' });
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'breadcrumbs'), { breadcrumbSchema: 'BREADCRUMBSCHEMA' });
   });
 
   test('an explicit site-level default still wins over the platform default', () => {
@@ -34,10 +50,9 @@ describe('resolveMarkers — analytics-install has a built-in platform default',
     assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), { analyticsScriptGa4: 'CUSTOM_GA4' });
   });
 
-  test('other action types are never given a platform default', () => {
+  test('an action type outside the marker-merge set still returns no platform default', () => {
     const site = { url_file_map: {} };
-    assert.equal(resolveMarkers(site, 'https://example.com/', 'meta-title'), null);
-    assert.equal(resolveMarkers(site, 'https://example.com/', 'faq'), null);
+    assert.equal(resolveMarkers(site, 'https://example.com/', 'blog-outline'), null);
   });
 });
 

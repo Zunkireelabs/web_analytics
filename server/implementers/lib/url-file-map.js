@@ -142,21 +142,67 @@ const DEFAULT_SLOT_BY_ACTION_TYPE = {
   'analytics-install': 'head',
 };
 
-// analytics-install's marker names are NOT a per-tenant naming choice the
-// way TITLE/FAQ/SCHEMA arguably are — there is exactly one field per
-// provider (marker-merge.js's ANALYTICS_PROVIDER_FIELDS), fixed by the
-// generator itself, and no tenant has ever had a reason to want a different
-// name for "the GA4 install marker." Requiring every newly onboarded site to
-// hand-author `defaults.placements["analytics-install"].markers` before its
-// own already-configured ga4_measurement_id/facebook_pixel_id could ever
-// actually install is exactly the class of pointless manual step the rest
-// of this module's `defaults.placements` inheritance already exists to
-// avoid — so it's the ONE built-in platform default here, used only as the
-// last resort (a site-level, page-level, or pattern-level config a human
-// (or discovery) actually wrote always wins — see the resolution order
-// below). A site that genuinely wants different marker names still can, by
-// configuring `defaults.placements["analytics-install"]` explicitly.
+// The real field name buildMergeValues() (marker-merge.js) expects for each
+// marker-merge action type — same field->MARKER naming convention
+// zunkireelabs-web's hand-authored `defaults.placements` already uses in
+// production (e.g. faq -> FAQ, schema -> SCHEMA). Exported so backend.js's
+// error-message helper (markerConfigExample) reads this instead of keeping
+// its own drift-prone copy.
+export const MARKER_FIELD_BY_ACTION_TYPE = {
+  'meta-title': 'title',
+  faq: 'faq',
+  schema: 'schema',
+  'internal-links': 'links',
+  canonical: 'canonical',
+  'open-graph': 'openGraph',
+  'expand-content': 'expandedContent',
+  'qa-content': 'qaContent',
+  breadcrumbs: 'breadcrumbSchema',
+};
+
+// None of these marker names are a genuine per-tenant naming choice — same
+// reasoning analytics-install (the original, sole entry here) already
+// established: there is exactly one real field per action type
+// (MARKER_FIELD_BY_ACTION_TYPE above / marker-merge.js's
+// ANALYTICS_PROVIDER_FIELDS), fixed by the generator itself, and no tenant
+// has ever had a reason to want a different name for e.g. "the FAQ marker."
+// Until this covered every marker-merge type, only Zunkiree Labs (the one
+// site with a hand-authored `defaults.placements` block) could ever get a
+// draft to apply for these action types — every OTHER newly connected site
+// (e.g. Admizz, the first Next.js/App-Router site onboarded) had file paths
+// mapped by discovery but resolveMarkers() returned null for all of them,
+// silently blocking every draft with no visible error. Requiring a human to
+// hand-author the same generic block per site is exactly the class of
+// pointless manual step `defaults.placements` inheritance already exists to
+// avoid — so these are now ALL built-in platform defaults, used only as the
+// last resort (a site-level, page-level, or pattern-level config a human (or
+// discovery) actually wrote always wins — see the resolution order below).
+// A site that genuinely wants different marker names still can, by
+// configuring `defaults.placements[actionType]` explicitly.
+//
+// Not simply `field.toUpperCase()` — Zunkiree Labs' real, already-live
+// config names `internal-links`' marker INTERNALLINKS (the action type),
+// not LINKS (the field), and there is no reason to invent a new, different
+// name now rather than match the one convention already proven in
+// production. Every other entry does happen to equal field.toUpperCase();
+// spelled out explicitly anyway so this table is never silently wrong for
+// the next field whose name doesn't match its action type either.
+const MARKER_NAME_BY_ACTION_TYPE = {
+  'meta-title': 'TITLE',
+  faq: 'FAQ',
+  schema: 'SCHEMA',
+  'internal-links': 'INTERNALLINKS',
+  canonical: 'CANONICAL',
+  'open-graph': 'OPENGRAPH',
+  'expand-content': 'EXPANDEDCONTENT',
+  'qa-content': 'QACONTENT',
+  breadcrumbs: 'BREADCRUMBSCHEMA',
+};
+
 const PLATFORM_DEFAULT_MARKERS = {
+  ...Object.fromEntries(
+    Object.entries(MARKER_FIELD_BY_ACTION_TYPE).map(([actionType, field]) => [actionType, { [field]: MARKER_NAME_BY_ACTION_TYPE[actionType] }])
+  ),
   'analytics-install': { analyticsScriptGa4: 'ANALYTICSSCRIPTGA4', analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL' },
 };
 
