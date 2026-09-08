@@ -31,43 +31,27 @@ jobs:
     needs: checks
     environment: staging
     steps:
-      # Split into two SSH steps (2026-09-08): the single combined script
+      # Split into four SSH steps (2026-09-08): the single combined script
       # below this point used to run bootstrap + both .env writes + the
       # build/deploy/cron logic as one `script:` block. GitHub Actions
       # compiles a string containing multiple ${{ }} substitutions into one
       # composite expression, and that block's ~25.7k characters exceeded
       # the platform's 21000-character max expression length — every push
       # to stage failed at parse time with "Exceeded max expression length
-      # 21000" before any job even started. Splitting the script across two
-      # steps keeps each step's composite expression comfortably under the
-      # cap. Each step is its own SSH session, so anything that depends on
-      # being inside $DIR (git state, cwd) must re-`cd` at the top of the
-      # next step — it does not carry over from the previous one.
-      - name: Bootstrap checkout and write app .env
+      # 21000" before any job even started. Splitting the script across
+      # steps keeps each step's composite expression well under the cap,
+      # with margin for future growth. Each step is its own SSH session, so
+      # anything that depends on being inside $DIR (git state, cwd) must
+      # re-`cd` at the top of the next step — it does not carry over from
+      # the previous one. `command_timeout: 35m` only needs to live on the
+      # build/deploy step — it's the only one that runs anything slow.
+      - name: Bootstrap checkout
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # 20m was enough for a warm-cache build. A cold cache (e.g. right
-          # after a disk-space `docker system prune` on the VPS) reinstalls
-          # data-analyst-agent's Python ML dependencies (scikit-learn,
-          # transformers, sentence-transformers) from scratch with no cached
-          # layers — a real deploy on 2026-08-13 got through git pull, image
-          # build, and dependency install, then died on "exporting layers" at
-          # the 20m mark, one step from finishing. 35m covers a full cold
-          # build with headroom; a normal warm-cache deploy still finishes in
-          # its usual few minutes and never gets close to this ceiling.
-          command_timeout: 35m
           script: |
-            # Without this, a failed step (e.g. `docker compose build` running
-            # out of disk space) doesn't stop the script — it falls through to
-            # `up -d`, which happily recreates the container from whatever
-            # image already exists locally (the OLD one), passes its health
-            # check, and the whole job reports success even though nothing
-            # new was actually deployed. Confirmed real: a real deploy did
-            # exactly this on 2026-07-22 (VPS out of disk space), silently
-            # serving stale code while CI showed green.
             set -eo pipefail
 
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
@@ -91,6 +75,16 @@ jobs:
             git fetch origin
             git checkout stage
             git pull origin stage
+
+      - name: Write app .env
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            cd "$DIR"
 
             cat > .env << 'ENVEOF'
             # ── Database (staging) ──────────────────────────────────────────
@@ -329,16 +323,13 @@ jobs:
             DATA_ANALYST_AGENT_ADMIN_KEY=${{ secrets.DATA_ANALYST_AGENT_ADMIN_KEY }}
             ENVEOF
 
-      - name: Write data-analyst-agent .env, build, and deploy
+      - name: Write data-analyst-agent .env
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 35m
           script: |
-            set -eo pipefail
-
             DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
             cd "$DIR"
 
@@ -382,6 +373,36 @@ jobs:
             INGEST_SCHEDULE_ENABLED=false
             ANALYSIS_SCHEDULE_ENABLED=false
             DAAENVEOF
+
+      - name: Build, deploy, and install cron
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # 20m was enough for a warm-cache build. A cold cache (e.g. right
+          # after a disk-space `docker system prune` on the VPS) reinstalls
+          # data-analyst-agent's Python ML dependencies (scikit-learn,
+          # transformers, sentence-transformers) from scratch with no cached
+          # layers — a real deploy on 2026-08-13 got through git pull, image
+          # build, and dependency install, then died on "exporting layers" at
+          # the 20m mark, one step from finishing. 35m covers a full cold
+          # build with headroom; a normal warm-cache deploy still finishes in
+          # its usual few minutes and never gets close to this ceiling.
+          command_timeout: 35m
+          script: |
+            # Without this, a failed step (e.g. `docker compose build` running
+            # out of disk space) doesn't stop the script — it falls through to
+            # `up -d`, which happily recreates the container from whatever
+            # image already exists locally (the OLD one), passes its health
+            # check, and the whole job reports success even though nothing
+            # new was actually deployed. Confirmed real: a real deploy did
+            # exactly this on 2026-07-22 (VPS out of disk space), silently
+            # serving stale code while CI showed green.
+            set -eo pipefail
+
+            DIR="/home/zunkireelabs/devprojects/analytics-app-stage"
+            cd "$DIR"
 
             # design-agent-worker gets --no-cache: a real deploy on 2026-08-26
             # showed its `COPY package*.json ./` / `RUN npm ci --omit=dev`
