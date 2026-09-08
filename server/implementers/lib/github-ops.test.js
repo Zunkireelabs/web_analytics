@@ -140,6 +140,30 @@ describe('family-write marker on same-day _data batches', () => {
       defaults.getFileContent = async () => null;
     }
   });
+
+  test('a global-by-design draft (analytics-install) gets the marker on its own, even as the day\'s first commit', async () => {
+    let captured;
+    defaults.getBranchSha = async () => 'sha123';
+    defaults.createBranch = async () => ({});
+    defaults.commitFilesAtomic = async (site, branch, files, message) => { captured = message; return { sha: 'new' }; };
+    defaults.getFileContent = async () => { throw new Error('should not be consulted — global-by-design short-circuits the _data diff check'); };
+
+    try {
+      const result = await pushDraftBranch(
+        site, { ...draft, action_type: 'analytics-install' },
+        [{ path: 'src/_includes/layouts/base.njk', content: 'x' }],
+        { branchName: 'action-center/batch-1-2026-08-16', exists: false },
+      );
+
+      assert.equal(result.ok, true);
+      assert.match(captured, /\[family-write\]$/);
+    } finally {
+      defaults.getBranchSha = async () => { throw new Error('Bad credentials (401) token=ghp_SECRET'); };
+      defaults.createBranch = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.commitFilesAtomic = async () => { throw new Error('Bad credentials (401)'); };
+      defaults.getFileContent = async () => null;
+    }
+  });
 });
 
 // Regression coverage for the actual Action Center batching feature:

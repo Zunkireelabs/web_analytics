@@ -5,6 +5,7 @@ import {
 } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
 import { validateRenderingBatch } from './rendering-gate.js';
+import { actionScopeFor } from './action-scope.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -130,7 +131,20 @@ const FAMILY_WRITE_MARKER = '[family-write]';
 // draft is about to write already differing between today's batch branch's
 // current tip and the site's base branch means an earlier commit THIS PR
 // already touched it — the exact case the sibling-leakage gate flags.
-async function needsFamilyWriteMarker(site, files, target) {
+//
+// A `GLOBAL_BY_DESIGN` draft (action-scope.js — analytics-install,
+// security-headers, html-lang, ...) is a second, unconditional case: its one
+// real target IS the site's shared layout template, so a SINGLE such write
+// already changes every family's rendered output by itself — there's no
+// "second write collides with an earlier one" to detect, unlike a `_data/*`
+// splice. Confirmed live on site 1's 2026-09-08 batch: two analytics-install
+// drafts wrote src/_includes/layouts/base.njk (no `_data/*` file touched at
+// all), and check-family-siblings.mjs — which diffs each family's RENDERED
+// dist output, not this app's source diff — correctly flagged all 21
+// glossary + 4 compare + 4 locations pages as changed, with no commit
+// carrying the marker to say so was intentional.
+async function needsFamilyWriteMarker(site, draft, files, target) {
+  if (actionScopeFor(draft.action_type) === 'global-by-design') return true;
   if (!target.exists) return false; // first commit on today's branch — nothing prior to collide with
   const dataFiles = files.filter((f) => /(^|\/)_data\//.test(f.path));
   if (!dataFiles.length) return false;
@@ -230,7 +244,7 @@ export async function pushDraftBranch(site, draft, files, target) {
     // draft (see commitFilesAtomic's comment). Replaces a previous
     // sequential getFileSha+putFile-per-file loop, which had exactly that
     // gap for multi-file draft types (llms-txt+robots.txt, broken-link-fix).
-    const marker = (await needsFamilyWriteMarker(site, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
+    const marker = (await needsFamilyWriteMarker(site, draft, files, target)) ? ` ${FAMILY_WRITE_MARKER}` : '';
     const message = `Action Center: apply ${draft.action_type} draft #${draft.id}${marker}`;
 
     const batch = activeBatches.get(branchName);
