@@ -31,7 +31,12 @@ mock.module(resolve('../../store/read.js'), {
     getHealthScoreOnOrBefore: async () => 60,
   },
 });
-mock.module(resolve('../../store/recommendations.js'), { namedExports: { listOpenRecommendations: async () => [] } });
+const RECOMMENDATIONS = [
+  { page: 'https://a.com/register', recommendation_type: 'faq', issue: 'Add FAQ', priority: 'high' },
+  { page: 'landing::Kathmandu', recommendation_type: 'landing-page', issue: 'Generate Landing Page', priority: 'high' },
+  { page: 'https://a.com/x::comparison-content', recommendation_type: 'expand-content', issue: 'Add comparison content', priority: 'medium' },
+];
+mock.module(resolve('../../store/recommendations.js'), { namedExports: { listOpenRecommendations: async () => RECOMMENDATIONS } });
 mock.module(resolve('../../store/audit-runs.js'), {
   namedExports: {
     getLatestAuditRun: async () => ({ id: 9, status: 'completed', health_score: 60, pages_audited: 93 }),
@@ -111,5 +116,25 @@ describe('baseline report — the day-0 audit actually names what is missing', (
     assert.match(capturedUser, /Missing alt text/, 'the model must receive the real defect labels');
     assert.match(capturedUser, /"category":"Entity markup","score":0,"status":"Missing"/,
       'the model receives the pre-computed status so it cannot re-derive it wrongly');
+  });
+});
+
+describe('baseline report — recommendation page links are never internal identifiers or half-broken URLs', () => {
+  test('a real page-scoped URL is kept', async () => {
+    await buildBaselineReport(1);
+    const items = savedSnapshot.issuesSnapshot.openRecommendations.items;
+    assert.equal(items.find((i) => i.issue === 'Add FAQ').page, 'https://a.com/register');
+  });
+
+  test('an internal generator parameter (no real URL at all) becomes null, not a rendered dead link', async () => {
+    await buildBaselineReport(1);
+    const items = savedSnapshot.issuesSnapshot.openRecommendations.items;
+    assert.equal(items.find((i) => i.issue === 'Generate Landing Page').page, null);
+  });
+
+  test('a real URL with an internal "::" sub-target appended also becomes null', async () => {
+    await buildBaselineReport(1);
+    const items = savedSnapshot.issuesSnapshot.openRecommendations.items;
+    assert.equal(items.find((i) => i.issue === 'Add comparison content').page, null);
   });
 });

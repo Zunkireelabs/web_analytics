@@ -162,9 +162,14 @@ function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRu
         // net-new page it carries an internal generator PARAMETER instead
         // (a real observed value: "landing::Kathmandu"), which the narrative
         // then rendered as a markdown link — shipping an internal identifier
-        // and a dead link into the first document a client ever reads.
-        // Passed through only when it is genuinely a URL.
-        page: /^https?:\/\//i.test(r.page || '') ? r.page : null,
+        // and a dead link into the first document a client ever reads. A
+        // second real shape starts with a genuine URL but has an internal
+        // sub-target appended after "::" (e.g.
+        // "https://.../page::comparison-content", "https://.../page::https://
+        // instagram.com/..." for a citation to remove) — passing that
+        // straight through would ship a dead link that merely LOOKS real.
+        // Passed through only when it's a real URL with no "::" suffix.
+        page: /^https?:\/\//i.test(r.page || '') && !String(r.page).includes('::') ? r.page : null,
         type: r.recommendation_type,
         issue: r.issue,
         priority: r.priority,
