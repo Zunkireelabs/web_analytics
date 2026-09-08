@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { pool, updateSiteRepoConfig, updateSiteAutoRemediation } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { auditSite } from './audit-url-file-map.js';
+import { runDiscovery } from '../discovery/run-discovery.js';
 import { shouldAutoEnableOnConnect } from '../routes/clients.js';
 import { queueDesignAgentDerivationForSite } from '../job.js';
 import { refreshBlockedRecommendations } from '../agents/lib/recommendation-coordinator.js';
@@ -142,12 +143,42 @@ async function main() {
       console.warn(`Could not queue Design Agent derivation: ${err.message} — the next daily sweep will pick this up instead.`)
     );
 
+    // Automatic repo discovery — the actual fix for the class of onboarding
+    // gap that left url_file_map.pages/patterns empty (or wrong, e.g. an
+    // assumed `/<slug>/ -> src/app/$1/page.tsx` regex that never matched
+    // this framework's real routing) whenever nobody hand-authored a
+    // --url-file-map JSON. Inspects the connected repo, detects its real
+    // framework and routing structure (Next.js App/Pages Router, Astro,
+    // Eleventy/Jekyll/Hugo front-matter routing — see discovery/run-discovery.js),
+    // and writes ONLY what it can prove by reading the result back through
+    // the exact same resolvers backend.js uses (discovery/auto-configure.js).
+    // Anything it can't prove is left for a human, not guessed — see the
+    // config-completeness check right after this, which reports exactly
+    // what's still missing. Best-effort: a failure here must not undo the
+    // repo config write above.
+    console.log('\nRunning repo discovery (framework, routes, render capabilities)...');
+    try {
+      const discovery = await runDiscovery(updated);
+      if (discovery.ok) {
+        console.log(`  framework: ${discovery.technology.framework?.name || '(not detected)'}${discovery.technology.framework?.ambiguous ? ' (ambiguous — see site_understanding)' : ''}`);
+        console.log(`  routes discovered: ${discovery.routes.routes.length} static, ${discovery.routes.families.length} pattern famil${discovery.routes.families.length === 1 ? 'y' : 'ies'}, ${discovery.routes.unresolved.length} unresolved`);
+        console.log(`  auto-configured: ${discovery.autoConfigured.applied} url_file_map entrie(s) written and verified`);
+        updated = (await getSiteById(siteId)) || updated;
+      } else {
+        console.log(`  discovery skipped: ${discovery.reason}`);
+      }
+    } catch (err) {
+      console.warn(`Repo discovery failed to run: ${err.message} — falling back to whatever url_file_map was passed by hand.`);
+    }
+
     // Auto-run the same config-completeness check `npm run audit-url-file-map`
     // does, right now, instead of leaving it as a separate step someone has
     // to remember — this is exactly the gap that let drafts get stuck on
     // missing url_file_map entries / vanished SEOAI markers after onboarding
-    // looked "done." Best-effort: a failure here (e.g. GitHub API hiccup)
-    // must not undo the repo config write above.
+    // looked "done." Runs AFTER discovery above so its gap count reflects
+    // what's genuinely still missing, not what discovery would have filled
+    // in anyway. Best-effort: a failure here (e.g. GitHub API hiccup) must
+    // not undo the repo config write above.
     console.log('\nRunning config-completeness check...');
     try {
       await auditSite(siteId);

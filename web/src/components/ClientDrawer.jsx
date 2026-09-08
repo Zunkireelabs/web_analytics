@@ -311,6 +311,33 @@ function IntegrationsTab({ client, onReload }) {
   const [retryResult, setRetryResult] = useState(null);
   const [retryError, setRetryError] = useState(null);
 
+  // The two IDs generators/analytics-install.js reads live at draft time
+  // (server/db.js's updateSiteAnalyticsIds) — separate from "GA4 Property
+  // ID" above, which is the Data API reporting property this dashboard
+  // ingests from, not the on-site gtag/Pixel install target. Saved together,
+  // same paired-save shape as auto-remediation's enabled+dailyLimit, since
+  // the server route takes both in one PATCH.
+  const [ga4MeasurementId, setGa4MeasurementId] = useState(client.ga4MeasurementId || '');
+  const [facebookPixelId, setFacebookPixelId] = useState(client.facebookPixelId || '');
+  const [analyticsIdsSaving, setAnalyticsIdsSaving] = useState(false);
+  const [analyticsIdsError, setAnalyticsIdsError] = useState(null);
+  const [analyticsIdsSaved, setAnalyticsIdsSaved] = useState(false);
+
+  const saveAnalyticsIds = async () => {
+    setAnalyticsIdsSaving(true);
+    setAnalyticsIdsError(null);
+    setAnalyticsIdsSaved(false);
+    try {
+      await api.clients.setAnalyticsIds(client.id, ga4MeasurementId.trim(), facebookPixelId.trim());
+      setAnalyticsIdsSaved(true);
+      onReload();
+    } catch (err) {
+      setAnalyticsIdsError(err.message || 'Could not save.');
+    } finally {
+      setAnalyticsIdsSaving(false);
+    }
+  };
+
   const retryBaseline = async () => {
     setRetrying(true);
     setRetryError(null);
@@ -369,6 +396,33 @@ function IntegrationsTab({ client, onReload }) {
         </span>
         <p className="text-xs font-bold text-slate-800">{client.repoConnected ? 'Connected' : 'Not connected'}</p>
         <p className="text-[10.5px] font-semibold text-slate-400 mt-1">Manage repository details in the Repository tab.</p>
+      </div>
+
+      {/* GA4/Meta Pixel install target — what the Action Center's
+          analytics-install generator drafts a script for. Distinct from
+          "GA4 Property ID" above (the reporting ingestion source). */}
+      <div className="border-t border-slate-100 pt-4">
+        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5 mb-2">
+          <Globe size={11} /> Analytics install (GA4 / Meta Pixel)
+        </span>
+        <div className="space-y-2.5">
+          <Field label="GA4 Measurement ID" value={ga4MeasurementId}
+            onChange={(e) => { setGa4MeasurementId(e.target.value); setAnalyticsIdsSaved(false); }}
+            placeholder="G-XXXXXXXXXX" hint="Used for the on-site gtag install script, not the reporting property above." />
+          <Field label="Meta (Facebook) Pixel ID" value={facebookPixelId}
+            onChange={(e) => { setFacebookPixelId(e.target.value); setAnalyticsIdsSaved(false); }}
+            placeholder="123456789012345" hint="Numeric Pixel ID from Meta Events Manager." />
+        </div>
+        <button type="button" onClick={saveAnalyticsIds} disabled={analyticsIdsSaving}
+          className="mt-2.5 text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-650 transition disabled:opacity-60">
+          {analyticsIdsSaving ? 'Saving…' : 'Save Analytics IDs'}
+        </button>
+        {analyticsIdsSaved && !analyticsIdsError && (
+          <p className="text-[10px] font-bold text-emerald-700 mt-1.5">Saved — the next analytics-install draft will use this.</p>
+        )}
+        {analyticsIdsError && (
+          <div className="text-[10px] font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mt-2">{analyticsIdsError}</div>
+        )}
       </div>
     </div>
   );

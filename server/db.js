@@ -286,6 +286,34 @@ export async function updateSiteLearnedRepair({ siteId, enabled }) {
   return rows[0];
 }
 
+// The site's own real GA4 Measurement ID / Meta (Facebook) Pixel ID
+// (migrations 130/135) — read live at draft time by
+// generators/analytics-install.js so a client can add/correct either ID at
+// any point and have the very next draft use it, no re-detection needed.
+// Until this existed there was no route/UI that ever set these two columns
+// at all (only a raw SQL UPDATE could) — the same class of gap
+// design_agent_enabled had, for the same reason: nothing wired the DB
+// column to anything a person could actually use.
+// Either field is nullable — passing null clears that one ID without
+// touching the other; passing undefined leaves it unchanged (Field()'s
+// unfilled-input contract, same as every other optional PATCH here).
+export async function updateSiteAnalyticsIds({ siteId, ga4MeasurementId, facebookPixelId }) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const set = (column, value) => { fields.push(`${column} = $${i++}`); values.push(value); };
+  if (ga4MeasurementId !== undefined) set('ga4_measurement_id', ga4MeasurementId || null);
+  if (facebookPixelId !== undefined) set('facebook_pixel_id', facebookPixelId || null);
+  if (!fields.length) throw new Error('updateSiteAnalyticsIds: nothing to update.');
+  values.push(siteId);
+  const { rows } = await query(
+    `UPDATE sites SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+    values
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
 export async function updateSiteVisibleFaqCap({ siteId, visibleFaqCap }) {
   const { rows } = await query(
     `UPDATE sites SET visible_faq_cap = $1 WHERE id = $2 RETURNING *`,

@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
+  resolveMarkers,
 } from './url-file-map.js';
 
 // Regression coverage for a real report: zunkireelabs-web's `/compare/:slug`
@@ -11,6 +12,35 @@ import {
 // failed every time someone tried to apply it ("No url_file_map entry
 // matches..."). isPageMapped is the pre-check that lets
 // agents/lib/recommendations.js skip creating that recommendation at all.
+// analytics-install's marker names have exactly one field per provider and
+// no tenant has a real reason to want a different name for it — so unlike
+// every other action type, it falls back to a built-in platform default
+// rather than requiring a human to hand-author `defaults.placements` before
+// an already-configured ga4_measurement_id/facebook_pixel_id can ever
+// actually install. Real incident: site #8862 had both IDs configured in
+// the database but no placements config at all, so every analytics-install
+// draft failed "no markers configured" regardless.
+describe('resolveMarkers — analytics-install has a built-in platform default', () => {
+  test('falls back to the platform default when nothing is configured', () => {
+    const site = { url_file_map: {} };
+    assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), {
+      analyticsScriptGa4: 'ANALYTICSSCRIPTGA4',
+      analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL',
+    });
+  });
+
+  test('an explicit site-level default still wins over the platform default', () => {
+    const site = { url_file_map: { defaults: { placements: { 'analytics-install': { markers: { analyticsScriptGa4: 'CUSTOM_GA4' } } } } } };
+    assert.deepEqual(resolveMarkers(site, null, 'analytics-install'), { analyticsScriptGa4: 'CUSTOM_GA4' });
+  });
+
+  test('other action types are never given a platform default', () => {
+    const site = { url_file_map: {} };
+    assert.equal(resolveMarkers(site, 'https://example.com/', 'meta-title'), null);
+    assert.equal(resolveMarkers(site, 'https://example.com/', 'faq'), null);
+  });
+});
+
 describe('isPageMapped', () => {
   const site = {
     url_file_map: {

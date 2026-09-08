@@ -150,6 +150,7 @@ export const api = {
     setOauthPolicy: (id, oauthMaxPermissionLevel) => req(`/internal/clients/${id}/oauth-policy`, { method: 'POST', body: JSON.stringify({ oauthMaxPermissionLevel }) }),
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
+    setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
     // Design-integrity gate: what the design agent found on this site's real
     // pages and what it would write, plus the current sign-off state
     // (server/agents/lib/design-review.js's buildDesignReviewReport).
