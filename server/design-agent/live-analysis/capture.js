@@ -16,6 +16,10 @@ import { classifyPageType } from './schema.js';
 
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
+// See discoverCardHeavyPages below for why these exist separately from
+// DEFAULT_MAX_PAGES.
+const DEFAULT_EXTRA_CARD_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_EXTRA_CARD_PAGES) || 2;
+const DEFAULT_CARD_SCAN_BUDGET = Number(process.env.DESIGN_AGENT_CAPTURE_CARD_SCAN_BUDGET) || 6;
 
 export async function launchBrowser() {
   return chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
@@ -65,6 +69,56 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
   }
 
   return [...byType.entries()].map(([pageType, url]) => ({ url, pageType }));
+}
+
+// classifyPageType is a URL-shape heuristic (schema.js) — every page whose
+// path doesn't match a known pattern (service/location/faq/blog/legal/...)
+// falls into the same 'other' bucket, and discoverPages keeps only the FIRST
+// url it meets for that whole bucket. A card-grid portfolio/case-study page
+// (e.g. /projects/) is exactly as likely to be URL-classified 'other' as any
+// unrelated miscellaneous page, so it can lose that one slot to something
+// else entirely and never get captured — "flat" content-injection on such a
+// page (design-profile.js's pageUsesCardSections/projectExpandContentCard
+// has nothing to key off) traces back to this targeting gap, not a rendering
+// bug. Whether a page is card-heavy is a STRUCTURAL fact invisible from its
+// URL, so it can only be found by loading candidates and looking — this scans
+// a bounded number of not-yet-captured same-origin links (re-collected from a
+// fresh homepage visit, since discoverPages doesn't expose its own link list)
+// and keeps the ones that turn out to have several repeating card-shaped
+// blocks. Bounded on both axes (scanBudget page loads attempted, maxFound
+// pages kept) so a large site can't turn this into an unbounded crawl.
+export async function discoverCardHeavyPages(browserPage, homepageUrl, excludeUrls, {
+  scanBudget = DEFAULT_CARD_SCAN_BUDGET,
+  maxFound = DEFAULT_EXTRA_CARD_PAGES,
+} = {}) {
+  await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  const rawLinks = await browserPage.evaluate(collectLinksInPage);
+
+  const seen = new Set(excludeUrls);
+  const found = [];
+  let scanned = 0;
+  for (const href of rawLinks) {
+    if (found.length >= maxFound || scanned >= scanBudget) break;
+    let abs;
+    try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { continue; }
+    if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
+    if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
+    seen.add(abs);
+    scanned++;
+    // eslint-disable-next-line no-await-in-loop
+    const captured = await capturePage(browserPage, abs).catch((err) => {
+      console.warn(`[design-agent/capture] could not scan ${abs} for card sections: ${err.message}`);
+      return null;
+    });
+    if (!captured) continue;
+    const cardBlockCount = captured.blocks.filter((b) => b.cardLike).length;
+    // Two or more, same threshold design-profile.js's pageUsesCardSections
+    // applies to the segmented sections this raw block count becomes — one
+    // incidental card (a testimonial, a pricing callout) doesn't make a page
+    // "card-heavy" the way a portfolio/case-study grid is.
+    if (cardBlockCount >= 2) found.push({ ...captured, pageType: classifyPageType(abs) });
+  }
+  return found;
 }
 
 // Runs in-page: walks the direct structural children of <body> (treating
@@ -324,6 +378,7 @@ export async function captureSite(homepageUrl, {
   maxPages = DEFAULT_MAX_PAGES,
   launchBrowserFn = launchBrowser,
   screenshots = false,
+  extraCardPages = DEFAULT_EXTRA_CARD_PAGES,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -340,6 +395,16 @@ export async function captureSite(homepageUrl, {
       });
       if (captured) pages.push({ ...captured, pageType });
     }
+
+    // See discoverCardHeavyPages: classifyPageType's URL-only bucketing can
+    // lose a genuine card-grid page (e.g. /projects/) to whatever else won
+    // its 'other' slot above. extraCardPages: 0 opts out entirely (tests,
+    // and any caller that wants the old exact page set).
+    if (extraCardPages > 0) {
+      const cardPages = await discoverCardHeavyPages(page, homepageUrl, pages.map((p) => p.url), { maxFound: extraCardPages });
+      for (const captured of cardPages) pages.push(captured);
+    }
+
     return { homepageUrl, pages };
   } finally {
     await browser.close();
