@@ -11,8 +11,9 @@ import { autoRemediateSafeRecommendations } from '../agents/lib/auto-remediation
 import { applyPacing, applyConvergenceCap } from '../agents/lib/ship-pacing.js';
 import { draftShipState, SHIP_STATE } from '../lib/draft-ship-state.js';
 import { recordOutcome } from '../agents/lib/generator-learning.js';
-import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation } from '../store/recommendations.js';
+import { listOpenSafeRecommendations, getRecommendationById, setRecommendationExecutionState, reopenRecommendation, blockRecommendation } from '../store/recommendations.js';
 import { recordAttempt } from '../store/recommendation-attempts.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../lib/attempt-classification.js';
 import { query as pgQuery } from '../db.js';
 import { createExecutionJob, addJobRecommendation, updateJobRecommendationStatus, appendJobLog, finishExecutionJob, getExecutionJob, getLatestBulkExecutionJob, getTodayExecutionStats } from '../store/execution-jobs.js';
 import { scheduleImpactMeasurement } from '../store/fix-impact.js';
@@ -1235,6 +1236,25 @@ async function shipRecommendation(siteId, rec, { userId, jobId, deferPr = false,
       outcome: 'failed',
       reason: message,
     }).catch((err) => console.error(`[action-center] could not record attempt for rec ${rec.id}:`, err.message));
+    // Same block-on-NEEDS_HUMAN decision action-center-reconciler.js's
+    // classifyUnrecordedFailures makes for a failure it discovers — but that
+    // pass only ever looks at drafts with NO recommendation_attempts row yet,
+    // and the attempt was just recorded, right above, unconditionally. That
+    // is deliberate there (its own comment: avoid a duplicate-decision on the
+    // same data) but means a NEEDS_HUMAN classification recorded THIS way —
+    // the common case, not the reconciler's gap-filling case — never gets
+    // blocked at all otherwise, and stays open to be re-attempted on the
+    // normal schedule. Confirmed live, 2026-09-09: a missing-GitHub-PAT
+    // recommendation reached 19 failed attempts over 6 days before a rare
+    // gap let the reconciler's pass finally catch and block it. Blocking here
+    // — the moment the classification is known, not after N more retries —
+    // is what NEEDS_HUMAN's own contract already promises everywhere else.
+    if (!rec.blocked_reason) {
+      const { retryPolicy, summary } = classifyAbandonReason(message);
+      if (retryPolicy === RETRY_POLICY.NEEDS_HUMAN) {
+        await blockRecommendation(rec.id, summary).catch((err) => console.error(`[action-center] could not block rec ${rec.id}:`, err.message));
+      }
+    }
     return { ok: false, error: message };
   }
 }
