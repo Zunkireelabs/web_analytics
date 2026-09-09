@@ -191,9 +191,9 @@ function industryLabel(industry) {
 // encouraging, forward-looking sentence tied to the client's own industry
 // and what WE do about the gap, rather than a bare score comparison (which
 // reads as a cold report card, not something that makes a client excited to
-// work with us). The real score comparison (competitorScoreBadge below)
-// still exists, but only as small supporting
-// evidence underneath this sentence, never as the headline.
+// work with us). The real ownScore/competitorScore numbers still decide
+// which of the two sentences below applies (real fact driving the copy),
+// they're just never printed as a raw score in the client's own PDF.
 export function competitorPositiveLine(c, industry) {
   const label = industryLabel(industry);
   if (c.ownScore == null || c.competitorScore == null) {
@@ -203,13 +203,6 @@ export function competitorPositiveLine(c, industry) {
     return `${c.domain} is currently ahead of you in ${label} — closing gaps like this is exactly what our daily system does.`;
   }
   return `Good news — you're already ranking ahead of ${c.domain} in ${label}. We'll help you extend that lead.`;
-}
-
-// Small supporting evidence line under the headline above — the real number,
-// kept, just no longer the first thing a client reads.
-export function competitorScoreBadge(c) {
-  if (c.ownScore == null || c.competitorScore == null) return '';
-  return `<span class="competitor-rank">${c.competitorScore}/100 vs. your ${c.ownScore}/100</span>`;
 }
 
 // The label in front of whatTheyDoBetter (the LLM's one-sentence verdict) —
@@ -264,6 +257,38 @@ function industrySearchExample(industry, siteName) {
   const key = String(industry || '').toLowerCase();
   const match = INDUSTRY_SEARCH_EXAMPLES.find(([needle]) => key.includes(needle));
   return match ? match[1] : `someone searching for exactly what ${siteName} offers`;
+}
+
+// What's actually changing in a client's own industry right now — the
+// "here's the trend, here's what it means for you" opener for page 2, so a
+// client sees themselves inside a real market shift before they see their
+// own numbers. Same substring-match approach as INDUSTRY_SEARCH_EXAMPLES
+// above, with a still-concrete (never blank) fallback for an unrecognized
+// or unset industry.
+const INDUSTRY_TRENDS = [
+  ['educat', 'Parents increasingly research programs entirely online before ever contacting a school, and now often ask an AI assistant to shortlist options before they visit a single website.'],
+  ['health', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['medical', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['dental', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['real estate', 'Buyers increasingly do their research, and now even ask AI assistants to compare listings, long before they ever contact an agent.'],
+  ['legal', 'People increasingly search for legal help in a moment of urgency, and are starting to ask AI assistants to recommend a lawyer by name.'],
+  ['law', 'People increasingly search for legal help in a moment of urgency, and are starting to ask AI assistants to recommend a lawyer by name.'],
+  ['ecommerce', 'Shoppers increasingly ask AI assistants what to buy before they ever visit a retailer\'s own site.'],
+  ['retail', 'Shoppers increasingly ask AI assistants what to buy before they ever visit a retailer\'s own site.'],
+  ['hospitality', 'Travelers increasingly plan entire trips through AI assistants, which now recommend specific hotels and restaurants by name.'],
+  ['travel', 'Travelers increasingly plan entire trips through AI assistants, which now recommend specific hotels and restaurants by name.'],
+  ['finance', 'People increasingly ask AI assistants to compare financial products and providers before ever contacting one directly.'],
+  ['insurance', 'People increasingly ask AI assistants to compare coverage and providers before ever contacting one directly.'],
+  ['fitness', 'People increasingly search or ask an AI assistant for a nearby recommendation instead of browsing a list of gyms themselves.'],
+  ['restaurant', 'Diners increasingly ask an AI assistant where to eat, by name, before ever opening a search engine.'],
+  ['home service', 'People increasingly search or ask an AI assistant for a service provider the moment something breaks, and expect an immediate, trustworthy answer.'],
+  ['construction', 'People increasingly search or ask an AI assistant for a service provider the moment something breaks, and expect an immediate, trustworthy answer.'],
+];
+
+function industryTrendLine(industry) {
+  const key = String(industry || '').toLowerCase();
+  const match = INDUSTRY_TRENDS.find(([needle]) => key.includes(needle));
+  return match ? match[1] : 'More people are starting their research with a search engine or an AI assistant instead of going straight to a business\'s website — and increasingly expect a direct, trustworthy answer instead of a list of links to click through.';
 }
 
 function pageChrome({ eyebrow, sectionNumber, sectionTitle, body, footerNote, siteName, dateLabel, pageNumber }) {
@@ -348,16 +373,19 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
   const competitorRows = (competitors && competitors.length)
     ? competitors.map((c) => `
     <div class="competitor-row">
-      <div class="competitor-head">
-        <span class="competitor-domain">${escapeHtml(c.domain)}</span>
-        ${competitorScoreBadge(c)}
-      </div>
+      <span class="competitor-domain">${escapeHtml(c.domain)}</span>
       <p class="competitor-headline">${escapeHtml(competitorPositiveLine(c, industry))}</p>
       ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(competitorDetailLabel(c))} ${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
     </div>`).join('')
     : `<p class="section-intro">We're still identifying your closest competitors — this will be filled in as soon as that analysis completes.</p>`;
 
+  const industryName = industry || 'Your Industry';
   const body = `
+    <div class="industry-block">
+      <p class="label-small">${escapeHtml(industryName)} — What's Changing</p>
+      <p class="section-intro">${escapeHtml(industryTrendLine(industry))}</p>
+    </div>
+    <p class="section-intro" style="margin-top:0;">Here's exactly where ${escapeHtml(siteName)} stands inside that shift today:</p>
     <div class="score-moment">
       <span class="score-value">${score} <span class="score-max">/ 100</span></span>
       <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
@@ -580,13 +608,14 @@ const REPORT_CSS = `
   .mini-score-max { font-size: 12px; color: ${BRAND.faint}; }
   .mini-score-label { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; }
 
+  /* ---- industry trend opener, page 2 ---- */
+  .industry-block { margin-bottom: 6mm; }
+
   /* ---- competitors, page 2 ---- */
   .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
   .competitor-row { padding: 4mm 0; break-inside: avoid; page-break-inside: avoid; }
-  .competitor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6mm; }
   .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: ${BRAND.faint}; }
-  .competitor-rank { font-size: 9.5px; letter-spacing: 0.03em; color: ${BRAND.faint}; text-align: right; flex-shrink: 0; }
-  .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
+  .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 0; max-width: 150mm; }
   .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
 
   /* ---- autonomous-agent note, page 3 ---- */
