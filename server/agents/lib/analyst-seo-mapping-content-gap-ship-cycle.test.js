@@ -46,7 +46,9 @@ mock.module(resolve('./page-content.js'), {
   },
 });
 mock.module(resolve('../../llm.js'), {
-  namedExports: { callLLMForJson: async () => { throw new Error('not exercised by this test file'); } },
+  namedExports: {
+    callLLM: async () => { throw new Error('these tests do not exercise LLM calls'); },
+    callLLMForJson: async () => { throw new Error('not exercised by this test file'); } },
 });
 mock.module(resolve('../../routes/action-center.js'), {
   namedExports: { generateDraft: async () => { throw new Error('dryRun must never generate a draft'); } },

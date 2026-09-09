@@ -14,6 +14,7 @@ import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
 import { extractDesignProfile } from './live-analysis/profile-extract.js';
 import { compareSectionsToProfile } from './live-analysis/consistency-check.js';
+import { summarizeResponsive, detectResponsiveIssues } from './live-analysis/responsive-analysis.js';
 import { composeGeneratedExpandLayout } from './live-analysis/compose-expand-layout.js';
 import { projectAllComponentTemplates } from './lib/design-profile.js';
 import { getSiteById } from '../store/read.js';
@@ -57,11 +58,23 @@ export function createLiveDesignAnalysisHandler({
       const site = await getSiteByIdFn(job.site_id);
       const storedProfile = site?.url_file_map?.siteRoot?.designProfile;
       if (!storedProfile) throw taggedError('No stored design profile to compare against — derive one first.', 'input_validation');
-      const findings = compareSectionsToProfile(storedProfile, segmented);
+      // Class-level drift (does this section look like the rest of the site)
+      // and measured responsive defects (does this page actually work at
+      // 390px) are both "this page is inconsistent with what it should be",
+      // they are just evidenced differently — so they travel as one findings
+      // list through one persistence path rather than the responsive half
+      // growing a second, parallel lifecycle.
+      const findings = [
+        ...compareSectionsToProfile(storedProfile, segmented, { responsive: capture.responsive }),
+        ...detectResponsiveIssues(capture.responsive),
+      ];
       return { jobId: job.id, consistencyFindings: findings, pagesScanned: segmented.length };
     }
 
-    const profile = await extractProfileFn(segmented, { siteId: job.site_id }).catch((err) => {
+    const profile = await extractProfileFn(segmented, {
+      siteId: job.site_id,
+      responsiveMeasured: summarizeResponsive(capture.responsive),
+    }).catch((err) => {
       const { message } = safeMessage('live-analysis-handler.extractProfile', err, 'Design profile extraction failed');
       throw taggedError(message, 'result_validation');
     });

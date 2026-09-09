@@ -71,6 +71,17 @@ export async function run({ siteId, start, end }) {
       whyItMatters: `${c.pages.length} pages both rank for "${c.query}" — ${pageList} — splitting clicks and ranking signal instead of one page owning it.`,
       priority: cannibalPriorities[i],
       recommendedAction: null,
+      // Deciding which page should own a query is editorial — it depends on
+      // what the business wants that query to sell, which no signal here
+      // carries. But two of this site's own pages competing for one query is
+      // a confirmed defect, so it becomes a visible read-only row rather
+      // than being dropped the way it was until 2026-09-09.
+      reportOnly: {
+        kind: 'query-cannibalization',
+        label: `${c.pages.length} pages compete for "${c.query}"`,
+        page: c.pages[0]?.page || '',
+        whyBlocked: `These pages all rank for "${c.query}", so they split the clicks and ranking signal that one page could hold on its own. Fixing it means deciding which page should own this search — a call that depends on which page you actually want people to land on, so it is not safe to make automatically.`,
+      },
       expectedImpact: { label: impactFromPriority(cannibalPriorities[i]), basis: 'computed', value: totalClicks },
     });
   });

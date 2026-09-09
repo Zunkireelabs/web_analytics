@@ -83,8 +83,24 @@ const PROSE_LIKE_ROLES = new Set(['content', 'faq', 'features', 'testimonials', 
  *                  fresh capture — one entry per page type captured.
  * @returns Finding[] — { id, pageUrl, pageType, sectionRole, sectionOrder, evidence }
  */
-export function compareSectionsToProfile(profile, segmentedPages) {
+export function compareSectionsToProfile(profile, segmentedPages, { responsive = null } = {}) {
   const findings = [];
+  // Pages we have REAL responsive measurements for. For those, the
+  // class-name heuristic below (finding 2) is switched off entirely and
+  // responsive-analysis.js's measured defects stand in its place.
+  //
+  // This is a strict improvement, not just a swap: "has no breakpoint-prefixed
+  // class" was only ever a proxy for "probably breaks on a phone", and it is a
+  // bad one in both directions. A section can be perfectly responsive with no
+  // prefixed class at all (a plain flex-wrap, a max-width, a CSS grid with
+  // auto-fit, or any non-Tailwind stylesheet), and a section covered in
+  // md:/lg: classes can still overflow. Measuring the rendered page answers
+  // the real question and drops that whole class of false positive.
+  const measuredPages = new Set(
+    (responsive?.pages || [])
+      .filter((p) => Object.keys(p.byViewport || {}).length > 0)
+      .map((p) => p.url),
+  );
   const breakpointPrefixes = (profile?.responsive?.breakpoints || []).filter((b) => typeof b === 'string' && b);
   const tableConvention = profile?.components?.table?.wrapper ? classTokens(profile.components.table.wrapper) : null;
   const headingConvention = profile?.typography?.heading?.item ? classTokens(profile.typography.heading.item) : null;
@@ -123,7 +139,8 @@ export function compareSectionsToProfile(profile, segmentedPages) {
       // 2. MISSING RESPONSIVE CLASSES — this site demonstrably uses
       // breakpoint-prefixed classes elsewhere (breakpointPrefixes is real
       // evidence, not an assumption), but this section has none at all.
-      if (breakpointPrefixes.length && sectionTokens.size && !hasResponsiveToken(sectionTokens, breakpointPrefixes)) {
+      if (!measuredPages.has(page.url)
+        && breakpointPrefixes.length && sectionTokens.size && !hasResponsiveToken(sectionTokens, breakpointPrefixes)) {
         findings.push({
           id: RESPONSIVE_FINDING, pageUrl: page.url, pageType: page.pageType,
           sectionRole: section.role, sectionOrder: section.order,

@@ -12,6 +12,7 @@
     "create-client": "node server/scripts/create-client.js",
     "connect-site": "node server/scripts/connect-site.js",
     "connect-repo": "node server/scripts/connect-repo.js",
+    "onboard-client": "node server/scripts/onboard-client.js",
     "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
     "verify-component-templates": "node server/scripts/verify-component-templates.js",
     "verify-github-app": "node server/scripts/verify-github-app.js",

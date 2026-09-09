@@ -798,6 +798,74 @@ describe('buildMergeValues — qa-content borrows the site\'s own FAQ template',
   });
 });
 
+// Reported 2026-09-09: a real captured template (site 8862) carried a
+// fixed `h-[70px]` wrapper height plus the site's page-level FAQ *section*
+// sizing (`max-w-7xl mx-auto ...`). Applied verbatim to a blog post's FAQ,
+// a genuinely long question overflowed/clipped past the viewport edge.
+describe('buildMergeValues — captured template with unsafe classes never ships verbatim', () => {
+  const items = [
+    { question: 'Why is patient data security important for healthcare providers?', answer: 'Because compromised data leads to identity theft and loss of trust.' },
+  ];
+  const captured = {
+    wrapper: '<dl class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-[70px]">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-[28px] sm:text-[36px] md:text-[50px] font-bold h-12">{{QUESTION}}</dt>\n  <dd class="mt-3 text-sm opacity-80">{{ANSWER}}</dd>',
+  };
+
+  test('a fixed wrapper height is always stripped, on any page', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /h-\[70px\]/);
+  });
+
+  test('a fixed row height is always stripped, on any page', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /h-12/);
+  });
+
+  test('a non-blog page keeps the site\'s real section container sizing', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/services/' });
+    assert.equal(result.ok, true);
+    assert.match(result.values.faq, /max-w-7xl mx-auto/);
+  });
+
+  test('a blog page drops the page-level container sizing but keeps typography', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /max-w-7xl/);
+    assert.doesNotMatch(result.values.faq, /mx-auto/);
+    assert.match(result.values.faq, /text-\[50px\]/);
+  });
+
+  // Site 8862's real capture bug wasn't limited to faq/qaContent — EVERY
+  // captured componentTemplate (expandContent, internalLinks too) carried
+  // the same `h-[70px]`. Confirms the fix, moved into templateFor() itself,
+  // covers every actionType that resolves a componentTemplate, not just the
+  // one first reported.
+  test('qa-content, expand-content and internal-links strip the same unsafe classes', () => {
+    const qaResult = buildMergeValues('qa-content', { items }, 'visible', { qaContent: {
+      wrapper: '<div class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</div>',
+      row: '<details><summary><h3 class="h-8">{{QUESTION}}</h3></summary><p>{{ANSWER}}</p></details>',
+    } }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(qaResult.ok, true);
+    assert.doesNotMatch(qaResult.values.qaContent, /h-\[70px\]|h-8|max-w-7xl|mx-auto/);
+
+    const expandResult = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'Body' }] }, 'visible', { expandContent: {
+      wrapper: '<div class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</div>',
+      row: '<section><h2>{{HEADING}}</h2><div>{{BODY}}</div></section>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(expandResult.ok, true);
+    assert.doesNotMatch(expandResult.values.expandedContent, /h-\[70px\]|max-w-7xl|mx-auto/);
+
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+      wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
+      row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}</a></li>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(linksResult.ok, true);
+    assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+  });
+});
+
 describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {
   // ensureMarkers itself no longer creates a body-scoped marker on a .tsx
   // file at all (see isNoEofInsertField above) — that's now

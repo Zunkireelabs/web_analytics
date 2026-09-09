@@ -152,3 +152,54 @@ describe('compareSectionsToProfile — a fully-consistent site produces zero fin
     assert.equal(findings.length, 0);
   });
 });
+
+// Measurement supersedes inference. `missing-responsive-classes` was only
+// ever a proxy for "this probably breaks on a phone", and a bad one in both
+// directions — a section can be perfectly responsive with no prefixed class
+// (plain flex-wrap, a max-width, CSS grid auto-fit, or any non-Tailwind
+// stylesheet), and one covered in md:/lg: classes can still overflow. When
+// responsive-analysis.js has REAL measurements for a page, the heuristic is
+// switched off for that page and the measured defects stand in its place.
+describe('compareSectionsToProfile — responsive measurements supersede the class-name heuristic', () => {
+  const unresponsiveSection = section({ classes: 'flex gap-4', order: 0 });
+  const pageWithNoPrefixedClasses = page({ url: 'https://example.com/x', sections: [unresponsiveSection] });
+
+  test('without measurements, the class-name heuristic still runs (unchanged fallback)', () => {
+    const findings = compareSectionsToProfile(BASE_PROFILE, [pageWithNoPrefixedClasses]);
+    assert.ok(findings.some((f) => f.id === 'missing-responsive-classes'));
+  });
+
+  test('with measurements for that page, the heuristic is skipped', () => {
+    const responsive = {
+      pages: [{ url: 'https://example.com/x', pageType: 'other', byViewport: { mobile: { blocks: [] } } }],
+    };
+    const findings = compareSectionsToProfile(BASE_PROFILE, [pageWithNoPrefixedClasses], { responsive });
+    assert.equal(findings.filter((f) => f.id === 'missing-responsive-classes').length, 0);
+  });
+
+  test('a page that was NOT measured keeps the heuristic even when other pages were', () => {
+    const responsive = {
+      pages: [{ url: 'https://example.com/measured', pageType: 'other', byViewport: { mobile: { blocks: [] } } }],
+    };
+    const findings = compareSectionsToProfile(BASE_PROFILE, [pageWithNoPrefixedClasses], { responsive });
+    assert.ok(findings.some((f) => f.id === 'missing-responsive-classes'));
+  });
+
+  test('a page whose every viewport failed to measure is treated as unmeasured', () => {
+    const responsive = {
+      pages: [{ url: 'https://example.com/x', pageType: 'other', byViewport: {} }],
+    };
+    const findings = compareSectionsToProfile(BASE_PROFILE, [pageWithNoPrefixedClasses], { responsive });
+    assert.ok(findings.some((f) => f.id === 'missing-responsive-classes'));
+  });
+
+  test('table and typography drift are unaffected by responsive measurements', () => {
+    const p = page({
+      url: 'https://example.com/x',
+      sections: [section({ components: [{ type: 'table', classes: { wrapper: 'basic-table plain' } }] })],
+    });
+    const responsive = { pages: [{ url: 'https://example.com/x', byViewport: { mobile: { blocks: [] } } }] };
+    const findings = compareSectionsToProfile(BASE_PROFILE, [p], { responsive });
+    assert.ok(findings.some((f) => f.id === 'table-style-drift'));
+  });
+});

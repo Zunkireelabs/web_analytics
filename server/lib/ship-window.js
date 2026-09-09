@@ -30,6 +30,44 @@ export const SHIP_HOUR_LOCAL = Number(process.env.SHIP_HOUR_LOCAL || 7);
 // wake-up without leaving the window open all day.
 export const SHIP_CATCHUP_END_HOUR_LOCAL = Number(process.env.SHIP_CATCHUP_END_HOUR_LOCAL || 11);
 
+// THE lock identity for a site's autonomous shipping run — the scheduled run
+// and its hourly catch-up guard must contend for the SAME key, or the guard
+// can open a second batch branch and a second PR alongside a run already in
+// flight, and a client's day stops being one reviewable commit.
+//
+// Keyed per SITE, deliberately not one platform-wide key. A single key around
+// the whole multi-site loop meant one slow tenant stalled every other
+// tenant's PR for the rest of the pass, and a lease expiring mid-run let a
+// second process restart the ENTIRE pass instead of just the site that
+// stalled. Per-site, a tenant can only ever block itself, while the
+// cross-process protection the lock exists for (the 2026-09-08 laptop-vs-VPS
+// double-run) is unchanged: two processes still cannot ship one site at once.
+//
+// Lives here rather than inline at the call sites because the two callers
+// agreeing is the entire safety property; a hand-mirrored copy of this string
+// is exactly the kind of constant this codebase has already had go stale.
+export const SHIP_LOCK_JOB_NAME = 'auto-remediation-ship';
+
+// A SEPARATE lock from the one above, keyed by GitHub credential identity
+// (github/client.js's rateLimitKey), not by site. The per-site lock above
+// only stops one process from shipping the SAME site twice — it was
+// (correctly) widened from one platform-wide lock specifically so that an
+// unrelated tenant is never stalled by a slow one. But two DIFFERENT sites
+// sharing one GitHub App installation (the common case before a tenant gets
+// its own — both live tenants as of 2026-09 share installation 153416356)
+// can now legitimately be shipped by two different processes at the same
+// moment, and each process's in-memory rate-limit tracking
+// (lastRateLimitByCredential in github/client.js) is process-local — so
+// neither process's pre-ship budget check sees the other's spending. That
+// reopens exactly the double-spend the site-level lock's own comment says is
+// "unchanged": it isn't, once two sites share a token. This lock closes that
+// gap without reintroducing the platform-wide stall: a tenant on its own
+// credential is never blocked by this key at all, and two tenants sharing
+// one credential simply ship one at a time, same as before the per-site
+// change — which is the correct, load-bearing behavior for a shared budget,
+// not a regression of it.
+export const GITHUB_CREDENTIAL_LOCK_JOB_NAME = 'auto-remediation-ship-credential';
+
 // Whether a site is eligible to have work SHIPPED at all. Deliberately keyed
 // on the repo, not on GSC/GA4 (listConnectedSites' filter): a site with
 // analytics but no repository has nowhere to push a branch. The

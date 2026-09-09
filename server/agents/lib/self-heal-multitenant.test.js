@@ -45,6 +45,17 @@ mock.module(resolve('../../store/capability-repairs.js'), {
   },
 });
 
+// recommendation-gates.js now reaches llm.js, whose import graph pulls in
+// openai -> formdata-node -> web-streams-polyfill, which fails to instantiate
+// under the test runner. Every other test file in this directory stubs it the
+// same narrow way; none of these tests exercise an LLM call.
+mock.module(resolve('../../llm.js'), {
+  namedExports: {
+    callLLM: async () => { throw new Error('these tests do not exercise LLM calls'); },
+    callLLMForJson: async () => { throw new Error('these tests do not exercise LLM calls'); },
+  },
+});
+
 const { createRecommendationGates } = await import('./recommendation-gates.js');
 
 // Two unrelated tenants: different owner/repo, different route prefixes,

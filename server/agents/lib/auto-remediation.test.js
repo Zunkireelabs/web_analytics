@@ -34,6 +34,7 @@ let stuckDraftBranch;
 let failedAttempts; // Map(finding_id -> prior failed attempts), for the convergence cap
 let finalizeBatchFails; // simulates the batch's one shared push/PR (finalizeBatchPr) failing
 let finalizeBatchRateLimited; // ...and whether that failure was a transient GitHub rate limit
+let finalizeBatchError; // ...and the text it failed with, which decides transient vs permanent
 let failOn; // (recommendationType) => boolean — simulates a step throwing
 let refuseOn; // (recommendationType) => boolean — simulates a generator's principled 4xx refusal
 let staleOn; // (recommendationType) => boolean — simulates a refusal that also proves the recommendation's premise is gone (schema.js's `stale: true`)
@@ -76,6 +77,7 @@ function reset() {
   failedAttempts = new Map();
   finalizeBatchFails = false;
   finalizeBatchRateLimited = false;
+  finalizeBatchError = 'simulated batch push/PR failure';
   failOn = () => false;
   rateLimitOn = () => false;
   refuseOn = () => false;
@@ -271,7 +273,7 @@ mock.module(resolve('../../routes/action-center.js'), {
     // the batch's one shared push/PR failing instead.
     finalizeBatchPr: async (site, branchName, draftIds) => {
       calls.batchFinalizeCalls.push({ branchName, draftIds });
-      if (finalizeBatchFails) return { ok: false, error: 'simulated batch push/PR failure', rateLimited: finalizeBatchRateLimited };
+      if (finalizeBatchFails) return { ok: false, error: finalizeBatchError, rateLimited: finalizeBatchRateLimited };
       calls.prsOpened.push(...draftIds);
       return { ok: true, pushed: draftIds.length, prNumber: 1, prUrl: 'https://github.com/acme/site/pull/1' };
     },
@@ -659,15 +661,27 @@ describe('batched PR opening', () => {
     assert.equal(calls.batchFinalizeCalls.length, 0);
   });
 
-  test('when the batch push/PR itself fails, every pending item reverts to failed and gets abandoned', async () => {
+  // An UNATTRIBUTABLE batch failure is transient by construction: this one
+  // call fails every pending item together regardless of their content, so a
+  // failure nothing can be pinned on says nothing about any single item.
+  // These drafts keep their real, Quality-Gate-passed commits and re-attempt
+  // on the next run instead of being destroyed — the 2026-09-01 shape, where
+  // 80 drafts died on a sanitized "This pull request could not be opened
+  // right now" that carried no evidence of its own transience.
+  test('an unattributable batch push/PR failure leaves every pending item re-attemptable, not abandoned', async () => {
     finalizeBatchFails = true;
     recommendations = [rec(1), rec(2)];
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.shipped, 0, 'nothing actually reached GitHub');
-    assert.equal(result.failed, 2);
+    assert.equal(result.failed, 0, 'a shared batch failure is not scored against the items it happened to catch');
     assert.deepEqual(calls.prsOpened, [], 'no PR was opened');
-    assert.deepEqual(calls.abandoned.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'], 'both drafts are abandoned so they are re-attempted on a future run, not silently stuck at branch_pushed');
+    assert.deepEqual(calls.abandoned, [], 'no draft is destroyed for a failure that says nothing about it');
+    assert.deepEqual(
+      calls.retryable.map((a) => a.draftId).sort(), ['d-f1', 'd-f2'],
+      'both record the failure in place, which reopens their finding for the next run',
+    );
+    assert.equal(result.stoppedReason, 'batch-push-failed-transient', 'never mislabelled as a rate limit, which the headers did not report');
   });
 
   // The 2026-09-01 outage in miniature. This one call fails the whole batch
@@ -692,18 +706,40 @@ describe('batched PR opening', () => {
     assert.equal(result.stoppedReason, 'github-rate-limited', 'reported as its own reason, never as a circuit-breaker fault');
   });
 
-  // The counterpart: transience must be established from evidence, not
-  // assumed. A genuine fault still ends in abandonment, or a broken repo
-  // would retry the same doomed work forever.
-  test('a non-transient batch failure still abandons, so a real fault is never retried forever', async () => {
+  // The exact live string that destroyed 80 drafts on this instance. It is
+  // sanitized before it reaches here, so it carries no rate-limit flag and no
+  // recognizable cause — the shape that must not be read as an item fault.
+  test('a sanitized PR-open failure is re-attemptable, not abandoned', async () => {
     finalizeBatchFails = true;
     finalizeBatchRateLimited = false;
+    finalizeBatchError = 'This pull request could not be opened right now — our team has been notified. (ref: 7f3a91)';
+    recommendations = [rec(1), rec(2)];
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.deepEqual(calls.abandoned, [], 'no Quality-Gate-passed commit is thrown away for an unattributable failure');
+    assert.deepEqual(calls.retryable.map((a) => a.draftId).sort(), ['d-f1', 'd-f2']);
+    assert.equal(result.failed, 0);
+  });
+
+  // The counterpart: a cause that DEMONSTRABLY cannot resolve itself still
+  // ends in abandonment, or the pipeline would re-attempt doomed work every
+  // run forever. A missing PAT is the real example — 40 drafts on this
+  // instance — and it is exactly what a naive "any batch failure is
+  // transient" rule would have retried indefinitely.
+  test('a batch failure with a demonstrably permanent cause still abandons', async () => {
+    finalizeBatchFails = true;
+    finalizeBatchRateLimited = false;
+    finalizeBatchError = 'No GitHub PAT set in env var "GITHUB_PAT"';
     recommendations = [rec(1)];
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.failed, 1);
-    assert.deepEqual(calls.retryable, []);
+    assert.deepEqual(calls.retryable, [], 'nothing is left to retry against a config gap that cannot fix itself');
     assert.deepEqual(calls.abandoned.map((a) => a.draftId), ['d-f1']);
+    assert.match(
+      calls.abandoned[0].reason, /GITHUB_PAT/,
+      'the recorded reason names the real cause, so the fix is actionable without reading logs',
+    );
   });
 });
 

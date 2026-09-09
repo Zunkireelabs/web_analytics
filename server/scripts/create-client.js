@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { pool, createClientSite } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { getUserByEmail, createUser } from '../store/users.js';
+import { ensureAnalystClient, assessTenantReadiness, printReadiness } from '../lib/tenant-provisioning.js';
 
 // Provision a client login. Two modes:
 //
@@ -90,6 +91,14 @@ async function main() {
     const user = await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
     console.log(`Created client #${site.client_number} (site #${site.id} "${site.name}") and user #${user.id} "${normalizedEmail}".`);
     console.log('GSC/GA4 are not connected for this site yet.');
+
+    // Register the Data Analyst side as soon as the tenant exists, so the
+    // nightly Python pipeline picks it up the moment GSC/GA4 land — rather
+    // than depending on someone remembering a separate manual script.
+    const analyst = await ensureAnalystClient(site);
+    if (analyst.ok && analyst.created) console.log(`Data Analyst client registered (id ${site.id}).`);
+
+    printReadiness(await assessTenantReadiness(site));
   } catch (err) {
     console.error(`Site #${site.id} "${site.name}" was created, but the login failed: ${err.message}`);
     console.error(`Retry with: node server/scripts/create-client.js ${email} <password> --site-id ${site.id}`);

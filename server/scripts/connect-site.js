@@ -4,6 +4,7 @@ import { extname } from 'node:path';
 import { pool, updateSiteConnection } from '../db.js';
 import { getSiteById } from '../store/read.js';
 import { discoverLogo } from '../agents/lib/logo-discovery.js';
+import { ensureAnalystClient, assessTenantReadiness, printReadiness } from '../lib/tenant-provisioning.js';
 
 // Attach GSC/GA4 (and optionally a report email recipient / logo) to a site
 // that was already created via `npm run create-client` with no properties
@@ -46,18 +47,12 @@ function logoToDataUrl(path) {
   return `data:${mime};base64,${data.toString('base64')}`;
 }
 
-async function main() {
-  const flags = parseArgs(process.argv.slice(2));
-  const siteId = Number(flags['site-id']);
-  if (!siteId) {
-    throw new Error(
-      'Usage: connect-site.js --site-id <id> --gsc-property "sc-domain:example.com" --ga4-property-id 123456789 [--email-to you@client.com] [--logo path/to/logo.svg]'
-    );
-  }
-
-  const site = await getSiteById(siteId);
-  if (!site) throw new Error(`No site found with id ${siteId}.`);
-
+// Core logic, exported so onboard-client.js (the single coherent onboarding
+// flow) can run this same step in-process without shelling out. Takes an
+// already-loaded site row and the same flag shape the CLI parses, and prints
+// through the same console.log lines either way — one behavior, two entry
+// points.
+export async function performSiteConnect(site, flags) {
   const update = {};
   if (flags['gsc-property'] != null) update.gscProperty = flags['gsc-property'];
   if (flags['ga4-property-id'] != null) update.ga4PropertyId = flags['ga4-property-id'];
@@ -76,10 +71,10 @@ async function main() {
   }
 
   if (!Object.keys(update).length) {
-    throw new Error('Pass at least one of --gsc-property, --ga4-property-id, --email-to, --logo.');
+    return { site, skipped: true };
   }
 
-  const updated = await updateSiteConnection({ siteId, ...update });
+  const updated = await updateSiteConnection({ siteId: site.id, ...update });
   console.log(`Updated site #${updated.id} "${updated.name}":`);
   if (update.gscProperty !== undefined) console.log(`  gsc_property → ${updated.gsc_property}`);
   if (update.ga4PropertyId !== undefined) console.log(`  ga4_property_id → ${updated.ga4_property_id}`);
@@ -91,6 +86,42 @@ async function main() {
   } else {
     console.log('Still missing one of GSC/GA4 — this site is not yet included in automated ingestion.');
   }
+
+  // The Data Analyst half of the tenant. Nothing in the Node onboarding path
+  // created this before, so a normally-onboarded client silently got no
+  // forecasts, no anomalies and no predicted-decline recommendations — the
+  // Python nightly pipeline iterates `clients` rows, and there was no row.
+  const analyst = await ensureAnalystClient(updated);
+  if (analyst.ok) {
+    console.log(analyst.created
+      ? `  Data Analyst client → registered (id ${updated.id}) — forecasts/anomalies begin on the next nightly run.`
+      : '  Data Analyst client → already registered.');
+  } else {
+    console.warn(`  Data Analyst client → NOT registered: ${analyst.error || analyst.reason}. This tenant will get no forecasts until it is.`);
+  }
+
+  printReadiness(await assessTenantReadiness(updated));
+  return { site: updated, skipped: false, analyst };
+}
+
+async function main() {
+  const flags = parseArgs(process.argv.slice(2));
+  const siteId = Number(flags['site-id']);
+  if (!siteId) {
+    throw new Error(
+      'Usage: connect-site.js --site-id <id> --gsc-property "sc-domain:example.com" --ga4-property-id 123456789 [--email-to you@client.com] [--logo path/to/logo.svg]'
+    );
+  }
+
+  const site = await getSiteById(siteId);
+  if (!site) throw new Error(`No site found with id ${siteId}.`);
+
+  const hasAnyFlag = ['gsc-property', 'ga4-property-id', 'email-to', 'logo'].some((k) => flags[k] != null);
+  if (!hasAnyFlag) {
+    throw new Error('Pass at least one of --gsc-property, --ga4-property-id, --email-to, --logo.');
+  }
+
+  await performSiteConnect(site, flags);
 }
 
 main()

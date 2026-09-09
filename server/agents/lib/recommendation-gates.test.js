@@ -275,3 +275,96 @@ describe('createRecommendationGates — faq/qa-content vs an already-schema\'d f
     assert.equal(result.drop, null);
   });
 });
+
+// The stale-gate fix. This gate used to mirror a hard 422 in generateDraft;
+// that 422 was removed (routes/action-center.js now warns and generates with
+// whatever the render path can produce), but the demotion here stayed — so
+// real, shippable faq/expand-content/internal-links/qa-content work kept
+// being forced to the 'manual' tier on behalf of a block that no longer
+// existed. These cover the replacement rule: block only when the render path
+// would genuinely fall through to generic DEFAULT_* markup.
+describe('createRecommendationGates — design context availability (not stored-template presence)', () => {
+  // A real v2 profile: enough for design-profile.js's projectors to compose a
+  // template for every marker-merge action type.
+  const USABLE_PROFILE = {
+    version: 2,
+    typography: {
+      heading: { section: 'text-3xl font-bold', item: 'text-xl font-semibold' },
+      body: 'text-gray-600 leading-relaxed',
+      link: 'text-blue-600 underline',
+    },
+    color: { primary: '#111827', background: '#ffffff', text: '#374151' },
+    spacing: { section: 'py-12', stack: 'space-y-4' },
+    layout: { container: 'max-w-4xl mx-auto px-4' },
+    components: {
+      accordion: { wrapper: 'divide-y', trigger: 'font-medium py-3', panel: 'pb-3 text-gray-600' },
+      button: { primary: 'btn btn-primary' },
+      card: { wrapper: 'rounded-lg border p-6', body: 'mt-2' },
+    },
+    responsive: { breakpoints: ['sm:', 'md:'] },
+  };
+
+  const siteWith = (siteRoot) => ({
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main', auto_remediation_enabled: true,
+    url_file_map: { pages: { '/page': { file: 'src/pages/page.njk' } }, ...(siteRoot ? { siteRoot } : {}) },
+  });
+  const deps = () => ({ ...neutralDeps(), fetchFile: async () => ({ content: 'ok' }), designAgentStatus: async () => null });
+
+  for (const generatorId of ['faq', 'expand-content', 'internal-links', 'qa-content']) {
+    test(`${generatorId} is NOT blocked when the site's design profile can project a template`, async () => {
+      const gates = createRecommendationGates(1, siteWith({ designProfile: USABLE_PROFILE }), deps());
+
+      const result = await gates.evaluate(generatorId, { page: 'https://acme.com/page' });
+
+      assert.equal(result.drop, null);
+      assert.equal(
+        result.blockedReason, null,
+        `${generatorId} renders through marker-merge's projection branch (the site's own typography and components), so there is nothing to block on`,
+      );
+    });
+  }
+
+  test('still blocked when there is no design knowledge at all — the fix would be generic DEFAULT_* markup', async () => {
+    const gates = createRecommendationGates(1, siteWith(null), deps());
+
+    const result = await gates.evaluate('faq', { page: 'https://acme.com/page' });
+
+    assert.equal(result.drop, null, 'a real finding is never dropped — it stays visible');
+    assert.ok(result.blockedReason, 'blocked, because nothing about this site is known yet');
+  });
+
+  test('still blocked when a stored profile exists but is too incomplete to project from', async () => {
+    const unusable = { version: 2, typography: {}, layout: {} };
+    const gates = createRecommendationGates(1, siteWith({ designProfile: unusable }), deps());
+
+    const result = await gates.evaluate('expand-content', { page: 'https://acme.com/page' });
+
+    assert.ok(result.blockedReason);
+  });
+
+  test('a verified stored template still passes on its own, with no profile present', async () => {
+    const stored = {
+      componentTemplates: {
+        faq: {
+          wrapper: '<dl class="divide-y">{{ROWS}}</dl>',
+          row: '<dt>{{QUESTION}}</dt><dd>{{ANSWER}}</dd>',
+          verifiedAt: new Date().toISOString(),
+          verifiedBy: 'test',
+        },
+      },
+    };
+    const gates = createRecommendationGates(1, siteWith(stored), deps());
+
+    const result = await gates.evaluate('faq', { page: 'https://acme.com/page' });
+
+    assert.equal(result.blockedReason, null);
+  });
+
+  test("action types with no component-template concept are unaffected", async () => {
+    const gates = createRecommendationGates(1, siteWith(null), deps());
+
+    const result = await gates.evaluate('meta-title', { page: 'https://acme.com/page' });
+
+    assert.equal(result.blockedReason, null);
+  });
+});

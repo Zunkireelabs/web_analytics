@@ -29,6 +29,8 @@ import { buildGrowthSummary } from '../agents/lib/growth-summary.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
 import { runDiscovery } from '../discovery/run-discovery.js';
 import { auditSite } from '../scripts/audit-url-file-map.js';
+import { persistDerivedContentConfig } from '../lib/derive-repo-content-config.js';
+import { ensureAnalystClient, assessTenantReadiness } from '../lib/tenant-provisioning.js';
 
 // Client provisioning, exposed as real routes for the first time this
 // session — previously only reachable via server/scripts/create-client.js /
@@ -257,6 +259,19 @@ async function runBaselineSequence(siteId, site) {
     console.error(`[clients] site ${siteId} onboarding design-profile derivation failed to queue:`, err.message);
   });
 
+  // Register the Data Analyst side of this tenant before anything reads it.
+  // The Python nightly pipeline (ingest -> stats -> anomalies -> forecasts ->
+  // insights -> forecast_risk recommendations) iterates `clients` rows keyed
+  // by this same site id, and nothing in the Node onboarding path ever
+  // created that row — so every tenant onboarded through this flow silently
+  // had no forecasting at all. Best-effort like every other step here: a
+  // failure must not fail onboarding, but it is logged loudly rather than
+  // swallowed, and assessTenantReadiness reports it as a blocking gap.
+  const analyst = await ensureAnalystClient(site);
+  if (!analyst.ok) {
+    console.error(`[clients] site ${siteId} Data Analyst client not provisioned (${analyst.reason}) — this tenant will have no forecasts or anomaly detection until it is.`);
+  }
+
   // Real site structure first — independent of GSC/GA4 having any data
   // yet, works off the live site itself (sitemap + crawl).
   const discovery = await runSiteDiscoveryIfDue(site).catch((err) => {
@@ -323,7 +338,12 @@ async function runBaselineSequence(siteId, site) {
 
   return {
     site: { id: finalSite.id, name: finalSite.name, onboardedAt: finalSite.onboarded_at, baselineRunId: finalSite.baseline_run_id },
-    discovery, ingestion, analysis, healthScore, baselineReport,
+    discovery, ingestion, analysis, healthScore, baselineReport, analyst,
+    // What this tenant still needs before it runs end to end, in the same
+    // response that reports onboarding "succeeded" — so a half-provisioned
+    // tenant is visible at the moment it is created, not weeks later when
+    // nothing has shipped.
+    readiness: await assessTenantReadiness(finalSite).catch(() => null),
   };
 }
 
@@ -491,12 +511,29 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
     // this request supplied a hand-authored urlFileMap, so a UI-driven
     // connect gets the same automatic mapping the CLI does — no separate
     // manual step. Best-effort: must not fail the connect-repo request.
+    let lastDiscovery = null;
     try {
-      const discovery = await runDiscovery(site);
-      if (discovery.ok) site = (await getSiteById(siteId)) || site;
+      lastDiscovery = await runDiscovery(site);
+      if (lastDiscovery.ok) site = (await getSiteById(siteId)) || site;
     } catch (err) {
       console.error(`[clients] repo discovery failed for site ${site.id}:`, err.message);
     }
+
+    // renderCapabilities + newContentTargets, derived from that same
+    // discovery result — same as connect-repo.js's CLI path (see its own
+    // comment). Previously only reachable by hand-authoring urlFileMap, which
+    // is the single largest source of blocked autonomous work in production
+    // (missing newContentTargets entries for landing-page/blog/legal pages).
+    // Best-effort: must not fail the connect-repo request.
+    if (lastDiscovery?.ok) {
+      try {
+        const content = await persistDerivedContentConfig(site, lastDiscovery);
+        if (content.applied) site = content.site || site;
+      } catch (err) {
+        console.error(`[clients] render-capability/new-content-target derivation failed for site ${site.id}:`, err.message);
+      }
+    }
+
     // Same config-completeness check connect-repo.js's CLI already ran
     // automatically — this HTTP route never had it, so a UI-driven connect
     // could look "done" while still missing every generator's target.
@@ -521,6 +558,7 @@ router.post('/internal/clients/:id/connect-repo', async (req, res, next) => {
       githubAppInstallationId: site.github_app_installation_id,
       autoRemediationEnabled: site.auto_remediation_enabled,
       autoRemediationDailyLimit: site.auto_remediation_daily_limit,
+      readiness: await assessTenantReadiness(site).catch(() => null),
     });
   } catch (e) { next(e); }
 });

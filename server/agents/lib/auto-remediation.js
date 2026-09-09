@@ -17,6 +17,7 @@ import { buildPageMetrics } from './growth-scoring.js';
 import { classifyShipFailure, failureFamilyKey, FAILURE_KIND, SYSTEMIC_FAILURE_LIMIT, FAMILY_FAILURE_LIMIT } from './failure-policy.js';
 import { getQueryPageMetrics } from '../../store/read.js';
 import { draftShipState, SHIP_STATE } from '../../lib/draft-ship-state.js';
+import { classifyAbandonReason, RETRY_POLICY } from '../../lib/attempt-classification.js';
 import { NO_FILE_MAPPING_FRAGMENT, NO_MARKERS_CONFIGURED_FRAGMENT, UNVERIFIED_PLACEHOLDER_FRAGMENT } from '../../lib/draft-failure-phrases.js';
 import { recordAutoRemediationRun } from '../../store/auto-remediation-runs.js';
 import { laneBudgets, ANALYST_MAX, AUTONOMOUS_DRAFT_SOURCES } from '../../lib/autonomous-quota.js';
@@ -840,14 +841,58 @@ export async function autoRemediateSafeRecommendations(siteId, {
       // counted as shipped that wasn't: these drafts' commits never reached
       // GitHub (the batch overlay holds them locally until the push that
       // just failed), and they stay visibly unshipped either way.
-      const transient = finalization.rateLimited === true;
+      // What counts as transient is decided by the SAME classifier the
+      // reconciler and the attempt record already use (lib/attempt-
+      // classification.js), not by the single `rateLimited` boolean this used
+      // to read. `rateLimited` is still honoured first because it is direct
+      // evidence from the response headers rather than an inference from
+      // prose, but it was far too narrow on its own:
+      //
+      //   - "Batch push/PR failed: This pull request could not be opened right
+      //     now" — 80 abandoned drafts on this instance. finalizeBatchPr
+      //     sanitizes the underlying error, so a rate limit that surfaced at
+      //     the PR-open step arrived with `rateLimited` unset and the text
+      //     stripped of any evidence it was transient.
+      //   - "...batch branch has diverged from main" — a further 45. Self-
+      //     healing by construction: tomorrow's branch forks fresh.
+      //
+      // Every one of those had a real, Quality-Gate-passed commit built and
+      // threw it away for a failure that says nothing about the item. The
+      // classifier already encodes exactly this ("fails every pending item at
+      // once regardless of content") — it simply was not being asked.
+      //
+      // Classified on the UNDERLYING error, never on the "Batch push/PR
+      // failed:" prefix. Classifying the prefixed string instead looks
+      // tempting (that rule exists, and returns RETRY) but it swallows the
+      // cause whole: every batch failure would come back retryable, including
+      // `No GitHub PAT set in env var "GITHUB_PAT"` — 40 real drafts here,
+      // a config gap that cannot resolve itself and would be re-attempted
+      // every run forever. So a cause that classifies as definitively
+      // non-retryable (needs_human / already_resolved / a human's own
+      // decision) is honoured as such and still ends in abandonment.
+      //
+      // An UNRECOGNISED batch failure is treated as transient, which is the
+      // 2026-09-01 lesson: this call fails every pending item at once by
+      // construction, so an unattributable failure says nothing about any
+      // individual item's content, and abandoning discards a real
+      // Quality-Gate-passed commit that would ship on the next pass.
+      const underlying = classifyAbandonReason(finalization.error);
+      const permanent = underlying.retryPolicy === RETRY_POLICY.NEEDS_HUMAN
+        || underlying.retryPolicy === RETRY_POLICY.ALREADY_RESOLVED
+        || underlying.retryPolicy === RETRY_POLICY.NEVER;
+      const transient = finalization.rateLimited === true || !permanent;
       if (pending.length > 0) {
         const disposition = transient
           ? `${pending.length} item(s) left re-attemptable for the next run`
           : `${pending.length} item(s) reverted to failed`;
         console.error(`[auto-remediation] ${clientLabel}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
-      if (transient) stoppedReason = 'github-rate-limited';
+      // Only claim a rate limit when the response headers actually said so.
+      // Now that other transient classes reach this branch too, reusing the
+      // rate-limit label for all of them would put a cause in the run summary
+      // (and in every operator-facing log line that reads it) that the
+      // evidence does not support.
+      if (transient) stoppedReason = finalization.rateLimited === true ? 'github-rate-limited' : 'batch-push-failed-transient';
       await Promise.all(pending.map(async ({ rec, draft, learnedRepairQueueId, memoryRefId }) => {
         // A transient failure is not scored against the generator either:
         // generator-learning.js reads these outcomes to decide what to trust,

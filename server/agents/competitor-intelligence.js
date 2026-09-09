@@ -1,5 +1,6 @@
 import { getCompetitorRankingDates, getCompetitorRankingsOn, getSearchPerformanceRange } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { effortForGenerator } from './lib/page-content.js';
 import { runCompetitorDiscovery, normalizeCompetitorDomain, isKnownPlatformDomain } from './lib/competitor-analysis.js';
 import { buildBacklinkComparison } from './lib/competitor-backlinks.js';
 import { upsertCompetitorProfile, insertCompetitorStructuralSnapshot } from '../store/competitor-profiles.js';
@@ -278,10 +279,34 @@ async function buildRankingFindings(siteId, start, end) {
         ? `"${c.topCompetitor.domain}" ranks #${c.topCompetitor.position} for "${c.query}" (${c.impressions} impressions) — you don't appear in the top 20.`
         : `"${c.topCompetitor.domain}" ranks #${c.topCompetitor.position} for "${c.query}" vs your #${c.ownPosition} (${c.impressions} impressions).`,
       priority,
-      // No generator fits "outrank a specific named competitor" — a real,
-      // worthwhile finding with no forced draftable action, same honest
-      // pattern as device-intelligence/query-intelligence.
-      recommendedAction: null,
+      // Two genuinely different situations were both being dropped here.
+      //
+      // ownPosition == null means this site does not appear in the top 20 at
+      // all for a query with real demand that a competitor is ranking for —
+      // that is a content gap, the same thing content-gap.js routes to
+      // blog-outline, and it is actionable: draft a page that covers it.
+      //
+      // ownPosition != null means both sites already rank and the competitor
+      // ranks higher. No generator can "outrank a named competitor", and the
+      // page already exists, so that stays evidence for a human — but a
+      // visible one now, not a silent drop.
+      recommendedAction: c.ownPosition == null
+        ? {
+          label: `Cover: ${c.query}`,
+          generatorId: 'blog-outline',
+          params: {
+            topic: c.query,
+            context: `This site does not appear in the top 20 for "${c.query}" (${c.impressions} impressions), while ${c.topCompetitor.domain} ranks #${c.topCompetitor.position}.`,
+          },
+          effort: effortForGenerator('blog-outline'),
+        }
+        : null,
+      reportOnly: c.ownPosition == null ? null : {
+        kind: 'competitor-outranking',
+        label: `${c.topCompetitor.domain} outranks this site for "${c.query}"`,
+        page: '',
+        whyBlocked: `Both sites already have a page for "${c.query}" — theirs ranks #${c.topCompetitor.position}, this site's ranks #${c.ownPosition}. Closing that gap means strengthening the existing page against a specific competitor, which needs a person to look at what theirs covers that this one does not.`,
+      },
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: c.impressions },
     });
   });
@@ -325,6 +350,15 @@ function buildBacklinkFindings(ownDomain, bc) {
       whyItMatters: `${g.domain} has ${g.gap} more referring domain${g.gap === 1 ? '' : 's'} than ${ownDomain} per Common Crawl (free data, release ${g.graphRelease})${i === 0 && gaps.length > 1 ? ' — the largest real backlink gap among tracked competitors' : ''}.`,
       priority: priorities[i],
       recommendedAction: null,
+      // Same reasoning as authority.js's lost-backlinks finding: referring
+      // domains are other people's websites, so no change here creates one.
+      // Real, worth seeing, not automatable.
+      reportOnly: {
+        kind: 'competitor-backlink-gap',
+        label: `${g.domain} is linked to by ${g.gap} more sites`,
+        page: '',
+        whyBlocked: `${g.gap} more websites link to ${g.domain} than to ${ownDomain}. Links come from other people's sites, so nothing on this site can create them — closing this gap is outreach work, not a code change.`,
+      },
       expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: g.gap },
     }));
   });

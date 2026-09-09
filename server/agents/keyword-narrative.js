@@ -3,6 +3,7 @@ import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { listConnectedSites } from '../job.js';
 import { callLLM } from '../llm.js';
 import { runAgent } from './runner.js';
+import { effortForGenerator } from './lib/page-content.js';
 
 const SYSTEM_PROMPT = `You are an SEO and AI visibility analyst.
 Write a brief 3 paragraph narrative summary.
@@ -68,18 +69,33 @@ async function collectFacts(siteId) {
 // findings[] is what the orchestrator, the Copilot, and agentic-orchestrator's
 // tool loop actually consume (see agents/types.js) — priority comes from a
 // real signal already in facts (the gap's own stored priority; a cluster's
-// gap_score relative to the batch), never a constant. recommendedAction is
-// null throughout: a keyword gap names a topic to write about, and no
-// generator in generators/registry.js drafts net-new topical content from a
-// bare topic today. Stating that honestly beats pointing at a generator that
-// would produce something unrelated.
+// gap_score relative to the batch), never a constant.
+//
+// A keyword gap names a topic this site has no page for, which is exactly
+// what generators/blog-outline.js drafts — the same shape content-gap.js
+// already routes its own AI-suggested gaps through (`{topic, context}`).
+// This used to claim no such generator existed and left recommendedAction
+// null, so every gap the analyst found died here. Net-new content is still
+// gated downstream: a site with no url_file_map.newContentTargets entry for
+// blog-outline has the recommendation demoted to the manual tier by
+// recommendation-gates.js, visible with a reason, rather than queued.
 function buildFindings(facts) {
   const gapFindings = facts.keywordGaps.map((g) => ({
     id: `keyword-narrative:gap:${g.topic}`,
     evidence: { topic: g.topic, reason: g.reason, storedPriority: g.priority },
     whyItMatters: `No page on this site targets "${g.topic}" yet — ${g.reason || 'it was flagged as a gap against the site profile'}.`,
     priority: g.priority === 'high' || g.priority === 'medium' || g.priority === 'low' ? g.priority : 'medium',
-    recommendedAction: null,
+    recommendedAction: {
+      label: `Cover: ${g.topic}`,
+      generatorId: 'blog-outline',
+      params: {
+        topic: g.topic,
+        context: g.reason
+          ? `Keyword gap identified against this site's own profile: ${g.reason}`
+          : 'Keyword gap identified against this site\'s own profile — no existing page targets this topic.',
+      },
+      effort: effortForGenerator('blog-outline'),
+    },
     expectedImpact: { label: 'Medium', basis: 'estimate' },
   }));
 
@@ -94,6 +110,17 @@ function buildFindings(facts) {
       : `The "${c.name}" cluster has a gap score of ${c.gapScore} on ${Math.round(c.avgImpressions)} impressions but no ranking position yet.`,
     priority: topScore > 0 && c.gapScore >= topScore * 0.75 ? 'high' : (topScore > 0 && c.gapScore >= topScore * 0.4 ? 'medium' : 'low'),
     recommendedAction: null,
+    // A whole cluster ranking badly is real, but unlike a keyword gap it does
+    // not name one page to write — the fix is spread across every page in the
+    // cluster, and which of them to strengthen first is a judgment call. Kept
+    // visible read-only rather than forced onto blog-outline, which would
+    // draft an unrelated net-new post for a topic the site already covers.
+    reportOnly: {
+      kind: 'keyword-cluster-gap',
+      label: `"${c.name}" ranks poorly across its pages`,
+      page: '',
+      whyBlocked: `This site's pages about "${c.name}" attract real search demand but rank poorly as a group. Improving it means strengthening the existing pages on this topic rather than adding one new page, so someone needs to decide which of them to work on first.`,
+    },
     expectedImpact: { label: 'Medium', basis: 'computed', value: c.avgImpressions },
   }));
 

@@ -27,6 +27,7 @@ import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
 import { autoRemediateSafeRecommendations } from './agents/lib/auto-remediation.js';
+import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
@@ -37,7 +38,8 @@ import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
-import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL } from './lib/ship-window.js';
+import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
 import { syncWatchlist } from './agents/lib/watchlist.js';
@@ -243,21 +245,24 @@ export async function runDailyAgentAnalysisForSite(site) {
   await syncFromGrounded(site.id, grounded)
     .catch((err) => console.error(`[job] site ${site.id} recommendation coordinator sync failed:`, err.message));
 
-  await autoRemediateSafeRecommendations(site.id)
-    .catch((err) => console.error(`[job] site ${site.id} auto-remediation failed:`, err.message));
+  // Deliberately does NOT ship here. THE authoritative shipping invocation is
+  // runAutoRemediationForAllSites (cron.js's daily body, and its :35 catch-up
+  // guard) — one call per site per day, under that site's own shipping lock.
+  //
+  // This function used to call autoRemediateSafeRecommendations(site.id)
+  // itself, directly contradicting the comment that sat right below it. That
+  // made shipping reachable from three places in a single day: here, the
+  // chained site-wide run, and the :05 hourly catch-up guard, which re-enters
+  // this very function while holding only the 'daily-job' lock and not the
+  // shipping one — so the guard could open a second batch alongside a
+  // shipping run already in progress. Detection fills the recommendations
+  // table; shipping reads it. Keeping the two apart is what makes the day's
+  // work land as ONE reviewable branch/commit/PR per client.
+
   // Deliberately the PRE-repair list, not `grounded`. A repaired item's issue
   // is still genuinely live on the site until a human merges its PR, so the
   // watchlist must keep tracking it — dropping it here would mark the problem
   // as handled before anything actually shipped.
-
-  // Deliberately does NOT auto-remediate here. Detection and shipping are two
-  // separate schedules now: this morning run only DETECTS (fills the
-  // recommendations table), and runAutoRemediationForAllSites ships what it
-  // found on its own later trigger (cron.js, 13:00 site-local by default).
-  // Splitting them is what makes the day's PR a reviewable batch that lands at
-  // a predictable hour, instead of branches appearing the instant an agent
-  // happens to notice something.
-
   const groundedById = new Map(recommendations.items.map((item) => [item.id, item]));
   const watchlistSync = await syncWatchlist(site.id, result.findings, groundedById)
     .catch((err) => { console.error(`[job] site ${site.id} watchlist sync failed:`, err.message); return { added: 0, closed: 0 }; });
@@ -1233,6 +1238,28 @@ export async function refreshContentGapRecommendationsForAllSites() {
   return results;
 }
 
+// Shared by both shipping loops below. Nests the per-site lock inside a
+// per-CREDENTIAL lock (see ship-window.js's GITHUB_CREDENTIAL_LOCK_JOB_NAME
+// for why the credential lock exists at all): a site never ships without
+// first holding the budget its GitHub calls will actually spend from.
+// Acquire order matters here — credential outside, site inside — so two
+// sites sharing one credential contend on the SAME outer lock and are
+// serialized by it, while two sites on distinct credentials never share a
+// key and never wait on each other.
+async function shipSiteWithLocks(site, globalRemaining) {
+  const { ran: credRan, result } = await withJobLock(
+    jobKeyFor(GITHUB_CREDENTIAL_LOCK_JOB_NAME, rateLimitKey(site)),
+    () => withJobLock(
+      jobKeyFor(SHIP_LOCK_JOB_NAME, site.id),
+      () => autoRemediateSafeRecommendations(site.id, { globalRemaining }),
+    ),
+  );
+  if (!credRan) return { ran: false, reason: 'credential-locked' };
+  const { ran: siteRan, result: siteResult } = result;
+  if (!siteRan) return { ran: false, reason: 'site-locked' };
+  return { ran: true, result: siteResult };
+}
+
 export async function runAutoRemediationForAllSites() {
   const sites = (await listSites()).filter(isShippable);
   const results = [];
@@ -1243,7 +1270,23 @@ export async function runAutoRemediationForAllSites() {
       break;
     }
     try {
-      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      // Per-SITE lock nested inside a per-CREDENTIAL lock (shipSiteWithLocks
+      // above). The work this protects (a GitHub App token's budget, one
+      // batch branch) is per-tenant, so a single platform-wide key made one
+      // slow tenant stall every other tenant's PR for the rest of the pass —
+      // but two tenants sharing one actual credential (see
+      // GITHUB_CREDENTIAL_LOCK_JOB_NAME) must still ship one at a time, or
+      // each process's own in-memory rate-limit tracking blind-sides the
+      // other's. The cross-process protection either lock exists for (the
+      // 2026-09-08 laptop-vs-VPS double-run) is unchanged: two processes
+      // still cannot ship the same site, or spend the same credential's
+      // budget, at the same time.
+      const { ran, reason, result } = await shipSiteWithLocks(site, globalRemaining);
+      if (!ran) {
+        console.log(`[job] auto-remediation site ${site.id} "${site.name}" skipped — ${reason === 'credential-locked' ? 'another site sharing its GitHub credential is shipping right now' : "another process holds this site's shipping lock"}`);
+        results.push({ siteId: site.id, skipped: reason === 'credential-locked' ? 'credential-locked' : 'locked' });
+        continue;
+      }
       globalRemaining -= result.shipped || 0;
       if (result.attempted || result.shipped) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
@@ -1286,7 +1329,13 @@ export async function runAutoRemediationCatchupForAllSites(tz) {
       const alreadyShippedToday = await countDraftsBySourceToday(site.id, 'auto-remediation', site.timezone || tz);
       if (!isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone: tz })) continue;
 
-      const result = await autoRemediateSafeRecommendations(site.id, { globalRemaining });
+      // Same locks the scheduled run above takes (shipSiteWithLocks), which
+      // is what makes this guard incapable of opening a second batch
+      // alongside a run already in flight for this site, or spending a
+      // credential another site is mid-batch against — in this process or
+      // another one.
+      const { ran, result } = await shipSiteWithLocks(site, globalRemaining);
+      if (!ran) continue; // this site, or its GitHub credential, is already shipping right now
       globalRemaining -= result.shipped || 0;
       if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
     } catch (err) {

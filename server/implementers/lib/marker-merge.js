@@ -482,6 +482,71 @@ const DEFAULT_FAQ_TEMPLATE = {
   row: '  <dt>{{QUESTION}}</dt>\n  <dd>{{ANSWER}}</dd>',
 };
 
+// A captured componentTemplate carries whatever Tailwind classes the Design
+// Agent found literally on the site's real FAQ/Q&A element (design-drift.js).
+// Those classes were observed on a specific instance of the component, in a
+// specific container — verification only proves each class is LIVE in the
+// site's CSS (classExistsInCss), never that it is safe to reuse verbatim on
+// arbitrary future content or inside a different container. Two classes of
+// captured class break that assumption and are stripped before every render:
+//
+// A fixed pixel/number height on the element wrapping drafted Q&A text is
+// never valid regardless of where it's injected — it was the on-page height
+// of whatever question happened to be captured, not a real constraint, and
+// clips or overlaps any question/answer of different length. This is the
+// defect reported 2026-09-09: site 8862's captured faq/qaContent wrapper
+// carried `h-[70px]`, and a longer real question broke out of it.
+const FIXED_HEIGHT_CLASS_RE = /^h-(\[[^\]]+\]|\d+)$/;
+
+// Page-level section-container sizing (the site's own FAQ section width,
+// centering, and outer padding) is only correct when the component is
+// injected as its own full-bleed section, e.g. on a landing page. A blog
+// post's FAQ/Q&A block is nested inside the post body's own, already-
+// constrained content column — reapplying the site's wider section
+// container on top of that stretches/misaligns the block against the
+// column around it, which is the same 2026-09-09 defect (site 8862's
+// wrapper also carried `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`). Only the
+// WRAPPER is stripped of these — row-level typography (font size/weight/
+// color) still carries over so the questions/answers still look like the
+// rest of the site, just flowing in the post's own column instead of
+// fighting it for width.
+const BLOG_UNSAFE_WRAPPER_CLASS_RE = /^(container(-\w+)?|max-w-\S+|mx-auto)$/;
+
+const BLOG_PATH_RE = /\/blog\//i;
+function isBlogPage(pageUrl) {
+  return typeof pageUrl === 'string' && BLOG_PATH_RE.test(pageUrl);
+}
+
+function stripClassesMatching(html, predicate) {
+  if (!html) return html;
+  return html.replace(/class="([^"]*)"/g, (full, list) => {
+    const kept = list.split(/\s+/).filter((c) => c && !predicate(c));
+    return kept.length ? `class="${kept.join(' ')}"` : '';
+  });
+}
+
+// Exported standalone (not just through sanitizeCapturedTemplate below) for
+// newpage-render.js's contentWrapper — that one wraps a WHOLE net-new page
+// body, not a section nested inside an existing page, so the BLOG_UNSAFE
+// container-sizing strip below never applies to it (a page's own top-level
+// layout container is correct there by definition); only a fixed height
+// is unconditionally wrong on any element holding arbitrary-length body copy.
+export function stripFixedHeightClass(html) {
+  return stripClassesMatching(html, (c) => FIXED_HEIGHT_CLASS_RE.test(c));
+}
+
+// Applied to every captured template right before render — DEFAULT_* templates
+// carry no classes at all, so this is a no-op for them.
+export function sanitizeCapturedTemplate(template, { blog = false } = {}) {
+  if (!template) return template;
+  return {
+    ...template,
+    wrapper: stripClassesMatching(stripFixedHeightClass(template.wrapper),
+      (c) => blog && BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c)),
+    row: stripFixedHeightClass(template.row),
+  };
+}
+
 // The JSON-LD itself (content.schemaJsonLd) is already a deterministic
 // transform of the same approved items (server/generators/faq.js), reused
 // verbatim here rather than re-derived, so there's exactly one source of
@@ -843,10 +908,17 @@ export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE,
 export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
-  const templateFor = (actionType_, configured, fallback) =>
+  // sanitizeCapturedTemplate runs here, once, for every actionType that
+  // resolves a componentTemplate — not just faq/qa-content — so a bug like
+  // 2026-09-09's (one site's Design Agent capture stamping `h-[70px]` onto
+  // EVERY component wrapper: faq, qaContent, expandContent, internalLinks,
+  // contentWrapper alike) can't ship on any of them, present or future.
+  const templateFor = (actionType_, configured, fallback) => sanitizeCapturedTemplate(
     configured
     || (designProfile ? projectComponentTemplate(designProfile, actionType_) : null)
-    || fallback;
+    || fallback,
+    { blog: isBlogPage(page) },
+  );
 
   // expand-content only: a page whose OWN sections are built from the site's
   // card component (a portfolio/case-study grid — see
@@ -860,7 +932,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (page && pageUsesCardSections(designProfile, page)) {
       const chosen = componentTemplates.expandContentCard
         || (designProfile ? projectExpandContentCard(designProfile) : null);
-      if (chosen) return chosen;
+      if (chosen) return sanitizeCapturedTemplate(chosen, { blog: isBlogPage(page) });
     }
     return templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE);
   };

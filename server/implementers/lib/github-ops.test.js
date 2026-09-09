@@ -420,16 +420,41 @@ describe('beginBatchPush / endBatchPush', () => {
 });
 
 describe('batchBranchName', () => {
-  test('is keyed per site and per UTC day, so one tenant-day means one branch', () => {
+  test('is keyed per site and per day, so one tenant-day means one branch', () => {
     const d = new Date('2026-08-13T09:00:00Z');
     assert.equal(batchBranchName({ id: 1 }, d), 'action-center/batch-1-2026-08-13');
     assert.equal(batchBranchName({ id: 7 }, d), 'action-center/batch-7-2026-08-13');
   });
 
-  test('rolls to a new branch on the next UTC day', () => {
+  test('rolls to a new branch on the next day', () => {
     assert.notEqual(
       batchBranchName({ id: 1 }, new Date('2026-08-13T23:59:00Z')),
       batchBranchName({ id: 1 }, new Date('2026-08-14T00:01:00Z')),
     );
+  });
+
+  // The whole point of using the site's own timezone: the morning run and the
+  // catch-up guard a few hours later are the SAME local day and the same
+  // budget day, so they must land on the same branch and therefore the same
+  // PR. Under the previous UTC slice these two instants produced different
+  // names and a second PR for one day's work.
+  test('a site-local day is one branch even when it straddles UTC midnight', () => {
+    const site = { id: 1, timezone: 'Asia/Kolkata' };
+    const morningRun = new Date('2026-08-13T01:30:00Z');   // 07:00 IST, 13 Aug
+    const catchupRun = new Date('2026-08-13T05:35:00Z');   // 11:05 IST, still 13 Aug
+    assert.equal(batchBranchName(site, morningRun), 'action-center/batch-1-2026-08-13');
+    assert.equal(batchBranchName(site, catchupRun), batchBranchName(site, morningRun));
+  });
+
+  test('rolls over on the SITE local day boundary, not the UTC one', () => {
+    const site = { id: 1, timezone: 'Asia/Kolkata' };
+    // 2026-08-13T19:00Z is already 14 Aug 00:30 IST — a new local day.
+    assert.equal(batchBranchName(site, new Date('2026-08-13T19:00:00Z')), 'action-center/batch-1-2026-08-14');
+    // ...while 18:00Z is still 23:30 IST on the 13th.
+    assert.equal(batchBranchName(site, new Date('2026-08-13T18:00:00Z')), 'action-center/batch-1-2026-08-13');
+  });
+
+  test('falls back to UTC for a site with no timezone set', () => {
+    assert.equal(batchBranchName({ id: 3 }, new Date('2026-08-13T23:00:00Z')), 'action-center/batch-3-2026-08-13');
   });
 });
