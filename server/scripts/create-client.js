@@ -88,7 +88,7 @@ async function main() {
   });
   try {
     const user = await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
-    console.log(`Created site #${site.id} "${site.name}" and user #${user.id} "${normalizedEmail}".`);
+    console.log(`Created client #${site.client_number} (site #${site.id} "${site.name}") and user #${user.id} "${normalizedEmail}".`);
     console.log('GSC/GA4 are not connected for this site yet.');
   } catch (err) {
     console.error(`Site #${site.id} "${site.name}" was created, but the login failed: ${err.message}`);

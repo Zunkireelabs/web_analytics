@@ -516,9 +516,10 @@ export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, ap
 // every site buys nothing here — the work is small per site and never
 // latency-critical.
 export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply = true, log = console.log } = {}) {
-  const { rows: sites } = await query('SELECT id FROM sites ORDER BY id');
+  const { rows: sites } = await query('SELECT id, client_number FROM sites ORDER BY id');
   const results = [];
   for (const site of sites) {
+    const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${site.id}`;
     try {
       results.push(await reconcileSite(site.id, { idleHours, apply, log }));
     } catch (err) {
@@ -533,7 +534,7 @@ export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply 
       // module's CLI prints it to stdout, and a future caller could store it
       // on an execution_job — so it must never carry raw exception text.
       const id = logInternal(`action-center-reconciler site ${site.id}`, err);
-      log?.(`[reconciler] site ${site.id} failed (ref: ${id})`);
+      log?.(`[reconciler] ${clientLabel} failed (ref: ${id})`);
     }
   }
   const totals = results.reduce((acc, r) => ({

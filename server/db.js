@@ -83,8 +83,8 @@ export async function getOrCreateSite() {
   if (found.rows.length) return found.rows[0];
 
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone)
-     VALUES ($1, $2, $3, $4) RETURNING *`,
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, client_number)
+     VALUES ($1, $2, $3, $4, nextval('sites_client_number_seq')) RETURNING *`,
     [process.env.SITE_NAME || 'My Website', gsc, ga4, process.env.TZ || 'Asia/Kolkata']
   );
   return inserted.rows[0];
@@ -97,8 +97,8 @@ export async function getOrCreateSite() {
 // server/scripts/create-client.js).
 export async function createClientSite({ name, websiteDomain, timezone }) {
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain)
-     VALUES ($1, NULL, NULL, $2, $3) RETURNING *`,
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq')) RETURNING *`,
     [name, timezone || 'Asia/Kolkata', websiteDomain || null]
   );
   return inserted.rows[0];
