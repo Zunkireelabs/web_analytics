@@ -227,9 +227,19 @@ const DATA_FIELD = /(\bexpandedContent\s*:\s*)("(?:[^"\\]|\\.)*")/g;
 // Bare tags inherit prose exactly, which makes injected sections
 // indistinguishable from the post's own. This is not a different design, it is
 // the ABSENCE of a competing one, and it only applies inside a prose host.
+// FAQ was missing here (2026-09-09): a blog post's FAQ marker fell through
+// to `handler.template` below — the site's real captured template, built for
+// a full-bleed page SECTION (e.g. `container-custom py-12 md:py-20`) — and
+// carried that section's own width/padding straight into the post's already-
+// constrained prose column, the same "carries its own sizing classes into a
+// prose host" defect this whole PROSE_TEMPLATES table exists to prevent for
+// EXPANDEDCONTENT/QACONTENT. <dt>/<dd> is DEFAULT_FAQ_TEMPLATE's own bare
+// shape (marker-merge.js) — same "zero sizing classes, let prose style it"
+// contract as the other two rows here.
 const PROSE_TEMPLATES = {
   EXPANDEDCONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' },
   QACONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h3>{{QUESTION}}</h3>\n{{ANSWER}}' },
+  FAQ: { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt>\n<dd>{{ANSWER}}</dd>' },
 };
 
 // The site's own comparison-table convention (src/pages/agentic-as-a-service.njk).

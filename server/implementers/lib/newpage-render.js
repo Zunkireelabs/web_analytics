@@ -1,6 +1,7 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
+import { stripFixedHeightClass } from './marker-merge.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -280,7 +281,12 @@ function wrapInSiteProse(body, site) {
   // configured, even on a site whose design language was already known.
   // DEFAULT behaviour (bare body) now only applies to a site with no design
   // knowledge at all.
-  const configured = site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper;
+  // stripFixedHeightClass: a captured wrapper can carry an incidental fixed
+  // height from whatever instance the Design Agent captured it from (see
+  // marker-merge.js's sanitizeCapturedTemplate for the 2026-09-09 case this
+  // guards against) — catastrophic here specifically, since this wrapper
+  // holds an ENTIRE net-new page body, not one section.
+  const configured = stripFixedHeightClass(site?.url_file_map?.siteRoot?.componentTemplates?.contentWrapper?.wrapper);
   const wrapper = configured?.includes('{{BODY}}')
     ? configured
     : projectPageWrapper(site?.url_file_map?.siteRoot?.designProfile);

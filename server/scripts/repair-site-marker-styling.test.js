@@ -1,0 +1,94 @@
+import { test, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { repairSiteMarkerStyling } from './repair-site-marker-styling.js';
+
+// The site's real captured FAQ template — deliberately built for a full-bleed
+// page SECTION (the site's homepage FAQ), the same shape as a real capture.
+const SITE_TEMPLATES = {
+  faq: {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">{{ANSWER}}</dd>',
+  },
+  qaContent: {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '  <details>\n    <summary><h3 class="text-2xl md:text-3xl">{{QUESTION}}</h3></summary>\n    <div class="text-lg">{{ANSWER}}</div>\n  </details>',
+  },
+};
+
+async function writeRepo(files) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'marker-styling-test-'));
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = path.join(dir, 'src', rel);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, content, 'utf8');
+  }
+  return dir;
+}
+
+// Reported 2026-09-09: PROSE_TEMPLATES had entries for EXPANDEDCONTENT and
+// QACONTENT but not FAQ, so a blog post's FAQ marker fell through to the
+// site's raw page-section template above and carried `container-custom
+// py-12 md:py-20` into the post's own prose column.
+describe('repairSiteMarkerStyling — FAQ on a blog (.md) post gets the same bare prose treatment as QACONTENT/EXPANDEDCONTENT', () => {
+  const blogFaqRegion = [
+    '<!-- SEOAI:FAQ:START -->',
+    '<dl class="container-custom py-12 md:py-20">',
+    '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">Why is patient data security important for healthcare providers?</dt>',
+    '  <dd class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Because compromised data leads to identity theft and loss of trust.</dd>',
+    '</dl>',
+    '<!-- SEOAI:FAQ:END -->',
+  ].join('\n');
+
+  test('a blog post FAQ marker is re-rendered bare, with no page-section sizing classes', async () => {
+    const dir = await writeRepo({ 'blog/patient-data-security.md': `# Post\n\n${blogFaqRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'patient-data-security.md'), 'utf8');
+      assert.doesNotMatch(out, /container-custom/);
+      assert.doesNotMatch(out, /text-2xl|max-w-2xl/);
+      assert.match(out, /<dt>Why is patient data security important for healthcare providers\?<\/dt>/);
+      assert.match(out, /<dd>Because compromised data leads to identity theft and loss of trust\.<\/dd>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the same FAQ marker on a real .njk page (not prose-hosted) keeps the site\'s real section styling', async () => {
+    const dir = await writeRepo({ 'pages/services.njk': `<main>\n${blogFaqRegion}\n</main>\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 0); // already matches handler.template byte-for-byte
+      const out = await readFile(path.join(dir, 'src', 'pages', 'services.njk'), 'utf8');
+      assert.match(out, /container-custom py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('QACONTENT on the same blog post still gets its own existing bare treatment (regression guard)', async () => {
+    const region = [
+      '<!-- SEOAI:QACONTENT:START -->',
+      '<div class="container-custom py-12 md:py-20">',
+      '  <details>',
+      '    <summary><h3 class="text-2xl md:text-3xl">How do I get in touch?</h3></summary>',
+      '    <div class="text-lg">Email or call us.</div>',
+      '  </details>',
+      '</div>',
+      '<!-- SEOAI:QACONTENT:END -->',
+    ].join('\n');
+    const dir = await writeRepo({ 'blog/contact-info.md': `# Post\n\n${region}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, SITE_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'contact-info.md'), 'utf8');
+      assert.doesNotMatch(out, /container-custom/);
+      assert.match(out, /<h3>How do I get in touch\?<\/h3>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

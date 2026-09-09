@@ -60,6 +60,21 @@ describe('renderCompliancePageBody', () => {
     assert.equal(body.slice(closeIdx - 2, closeIdx), '\n\n');
   });
 
+  // 2026-09-09: a captured contentWrapper can carry an incidental fixed
+  // height (site 8862's real capture had `h-[70px]` on every componentTemplate,
+  // this one included) — catastrophic here since this wraps a WHOLE page
+  // body, not one section.
+  test('a fixed height on the captured contentWrapper is stripped — a whole page body is never 70px tall', () => {
+    const site = {
+      url_file_map: {
+        siteRoot: { componentTemplates: { contentWrapper: { wrapper: '<div class="max-w-7xl mx-auto h-[70px]">\n{{BODY}}\n</div>' } } },
+      },
+    };
+    const body = renderCompliancePageBody(content, {}, site);
+    assert.doesNotMatch(body, /h-\[70px\]/);
+    assert.match(body, /max-w-7xl mx-auto/);
+  });
+
   test('a contentWrapper template missing the {{BODY}} placeholder is ignored, not applied broken', () => {
     const site = {
       url_file_map: {
