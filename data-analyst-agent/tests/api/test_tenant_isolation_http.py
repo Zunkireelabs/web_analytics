@@ -37,6 +37,14 @@ INTENTIONALLY_CROSS_CLIENT = {
     "/activity",
     "/benchmarks/{metric_key}",
     "/benchmarks/{metric_key}/trend",
+    # Client PROVISIONING, not client data — deliberately keyed by `site_id`
+    # rather than `client_id` (see admin_clients.py's own note) precisely so
+    # it reads here as what it is: a route that CREATES the tenant row,
+    # which get_active_client cannot gate since the row may not exist yet.
+    # Admin-key gated only, same tier as the routes above; on the Node side
+    # only server/lib/data-analyst-client.js's provisionAnalystClient calls
+    # it, itself reached from onboarding, never from a tenant-facing route.
+    "/admin/clients/by-site/{site_id}",
 }
 
 

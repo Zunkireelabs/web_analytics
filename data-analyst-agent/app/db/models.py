@@ -825,10 +825,18 @@ class IngestionRun(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     took_ms: Mapped[int | None] = mapped_column()
+    # Which source actually produced this run: 'mcp' (preferred), 'direct-db'
+    # (MCP was unreachable/rejected and the shared database served it), or
+    # 'mixed'. Null for a collector that reads no external source at all
+    # (requires_mcp = False) and for every row written before this column
+    # existed. Recorded so a degraded night is never mistaken for a
+    # full-fidelity one after the fact.
+    source: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("status IN ('ok','insufficient-data','error')", name="ingestion_runs_status_check"),
+        CheckConstraint("source IS NULL OR source IN ('mcp','direct-db','mixed')", name="ingestion_runs_source_check"),
         Index("idx_ingestion_runs_lookup", "client_id", "collector_id", "created_at"),
     )
 
