@@ -20,7 +20,7 @@ import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepa
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
 import { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } from './lib/blog-image-inject.js';
-import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, removeArrayItemByField, assertValidContent } from './adapters/lib/js-data-splice.js';
+import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, findScalarFieldRange, removeArrayItemByField, spliceScalarField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 
 export const meta = {
@@ -442,6 +442,7 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
   const noAnchor = sourceAttempts.length - noMapping;
   const dataSourceAttempts = attempted.filter((a) => a.matchedVia === 'link-data-source');
+  const globalAttempts = attempted.filter((a) => a.matchedVia === 'global-link-data-file');
   const searchAttempts = attempted.filter((a) => a.matchedVia === 'repo-local-search');
   const searchError = searchAttempts.find((a) => a.reason === 'repo-local-search-error');
 
@@ -449,13 +450,16 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const dataSourceSummary = dataSourceAttempts.length
     ? `; also checked ${dataSourceAttempts.length} configured data-array source(s), none matched`
     : '';
+  const globalSummary = globalAttempts.length
+    ? `; also checked the site-wide link config file, ${globalAttempts[0].reason === 'file-not-found' ? 'which could not be read' : 'no match'}`
+    : '';
   const searchSummary = searchError
     ? `repository-local search fallback failed: ${searchError.error}`
     : searchAttempts.length
       ? `also checked ${searchAttempts.length} repository-local search candidate(s), none matched`
       : 'repository-local search fallback found no candidates';
 
-  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary} — ${searchSummary}.`;
+  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary}${globalSummary} — ${searchSummary}.`;
 }
 
 // The id to match within a linkDataSources dataFile is the page URL's own
@@ -475,7 +479,7 @@ function lastPathSegment(pageUrl) {
 // dead links both living in productsDetails.json) chain onto each other's
 // already-edited content instead of each starting fresh from beforeRef and
 // clobbering the other's edit.
-function applyLinkDataSourceEdit(content, page, href, source) {
+export function applyLinkDataSourceEdit(content, page, href, source) {
   const id = lastPathSegment(page);
   if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page}".` };
 
@@ -484,10 +488,35 @@ function applyLinkDataSourceEdit(content, page, href, source) {
   if (!rootBounds) return { ok: false, reason: 'no-match', error: `Could not find a root object in ${source.dataFile}.` };
   const entryRange = findObjectFieldRange(content, rootBounds, id, format);
   if (!entryRange) return { ok: false, reason: 'no-match', error: `No "${id}" entry found in ${source.dataFile}.` };
+
+  const urlField = source.urlField || 'url';
+
+  // Two real shapes seen on zunkireelabs-web: a "Resources" LIST of link
+  // objects living under itemsField (below — the original case this config
+  // was built for), and a single scalar link field directly on the entry
+  // itself (productsDetails.json's per-product "loginUrl" — one dead
+  // product/login URL, never a list item). Config with no itemsField means
+  // the latter: clear the field's value in place (matching the same
+  // "template already treats an empty/falsy value as no link" contract a
+  // stripped <a href> relies on) rather than trying to remove a whole array
+  // entry that doesn't exist here.
+  if (!source.itemsField) {
+    const scalarRange = findScalarFieldRange(content, entryRange, urlField, format);
+    if (!scalarRange) return { ok: false, reason: 'no-match', error: `"${id}" has no "${urlField}" field in ${source.dataFile}.` };
+    const currentValue = content.slice(scalarRange.valueStart + 1, scalarRange.valueEnd - 1);
+    if (!hrefVariants(href).includes(currentValue)) {
+      return { ok: false, reason: 'no-match', error: `"${id}"'s "${urlField}" in ${source.dataFile} is "${currentValue}", not "${href}".` };
+    }
+    const newContent = spliceScalarField(content, entryRange, urlField, '', format);
+    if (!newContent) return { ok: false, reason: 'no-match', error: `Could not clear "${urlField}" on "${id}" in ${source.dataFile}.` };
+    const check = assertValidContent(newContent, format);
+    if (!check.ok) return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${source.dataFile}'s syntax (${check.error}) — refused to apply.` };
+    return { ok: true, newContent };
+  }
+
   const arrayRange = findArrayFieldRange(content, entryRange, source.itemsField, format);
   if (!arrayRange) return { ok: false, reason: 'no-match', error: `"${id}" has no "${source.itemsField}" array in ${source.dataFile}.` };
 
-  const urlField = source.urlField || 'url';
   const newContent = removeArrayItemByField(content, arrayRange, urlField, hrefVariants(href), format);
   if (!newContent) return { ok: false, reason: 'no-match', error: `No "${urlField}" matching "${href}" found in ${source.dataFile}'s "${id}" entry.` };
 
@@ -497,7 +526,51 @@ function applyLinkDataSourceEdit(content, page, href, source) {
   return { ok: true, newContent };
 }
 
-async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
+// A dead link that lives in neither the page's own template nor a per-page
+// data source (Layers 1/1.5 above) but in one small site-wide config object
+// instead — e.g. zunkireelabs-web's src/_data/site.json `social.{twitter,
+// github,linkedin}`, rendered into every page's Organization schema via the
+// shared base layout. Configured once per site (siteRoot.globalLinkDataFile,
+// see resolveGlobalLinkDataFile below), never guessed at: only a file the
+// tenant's own repo setup named is ever touched here.
+//
+// A full JSON.parse/JSON.stringify round-trip, deliberately unlike the
+// surgical text-splicing js-data-splice.js uses elsewhere: those exist to
+// preserve a JS file's exact formatting/comments around the one field being
+// touched, which plain JSON has none of. Re-serializing at a fixed 2-space
+// indent is the one formatting cost, applied to a small, purely-data file.
+//
+// Only ever removes the field when the href appears EXACTLY ONCE in the
+// whole document — a href appearing under two different keys (unlikely, but
+// not impossible in a hand-edited config file) is refused rather than
+// guessed at, the same "not provably safe" stance every other Layer here
+// already takes.
+export function stripGlobalJsonLink(content, href) {
+  let data;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  const matches = [];
+  const walk = (node, path) => {
+    if (!node || typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string' && value === href) matches.push([...path, key]);
+      else if (value && typeof value === 'object') walk(value, [...path, key]);
+    }
+  };
+  walk(data, []);
+  if (matches.length !== 1) return null;
+
+  let parent = data;
+  const path = matches[0];
+  for (let i = 0; i < path.length - 1; i++) parent = parent[path[i]];
+  delete parent[path[path.length - 1]];
+  return `${JSON.stringify(data, null, 2)}\n`;
+}
+
+export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   const href = draft.content.href;
   // Back-compat: a draft persisted before this change has no sourcePages
   // key at all — fall back to the single `page` field, same effective
@@ -577,6 +650,30 @@ async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
       changedRegions: [{ field: 'href', before: href, after: null }],
       matchedVia: 'link-data-source', matchedFrom: working.matchedFrom,
     });
+  }
+
+  // Layer 1.6: one site-wide config file (see stripGlobalJsonLink above) —
+  // checked once per draft, not per source page, since it isn't scoped to
+  // any one page. Only reached when nothing page-specific matched, same
+  // "last resort before the bounded search" position as Layer 2.
+  const globalLinkDataFile = site.url_file_map?.siteRoot?.globalLinkDataFile;
+  if (!files.length && globalLinkDataFile && !seenPaths.has(globalLinkDataFile)) {
+    seenPaths.add(globalLinkDataFile);
+    const file = await getFileContent(site, globalLinkDataFile, beforeRef);
+    if (!file) {
+      attempted.push({ filePath: globalLinkDataFile, matchedVia: 'global-link-data-file', reason: 'file-not-found' });
+    } else {
+      const newContent = stripGlobalJsonLink(file.content, href);
+      if (!newContent) {
+        attempted.push({ filePath: globalLinkDataFile, matchedVia: 'global-link-data-file', reason: 'no-match' });
+      } else {
+        files.push({
+          filePath: globalLinkDataFile, oldContent: file.content, newContent,
+          changedRegions: [{ field: 'href', before: href, after: null }],
+          matchedVia: 'global-link-data-file',
+        });
+      }
+    }
   }
 
   if (files.length) return { ok: true, files, attempted };
