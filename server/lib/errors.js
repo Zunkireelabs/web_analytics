@@ -92,7 +92,30 @@ const LEAK_PATTERNS = [
   /\b(ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EAI_AGAIN)\b/,
   /\b(openai|anthropic|google (custom )?search|github api|postgres|pg_)\b.{0,40}(failed|error|rejected|denied)/i,
   /request failed\b/i,
+  // `TypeError: message` only ever appears in err.stack/err.toString() — a
+  // real Error's own `.message` NEVER carries the class-name prefix, so this
+  // pattern alone never matches the single most common shape of an uncaught
+  // internal crash reaching this boundary: the bare V8/Node built-in message
+  // (confirmed live, 2026-09-09: "Cannot read properties of null (reading
+  // 'id')" reached an Action Center card verbatim, unredacted, because it
+  // is exactly this shape). The patterns below match those bare messages
+  // directly, with no class-name prefix to depend on.
   /\b(TypeError|ReferenceError|SyntaxError|RangeError):/,
+  // Matches both Node's current wording ("...properties of null (reading
+  // 'x')") and the older pre-2020 V8 form ("...property 'x' of undefined") —
+  // the property name and quoting differ between them, so this only pins the
+  // stable prefix rather than the whole phrase.
+  /\bCannot read propert(?:y|ies)\b/i,
+  /\bis not a function\b/i,
+  /\bis not defined\b/i,
+  /\bis not iterable\b/i,
+  /\bis not a valid\b/i,
+  /\bundefined is not an object\b/i,
+  /\bMaximum call stack size exceeded\b/i,
+  /\bAssignment to constant variable\b/i,
+  /\bCannot convert (?:undefined|null|object) to\b/i,
+  /\bInvalid array length\b/i,
+  /\bout of memory\b/i,
 ];
 
 export function sanitizeForCustomer(text, fallback = null) {

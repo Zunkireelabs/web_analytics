@@ -37,6 +37,21 @@ describe('sanitizeForCustomer', () => {
     assert.equal(sanitizeForCustomer('OpenAI request failed after 3 retries'), null);
   });
 
+  test('blocks a bare built-in error message with no "TypeError:" prefix — the shape a real Error.message actually has', () => {
+    // Regression, confirmed live 2026-09-09: err.message NEVER carries the
+    // class-name prefix (only err.stack/err.toString() do), so the
+    // TypeError:/ReferenceError:/etc. pattern above never matches the single
+    // most common shape of an uncaught internal crash reaching this
+    // boundary. This exact string reached an Action Center card verbatim.
+    assert.equal(sanitizeForCustomer("Cannot read properties of null (reading 'id')"), null);
+    assert.equal(sanitizeForCustomer("Cannot read property 'id' of undefined"), null);
+    assert.equal(sanitizeForCustomer('doThing is not a function'), null);
+    assert.equal(sanitizeForCustomer('foo is not defined'), null);
+    assert.equal(sanitizeForCustomer('items is not iterable'), null);
+    assert.equal(sanitizeForCustomer('Assignment to constant variable.'), null);
+    assert.equal(sanitizeForCustomer('Maximum call stack size exceeded'), null);
+  });
+
   test('leaves genuinely safe, developer-authored text untouched', () => {
     const safe = 'This page could not be checked right now — showing results based on other signals.';
     assert.equal(sanitizeForCustomer(safe), safe);
