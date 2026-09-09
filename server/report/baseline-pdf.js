@@ -180,17 +180,46 @@ export function scoreStatusWord(score) {
 // competitor-analysis.js summarizeAnalysis / store/competitor-profiles.js
 // getLatestCompetitorScores) — falls back to the LLM's prose only when no
 // real score pair exists yet for this domain.
-export function competitorRankLine(c) {
-  if (c.ownScore == null || c.competitorScore == null) {
-    return c.whatTheyDoBetter || 'Ranking ahead of you for shared search terms.';
-  }
-  const ahead = c.competitorScore > c.ownScore;
-  return `${ahead ? 'Ranking ahead of you' : 'Ranking behind you'} — ${c.competitorScore}/100 vs. your ${c.ownScore}/100`;
+// A short "the [industry] space" phrase for the competitor headline below —
+// falls back to a still-concrete "your market" when site_profiles.industry
+// hasn't been set for this client yet, never a blank.
+function industryLabel(industry) {
+  return industry ? `the ${industry} space` : 'your market';
 }
 
-export function competitorRankColor(c) {
-  if (c.ownScore == null || c.competitorScore == null) return BRAND.muted;
-  return c.competitorScore > c.ownScore ? BRAND.red : BRAND.navy;
+// The primary, client-facing line for a competitor row — leads with an
+// encouraging, forward-looking sentence tied to the client's own industry
+// and what WE do about the gap, rather than a bare score comparison (which
+// reads as a cold report card, not something that makes a client excited to
+// work with us). The real score comparison (competitorScoreBadge below)
+// still exists, but only as small supporting
+// evidence underneath this sentence, never as the headline.
+export function competitorPositiveLine(c, industry) {
+  const label = industryLabel(industry);
+  if (c.ownScore == null || c.competitorScore == null) {
+    return `${c.domain} is a real competitor for ${label} search terms — here's how we help you compete.`;
+  }
+  if (c.competitorScore > c.ownScore) {
+    return `${c.domain} is currently ahead of you in ${label} — closing gaps like this is exactly what our daily system does.`;
+  }
+  return `Good news — you're already ranking ahead of ${c.domain} in ${label}. We'll help you extend that lead.`;
+}
+
+// Small supporting evidence line under the headline above — the real number,
+// kept, just no longer the first thing a client reads.
+export function competitorScoreBadge(c) {
+  if (c.ownScore == null || c.competitorScore == null) return '';
+  return `<span class="competitor-rank">${c.competitorScore}/100 vs. your ${c.ownScore}/100</span>`;
+}
+
+// The label in front of whatTheyDoBetter (the LLM's one-sentence verdict) —
+// must agree with competitorPositiveLine's headline above it. "Where
+// they're ahead" only makes sense when the competitor's real score is
+// actually higher; printing it under a "you're already ahead" headline
+// would contradict the sentence directly above it.
+function competitorDetailLabel(c) {
+  if (c.ownScore == null || c.competitorScore == null) return 'What we found:';
+  return c.competitorScore > c.ownScore ? "Where they're ahead:" : 'One thing to watch:';
 }
 
 // Deterministic, real-data-grounded caption — see this file's top comment
@@ -306,7 +335,7 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
 
 // Page 2 — "Where You Stand Today": plain-language baseline of current
 // search/AI visibility and website health, plus real named competitors.
-function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAssessmentHtml, siteName, dateLabel }) {
+function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAssessmentHtml, siteName, dateLabel, industry }) {
   const score = kpi.healthScore ?? 0;
   const status = scoreStatusWord(score);
   const findingsCount = auditFindings ? numberFormat(auditFindings.total) : null;
@@ -321,9 +350,10 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
     <div class="competitor-row">
       <div class="competitor-head">
         <span class="competitor-domain">${escapeHtml(c.domain)}</span>
-        <span class="competitor-rank" style="color:${competitorRankColor(c)}">${escapeHtml(competitorRankLine(c))}</span>
+        ${competitorScoreBadge(c)}
       </div>
-      ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
+      <p class="competitor-headline">${escapeHtml(competitorPositiveLine(c, industry))}</p>
+      ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(competitorDetailLabel(c))} ${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
     </div>`).join('')
     : `<p class="section-intro">We're still identifying your closest competitors — this will be filled in as soon as that analysis completes.</p>`;
 
@@ -452,6 +482,7 @@ export function renderBaselineReportHtml(report, site) {
     standTodayPage({
       kpi, auditFindings: issues.auditFindings, aiVisibility: issues.aiVisibility,
       competitors: issues.competitors, execAssessmentHtml, siteName: site.name, dateLabel,
+      industry: kpi.industry,
     }),
     howWeHelpPage({ openRecommendations: issues.openRecommendations, siteName: site.name, dateLabel }),
     gettingStartedPage({ siteName: site.name, dateLabel }),
@@ -551,11 +582,12 @@ const REPORT_CSS = `
 
   /* ---- competitors, page 2 ---- */
   .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
-  .competitor-row { padding: 3mm 0; break-inside: avoid; page-break-inside: avoid; }
+  .competitor-row { padding: 4mm 0; break-inside: avoid; page-break-inside: avoid; }
   .competitor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6mm; }
-  .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12.5px; font-weight: 500; color: ${BRAND.navy}; }
-  .competitor-rank { font-size: 10px; letter-spacing: 0.04em; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1mm 0 0; max-width: 150mm; }
+  .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: ${BRAND.faint}; }
+  .competitor-rank { font-size: 9.5px; letter-spacing: 0.03em; color: ${BRAND.faint}; text-align: right; flex-shrink: 0; }
+  .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
+  .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
 
   /* ---- autonomous-agent note, page 3 ---- */
   .agent-note { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.navy}; break-inside: avoid; page-break-inside: avoid; }
