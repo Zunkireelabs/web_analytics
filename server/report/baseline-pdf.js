@@ -596,7 +596,7 @@ const REPORT_CSS = `
   body { font-family: 'DM Sans', -apple-system, 'Helvetica Neue', Arial, sans-serif; color: ${BRAND.navy}; }
   .page {
     width: 210mm; min-height: 297mm; position: relative;
-    background: #fff; padding: 20mm 18mm 16mm; margin: 0 auto;
+    background: #fff; padding: 15mm 18mm 12mm; margin: 0 auto;
     display: flex; flex-direction: column;
     page-break-after: always; break-after: page;
     box-shadow: 0 1px 3px rgba(15,23,42,0.08), 0 8px 24px rgba(15,23,42,0.06);
@@ -617,13 +617,13 @@ const REPORT_CSS = `
   .page-header-meta { text-align: right; }
   .page-header-label { display: block; font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: ${BRAND.faint}; font-weight: 600; }
   .page-header-sub { display: block; font-size: 9px; color: ${BRAND.muted}; margin-top: 2px; }
-  .page-divider { height: 1px; background: ${BRAND.divider}; margin: 6mm 0 8mm; }
+  .page-divider { height: 1px; background: ${BRAND.divider}; margin: 4mm 0 5mm; }
 
   .section-marker { display: flex; align-items: baseline; gap: 4mm; margin-bottom: 4mm; }
   .section-number { font-family: 'DM Mono', monospace; font-size: 12px; color: ${BRAND.faint}; }
   .section-title { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: ${BRAND.navy}; }
   .eyebrow { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: ${BRAND.faint}; }
-  .section-intro { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.6; max-width: 150mm; margin: 0 0 8mm; }
+  .section-intro { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.55; max-width: 150mm; margin: 0 0 5mm; }
 
   /* Content flows from the top of the available space and stops — it is
      NOT centered/stretched to fill the full A4 height. That forced
@@ -644,42 +644,42 @@ const REPORT_CSS = `
   .page-footer-note { font-size: 8.5px; color: ${BRAND.faint}; margin: 2mm 0 0; }
 
   /* ---- hero (compact cover treatment on page 1, not a full page) ---- */
-  .hero { margin-bottom: 10mm; }
+  .hero { margin-bottom: 5mm; }
   .hero-title { font-size: 32px; line-height: 1.08; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 4mm; color: ${BRAND.navy}; }
   .hero-client { font-size: 15px; font-weight: 500; color: ${BRAND.navy}; margin: 0 0 1mm; }
   .hero-date { font-size: 10px; letter-spacing: 0.1em; color: ${BRAND.faint}; margin: 0; }
 
   /* ---- SEO/AEO/GEO explainers ---- */
   .explainer-list { margin-top: 2mm; }
-  .explainer { padding: 5mm 0; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
+  .explainer { padding: 3.5mm 0; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
   .explainer-term { font-size: 15px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 2mm; }
   .explainer-full { font-size: 11px; font-weight: 500; color: ${BRAND.faint}; }
   .explainer-copy { font-size: 12px; color: ${BRAND.muted}; line-height: 1.6; max-width: 155mm; margin: 0; }
-  .explainer-example { font-size: 11.5px; font-style: italic; color: ${BRAND.navy}; line-height: 1.5; max-width: 155mm; margin: 3mm 0 0; }
+  .explainer-example { font-size: 11px; font-style: italic; color: ${BRAND.navy}; line-height: 1.4; max-width: 155mm; margin: 2mm 0 0; }
 
-  .callout { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.red}; break-inside: avoid; page-break-inside: avoid; }
+  .callout { margin-top: 5mm; padding: 5mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.red}; break-inside: avoid; page-break-inside: avoid; }
   .callout-copy { font-size: 12.5px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
 
   /* ---- compact AI-visibility score, page 2 ---- */
   /* ---- paired health/AI-visibility stat cards, page 2 ---- */
   .stat-grid { display: flex; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
-  .stat-card { flex: 1; min-width: 0; padding: 6mm 6mm; background: #fff; border: 1px solid ${BRAND.divider}; border-radius: 3px; }
+  .stat-card { flex: 1; min-width: 0; padding: 4.5mm 5mm; background: #fff; border: 1px solid ${BRAND.divider}; border-radius: 3px; }
   .stat-score-row { display: flex; align-items: baseline; gap: 3mm; flex-wrap: wrap; margin-top: 1mm; }
 
   /* ---- industry trend opener, page 2 ---- */
-  .industry-block { margin-bottom: 6mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
+  .industry-block { margin-bottom: 4mm; padding: 4.5mm 6mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
   .industry-copy { font-size: 12.5px; color: ${BRAND.navy}; line-height: 1.6; max-width: 150mm; margin: 2mm 0 0; }
   .score-lead { font-size: 11.5px; color: ${BRAND.faint}; margin: 0 0 3mm; }
 
   /* ---- competitors, page 2 ---- */
-  .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
-  .competitor-row { padding: 3mm 0 3mm 5mm; margin: 3mm 0; border-left: 2.5px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
+  .competitors { margin-top: 5mm; padding-top: 5mm; border-top: 1px solid ${BRAND.divider}; }
+  .competitor-row { padding: 2mm 0 2mm 5mm; margin: 2mm 0; border-left: 2.5px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
   .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: ${BRAND.faint}; }
   .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 0; max-width: 150mm; }
   .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
 
   /* ---- autonomous-agent note, page 3 ---- */
-  .agent-note { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.navy}; break-inside: avoid; page-break-inside: avoid; }
+  .agent-note { margin-top: 5mm; padding: 4.5mm 6mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.navy}; break-inside: avoid; page-break-inside: avoid; }
   .agent-copy { font-size: 12px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
 
   /* ---- getting-started lists, page 4 ---- */
@@ -692,7 +692,7 @@ const REPORT_CSS = `
   .commitment .label-small { color: rgba(255,255,255,0.55); margin-bottom: 3mm; }
   .commitment-copy { font-size: 12.5px; line-height: 1.7; color: #fff; margin: 0; max-width: 155mm; }
 
-  .assessment { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
+  .assessment { margin-top: 5mm; padding-top: 5mm; border-top: 1px solid ${BRAND.divider}; }
   .label-small { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: ${BRAND.faint}; font-weight: 700; margin-bottom: 4mm; }
   .assessment-copy p { font-size: 13.5px; line-height: 1.8; color: ${BRAND.navy}; max-width: 150mm; margin: 0 0 4mm; }
   .assessment-copy strong { color: ${BRAND.navy}; font-weight: 700; }
@@ -707,7 +707,7 @@ const REPORT_CSS = `
 
   /* ---- recommendation rows ---- */
   .rec-list { margin-top: 2mm; }
-  .rec-row { display: flex; align-items: flex-start; gap: 6mm; padding: 6mm 0; break-inside: avoid; page-break-inside: avoid; }
+  .rec-row { display: flex; align-items: flex-start; gap: 5mm; padding: 3.5mm 0; break-inside: avoid; page-break-inside: avoid; }
   .rec-divider { height: 1px; background: ${BRAND.divider}; }
   .rec-dot { width: 2.5mm; height: 2.5mm; border-radius: 50%; flex-shrink: 0; margin-top: 2mm; }
   .rec-body { flex: 1; }
@@ -717,13 +717,13 @@ const REPORT_CSS = `
   .rec-summary { font-size: 10.5px; color: ${BRAND.faint}; margin-top: 6mm; }
 
   /* ---- roadmap ---- */
-  .roadmap { margin-top: 10mm; }
+  .roadmap { margin-top: 5mm; }
   .roadmap-stage { display: flex; align-items: flex-start; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
   .roadmap-marker { width: 10mm; height: 10mm; border-radius: 50%; background: ${BRAND.navy}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .roadmap-marker span { font-family: 'DM Mono', monospace; font-size: 10px; color: #fff; font-weight: 500; }
   .roadmap-title { font-size: 14px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 1mm; }
   .roadmap-copy { font-size: 11.5px; color: ${BRAND.muted}; margin: 0; }
-  .roadmap-line { width: 1.5px; height: 8mm; background: ${BRAND.divider}; margin: 1mm 0 1mm 5mm; }
+  .roadmap-line { width: 1.5px; height: 5mm; background: ${BRAND.divider}; margin: 1mm 0 1mm 5mm; }
 
   .closing { margin-top: 20mm; text-align: center; }
   .closing-logo { display: flex; justify-content: center; margin: 0 auto 6mm; }
