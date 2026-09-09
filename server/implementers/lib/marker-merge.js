@@ -1,4 +1,4 @@
-import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
+import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections } from '../../design-agent/lib/design-profile.js';
 // Marker-based splice — the only merge strategy this codebase uses for
 // editing an EXISTING page's real template file, because it never requires
 // parsing or understanding an unknown site's real templating syntax
@@ -840,13 +840,30 @@ export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE,
 // site's. A projection is the site's own typography, spacing and component
 // conventions. DEFAULT_* now only applies to a site with no design knowledge
 // at all.
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false } = {}) {
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
   const templateFor = (actionType_, configured, fallback) =>
     configured
     || (designProfile ? projectComponentTemplate(designProfile, actionType_) : null)
     || fallback;
+
+  // expand-content only: a page whose OWN sections are built from the site's
+  // card component (a portfolio/case-study grid — see
+  // pageUsesCardSections/projectExpandContentCard) gets the card-wrapped
+  // variant instead of the plain heading+paragraph row every other page uses.
+  // `componentTemplates.expandContentCard` is a captured/verified override,
+  // same precedence as every other slot here; falls through to a live
+  // projection, then to the plain template exactly as before for a page (or
+  // site) with no card evidence — never invents a card look.
+  const expandContentTemplate = () => {
+    if (page && pageUsesCardSections(designProfile, page)) {
+      const chosen = componentTemplates.expandContentCard
+        || (designProfile ? projectExpandContentCard(designProfile) : null);
+      if (chosen) return chosen;
+    }
+    return templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE);
+  };
   if (actionType === 'meta-title') {
     if (mode === 'schema-only') return { ok: false, error: '"meta-title" has no schema-only representation.' };
     if (!content.selectedTitle) {
@@ -941,7 +958,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
       values: {
         expandedContent: renderExpandedHtml(
           content.sections,
-          templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE),
+          expandContentTemplate(),
           componentTemplates.table || {},
         ),
       },
