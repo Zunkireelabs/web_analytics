@@ -4,6 +4,7 @@ import {
   validateDesignProfile, isProfileUsable, projectComponentTemplate,
   projectAllComponentTemplates, projectableActionTypes, stampDesignProfile,
   projectCta, projectCard, projectTable, projectPageWrapper,
+  projectExpandContentCard, pageUsesCardSections,
   DESIGN_PROFILE_VERSION,
 } from './design-profile.js';
 import { validatePlaceholders } from '../../implementers/lib/design-drift.js';
@@ -189,6 +190,74 @@ describe('projections never emit broken markup from a sparse profile', () => {
       assert.doesNotMatch(all, /undefined|\[object Object\]/, `${actionType} leaked a JS value into markup`);
       assert.doesNotMatch(all, /class="\s/, `${actionType} emitted leading whitespace in a class list`);
     }
+  });
+});
+
+describe('projectExpandContentCard — page-aware card variant', () => {
+  test('wraps the row in the site\'s own card classes when the profile has a real card component', () => {
+    const t = projectExpandContentCard(TAILWIND_PROFILE);
+    assert.ok(t.row.includes('rounded-lg border border-gray-200 p-6'), 'row must carry the site\'s real card wrapper class');
+    assert.match(t.row, /\{\{HEADING\}\}/);
+    assert.match(t.row, /\{\{BODY\}\}/);
+    assert.match(t.wrapper, /\{\{ROWS\}\}/);
+  });
+
+  test('refuses (returns null) when the site has no real card component, never invents one', () => {
+    assert.equal(projectExpandContentCard(PLAIN_PROFILE), null);
+  });
+
+  test('refuses on an unusable profile, same discipline as every other projector', () => {
+    assert.equal(projectExpandContentCard({ version: 1 }), null);
+    assert.equal(projectExpandContentCard(null), null);
+  });
+
+  test('satisfies the same placeholder contract expand-content is checked against', () => {
+    const t = projectExpandContentCard(TAILWIND_PROFILE);
+    assert.equal(validatePlaceholders('expand-content', t).ok, true);
+  });
+});
+
+describe('pageUsesCardSections — per-page card-grid detection', () => {
+  const PROFILE_WITH_PAGES = {
+    ...TAILWIND_PROFILE,
+    pages: [
+      {
+        url: 'https://example.com/projects/',
+        sections: [
+          { role: 'hero', components: [] },
+          { role: 'content', components: [{ type: 'card', classes: {} }] },
+          { role: 'content', components: [{ type: 'card', classes: {} }] },
+          { role: 'content', components: [{ type: 'card', classes: {} }] },
+        ],
+      },
+      {
+        url: 'https://example.com/about/',
+        sections: [
+          { role: 'hero', components: [] },
+          { role: 'content', components: [{ type: 'card', classes: {} }] },
+        ],
+      },
+    ],
+  };
+
+  test('true for a page with several repeating card sections', () => {
+    assert.equal(pageUsesCardSections(PROFILE_WITH_PAGES, 'https://example.com/projects/'), true);
+  });
+
+  test('false for a page with only one incidental card — not a grid', () => {
+    assert.equal(pageUsesCardSections(PROFILE_WITH_PAGES, 'https://example.com/about/'), false);
+  });
+
+  test('false for a page never captured, never throws', () => {
+    assert.equal(pageUsesCardSections(PROFILE_WITH_PAGES, 'https://example.com/never-captured/'), false);
+  });
+
+  test('matches ignoring a trailing slash difference', () => {
+    assert.equal(pageUsesCardSections(PROFILE_WITH_PAGES, 'https://example.com/projects'), true);
+  });
+
+  test('false when the profile has no pages array at all', () => {
+    assert.equal(pageUsesCardSections(TAILWIND_PROFILE, 'https://example.com/projects/'), false);
   });
 });
 

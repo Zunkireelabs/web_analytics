@@ -275,6 +275,91 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.doesNotMatch(result.values.expandedContent, /<h2>/);
   });
 
+  test('expand-content uses the card variant on a page whose own sections are card-heavy', () => {
+    const componentTemplates = {
+      expandContentCard: {
+        wrapper: '<div>\n{{ROWS}}\n</div>',
+        row: '<div class="rounded-lg border p-6"><h2 class="card-heading">{{HEADING}}</h2><p class="card-body">{{BODY}}</p></div>',
+      },
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{
+        url: 'https://example.com/projects/',
+        sections: [
+          { components: [{ type: 'card' }] },
+          { components: [{ type: 'card' }] },
+        ],
+      }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/projects/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /rounded-lg border p-6/);
+    assert.doesNotMatch(result.values.expandedContent, /site-heading/);
+  });
+
+  test('expand-content keeps the plain template on a page that is not card-heavy, even with a card variant configured', () => {
+    const componentTemplates = {
+      expandContentCard: {
+        wrapper: '<div>\n{{ROWS}}\n</div>',
+        row: '<div class="rounded-lg border p-6"><h2>{{HEADING}}</h2><p>{{BODY}}</p></div>',
+      },
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{ url: 'https://example.com/about/', sections: [{ components: [] }] }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/about/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /site-heading/);
+    assert.doesNotMatch(result.values.expandedContent, /rounded-lg border p-6/);
+  });
+
+  test('expand-content on a card-heavy page with no configured card template falls back to plain, never a guessed card look', () => {
+    const componentTemplates = {
+      expandContent: {
+        wrapper: '<section>\n{{ROWS}}\n</section>',
+        row: '<h3 class="site-heading">{{HEADING}}</h3><p class="site-body">{{BODY}}</p>',
+      },
+    };
+    const designProfile = {
+      pages: [{
+        url: 'https://example.com/projects/',
+        sections: [{ components: [{ type: 'card' }] }, { components: [{ type: 'card' }] }],
+      }],
+    };
+    const result = buildMergeValues(
+      'expand-content',
+      { sections: [{ heading: 'H1', body: 'Body text' }] },
+      'visible',
+      componentTemplates,
+      designProfile,
+      { page: 'https://example.com/projects/' },
+    );
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /site-heading/);
+  });
+
   test('expand-content fails honestly with no sections', () => {
     const result = buildMergeValues('expand-content', { sections: [] });
     assert.equal(result.ok, false);
