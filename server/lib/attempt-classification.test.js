@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyAbandonReason, isAutoRetryable, RETRY_POLICY } from './attempt-classification.js';
+import { FAILURE_CLASS } from './failure-classification.js';
 
 // Every string below is a REAL abandoned_reason counted in the live drafts
 // table on 2026-09-03, with its live row count. They are the whole point of
@@ -132,6 +133,21 @@ test('an incomplete bounded repository search waits on a human, not a per-item d
     'Auto-ship failed: No file could be found or safely stripped for href="https://dead.example/" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 3 repository-local search candidate(s), none matched. The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.',
   );
   assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('an unresolvable link target waits on a human, and does not re-draft on every recovery cycle', () => {
+  // Regression, measured live on site 1 (2026-09-09): the plain
+  // "…none matched." variant carried neither the credential phrase nor the
+  // bounded-search phrase, so it fell through to the ITEM_DEFECT default.
+  // ITEM_DEFECT is not merely "wrong label" here — ship-pacing grants
+  // MAX_FAILED_ATTEMPTS afresh per recovery cycle, so 75 findings produced
+  // 296 drafts, re-failing identically from 2026-08-23 onward.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://beed.com.np" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 1 repository-local search candidate(s), none matched.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.CLIENT_REPO);
   assert.equal(isAutoRetryable(retryPolicy), false);
 });
 

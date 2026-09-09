@@ -27,6 +27,7 @@ import {
   NO_MARKERS_CONFIGURED_FRAGMENT,
   UNVERIFIED_PLACEHOLDER_FRAGMENT,
   DESIGN_NOT_REVIEWED_FRAGMENT,
+  LINK_TARGET_UNRESOLVABLE_FRAGMENT,
 } from './draft-failure-phrases.js';
 
 // What the pipeline should DO. Kept separate from FAILURE_CLASS because
@@ -266,6 +267,21 @@ const RULES = [
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
     summary: 'This repository has more real candidate files than the bounded local search can scan in one pass — needs a url_file_map entry or manual confirmation.',
+  },
+  {
+    // Ordered AFTER the credential and bounded-search rules above so their
+    // more specific diagnoses still win on the link-strip messages that carry
+    // them; this catches the plain "…none matched." variant, which otherwise
+    // fell through to the ITEM_DEFECT default and was read as the agent's own
+    // logic failing. It is not: the link is on the page, and the file holding
+    // it is unreachable from this site's mapping. Live on site 1 (2026-09-09)
+    // that misclassification let 75 findings produce 296 drafts — ship-pacing
+    // grants MAX_FAILED_ATTEMPTS per recovery cycle, so an ITEM_DEFECT that
+    // can never converge re-drafts on a schedule instead of blocking once.
+    match: (r) => r.includes(LINK_TARGET_UNRESOLVABLE_FRAGMENT),
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'The file containing this link could not be located in the site’s repository — it likely lives in a shared header/footer that needs a url_file_map entry, or code search needs enabling.',
   },
   {
     // A REMOVED gate (commit 8a32037). Nothing produces this any more, but
