@@ -280,7 +280,7 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
       <p class="hero-client">${escapeHtml(siteName)}</p>
       <p class="hero-date">${escapeHtml(dateLabel).toUpperCase()}</p>
     </div>
-    <p class="section-intro">Three things decide whether people — and the AI tools they now search with — find ${escapeHtml(siteName)}. Here's what each one means, in plain terms.</p>
+    <p class="section-intro">Three things decide whether people — and the AI tools they now search with — find ${escapeHtml(siteName)}.</p>
     <div class="explainer-list">
       <div class="explainer">
         <p class="explainer-term">SEO <span class="explainer-full">— Search Engine Optimization</span></p>
