@@ -331,10 +331,10 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
   const body = `
     <div class="hero">
       <h1 class="hero-title">Digital Visibility<br/>Baseline Report</h1>
-      <p class="hero-client">${escapeHtml(siteName)}</p>
+      <p class="hero-client">Prepared for ${escapeHtml(siteName)}</p>
       <p class="hero-date">${escapeHtml(dateLabel).toUpperCase()}</p>
     </div>
-    <p class="section-intro">Three things decide whether people — and the AI tools they now search with — find ${escapeHtml(siteName)}.</p>
+    <p class="section-intro">This is where ${escapeHtml(siteName)} stands today — and exactly what it takes to become the business people find first, whether they're searching on Google or asking an AI assistant to recommend one nearby. Three things decide that:</p>
     <div class="explainer-list">
       <div class="explainer">
         <p class="explainer-term">SEO <span class="explainer-full">— Search Engine Optimization</span></p>
