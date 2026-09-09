@@ -36,14 +36,38 @@ export function hasDangerousReference(fileContent, id) {
   return jsRef.test(fileContent);
 }
 
-// Repo-wide check, same searchCodeForString mechanism broken-link-fix's
-// code-search fallback already uses — any OTHER file mentioning this id at
-// all (as a literal string) is treated as a possible cross-file reference,
-// since a full fetch-and-classify of every candidate isn't worth the extra
-// API calls for what's meant to be the conservative, narrow-scope path.
-export async function hasExternalReferences(site, id, ownFilePath, searchCodeForString) {
-  const candidates = await searchCodeForString(site, id, { maxResults: 5 });
-  return candidates.some((path) => path !== ownFilePath);
+// Repo-wide check, same App-token-compatible repo-local search
+// broken-link-fix's Layer 2 fallback already uses (see backend.js's
+// computeBrokenLinkFixMerge and repo-local-search.js's own header comment)
+// — any OTHER file mentioning this id at all (as a literal string) is
+// treated as a possible cross-file reference, since a full fetch-and-classify
+// of every candidate isn't worth the extra API calls for what's meant to be
+// the conservative, narrow-scope path.
+//
+// Used to call github/client.js's searchCodeForString, GitHub's /search/code
+// endpoint — which silently returns empty results for a GitHub App
+// installation token on a private repo (a real platform limitation, not a
+// bug in how it was called; see repo-local-search.js's header for the
+// discussion link) and otherwise needs a separate classic PAT with "repo"
+// scope. Every site here authenticates as an App installation, so this
+// safety check failed outright — refusing the whole draft with a "no PAT
+// configured" error — on any repo, forever, until someone provisioned a
+// second credential nothing else in this codebase needs. Swapped to the
+// same Trees+Contents-based search everything else already uses instead.
+export async function hasExternalReferences(site, id, ownFilePath, ref, searchRepoLocalForStrings) {
+  let result;
+  try {
+    result = await searchRepoLocalForStrings(site, ref, [id]);
+  } catch {
+    // Couldn't complete the check (missing credential, unreadable repo,
+    // etc.) — fail safe. Refusing to rename (treating "unknown" as "an
+    // external reference might exist") is the conservative direction for a
+    // safety check whose whole job is ruling out cross-file impact; the
+    // alternative would let a search outage silently turn into "confirmed
+    // safe to rename".
+    return true;
+  }
+  return result.matches.some((path) => path !== ownFilePath);
 }
 
 // Every <svg>...</svg> block in the file, in document order — non-greedy

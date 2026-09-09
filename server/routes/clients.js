@@ -138,7 +138,7 @@ router.post('/internal/clients', async (req, res, next) => {
       success: true,
     });
 
-    res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
   } catch (e) { next(e); }
 });
 
@@ -206,7 +206,7 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
       success: true,
     });
 
-    res.status(201).json({ id: site.id, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
   } catch (e) { next(e); }
 });
 

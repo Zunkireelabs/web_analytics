@@ -134,6 +134,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // real FK) — nothing to record, same 'disabled' outcome as the flag being off.
   if (!site) return { attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'disabled' };
 
+  // Human-facing label for this run's log lines. client_number is the small
+  // sequential onboarding number (1, 2, 3...) shown to people; the real
+  // sites.id primary key (e.g. 8862) is never sequential and isn't what
+  // anyone reading these logs is trying to track a site by.
+  const clientLabel = site.client_number ? `client #${site.client_number}` : `site ${siteId}`;
+
   const startedAt = new Date();
   // Every exit below goes through this so `auto_remediation_runs` always has
   // a row for what a console-only log used to be the only record of — see
@@ -229,21 +235,21 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // worth of blog content at once. Both paths now share this via
   // ship-pacing.js.
   const { paced, notes: pacingNotes } = await applyPacing(site, eligible);
-  for (const note of pacingNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of pacingNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Convergence cap: a finding that has already failed this many times for an
   // item-specific reason stops being auto-drafted. It stays open and fully
   // visible — what stops is spending a model call per run to reach the same
   // error. See ship-pacing.js for the measured churn this ends.
   const { converged, notes: convergenceNotes } = await applyConvergenceCap(site, paced);
-  for (const note of convergenceNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of convergenceNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Refusal cap: the convergence cap above counts abandoned DRAFTS, and a
   // refusal never creates one, so a permanently-refusing item slipped past
   // both it and the learned score. See applyRefusalCap for the live case (one
   // item refused 22 times, re-attempted hourly).
   const { kept: candidates, notes: refusalNotes } = await applyRefusalCap(site, converged);
-  for (const note of refusalNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of refusalNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
 
   // Daily budget. `remaining` can go negative if the limit was lowered
   // mid-day after work was already done — Math.max keeps that a clean "no
@@ -268,7 +274,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // simply runs a normal 60 day — the same posture the metrics fetch below
   // already takes.
   const { declines, siteWide } = await loadDeclines(siteId, { timezone: site.timezone || 'UTC' }).catch((err) => {
-    console.warn(`[auto-remediation] site ${siteId}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
+    console.warn(`[auto-remediation] ${clientLabel}: decline detection unavailable (${err.message}) — running a baseline day with no analyst lane.`);
     return { declines: new Map(), siteWide: null };
   });
 
@@ -297,7 +303,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // measures every page RELATIVE to this site-wide move, so a uniform fall
     // marks no individual page — which is correct: no page edit fixes an
     // algorithm update, and opening 80 PRs at one would add risk, not traffic.
-    console.warn(`[auto-remediation] site ${siteId}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
+    console.warn(`[auto-remediation] ${clientLabel}: SITE-WIDE impressions down ${Math.abs(Math.round(siteWide.impressionsChangePct * 100))}% (${siteWide.priorImpressions} -> ${siteWide.currentImpressions}) — per-page declines are measured net of this, so only pages falling faster than the site are escalated.`);
   }
 
   // Lane sizing — delegated entirely to lib/autonomous-quota.js's
@@ -334,13 +340,13 @@ export async function autoRemediateSafeRecommendations(siteId, {
   });
 
   console.log(
-    `[auto-remediation] site ${siteId}: capacity — analytics ${analyticsBudget} `
+    `[auto-remediation] ${clientLabel}: capacity — analytics ${analyticsBudget} `
     + `(${analyticsCandidates} eligible), analyst ${analystBudget}/${ANALYST_MAX} `
     + `(${decliningCandidates.length} evidenced), total ${dailyLimit}/${ceiling} (spent today across every `
     + `autonomous lane: ${spentToday}).`
   );
   if (dailyLimit < target) {
-    console.log(`[auto-remediation] site ${siteId}: only ${dailyLimit} genuinely eligible item(s) available against the ${target} normal target — shipping all of them rather than padding to reach it.`);
+    console.log(`[auto-remediation] ${clientLabel}: only ${dailyLimit} genuinely eligible item(s) available against the ${target} normal target — shipping all of them rather than padding to reach it.`);
   }
   if (remaining === 0) {
     // A dailyLimit of 0 from zero genuinely eligible candidates is not the
@@ -352,7 +358,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // ineligibility path in this function already honors) so a caller can't
     // mistake an empty queue for a stopped run.
     const reason = candidates.length === 0 ? null : (spentToday >= dailyLimit ? 'budget-exhausted' : 'global-ceiling-reached');
-    console.log(`[auto-remediation] site ${siteId} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
+    console.log(`[auto-remediation] ${clientLabel} has no budget left this run (${spentToday}/${dailyLimit} site budget used${globalRemaining < Infinity ? `, ${globalRemaining} left in the platform-wide ceiling` : ''}) — nothing attempted.`);
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: candidates.length, spentToday, dailyLimit, stoppedReason: reason });
   }
 
@@ -381,25 +387,25 @@ export async function autoRemediateSafeRecommendations(siteId, {
   const pageMetrics = await getQueryPageMetrics(siteId, iso(metricsStart), iso(metricsEnd), { minImpressions: 1 })
     .then(buildPageMetrics)
     .catch((err) => {
-      console.warn(`[auto-remediation] site ${siteId}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
+      console.warn(`[auto-remediation] ${clientLabel}: GSC metrics unavailable for scoring (${err.message}) — ranking on severity/breadth/confidence only.`);
       return new Map();
     });
 
   const { queue, deferred: selectionDeferred, report: selection } = buildDailyQueue({ candidates, remaining, pageMetrics, learnedMap, declines, analystBudget, analystFindingIds, baselineBudget: Math.max(0, analyticsBudget - spentToday) });
   const budgeted = queue.map((item) => item.rec);
   const scoreById = new Map(queue.map((item) => [item.rec.id, item]));
-  for (const note of selection.groupNotes) console.log(`[auto-remediation] site ${siteId}: ${note}`);
+  for (const note of selection.groupNotes) console.log(`[auto-remediation] ${clientLabel}: ${note}`);
   console.log(
-    `[auto-remediation] site ${siteId}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
+    `[auto-remediation] ${clientLabel}: queue built — ${selection.eligible} eligible, ${selection.selected} selected of ${remaining} budget. `
     + `By lane: ${JSON.stringify(selection.byLane)}. By tier: ${JSON.stringify(selection.byTier)}. By generator: ${JSON.stringify(selection.byGenerator)}.`
   );
   for (const top of selection.topSelected.slice(0, 5)) {
-    console.log(`[auto-remediation] site ${siteId}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
+    console.log(`[auto-remediation] ${clientLabel}:   #${top.id} ${top.type} score=${top.score} [${top.tier}] ${top.factors.join(', ')}`);
   }
   // Never silently truncate: a run that ships 30 of 41 open issues must say
   // so, or the Action Center looks like it simply found fewer problems.
   if (budgeted.length < candidates.length) {
-    console.log(`[auto-remediation] site ${siteId}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
+    console.log(`[auto-remediation] ${clientLabel}: ${candidates.length} eligible, taking ${budgeted.length} within today's budget (${spentToday}/${dailyLimit} already used); ${candidates.length - budgeted.length} deferred to tomorrow.`);
   }
 
   let shipped = 0;
@@ -515,12 +521,12 @@ export async function autoRemediateSafeRecommendations(siteId, {
 
     if (consecutiveSystemicFailures >= SYSTEMIC_FAILURE_LIMIT) {
       stoppedReason = 'circuit-breaker-systemic';
-      console.error(`[auto-remediation] site ${siteId}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
+      console.error(`[auto-remediation] ${clientLabel}: ${SYSTEMIC_FAILURE_LIMIT} consecutive SYSTEMIC failures (infrastructure, not individual items) — stopping this site's run. ${workQueue.length - cursor} candidate(s) left untouched and still open.`);
       break;
     }
     if (consecutiveRefusals >= CONSECUTIVE_REFUSAL_LIMIT) {
       stoppedReason = 'refusal-streak';
-      console.log(`[auto-remediation] site ${siteId}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
+      console.log(`[auto-remediation] ${clientLabel}: ${CONSECUTIVE_REFUSAL_LIMIT} consecutive honest refusals — nothing here can be drafted without fabricating, so stopping rather than spending the rest of the budget proving it. ${workQueue.length - cursor} candidate(s) left untouched and still open. This is not a fault.`);
       break;
     }
     // Stop STARTING new items once GitHub's remaining budget is under the
@@ -532,7 +538,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // deferred day at worst, against the whole-run collapse it prevents.
     if (getLastKnownRateLimit(site).low) {
       stoppedReason = 'github-rate-limited';
-      console.warn(`[auto-remediation] site ${siteId}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
+      console.warn(`[auto-remediation] ${clientLabel}: GitHub API budget under the ${RATE_LIMIT_RESERVE}-request reserve — stopping before starting more work. ${workQueue.length - cursor} candidate(s) left untouched and still open; they will be re-attempted next run.`);
       break;
     }
     if (attempted >= remaining) break; // backfill can grow workQueue past the budget's raw length
@@ -616,7 +622,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       const shipFailure = classifyShipFailure(err, { isRefusal: false });
       if (shipFailure.kind === FAILURE_KIND.RATE_LIMIT) {
         stoppedReason = 'github-rate-limited';
-        console.warn(`[auto-remediation] site ${siteId}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
+        console.warn(`[auto-remediation] ${clientLabel}: GitHub rate limit hit on recommendation ${rec.id} (${rec.recommendation_type}) — stopping this run. ${workQueue.length - cursor - 1} candidate(s) left untouched; this item and they stay open and will be re-attempted next run. Not a fault.`);
         break;
       }
       failed++;
@@ -685,7 +691,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
 
         if (shipFailure.kind === FAILURE_KIND.SYSTEMIC) {
           consecutiveSystemicFailures++;
-          console.error(`[auto-remediation] site ${siteId}: SYSTEMIC failure on recommendation ${rec.id} (${rec.recommendation_type}) — ${shipFailure.reason} (${consecutiveSystemicFailures}/${SYSTEMIC_FAILURE_LIMIT} consecutive).`);
+          console.error(`[auto-remediation] ${clientLabel}: SYSTEMIC failure on recommendation ${rec.id} (${rec.recommendation_type}) — ${shipFailure.reason} (${consecutiveSystemicFailures}/${SYSTEMIC_FAILURE_LIMIT} consecutive).`);
         } else {
           // An INDIVIDUAL item failure never touches the systemic streak —
           // a bad locations.js entry says nothing about GitHub or the
@@ -704,11 +710,11 @@ export async function autoRemediateSafeRecommendations(siteId, {
             quarantinedGenerators.set(rec.recommendation_type, familyKey);
             const note = `${rec.recommendation_type}: quarantined for the rest of this run after ${count} failures matching "${familyKey}" — other generators keep using the remaining budget; retried next run.`;
             quarantineNotes.push(note);
-            console.warn(`[auto-remediation] site ${siteId}: ${note}`);
+            console.warn(`[auto-remediation] ${clientLabel}: ${note}`);
           }
         }
       }
-      console.warn(`[auto-remediation] site ${siteId} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
+      console.warn(`[auto-remediation] ${clientLabel} ${isRefusal ? 'declined to draft' : 'could not auto-fix'} recommendation ${rec.id} (${rec.recommendation_type}), leaving it open:`, err.message);
     }
   }
 
@@ -750,7 +756,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       });
     } catch (err) {
       failed++;
-      console.warn(`[auto-remediation] site ${siteId}: learned-repair queue item ${item.id} (${item.generator_id}) could not be prepared, leaving it for the Action Center:`, err.message);
+      console.warn(`[auto-remediation] ${clientLabel}: learned-repair queue item ${item.id} (${item.generator_id}) could not be prepared, leaving it for the Action Center:`, err.message);
       // ITEM-STATE refusals say nothing about whether the borrowed repair
       // itself is portable — see learned-repair.js's identical prior
       // reasoning, preserved here since this is now where that ship attempt
@@ -801,7 +807,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
       shippedFileEditsQueueIds.push(item.id);
     } catch (err) {
       failed++;
-      console.warn(`[auto-remediation] site ${siteId}: ${item.source} queue item ${item.id} could not be pushed onto the batch, leaving it for the next run:`, err.message);
+      console.warn(`[auto-remediation] ${clientLabel}: ${item.source} queue item ${item.id} could not be pushed onto the batch, leaving it for the next run:`, err.message);
       await releaseQueueItem(item.id, { retryable: true, error: String(err.message || '').slice(0, 500) }).catch(() => {});
     }
   }
@@ -839,7 +845,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
         const disposition = transient
           ? `${pending.length} item(s) left re-attemptable for the next run`
           : `${pending.length} item(s) reverted to failed`;
-        console.error(`[auto-remediation] site ${siteId}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
+        console.error(`[auto-remediation] ${clientLabel}: batch push/PR failed for ${branchName}: ${finalization.error} — ${disposition}.`);
       }
       if (transient) stoppedReason = 'github-rate-limited';
       await Promise.all(pending.map(async ({ rec, draft, learnedRepairQueueId, memoryRefId }) => {
@@ -887,15 +893,15 @@ export async function autoRemediateSafeRecommendations(siteId, {
         shipped++;
         markQueueItemShipped(id).catch(() => {});
       }
-      console.log(`[auto-remediation] site ${siteId}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s), ${shippedFileEditsQueueIds.length} file-edits item(s)).`);
+      console.log(`[auto-remediation] ${clientLabel}: batch pushed and PR opened: ${finalization.prUrl} (${finalization.pushed} commit(s), ${pending.length} recommendation(s), ${shippedFileEditsQueueIds.length} file-edits item(s)).`);
     }
   }
 
   if (quarantineNotes.length) {
-    console.log(`[auto-remediation] site ${siteId}: ${quarantineNotes.length} generator(s) quarantined this run: ${[...quarantinedGenerators.keys()].join(', ')}.`);
+    console.log(`[auto-remediation] ${clientLabel}: ${quarantineNotes.length} generator(s) quarantined this run: ${[...quarantinedGenerators.keys()].join(', ')}.`);
   }
   console.log(
-    `[auto-remediation] site ${siteId}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
+    `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
     + `refused ${refused}, quarantined ${quarantined}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
@@ -1055,11 +1061,11 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   // identically (the credential is genuinely missing, and the existing
   // NEEDS_HUMAN classification is correct and now better evidenced).
   if (!approved.branch_name && CREDENTIAL_FAILURE_PATTERN.test(approved.apply_error || '')) {
-    console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
+    console.warn(`[auto-remediation] ${clientLabel} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
     await new Promise((r) => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
     approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
     if (approved.branch_name) {
-      console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
+      console.warn(`[auto-remediation] ${clientLabel} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
     }
   }
 

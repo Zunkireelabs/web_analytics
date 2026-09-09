@@ -1,6 +1,6 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { getFileContent, searchCodeForString } from '../github/client.js';
+import { getFileContent } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
@@ -367,7 +367,7 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
       unsafe.push(`id="${entry.id}" is referenced by something other than a plain url(#...) fill in ${filePath} (a CSS selector, getElementById/querySelector call, or #anchor) — refusing to rename it automatically.`);
       continue;
     }
-    if (await hasExternalReferences(site, entry.id, filePath, searchCodeForString)) {
+    if (await hasExternalReferences(site, entry.id, filePath, beforeRef, searchRepoLocalForStrings)) {
       unsafe.push(`id="${entry.id}" also appears in another file in this repo — can't confirm it's safe to rename without a human checking that reference.`);
       continue;
     }
@@ -865,7 +865,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // file.content already fetched above (known engineering issue: validate a
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
-  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile, { suppressSchema });
+  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Resolves any marker in markerMap that isn't already in the live file —
