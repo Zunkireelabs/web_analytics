@@ -1,6 +1,6 @@
 import { resolveFile, resolveSiteRootFile, resolveMarkers, resolveLinkDataSources, MARKER_FIELD_BY_ACTION_TYPE } from './lib/url-file-map.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { getFileContent, searchCodeForString } from '../github/client.js';
+import { getFileContent } from '../github/client.js';
 import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
@@ -367,7 +367,7 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
       unsafe.push(`id="${entry.id}" is referenced by something other than a plain url(#...) fill in ${filePath} (a CSS selector, getElementById/querySelector call, or #anchor) — refusing to rename it automatically.`);
       continue;
     }
-    if (await hasExternalReferences(site, entry.id, filePath, searchCodeForString)) {
+    if (await hasExternalReferences(site, entry.id, filePath, beforeRef, searchRepoLocalForStrings)) {
       unsafe.push(`id="${entry.id}" also appears in another file in this repo — can't confirm it's safe to rename without a human checking that reference.`);
       continue;
     }
