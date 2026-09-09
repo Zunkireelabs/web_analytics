@@ -330,7 +330,7 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
   const example = industrySearchExample(industry, siteName);
   const body = `
     <div class="hero">
-      <h1 class="hero-title">Digital Visibility<br/>Baseline Report</h1>
+      <h1 class="hero-title">Digital Growth<br/>Baseline Report</h1>
       <p class="hero-client">Prepared for ${escapeHtml(siteName)}</p>
       <p class="hero-date">${escapeHtml(dateLabel).toUpperCase()}</p>
     </div>
