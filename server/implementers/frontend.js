@@ -2,7 +2,7 @@ import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, re
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 
 export const meta = {
@@ -93,13 +93,27 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["blog-outline"] configured — add e.g. {"dir":"src/blog","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'blog-outline', title);
+
+    // A `filename` on the target config (url-file-map.js's
+    // resolveNewContentTarget) means this site routes by directory — a
+    // Next.js App Router page, not a flat Eleventy-style file — so the real
+    // page component is JSX, never Markdown+front-matter, which would be
+    // invalid TypeScript in a .tsx file and fail the client's build outright.
+    const targetConfig = resolveNewContentTargetConfig(site, 'blog-outline');
+    if (targetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderBlogOutlineBodyTsx(content, site, { canonicalUrl: permalink }),
+        contentFormat: 'jsx',
+      };
+    }
+
     // Siblings first: the posts already in this directory are the authority on
     // whether a post declares its own layout and what it calls its hero image.
     // resolveNewContentLayout stays as the fallback for a directory with no
     // readable siblings. See newcontent-contract.js for why.
-    const contract = await deriveNewContentContract(site, {
-      ...resolveNewContentTargetConfig(site, 'blog-outline'),
-    }, repoDeps);
+    const contract = await deriveNewContentContract(site, targetConfig, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'blog-outline') : contract.layout;
     return {
       ok: true,

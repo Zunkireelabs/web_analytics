@@ -134,6 +134,52 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
+// Next.js App Router variant of renderBlogOutlineBody, for a
+// newContentTargets["blog-outline"] configured with `filename` (a
+// directory-per-post framework — see url-file-map.js's resolveNewContentTarget).
+// Deliberately does NOT hand-write JSX around the generated title/body text:
+// a title or paragraph containing a brace, angle bracket, quote or backtick
+// would either break the surrounding TSX as source code or (worse) be
+// silently parsed as a JSX expression instead of literal text. Content is
+// instead serialized with JSON.stringify — a plain, always-valid JS object
+// literal — and handed as props to GeneratedBlogPost, a small shared
+// component this page imports and that owns 100% of the actual markup. The
+// component is written once per site (a real, human-reviewed file in the
+// client's own repo, not generated per post) and can be restyled without
+// regenerating any existing post.
+export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  const props = {
+    title: content.title || content.topic || 'Untitled',
+    sections: (content.sections || [])
+      .filter((s) => s?.heading)
+      .map((s) => ({ heading: s.heading, body: s.body || '' })),
+    featuredImage: content.featuredImage?.url
+      ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
+      : null,
+    publishedAt: new Date().toISOString(),
+  };
+  const metaTitle = content.title || content.topic || 'Untitled';
+  const metaDescription = content.metaDescription || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedBlogPost from "@/components/GeneratedBlogPost";',
+    '',
+    `const post = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    ...(canonicalUrl ? [`  alternates: { canonical: ${JSON.stringify(canonicalUrl)} },`] : []),
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedBlogPost {...post} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
+}
+
 // The direct-answer paragraph goes immediately after the heading — no
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
