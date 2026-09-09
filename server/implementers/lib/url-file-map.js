@@ -332,9 +332,18 @@ export function resolveLinkDataSources(site, pageUrl) {
 // Net-new-content generators (blog-outline, landing-page) have no existing
 // URL — resolves a deterministic new file path from the configured target
 // directory/extension plus a slugified title.
+// `filename` (optional) is for frameworks that route by DIRECTORY rather than
+// by file — a Next.js App Router page lives at `dir/<slug>/page.tsx`, never
+// at a flat `dir/<slug>.tsx`, unlike every flat-file target (Eleventy's
+// `src/blog/<slug>.md`) this function was originally written for. When set,
+// it names the fixed filename every new post's own directory contains;
+// `extension` still describes what KIND of file that is (used by
+// newcontent-contract.js's sibling matching), it just no longer participates
+// in the path itself.
 export function resolveNewContentTarget(site, actionType, title) {
   const target = site.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return null;
+  if (target.filename) return `${target.dir}/${slugifyTitle(title)}/${target.filename}`;
   return `${target.dir}/${slugifyTitle(title)}${target.extension}`;
 }
 
@@ -404,7 +413,7 @@ function slugifyTitle(title) {
 export function resolveNewContentTargetConfig(site, actionType) {
   const target = site?.url_file_map?.newContentTargets?.[actionType];
   if (!target?.dir || !target?.extension) return {};
-  return { dir: target.dir, extension: target.extension };
+  return { dir: target.dir, extension: target.extension, filename: target.filename || null };
 }
 
 export function resolveNewContentLayout(site, actionType) {
