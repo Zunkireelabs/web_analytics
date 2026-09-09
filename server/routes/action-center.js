@@ -24,7 +24,8 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { runQualityGate } from '../generators/lib/quality-gate.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
 import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
-import { VERIFIABLE_GENERATOR_IDS } from '../store/fix-verifications.js';
+import { VERIFIABLE_GENERATOR_IDS, scheduleVerificationForDraft, attachDeploymentToDraftVerifications } from '../store/fix-verifications.js';
+import { recordDeploymentObserved } from '../store/deployments.js';
 import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
@@ -46,7 +47,7 @@ import { resolveFile } from '../implementers/lib/url-file-map.js';
 import { triggerCmsRebuild } from '../sanity/rebuild.js';
 import { autoHealFileMapping } from '../implementers/lib/discover-file-mapping.js';
 import { resolvePageSource } from '../implementers/lib/page-resolution.js';
-import { getFileContent, getPullRequest, getLastKnownRateLimit, RATE_LIMIT_RESERVE } from '../github/client.js';
+import { getFileContent, getPullRequest, getLastKnownRateLimit, getDefaultBranchSha, RATE_LIMIT_RESERVE } from '../github/client.js';
 import { baseBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush, openPrForBranch } from '../implementers/lib/github-ops.js';
 import { inspectRenderMode, INSPECTABLE_ACTION_TYPES } from '../implementers/lib/render-inspector.js';
 import { getSiteById } from '../store/read.js';
@@ -1798,9 +1799,60 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 // refresh (never fails the caller's response — the draft is already
 // correctly marked implemented at this point; runSiteDiscoveryIfDue is
 // already cheap/idempotent when a real discovery isn't due yet).
-async function finalizeImplemented(siteId, draftId, site) {
+// The public origin a site's live pages are served from — the anchor for
+// site-level verification targets (/llms.txt, /robots.txt, /sitemap.xml) that
+// have no per-page URL of their own. Returns null rather than guessing when a
+// site has no domain configured, which verificationMethodFor turns into an
+// explicit 'unverifiable' reason instead of a fabricated check.
+function siteOriginFor(site) {
+  const raw = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '') || null;
+  if (!raw) return null;
+  try {
+    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Records that a human's merge happened, and what commit it produced, so the
+// question "did this actually reach the live site?" has something to hang off.
+// Deliberately NOT a claim that anything deployed: the row starts 'pending'
+// and only fix-verification.js's real live re-check can promote it (see
+// store/deployments.js). Best-effort — a merge that we fail to record must
+// still finalize the draft.
+async function recordMergeDeployment(site, draft) {
+  try {
+    const commitSha = await getDefaultBranchSha(site);
+    return await recordDeploymentObserved(site.id, {
+      commitSha,
+      prNumber: draft.pr_number ?? null,
+      prUrl: draft.pr_url ?? null,
+    });
+  } catch (err) {
+    console.error(`[action-center] could not record deployment for draft ${draft.id}:`, err.message);
+    return null;
+  }
+}
+
+async function finalizeImplemented(siteId, draftId, site, { deployment = null } = {}) {
   const draft = await markDraftImplemented(siteId, draftId);
   if (draft) {
+    // Verify stage, for EVERY generator type — not just the 9 that
+    // markDraftImplemented's own narrow isVerifiableDraft path covers. Each
+    // draft gets whichever re-check its change type actually supports (see
+    // verificationMethodFor in store/fix-verifications.js); a change with no
+    // externally checkable evidence is recorded as 'unverifiable' WITH its
+    // reason, never counted as verified. Idempotent: skips a draft that
+    // markDraftImplemented already scheduled.
+    try {
+      await scheduleVerificationForDraft(siteId, draft, {
+        siteOrigin: siteOriginFor(site),
+        deploymentId: deployment?.id ?? null,
+      });
+      if (deployment?.id) await attachDeploymentToDraftVerifications(siteId, draft.id, deployment.id);
+    } catch (err) {
+      console.error(`[action-center] could not schedule verification for draft ${draft.id}:`, err.message);
+    }
     // Phase 5: a real merge is the strongest positive signal a generator can
     // earn — a human actually shipped this to production. Recorded
     // regardless of how the draft originated (auto-remediation or a human
@@ -2165,12 +2217,18 @@ export async function checkDraftPrStatus(siteId, draftId) {
   if (pr.merged) {
     await recordPrState(siteId, draft.id, 'merged');
     notifyGscBestEffort(site, draft);
+    // A merge is evidence the change was accepted, never evidence it is live.
+    // Recording the resulting commit here is what lets the Verify stage tell
+    // "merged but not deployed yet" apart from "deployed and still wrong" —
+    // before this, both looked identical and a merge was silently treated as
+    // a shipped change.
+    const deployment = await recordMergeDeployment(site, draft);
     // The one outcome that ends a recommendation's life successfully. Recorded
     // so the card's history reads as a completed story rather than going
     // silent at the last step, and so a finding that regresses later shows
     // "shipped once, came back" instead of looking brand new.
     await recordAttemptForDraft(siteId, draft, { outcome: 'shipped', reason: `Merged in ${draft.pr_url || `PR #${draft.pr_number}`}.` });
-    return finalizeImplemented(siteId, draft.id, site);
+    return finalizeImplemented(siteId, draft.id, site, { deployment });
   }
   if (pr.state === 'closed') {
     // Closed without merging — the fix was abandoned, not shipped. Record

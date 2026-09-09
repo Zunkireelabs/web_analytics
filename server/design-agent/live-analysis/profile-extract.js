@@ -246,7 +246,9 @@ function compactPageForPrompt(page) {
 // segmentedPages: segment.js's segmentSite() output. Returns a Design
 // Profile v2 object, NOT yet stamped/validated — design-drift.js's
 // persistDesignProfile does both, the same as the v1 pipeline always did.
-export async function extractDesignProfile(segmentedPages, { siteId, generatorId = 'design-agent-live' } = {}) {
+export async function extractDesignProfile(segmentedPages, {
+  siteId, generatorId = 'design-agent-live', responsiveMeasured = null,
+} = {}) {
   const pages = (segmentedPages || []).map(compactPageForPrompt);
   const userPrompt = `Here is the structural data extracted from ${pages.length} real page(s) of this site:\n\n${JSON.stringify(pages, null, 2)}`;
 
@@ -292,7 +294,15 @@ export async function extractDesignProfile(segmentedPages, { siteId, generatorId
     spacing: extracted.spacing || {},
     layout: extracted.layout || {},
     components,
-    responsive: extracted.responsive || { breakpoints: [] },
+    // `breakpoints` stays exactly what it always was: the class PREFIXES the
+    // model reported seeing. `measured` is the other half and is never
+    // model-derived — it is arithmetic over real rendered geometry at real
+    // device widths (responsive-analysis.js), so it cannot be hallucinated
+    // and needs no correction pass the way typography does. Additive: a
+    // profile derived before responsive probing existed, or by a caller that
+    // skipped it, simply has `measured: null` and every existing reader of
+    // `responsive.breakpoints` is unaffected.
+    responsive: { ...(extracted.responsive || { breakpoints: [] }), measured: responsiveMeasured },
     navigation: extracted.navigation || {},
     pages: (segmentedPages || []).map((p) => ({ url: p.url, pageType: p.pageType, sections: p.sections })),
     pageTypePatterns: extracted.pageTypePatterns || {},

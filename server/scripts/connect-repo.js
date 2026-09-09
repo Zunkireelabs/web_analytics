@@ -8,6 +8,8 @@ import { shouldAutoEnableOnConnect } from '../routes/clients.js';
 import { queueDesignAgentDerivationForSite } from '../job.js';
 import { refreshBlockedRecommendations } from '../agents/lib/recommendation-coordinator.js';
 import { recordAuditEvent } from '../store/admin/audit-log.js';
+import { persistDerivedContentConfig } from '../lib/derive-repo-content-config.js';
+import { assessTenantReadiness, printReadiness } from '../lib/tenant-provisioning.js';
 
 // A synthetic req so recordAuditEvent's resolveActor(req) records this as a
 // 'system' actor rather than throwing on a missing req.userId — same shape
@@ -64,18 +66,13 @@ function parseArgs(argv) {
   return flags;
 }
 
-async function main() {
-  const flags = parseArgs(process.argv.slice(2));
-  const siteId = Number(flags['site-id']);
-  if (!siteId) {
-    throw new Error(
-      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--url-file-map path.json]'
-    );
-  }
-
-  const site = await getSiteById(siteId);
-  if (!site) throw new Error(`No site found with id ${siteId}.`);
-
+// Core logic, exported so onboard-client.js (the single coherent onboarding
+// flow) can run this same step in-process. Takes an already-loaded site row;
+// returns { site, connected } — `connected` false means no repo flags were
+// passed, which is a legitimate day-1 state (many clients don't need Action
+// Center apply on day one), not an error, when driven from the combined flow.
+export async function performRepoConnect(site, flags) {
+  const siteId = site.id;
   const update = {};
   if (flags['repo-owner'] != null) update.repoOwner = flags['repo-owner'];
   if (flags['repo-name'] != null) update.repoName = flags['repo-name'];
@@ -97,7 +94,7 @@ async function main() {
   if (flags['url-file-map'] != null) update.urlFileMap = JSON.parse(readFileSync(flags['url-file-map'], 'utf8'));
 
   if (!Object.keys(update).length) {
-    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
+    return { site, connected: false };
   }
 
   let updated = await updateSiteRepoConfig({ siteId, ...update });
@@ -164,6 +161,29 @@ async function main() {
         console.log(`  routes discovered: ${discovery.routes.routes.length} static, ${discovery.routes.families.length} pattern famil${discovery.routes.families.length === 1 ? 'y' : 'ies'}, ${discovery.routes.unresolved.length} unresolved`);
         console.log(`  auto-configured: ${discovery.autoConfigured.applied} url_file_map entrie(s) written and verified`);
         updated = (await getSiteById(siteId)) || updated;
+
+        // renderCapabilities + newContentTargets, derived from the same
+        // discovery result. Previously both were left for a human to
+        // hand-author and in practice nobody did, which is the single largest
+        // source of blocked autonomous work: every net-new page generator
+        // (landing-page, blog-outline, direct-answer, translation, the three
+        // compliance pages, missing-page-create) fails closed without them.
+        // Derives only what the repo proves; anything else is reported as a
+        // named gap rather than defaulted.
+        try {
+          const content = await persistDerivedContentConfig(updated, discovery);
+          if (content.applied) {
+            updated = content.site || updated;
+            console.log(`  render capabilities: ${Object.keys(content.patch.renderCapabilities?.extensions || {}).length} extension(s) recorded${content.markdownProven ? '' : ' (no Markdown-safe extension proven)'}`);
+            if (content.derivedTargets.length) {
+              console.log(`  new-page targets derived: ${content.derivedTargets.length}`);
+              for (const t of content.derivedTargets) console.log(`    ${t.type} → ${t.dir}/*${t.extension}  (${t.reason})`);
+            }
+          }
+          for (const gap of content.gaps) console.log(`  gap: ${gap}`);
+        } catch (err) {
+          console.warn(`  Could not derive render capabilities/new-page targets: ${err.message}`);
+        }
       } else {
         console.log(`  discovery skipped: ${discovery.reason}`);
       }
@@ -209,6 +229,34 @@ async function main() {
   } else {
     console.log('Still missing repo_owner/repo_name — Apply Change will 400 until both are set.');
   }
+
+  // One unambiguous statement of what this tenant still needs, instead of
+  // leaving "connected" and "actually works end to end" as different things
+  // nobody reconciles.
+  const fresh = (await getSiteById(siteId)) || updated;
+  printReadiness(await assessTenantReadiness(fresh));
+  return { site: fresh, connected: true };
+}
+
+async function main() {
+  const flags = parseArgs(process.argv.slice(2));
+  const siteId = Number(flags['site-id']);
+  if (!siteId) {
+    throw new Error(
+      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--url-file-map path.json]'
+    );
+  }
+
+  const site = await getSiteById(siteId);
+  if (!site) throw new Error(`No site found with id ${siteId}.`);
+
+  const anyFlag = ['repo-owner', 'repo-name', 'repo-url', 'default-branch', 'tech-stack', 'github-pat-env-var', 'github-app-installation-id', 'url-file-map']
+    .some((k) => flags[k] != null);
+  if (!anyFlag) {
+    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
+  }
+
+  await performRepoConnect(site, flags);
 }
 
 main()

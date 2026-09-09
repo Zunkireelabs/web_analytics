@@ -124,6 +124,30 @@ describe('buildRecommendations — report-only findings', () => {
     assert.deepEqual(items, []);
   });
 
+  test('accounts for every dropped evidence-only finding instead of discarding it silently', async () => {
+    runs = [{ agentId: 'query-intelligence', createdAt: '2026-09-03T07:00:00Z', findings: [evidenceOnlyFinding] }];
+
+    const { items, evidenceOnlyFindings } = await buildRecommendations(1);
+
+    // The row is still (correctly) not surfaced — but it is now countable.
+    // Without this, an agent that emits real defects and simply forgot to
+    // declare an action is indistinguishable from one emitting context, which
+    // is exactly how duplicate-content's byte-identical page groups were
+    // detected on every run and shown to nobody.
+    assert.deepEqual(items, []);
+    assert.equal(evidenceOnlyFindings.length, 1);
+    assert.equal(evidenceOnlyFindings[0].agentId, 'query-intelligence');
+    assert.equal(evidenceOnlyFindings[0].findingId, 'query-intelligence:top-query-shift');
+  });
+
+  test('does not count a surfaced report-only finding as evidence-only', async () => {
+    runs = [{ agentId: 'font-consistency', createdAt: '2026-09-03T07:00:00Z', findings: [reportOnlyFinding] }];
+
+    const { evidenceOnlyFindings } = await buildRecommendations(1);
+
+    assert.deepEqual(evidenceOnlyFindings, []);
+  });
+
   test('marks the report-only row detected so it is not auto-closed as stale', async () => {
     runs = [{ agentId: 'font-consistency', createdAt: '2026-09-03T07:00:00Z', findings: [reportOnlyFinding] }];
 

@@ -117,6 +117,25 @@ export async function getOwnStructuralScoreSeries(siteId, start, end) {
   return rows;
 }
 
+// The most recent real structural score for each domain a site has ever
+// been compared against — one row per domain, not one per run — for a
+// client-facing "how do they actually rank against you" line that needs a
+// real number, not the free-text `comparison` prose on competitor_profiles.
+// DISTINCT ON picks the latest snapshot_at per domain in one query, same
+// pattern as listCompetitorProfiles' "latest run" selection above but keyed
+// per-domain instead of per-run, since a domain's own_score/competitor_score
+// pair can legitimately come from different runs than another domain's.
+export async function getLatestCompetitorScores(siteId) {
+  const { rows } = await query(
+    `SELECT DISTINCT ON (domain) domain, own_score, competitor_score, snapshot_at
+       FROM competitor_structural_snapshots
+      WHERE site_id = $1
+      ORDER BY domain, snapshot_at DESC`,
+    [siteId]
+  );
+  return rows;
+}
+
 // Competitor identity isn't stable run to run (see migration 034's
 // comment) — this picks whichever domain actually has the most real
 // snapshots for a site (ties broken by most recent), so Growth/Review

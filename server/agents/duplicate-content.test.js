@@ -92,4 +92,27 @@ describe('duplicate-content finding ids', () => {
       'https://example.com/a', 'https://example.com/b', 'https://example.com/c',
     ]);
   });
+
+  // Until 2026-09-09 this finding had a null recommendedAction and no
+  // reportOnly, which is precisely the shape buildRecommendations discards —
+  // so byte-identical duplicate pages were detected every run and surfaced to
+  // nobody, despite duplicate-content being listed in RECOMMENDATION_AGENT_IDS.
+  test('surfaces the group as a visible report-only row rather than being dropped', async () => {
+    const result = await runOn(['https://example.com/c', 'https://example.com/a', 'https://example.com/b']);
+    const ro = result.facts.findings[0].reportOnly;
+
+    assert.equal(ro.kind, 'duplicate-content');
+    // Points at a real member page, and at a stable one (sorted), so the row's
+    // (page, kind) dedup key does not move between runs.
+    assert.equal(ro.page, 'https://example.com/a');
+    assert.match(ro.whyBlocked, /which single URL should own this content/);
+  });
+
+  test('still refuses to pick a canonical URL automatically', async () => {
+    const result = await runOn(['https://example.com/a', 'https://example.com/b']);
+    // Choosing the canonical decides which page keeps its ranking — evidence
+    // here (impressions) does not establish editorial intent, so no generator
+    // may be attached however tempting the canonical generator looks.
+    assert.equal(result.facts.findings[0].recommendedAction, null);
+  });
 });

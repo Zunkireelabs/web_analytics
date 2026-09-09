@@ -37,11 +37,61 @@ import { impactFromPriority } from './findings.js';
 // row per page (unchanged from before this file routed anything), so a
 // human still gets ONE card per page to look at rather than N near-
 // identical rows.
+// MEASURED RESPONSIVE DEFECTS (responsive-analysis.js) arrive in this same
+// findings list and are deliberately NOT in the routable set. The reason is
+// the same one that keeps missing-responsive-classes out of it, and it is
+// worth being explicit about because "make it automatic" is the obvious
+// instinct here: a class-swap fix needs a known-correct replacement VALUE,
+// and for "this section still renders in two columns at 390px" there is no
+// such value anywhere on the site. The site's own conventions tell us which
+// breakpoint prefixes it uses, never which layout classes THIS section should
+// carry — and copying another section's whole class attribute onto it would
+// change its colors, spacing and type along with its layout. That is the
+// invention this pipeline refuses to do everywhere else (see
+// consistency-check.js's module comment and content-integrity-repair.js's
+// refuse-rather-than-guess branches).
+//
+// So they become real, visible, evidence-carrying recommendations a human can
+// act on — with the actual numbers (how many px it overflows by, how many
+// columns it kept, which controls are under 24px) rather than a class-name
+// hunch. They are never silently dropped, and never auto-applied.
 const ROUTABLE_FINDING_IDS = new Set(['table-style-drift', 'typography-drift']);
 
 function isRoutable(f) {
   return ROUTABLE_FINDING_IDS.has(f.id) && !!f.evidence?.outerHtml && !!f.evidence?.siteConvention;
 }
+
+// One line of real evidence per finding, for the human reading the card.
+// JSON.stringify(evidence) was fine when every finding was two short class
+// strings; a responsive finding carries a live outerHtml anchor (up to 4KB)
+// that would bury the numbers that actually matter.
+function describeFinding(f) {
+  const e = f.evidence || {};
+  switch (f.id) {
+    case 'horizontal-overflow':
+      return `the page is ${e.overflowPx}px wider than the ${e.viewportWidth}px ${e.viewport} viewport, so it scrolls sideways`
+        + (e.offendingElements?.length
+          ? ` — widest offender: <${e.offendingElements[0].tag}${e.offendingElements[0].classes ? ` class="${e.offendingElements[0].classes}"` : ''}> (${e.offendingElements[0].overflowBy}px over)`
+          : '');
+    case 'tap-target-too-small':
+      return `${e.count} control(s) render smaller than the ${e.minimumPx}px minimum tap target at ${e.viewport}`
+        + (e.targets?.length ? ` — e.g. "${e.targets[0].text || e.targets[0].tag}" at ${e.targets[0].minSide}px` : '');
+    case 'section-does-not-stack':
+      return `section ${f.sectionOrder} still renders ${e.columnsAtMobile} columns at ${e.viewportWidth}px (it is ${e.columnsAtDesktop} at desktop, so it never stacks)`
+        + (e.sectionClasses ? ` — classes: "${e.sectionClasses}"` : '');
+    case 'content-clipped':
+      return `a <${e.tag}> is cut off by ${e.clippedBy}px at ${e.viewport} instead of wrapping`
+        + (e.sectionClasses ? ` — classes: "${e.sectionClasses}"` : '');
+    case 'missing-responsive-classes':
+      return `this section carries none of the site's own breakpoint prefixes (${(e.siteBreakpoints || []).join(', ')}) — classes: "${e.sectionClasses}"`;
+    default:
+      return JSON.stringify(e);
+  }
+}
+
+const RESPONSIVE_FINDING_IDS = new Set([
+  'horizontal-overflow', 'tap-target-too-small', 'section-does-not-stack', 'content-clipped',
+]);
 
 // One grounded item per routable finding — content-integrity-repair's
 // generate() only ever patches one anchor per draft, so one section's drift
@@ -99,15 +149,19 @@ export async function persistConsistencyFindings(siteId, findings) {
     const byKind = {};
     for (const f of manual) byKind[f.id] = (byKind[f.id] || 0) + 1;
     const summary = Object.entries(byKind).map(([kind, n]) => `${n}× ${kind}`).join(', ');
-    const detail = manual.slice(0, 5).map((f) =>
-      `- [${f.sectionRole}] ${f.id}: ${JSON.stringify(f.evidence)}`
+    const detail = manual.slice(0, 8).map((f) =>
+      `- [${f.sectionRole}] ${f.id}: ${describeFinding(f)}`
     ).join('\n');
+
+    const responsiveCount = manual.filter((f) => RESPONSIVE_FINDING_IDS.has(f.id)).length;
 
     await insertRecommendation(siteId, {
       page: pageUrl,
       recommendationType: 'design-consistency-review',
-      issue: `${manual.length} section(s) on this page don't match the site's own real design conventions (${summary})`,
-      reason: `A whole-page design-consistency scan (not just SEOAI-marker regions) found real, evidenced drift — every section's classes are compared against this site's own stored design profile, never invented. No generator can safely fix this automatically: a missing-responsive-classes finding has no known-correct replacement value (only the site's real breakpoint prefixes, never which classes a fixed section should carry), so this needs a human look.\n\n${detail}`,
+      issue: responsiveCount
+        ? `${manual.length} design issue(s) on this page, including ${responsiveCount} measured at tablet/mobile width (${summary})`
+        : `${manual.length} section(s) on this page don't match the site's own real design conventions (${summary})`,
+      reason: `A whole-page design scan found real, evidenced problems. Class drift is compared against this site's own stored design profile, never invented; responsive defects are MEASURED in a real browser at 834px (tablet) and 390px (mobile) — rendered geometry, not class-name guesswork.\n\nNo generator can safely fix these automatically: there is no known-correct replacement value for "what should this section's layout classes be", and copying another section's classes would change its color, spacing and type along with its layout. So this needs a human look.\n\n${detail}`,
       params: { page: pageUrl, findings: manual },
       findingId,
       detectingAgent: 'design-consistency',

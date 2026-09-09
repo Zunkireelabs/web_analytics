@@ -133,22 +133,21 @@ export function startCron() {
       // must not cost every OTHER site its PRs, which is the same per-tenant
       // isolation runAutoRemediationForAllSites already applies internally.
       if (!process.env.SHIP_CRON_SCHEDULE) {
-        // Same lock key the standalone shipping cron and its :35 catch-up
-        // guard use below — chained mode still shares the underlying
-        // GitHub-token-spending work, so it must never overlap either of
-        // them even though this call is nested inside the daily-job lock,
-        // not the shipping one.
-        const { ran: shipRan } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), async () => {
-          console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
-          try {
-            const results = await runAutoRemediationForAllSites();
-            const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
-            console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
-          } catch (err) {
-            console.error('[cron] autonomous shipping run error:', err.message);
-          }
-        });
-        if (!shipRan) console.log('[cron] autonomous shipping run (chained) skipped — another process already holds the lock');
+        // No lock taken here: runAutoRemediationForAllSites takes a PER-SITE
+        // shipping lock around each tenant's own run (job.js). A platform-wide
+        // key here would undo that — one slow tenant would again stall every
+        // other tenant's PR, and a lease expiring mid-pass would let a second
+        // process restart the whole multi-site run instead of the one site
+        // that stalled.
+        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+        try {
+          const results = await runAutoRemediationForAllSites();
+          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+          const locked = results.filter((r) => r.skipped === 'locked').length;
+          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)${locked ? `, ${locked} site(s) already shipping elsewhere` : ''}`);
+        } catch (err) {
+          console.error('[cron] autonomous shipping run error:', err.message);
+        }
       }
   }
 
@@ -339,17 +338,16 @@ export function startCron() {
     console.error(`[cron] invalid SHIP_CRON_SCHEDULE "${shipSchedule}" — autonomous shipping NOT scheduled.`);
   } else {
     cron.schedule(shipSchedule, async () => {
-      const { ran } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), async () => {
-        console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
-        try {
-          const results = await runAutoRemediationForAllSites();
-          const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
-          console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
-        } catch (err) {
-          console.error('[cron] autonomous shipping run error:', err.message);
-        }
-      });
-      if (!ran) console.log('[cron] autonomous shipping run skipped — another process already holds the lock');
+      // Per-site locking lives in runAutoRemediationForAllSites — see the
+      // chained call above for why there is no platform-wide key here.
+      console.log(`[cron] autonomous shipping run started ${new Date().toISOString()}`);
+      try {
+        const results = await runAutoRemediationForAllSites();
+        const shipped = results.reduce((n, r) => n + (r.shipped || 0), 0);
+        console.log(`[cron] autonomous shipping run finished — ${shipped} draft(s) shipped across ${results.length} site(s)`);
+      } catch (err) {
+        console.error('[cron] autonomous shipping run error:', err.message);
+      }
     }, { timezone: tz });
     console.log(`[cron] autonomous shipping scheduled "${shipSchedule}" (${tz})`);
   }
@@ -363,8 +361,11 @@ export function startCron() {
   // in the job, not here, because it depends on each site's timezone.
   cron.schedule('35 * * * *', async () => {
     try {
-      const { ran } = await withJobLock(jobKeyFor('auto-remediation-ship', 'all-sites'), () => runAutoRemediationCatchupForAllSites(tz));
-      if (!ran) console.log('[cron] autonomous shipping catch-up skipped — shipping lock held');
+      // Takes the same per-site shipping lock the scheduled run takes, inside
+      // its own loop — so this guard can never open a second batch alongside
+      // a run already in flight for that site, while still being free to
+      // recover a DIFFERENT site whose morning run was missed.
+      await runAutoRemediationCatchupForAllSites(tz);
     } catch (err) {
       console.error('[cron] autonomous shipping catch-up error:', err.message);
     }

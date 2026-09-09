@@ -1,6 +1,7 @@
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
-import { componentTemplateVerification, componentTemplateActionTypeFor } from '../../implementers/lib/design-drift.js';
+import { componentTemplateVerification, componentTemplateActionTypeFor, getDesignProfile } from '../../implementers/lib/design-drift.js';
+import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
 import { isDataReady } from '../../implementers/adapters/data-array-content.js';
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
@@ -45,6 +46,33 @@ import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter
 // The caches are per-instance and deliberately so: one repo tree read, one
 // read per unique file, and one soft-404 fingerprint per pass, no matter how
 // many findings share them.
+
+// Can this generator render in THIS site's own design language right now?
+//
+// Asks the question the apply path actually answers, rather than the stricter
+// "is a template stored and stamped" one. Two ways to say yes, matching
+// marker-merge.js's real precedence (configured -> projected -> DEFAULT_*):
+//
+//   1. a verified stored component template exists, or
+//   2. the site's design profile can project one for this action type — the
+//      projection IS the site's own typography/spacing/components, so a fix
+//      built on it is design-consistent even though nothing was stored.
+//
+// projectComponentTemplate is a pure function that already returns null for
+// an unusable profile or a non-projectable action type, so calling it is both
+// the check and the proof — no separate isProfileUsable/isProjectable pair to
+// drift out of step with it. Only when neither holds does the render path
+// reach the generic DEFAULT_* markup, and only then is this genuinely blocked.
+export function designContextAvailability(site, generatorId) {
+  const actionType = componentTemplateActionTypeFor(generatorId);
+  const verdict = componentTemplateVerification(site, actionType);
+  if (verdict.ok) return verdict;
+
+  if (projectComponentTemplate(getDesignProfile(site), actionType)) {
+    return { ...verdict, ok: true, reason: 'projectable-from-profile' };
+  }
+  return verdict;
+}
 
 export function createRecommendationGates(siteId, initialSite, deps = {}) {
   const {
@@ -414,11 +442,25 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     // the gates that drop), this one does NOT drop — a blocked item is a real,
     // correctly-detected issue we simply aren't allowed to auto-fix yet, so
     // dropping it would lose a genuine finding and let the recommendation
-    // close out as "resolved" when nothing was resolved. The real hard block
-    // (a 422) lives in generateDraft — this is the honest UI half of it, so a
-    // user sees "blocked, here's why" instead of clicking Generate and getting
-    // an error. Pure in-memory check against the already-loaded `site` row.
-    const designCheck = componentTemplateVerification(site, componentTemplateActionTypeFor(generatorId));
+    // close out as "resolved" when nothing was resolved.
+    //
+    // This gate used to mirror a hard 422 in generateDraft. That 422 is GONE
+    // (routes/action-center.js now only warns and generates with whatever the
+    // render path can produce), so mirroring it here demoted real, shippable
+    // faq/expand-content/internal-links/qa-content work to 'manual' on behalf
+    // of a block that no longer exists — the single largest suppressor of
+    // autonomous volume this system had.
+    //
+    // What replaces it is the question the apply path actually asks, and the
+    // same rule contentWrapperAvailability (design-drift.js) already applies
+    // to net-new pages: marker-merge.js's precedence is
+    //   configured template -> projection from the design profile -> DEFAULT_*
+    // so a site with a usable design profile renders in ITS OWN typography,
+    // spacing and components even with no stored template. Only a site where
+    // BOTH are missing would fall through to the generic DEFAULT_* markup —
+    // a visual language that is nobody's — and only that case is still
+    // blocked. Pure in-memory check against the already-loaded `site` row.
+    const designCheck = designContextAvailability(site, generatorId);
 
     // Enrich a blocked design-check with the REAL, persisted Design Agent
     // job status (implementers/lib/design-agent-status.js) instead of

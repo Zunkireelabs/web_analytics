@@ -47,6 +47,7 @@ mock.module(resolve('./page-content.js'), {
 });
 mock.module(resolve('../../llm.js'), {
   namedExports: {
+    callLLM: async () => { throw new Error('these tests do not exercise LLM calls'); },
     callLLMForJson: async () => ({ covered_by: coveredByAnswer }),
   },
 });

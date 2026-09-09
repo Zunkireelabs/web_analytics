@@ -16,6 +16,41 @@ import { classifyPageType } from './schema.js';
 
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
+
+// The viewports this agent actually looks at. `desktop` is the one the design
+// PROFILE is derived from — it stays first and stays 1440x900 so every
+// existing block/section/typography fact keeps the exact meaning it had when
+// it was the only viewport that existed. `tablet` and `mobile` are measured
+// separately and only ever ADD responsive facts; nothing about the profile's
+// existing shape is derived from them.
+//
+// Sizes are real device classes, not round numbers: 834x1112 is iPad Air
+// portrait, 390x844 is iPhone 12/13/14. Picked because a site's breakpoints
+// are authored against real devices, so measuring between them (e.g. 800px)
+// would report layout no real visitor sees.
+export const DESKTOP_VIEWPORT = Object.freeze({ name: 'desktop', width: 1440, height: 900 });
+export const RESPONSIVE_VIEWPORTS = Object.freeze([
+  Object.freeze({ name: 'tablet', width: 834, height: 1112 }),
+  Object.freeze({ name: 'mobile', width: 390, height: 844 }),
+]);
+
+// Responsive probing costs one extra page load per page per extra viewport, so
+// it is bounded independently of the profile capture. The probe itself is much
+// cheaper than a profile capture (one evaluate() of measurements, no LLM, no
+// markup serialization), which is why the default covers the whole captured
+// set rather than a sample: a responsive defect on page 7 is exactly as real
+// as one on page 1, and sampling would make detection depend on crawl order.
+// Set DESIGN_AGENT_RESPONSIVE_MAX_PAGES=0 to skip responsive probing entirely.
+const DEFAULT_RESPONSIVE_MAX_PAGES = process.env.DESIGN_AGENT_RESPONSIVE_MAX_PAGES === undefined
+  ? DEFAULT_MAX_PAGES + 2
+  : Number(process.env.DESIGN_AGENT_RESPONSIVE_MAX_PAGES);
+
+// WCAG 2.2 SC 2.5.8 (Target Size, Minimum) — 24x24 CSS px. Deliberately the
+// AA floor and not Apple's 44pt or Android's 48dp guidance: those are design
+// recommendations, and flagging every control under 44px would bury a real
+// defect under dozens of judgement calls on sites that are not actually
+// broken. 24px is the threshold with an objective standard behind it.
+const MIN_TAP_TARGET_PX = 24;
 // See discoverCardHeavyPages below for why these exist separately from
 // DEFAULT_MAX_PAGES.
 const DEFAULT_EXTRA_CARD_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_EXTRA_CARD_PAGES) || 2;
@@ -354,6 +389,207 @@ function extractBlocksInPage() {
 }
 /* eslint-enable no-undef */
 
+// Runs in-page: MEASURES what this viewport actually renders, rather than
+// reading class strings and inferring. This is the whole point of the
+// responsive pass — `responsive.breakpoints` in the stored profile has only
+// ever been a list of class PREFIXES the model reported seeing ("sm:",
+// "md:"), which says a site is capable of responding to width, not that it
+// does so correctly on any given page. Everything here is a number or a
+// boolean read off the rendered page at a real device width.
+//
+// Deliberately much cheaper than extractBlocksInPage: no outerHTML
+// serialization except for the handful of elements that are actually
+// defective (which is the evidence a fix would need to anchor against), and
+// every scan is bounded so a large DOM cannot turn one probe into a crawl.
+/* eslint-disable no-undef */
+function measureResponsiveInPage(minTapTargetPx) {
+  const vw = window.innerWidth;
+
+  function isVisible(el) {
+    if (!el || !el.getClientRects().length) return false;
+    const cs = window.getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
+  }
+
+  function classesOf(el) {
+    return (el && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
+  }
+
+  function describe(el, extra = {}) {
+    const r = el.getBoundingClientRect();
+    return {
+      tag: el.tagName.toLowerCase(),
+      classes: classesOf(el),
+      text: (el.textContent || '').trim().slice(0, 80),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      // The exact live anchor a class-swap fix would patch against, same
+      // discipline as extractBlocksInPage's outerHtml fields. Bounded: a
+      // whole overflowing <section> can be enormous, and no fix needs more
+      // than the opening element to match on.
+      outerHtml: typeof el.outerHTML === 'string' ? el.outerHTML.slice(0, 4000) : '',
+      ...extra,
+    };
+  }
+
+  // ── Horizontal overflow ────────────────────────────────────────────────
+  // The single most common real responsive defect: something wider than the
+  // screen forces the whole page to pan sideways. Reported as the OUTERMOST
+  // offending elements — descending into an overflowing container would list
+  // every one of its children too and bury the actual cause.
+  const docScrollWidth = Math.max(
+    document.documentElement.scrollWidth,
+    document.body ? document.body.scrollWidth : 0,
+  );
+  const overflowPx = Math.max(0, Math.round(docScrollWidth - vw));
+
+  const overflowingElements = [];
+  if (overflowPx > 1 && document.body) {
+    const queue = [...document.body.children];
+    let scanned = 0;
+    while (queue.length && overflowingElements.length < 5 && scanned < 800) {
+      const el = queue.shift();
+      scanned++;
+      if (!isVisible(el)) continue;
+      const r = el.getBoundingClientRect();
+      const right = r.right;
+      if (right > vw + 1 || r.width > vw + 1) {
+        overflowingElements.push(describe(el, { overflowBy: Math.round(Math.max(right - vw, r.width - vw)) }));
+        continue; // outermost only — do not descend into a known offender
+      }
+      for (const child of el.children) queue.push(child);
+    }
+  }
+
+  // ── Stacking ───────────────────────────────────────────────────────────
+  // Measured, not inferred from grid/flex declarations: group each block's
+  // direct children by their rendered top edge and count how many share a
+  // row. A block laid out as one column at this width has columns === 1,
+  // whatever CSS mechanism produced it. That makes this framework-agnostic
+  // (CSS grid, flexbox, floats, or a table all read the same).
+  function columnsOf(el) {
+    const kids = [...el.children].filter(isVisible);
+    if (kids.length < 2) return kids.length;
+    const rows = new Map();
+    for (const kid of kids.slice(0, 24)) {
+      const top = Math.round(kid.getBoundingClientRect().top / 8) * 8; // 8px tolerance
+      rows.set(top, (rows.get(top) || 0) + 1);
+    }
+    return Math.max(...rows.values());
+  }
+
+  function unwrapLandmark(el) {
+    if (['HEADER', 'NAV', 'MAIN', 'FOOTER'].includes(el.tagName) && el.children.length) return [...el.children];
+    return [el];
+  }
+
+  const blocks = [];
+  const topLevel = document.body ? [...document.body.children].flatMap(unwrapLandmark) : [];
+  let order = 0;
+  for (const el of topLevel.slice(0, 40)) {
+    const r = el.getBoundingClientRect();
+    if (r.height < 4) { order++; continue; }
+    const cs = window.getComputedStyle(el);
+    blocks.push({
+      order: order++,
+      tag: el.tagName.toLowerCase(),
+      classes: classesOf(el),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      columns: columnsOf(el),
+      paddingTop: Math.round(parseFloat(cs.paddingTop) || 0),
+      paddingLeft: Math.round(parseFloat(cs.paddingLeft) || 0),
+      outerHtml: typeof el.outerHTML === 'string' ? el.outerHTML.slice(0, 1500) : '',
+    });
+  }
+
+  // ── Navigation ─────────────────────────────────────────────────────────
+  // Does the nav collapse behind a control at this width? Both halves are
+  // measured: how many nav links are actually visible, and whether a visible
+  // disclosure control exists. A nav that keeps 8 visible links at 390px has
+  // not collapsed, whatever its classes claim.
+  const navRoot = document.querySelector('header nav') || document.querySelector('nav') || document.querySelector('header');
+  let navigation = null;
+  if (navRoot) {
+    const links = [...navRoot.querySelectorAll('a')];
+    const controls = [...navRoot.querySelectorAll('button, [role="button"], [aria-expanded], [aria-controls]')];
+    navigation = {
+      visibleLinks: links.filter(isVisible).length,
+      totalLinks: links.length,
+      hasVisibleToggle: controls.some((c) => isVisible(c)
+        && (c.hasAttribute('aria-expanded') || c.hasAttribute('aria-controls')
+          || /\b(toggle|hamburger|menu|nav)\b/i.test(classesOf(c)))),
+    };
+  }
+
+  // ── Type scale & spacing ───────────────────────────────────────────────
+  // The dominant heading and a real body paragraph at this width. Body copy
+  // is filtered the same way pickBody does it (length, not class names) so a
+  // kicker never becomes the measured body size.
+  function measureText(el) {
+    if (!el) return null;
+    const cs = window.getComputedStyle(el);
+    return {
+      fontSize: Math.round(parseFloat(cs.fontSize) || 0),
+      lineHeight: Math.round(parseFloat(cs.lineHeight) || 0),
+    };
+  }
+  const headingEl = [...document.querySelectorAll('h1, h2')].filter(isVisible)
+    .sort((a, b) => (parseFloat(window.getComputedStyle(b).fontSize) || 0) - (parseFloat(window.getComputedStyle(a).fontSize) || 0))[0] || null;
+  const bodyEl = [...document.querySelectorAll('p')].find((p) => isVisible(p) && (p.textContent || '').trim().length >= 40) || null;
+
+  // ── Tap targets (small viewports) ──────────────────────────────────────
+  const smallTapTargets = [];
+  const interactive = [...document.querySelectorAll('a, button, input, select, textarea, [role="button"]')].slice(0, 400);
+  for (const el of interactive) {
+    if (smallTapTargets.length >= 5) break;
+    if (!isVisible(el)) continue;
+    const r = el.getBoundingClientRect();
+    // Zero-size and icon-in-link wrappers are excluded by requiring a real
+    // rendered box; a control with no box is not a tap target a user misses.
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.width < minTapTargetPx || r.height < minTapTargetPx) {
+      smallTapTargets.push(describe(el, { minSide: Math.round(Math.min(r.width, r.height)) }));
+    }
+  }
+
+  // ── Clipped content ────────────────────────────────────────────────────
+  // Text cut off rather than wrapped: the element's own content is wider than
+  // its box AND it is set to hide the excess.
+  const clippedElements = [];
+  for (const el of topLevel.slice(0, 40)) {
+    if (clippedElements.length >= 5) break;
+    if (!isVisible(el)) continue;
+    const cs = window.getComputedStyle(el);
+    if (cs.overflowX !== 'hidden' && cs.overflow !== 'hidden') continue;
+    if (el.scrollWidth > el.clientWidth + 1) {
+      clippedElements.push(describe(el, { clippedBy: Math.round(el.scrollWidth - el.clientWidth) }));
+    }
+  }
+
+  return {
+    viewportWidth: vw,
+    documentScrollWidth: Math.round(docScrollWidth),
+    overflowPx,
+    overflowingElements,
+    blocks,
+    navigation,
+    typography: { heading: measureText(headingEl), body: measureText(bodyEl) },
+    smallTapTargets,
+    clippedElements,
+  };
+}
+/* eslint-enable no-undef */
+
+// One responsive probe of one URL at whatever viewport `browserPage`'s context
+// was created with. Separate from capturePage on purpose: this never
+// serializes the full block/markup set, so probing two extra viewports costs
+// roughly a page load each rather than a second full capture.
+export async function captureResponsive(browserPage, url, { minTapTargetPx = MIN_TAP_TARGET_PX } = {}) {
+  await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  return browserPage.evaluate(measureResponsiveInPage, minTapTargetPx);
+}
+
 // screenshot: false by default — the Design Agent's own profile-derivation
 // caller never needs it (structured DOM/CSS facts only), and a screenshot on
 // every page load is real added cost. visual-quality.js (server/agents/
@@ -379,10 +615,14 @@ export async function captureSite(homepageUrl, {
   launchBrowserFn = launchBrowser,
   screenshots = false,
   extraCardPages = DEFAULT_EXTRA_CARD_PAGES,
+  responsiveViewports = RESPONSIVE_VIEWPORTS,
+  responsiveMaxPages = DEFAULT_RESPONSIVE_MAX_PAGES,
 } = {}) {
   const browser = await launchBrowserFn();
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const context = await browser.newContext({
+      viewport: { width: DESKTOP_VIEWPORT.width, height: DESKTOP_VIEWPORT.height },
+    });
     const page = await context.newPage();
     const targets = await discoverPages(page, homepageUrl, { maxPages });
 
@@ -405,7 +645,53 @@ export async function captureSite(homepageUrl, {
       for (const captured of cardPages) pages.push(captured);
     }
 
-    return { homepageUrl, pages };
+    // Responsive pass. One fresh context per extra viewport (a context's
+    // viewport is fixed at creation, and re-using the desktop page with
+    // setViewportSize would leave desktop-width layout state and media-query
+    // listeners already resolved — a real source of false "it stacks fine"
+    // readings). The desktop measurements come from the SAME probe so every
+    // viewport is compared like-for-like rather than against block data
+    // produced by a different code path.
+    const responsive = { viewports: [], pages: [] };
+    const probeTargets = pages.slice(0, Math.max(0, responsiveMaxPages));
+    if (probeTargets.length && responsiveViewports.length) {
+      const viewports = [DESKTOP_VIEWPORT, ...responsiveViewports];
+      const byUrl = new Map(probeTargets.map((p) => [p.url, { url: p.url, pageType: p.pageType, byViewport: {} }]));
+
+      for (const viewport of viewports) {
+        // eslint-disable-next-line no-await-in-loop
+        const vpContext = viewport.name === DESKTOP_VIEWPORT.name
+          ? context
+          : await browser.newContext({
+            viewport: { width: viewport.width, height: viewport.height },
+            // isMobile/hasTouch make a site's own mobile detection (and any
+            // touch-only nav) behave the way it does for a real visitor.
+            isMobile: viewport.width < 768,
+            hasTouch: viewport.width < 768,
+          });
+        // eslint-disable-next-line no-await-in-loop
+        const vpPage = viewport.name === DESKTOP_VIEWPORT.name ? page : await vpContext.newPage();
+        try {
+          for (const target of probeTargets) {
+            // eslint-disable-next-line no-await-in-loop
+            const measured = await captureResponsive(vpPage, target.url).catch((err) => {
+              console.warn(`[design-agent/capture] could not measure ${target.url} at ${viewport.name}: ${err.message}`);
+              return null;
+            });
+            if (measured) byUrl.get(target.url).byViewport[viewport.name] = measured;
+          }
+          responsive.viewports.push({ ...viewport });
+        } finally {
+          if (viewport.name !== DESKTOP_VIEWPORT.name) await vpContext.close();
+        }
+      }
+      // A page every viewport failed to measure carries no responsive signal
+      // at all — keeping it would make "no defects found" indistinguishable
+      // from "never looked".
+      responsive.pages = [...byUrl.values()].filter((p) => Object.keys(p.byViewport).length > 0);
+    }
+
+    return { homepageUrl, pages, responsive };
   } finally {
     await browser.close();
   }

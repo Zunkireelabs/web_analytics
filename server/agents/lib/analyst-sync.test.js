@@ -55,6 +55,7 @@ mock.module(resolve('../../routes/action-center.js'), {
 // never call it.
 mock.module(resolve('../../llm.js'), {
   namedExports: {
+    callLLM: async () => { throw new Error('these tests do not exercise LLM calls'); },
     callLLMForJson: async () => { throw new Error('these tests do not exercise LLM-backed gap classification'); },
   },
 });

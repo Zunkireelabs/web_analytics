@@ -4,6 +4,7 @@ import {
   beginFileOverlay, endFileOverlay, recordFileOverlayWrites, compareCommits,
 } from '../../github/client.js';
 import { safeMessage } from '../../lib/errors.js';
+import { todayInTz } from '../../util/dates.js';
 import { validateRenderingBatch } from './rendering-gate.js';
 import { actionScopeFor } from './action-scope.js';
 import { findMarkerCorruption } from './marker-merge.js';
@@ -58,8 +59,21 @@ function persistedFailure(context, err, fallback) {
   return { ok: false, reason: 'github-error', error: `${message} (ref: ${id})`, rateLimited: err?.rateLimited === true };
 }
 
+// One batch branch per site per DAY — and "day" here must be the same day the
+// daily budget counts in, which is the site's own timezone (store/drafts.js's
+// countDraftsBySourceToday, isShipCatchupOwed). This used to slice a UTC
+// ISO string, so for any site east of UTC the two disagreed for part of every
+// day: an Asia/Kolkata site shipping at 07:00 local (01:30 UTC) opened
+// `batch-<id>-<utc-today>`, and its own catch-up guard a few hours later —
+// still the same local day, still the same budget day — computed a DIFFERENT
+// UTC date and opened a SECOND branch and a second PR for work that belongs
+// in the day's single reviewable batch.
+//
+// Still idempotent: same site + same local day always produces the same name,
+// which is what lets beginBatchPush reuse an existing branch rather than
+// forking a new one.
 export function batchBranchName(site, date = new Date()) {
-  const day = date.toISOString().slice(0, 10); // YYYY-MM-DD, UTC
+  const day = todayInTz(site.timezone || 'UTC', date);
   return `action-center/batch-${site.id}-${day}`;
 }
 

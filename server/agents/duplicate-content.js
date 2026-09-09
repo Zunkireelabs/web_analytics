@@ -105,6 +105,21 @@ export async function run({ siteId, start, end, pageCache, params }) {
       whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
       priority: priorities[i],
       recommendedAction: null, // picking a canonical URL / merging pages is a real editorial decision, not draftable content
+      // Deliberately NOT auto-canonicalized. Choosing which URL owns the
+      // content decides which of these pages keeps its ranking and which
+      // ones stop being indexed independently — pointing that at the wrong
+      // page is a traffic loss no later fix recovers cheaply, and impressions
+      // (the only signal available here) do not establish editorial intent.
+      // So it stays a human decision — but a VISIBLE one. Until 2026-09-09
+      // this finding had a null action and no reportOnly, which meant
+      // buildRecommendations dropped it outright: byte-identical duplicate
+      // pages were detected on every run and shown to nobody.
+      reportOnly: {
+        kind: 'duplicate-content',
+        label: `${g.pages.length} URLs serve identical content`,
+        page: [...g.pages].sort()[0],
+        whyBlocked: 'These URLs serve byte-identical content. Consolidating them means choosing which single URL should own this content and pointing the others at it — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
+      },
       expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
     });
   });

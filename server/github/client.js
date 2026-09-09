@@ -116,7 +116,13 @@ export const RATE_LIMIT_RESERVE = 100;
 // process on that credential — never treated as "plenty left".
 const lastRateLimitByCredential = new Map();
 
-function rateLimitKey(site) {
+// Exported (not just used internally for the in-memory map above) so a
+// caller outside this file can key a lock on the same identity — see
+// job.js's per-credential ship lock. Two sites resolving to the same string
+// here share one real GitHub budget; anything that reasons about that
+// budget, in-memory tracking or a cross-process lock alike, must derive the
+// identity from this one function or the two will disagree.
+export function rateLimitKey(site) {
   return usesGithubApp(site) ? `app:${site.github_app_installation_id}` : `pat:${githubTokenEnvVar(site)}`;
 }
 

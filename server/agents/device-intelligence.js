@@ -46,6 +46,18 @@ export async function run({ siteId, start, end }) {
       evidence: { device: d.device, ctr: d.ctr, ctrDeviationPct: d.ctrDeviationPct, clicks: d.clicks, impressions: d.impressions },
       whyItMatters: `${d.device} CTR is ${Math.abs(d.ctrDeviationPct)}% below this site's own cross-device average.`,
       magnitude: Math.abs(d.ctrDeviationPct),
+      // A whole device class under-performing this site's own average is a
+      // confirmed defect, not a stat: the same listings earn materially
+      // fewer clicks on one device than on the others. There is no single
+      // file to change — the cause is spread across layout, speed and
+      // how titles truncate on that device — so it surfaces read-only
+      // instead of being dropped, and points at the device to investigate.
+      reportOnly: {
+        kind: 'device-ctr-deficit',
+        label: `${d.device} click-through rate is below this site's average`,
+        page: '',
+        whyBlocked: `Search listings for this site earn ${Math.abs(d.ctrDeviationPct)}% fewer clicks on ${d.device.toLowerCase()} than on this site's other devices. The cause is usually how pages look, load or truncate on that device rather than any one file, so it needs someone to look at real ${d.device.toLowerCase()} results before anything is changed.`,
+      },
     })),
     ...decliningDevices.map((d) => ({
       id: `device-intelligence:declining:${d.device}`,
@@ -62,6 +74,9 @@ export async function run({ siteId, start, end }) {
     return makeFinding({
       id: c.id, evidence: c.evidence, whyItMatters: c.whyItMatters, priority,
       recommendedAction: null,
+      // Declining-sessions candidates carry no reportOnly: a device losing
+      // sessions is a trend to read, not a defect on the site.
+      reportOnly: c.reportOnly || null,
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: c.magnitude },
     });
   });

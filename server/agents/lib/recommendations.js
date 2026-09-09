@@ -98,6 +98,11 @@ export async function buildRecommendations(siteId) {
   // close it — the mechanism that kept 6 /docs/* rows open on site 1
   // indefinitely.
   const droppedRecommendations = [];
+  // Findings that carried neither a generatorId nor a reportOnly declaration.
+  // Returned (and summarized in one log line below) so "this agent detects
+  // things that reach nobody" is visible in the run itself rather than only
+  // discoverable by reading every agent's source.
+  const evidenceOnlyFindings = [];
   const DROP_REASONS = {
     'soft-404': 'This page returns the site\'s soft-404 fallback — it does not exist.',
     'file-missing': 'The file this page was mapped to no longer exists in the repository.',
@@ -133,7 +138,18 @@ export async function buildRecommendations(siteId) {
         // question about a fix that does not exist, and a 'drop' verdict from
         // one of them would delete a real finding for the wrong reason.
         const ro = f.reportOnly;
-        if (!ro?.kind) continue;
+        if (!ro?.kind) {
+          // Never silent. A finding that reaches here is evidence by design
+          // (a number a human reads in a report), but "by design" and "an
+          // agent forgot to declare an action" are indistinguishable from
+          // the outside, and that ambiguity is exactly how sitemap's and
+          // duplicate-content's real defects sat invisible while both agents
+          // were listed in RECOMMENDATION_AGENT_IDS. Recording it makes the
+          // distinction auditable without turning every legitimate
+          // evidence-only number into an Action Center row.
+          evidenceOnlyFindings.push({ agentId: run.agentId, findingId: f.id, whyItMatters: f.whyItMatters });
+          continue;
+        }
         const page = ro.page || '';
         detectedKeys.add(`${ro.kind}::${recommendationPageKey({ generatorId: ro.kind, params: { page } })}`);
         // Not skipped on draftedFindingIds the way an actionable finding is:
@@ -200,5 +216,10 @@ export async function buildRecommendations(siteId) {
       });
     }
   }
-  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations };
+  if (evidenceOnlyFindings.length) {
+    const byAgent = evidenceOnlyFindings.reduce((acc, e) => { acc[e.agentId] = (acc[e.agentId] || 0) + 1; return acc; }, {});
+    console.info(`[recommendations] site ${siteId}: ${evidenceOnlyFindings.length} evidence-only findings not surfaced as recommendations —`,
+      Object.entries(byAgent).map(([a, n]) => `${a}:${n}`).join(' '));
+  }
+  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings };
 }

@@ -1,6 +1,19 @@
-import { getDueVerifications, recordVerificationOutcome } from '../../store/fix-verifications.js';
+import {
+  getDueVerifications, recordVerificationOutcome, rescheduleVerification, VERIFICATION_METHOD,
+} from '../../store/fix-verifications.js';
+import {
+  getDeploymentById, markDeploymentDetected, markDeploymentNotDetected, deploymentGraceElapsed,
+} from '../../store/deployments.js';
 import { getWatchlistItemById, setWatchlistStatus } from '../../store/watchlist.js';
-import { analyzePageUrl, recommendationsFor, contentGapsFor, fetchHtml } from './page-content.js';
+import {
+  analyzePageUrl, recommendationsFor, contentGapsFor, fetchHtml,
+  fetchResponseHeaders, fetchTextIfExists, llmsTxtHasValidStructure,
+} from './page-content.js';
+import { reopenRecommendation } from '../../store/recommendations.js';
+import { recordAttempt } from '../../store/recommendation-attempts.js';
+import { getFileContent } from '../../github/client.js';
+import { RETRY_POLICY } from '../../lib/attempt-classification.js';
+import { FAILURE_CLASS } from '../../lib/failure-classification.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { topLevelCategoryForGenerator } from '../../generators/lib/pattern-categories.js';
 import { getSiteById } from '../../store/read.js';
@@ -166,8 +179,263 @@ async function verifyAnalyticsInstall(row) {
   return { id: row.id, outcome };
 }
 
-async function verifyOne(row) {
+// --------------------------------------------------------------------------
+// Per-method evidence checks (migration 153)
+// --------------------------------------------------------------------------
+//
+// Each returns { present: boolean|null, evidence } — `present: null` means the
+// evidence could not be read at all (network failure, missing config), which
+// is reported as 'unreachable' rather than being mistaken for a failed fix.
+// None of these judge whether the shipped copy is *good*; they establish
+// whether it is actually THERE, which is the question "did this ship" asks.
+
+function stripHtmlToText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;|&apos;|&rsquo;|&lsquo;/gi, "'")
+    .replace(/&#8217;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function checkSiteAsset(row) {
+  const fetched = await fetchTextIfExists(row.page_url);
+  if (!fetched.ok) return { present: false, evidence: { asset: row.page_url, served: false } };
+  const structure = row.expected?.structure;
+  if (structure === 'llms-txt') {
+    const valid = llmsTxtHasValidStructure(fetched.text);
+    return { present: valid, evidence: { asset: row.page_url, served: true, validStructure: valid } };
+  }
+  return { present: true, evidence: { asset: row.page_url, served: true } };
+}
+
+async function checkResponseHeader(row) {
+  const res = await fetchResponseHeaders(row.page_url);
+  if (!res.ok) return { present: null, evidence: { error: res.error } };
+  const wanted = row.expected?.headers || [];
+  if (!wanted.length) return { present: null, evidence: { error: 'no header names were recorded for this change' } };
+  const missing = wanted.filter((name) => !res.headers.get(name));
+  return { present: missing.length === 0, evidence: { checked: wanted, missing } };
+}
+
+function duplicateIdsIn(html) {
+  const ids = [...html.matchAll(/\sid=["']([^"']+)["']/gi)].map((m) => m[1]);
+  const seen = new Set();
+  const dupes = new Set();
+  for (const id of ids) {
+    if (seen.has(id)) dupes.add(id);
+    seen.add(id);
+  }
+  return [...dupes];
+}
+
+async function checkPagePattern(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  const html = fetched.html;
+  switch (row.expected?.check) {
+    case 'html-lang-present': {
+      const present = /<html[^>]*\slang=["'][^"']+["']/i.test(html);
+      return { present, evidence: { check: 'html-lang-present' } };
+    }
+    case 'viewport-meta-present': {
+      const present = /<meta[^>]+name=["']viewport["'][^>]*>/i.test(html);
+      return { present, evidence: { check: 'viewport-meta-present' } };
+    }
+    case 'no-duplicate-ids': {
+      const dupes = duplicateIdsIn(html);
+      const target = row.expected?.id;
+      const present = target ? !dupes.includes(target) : dupes.length === 0;
+      return { present, evidence: { check: 'no-duplicate-ids', duplicatesFound: dupes.slice(0, 10), target: target ?? null } };
+    }
+    default:
+      return { present: null, evidence: { error: `unknown pattern check "${row.expected?.check}"` } };
+  }
+}
+
+async function checkPageAbsence(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  const absentTarget = row.expected?.absent;
+  if (!absentTarget) return { present: null, evidence: { error: 'nothing was recorded as needing to be absent' } };
+  const stillThere = fetched.html.includes(absentTarget);
+  return { present: !stillThere, evidence: { mustBeAbsent: absentTarget, stillPresent: stillThere } };
+}
+
+async function checkRedirect(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) {
+    // A 404 that is now correctly a 404 is not something this check can tell
+    // apart from an unreachable host, so it stays honest and says so.
+    return { present: null, evidence: { error: fetched.error } };
+  }
+  const landedElsewhere = !!fetched.url && fetched.url.replace(/\/$/, '') !== row.page_url.replace(/\/$/, '');
+  return { present: landedElsewhere, evidence: { requested: row.page_url, landedOn: fetched.url ?? null, expected: row.expected?.to ?? null } };
+}
+
+async function checkPageContent(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  const needle = row.expected?.needle;
+  if (!needle) return { present: null, evidence: { error: 'no excerpt was recorded to look for' } };
+  const wanted = needle.replace(/\s+/g, ' ').trim().toLowerCase();
+  // Checked against BOTH the visible text and the raw markup: plenty of real
+  // shipped content never appears as visible text — JSON-LD inside a
+  // <script type="application/ld+json">, an alt attribute, an OG meta tag —
+  // and tag-stripping alone would report those as missing when they are
+  // sitting right there.
+  const visibleText = stripHtmlToText(fetched.html).toLowerCase();
+  const rawMarkup = fetched.html.replace(/\s+/g, ' ').toLowerCase();
+  const present = visibleText.includes(wanted) || rawMarkup.includes(wanted);
+  return { present, evidence: { needle, page: row.page_url, foundIn: present ? (visibleText.includes(wanted) ? 'text' : 'markup') : null } };
+}
+
+// The merged branch is the evidence for changes with no public URL (a blog
+// image swap, a new file whose route this app cannot resolve). It proves the
+// change landed, and deliberately claims nothing about it being live — which
+// is exactly why the deployment record is tracked separately.
+async function checkRepoFile(row, site) {
+  const files = row.expected?.files || [];
+  if (!site?.repo_owner || !files.length) {
+    return { present: null, evidence: { error: 'no repository or file path recorded for this change' } };
+  }
+  const needle = row.expected?.needle;
+  for (const path of files) {
+    const file = await getFileContent(site, path).catch((err) => ({ error: err.message }));
+    if (file?.error) return { present: null, evidence: { error: file.error, path } };
+    const content = typeof file === 'string' ? file : file?.content ?? '';
+    if (!content) return { present: false, evidence: { path, reason: 'file is absent or empty in the merged branch' } };
+    if (needle && !content.replace(/\s+/g, ' ').toLowerCase().includes(needle.replace(/\s+/g, ' ').trim().toLowerCase())) {
+      return { present: false, evidence: { path, reason: 'file exists but no longer contains the shipped content' } };
+    }
+  }
+  return { present: true, evidence: { files } };
+}
+
+async function runMethodCheck(row, site) {
+  switch (row.method) {
+    case VERIFICATION_METHOD.SITE_ASSET: return checkSiteAsset(row);
+    case VERIFICATION_METHOD.RESPONSE_HEADER: return checkResponseHeader(row);
+    case VERIFICATION_METHOD.PAGE_PATTERN: return checkPagePattern(row);
+    case VERIFICATION_METHOD.PAGE_ABSENCE: return checkPageAbsence(row);
+    case VERIFICATION_METHOD.REDIRECT: return checkRedirect(row);
+    case VERIFICATION_METHOD.PAGE_CONTENT: return checkPageContent(row);
+    case VERIFICATION_METHOD.REPO_FILE: return checkRepoFile(row, site);
+    default: return { present: null, evidence: { error: `no verification method recorded (${row.method ?? 'null'})` } };
+  }
+}
+
+// A fix that verified as still-broken is not finished work. Rather than
+// leaving the recommendation closed and the finding silently marked done, put
+// it back on the board with the real reason attached, so the next cycle can
+// pick it up. Idempotent and per-site: reopenRecommendation no-ops on a row
+// that is already open, and every lookup is scoped by site_id.
+// The two ways a verification can fail mean opposite things, so they are
+// classified rather than both falling through to classifyAbandonReason's
+// "unrecognised prose => the item is defective" default:
+//
+//   NOT_LIVE   — the fix merged fine and simply never reached the site. The
+//                item is not at fault and regenerating it would change
+//                nothing; a person needs to look at why the merge did not
+//                deploy. NEEDS_HUMAN, so it is not silently retried forever.
+//   NOT_FIXED  — the change IS live and the issue is still there, so the
+//                generated fix genuinely did not work. That is an item
+//                defect, and counting it toward the convergence cap is the
+//                point: a fix that keeps not working must eventually stop.
+const RECONCILE = {
+  NOT_LIVE: {
+    reason: 'verification-found-change-not-live',
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    retryPolicy: RETRY_POLICY.NEEDS_HUMAN,
+  },
+  NOT_FIXED: {
+    reason: 'verification-found-issue-still-present',
+    failureClass: FAILURE_CLASS.AGENT_LOGIC,
+    retryPolicy: RETRY_POLICY.ITEM_DEFECT,
+  },
+};
+
+async function reconcileFailedVerification(row, kind, evidence) {
+  try {
+    const rec = await findOpenRecommendation(row.site_id, row.page_url, row.generator_id);
+    if (rec?.id) await reopenRecommendation(rec.id);
+    await recordAttempt(row.site_id, {
+      recommendationId: rec?.id ?? null,
+      findingId: row.finding_id,
+      draftId: row.draft_id ?? null,
+      outcome: 'failed',
+      reason: `${kind.reason}: ${JSON.stringify(evidence ?? {}).slice(0, 300)}`,
+      failureClass: kind.failureClass,
+      retryPolicy: kind.retryPolicy,
+    });
+  } catch (err) {
+    console.warn(`[fix-verification] reconcile failed for row ${row.id}:`, err.message);
+  }
+  if (row.watchlist_item_id) await reopenIfClosed(row.site_id, row.watchlist_item_id);
+}
+
+// Was this change's merge ever actually deployed? Absence of the shipped
+// evidence means two very different things depending on the answer, so the
+// deployment record is consulted before an absence is called a failure.
+async function resolveDeploymentState(row) {
+  if (!row.deployment_id) return { known: false, deployment: null, graceElapsed: true };
+  const deployment = await getDeploymentById(row.deployment_id);
+  if (!deployment) return { known: false, deployment: null, graceElapsed: true };
+  return { known: true, deployment, graceElapsed: deploymentGraceElapsed(deployment) };
+}
+
+const AWAIT_RECHECK_HOURS = Number(process.env.FIX_VERIFY_REDEPLOY_HOURS) || 3;
+
+async function verifyByMethod(row, site) {
+  const { present, evidence } = await runMethodCheck(row, site);
+
+  if (present === null) {
+    await recordVerificationOutcome(row.id, 'unreachable', evidence);
+    return { id: row.id, outcome: 'unreachable' };
+  }
+
+  if (present) {
+    const { deployment } = await resolveDeploymentState(row);
+    // The live site reflecting the shipped change IS the deploy signal — this
+    // is the only thing that promotes a deployment out of 'pending'.
+    if (deployment && row.method !== VERIFICATION_METHOD.REPO_FILE) {
+      await markDeploymentDetected(deployment.id, { via: row.method, verificationId: row.id, ...evidence });
+    }
+    await recordVerificationOutcome(row.id, 'verified-fixed', evidence);
+    await learnFromOutcome(row, 'verified-fixed', []);
+    const rec = await findOpenRecommendation(row.site_id, row.page_url, row.generator_id);
+    if (rec) await closeRecommendation(rec.id);
+    return { id: row.id, outcome: 'verified-fixed' };
+  }
+
+  // Absent. Still deploying, or genuinely not shipped?
+  const { deployment, graceElapsed } = await resolveDeploymentState(row);
+  if (deployment && !graceElapsed) {
+    await rescheduleVerification(row.id, { delayHours: AWAIT_RECHECK_HOURS, evidence: { ...evidence, awaitingDeployment: true, commitSha: deployment.commit_sha } });
+    return { id: row.id, outcome: 'awaiting-deployment' };
+  }
+  if (deployment && graceElapsed && deployment.status === 'pending') {
+    await markDeploymentNotDetected(deployment.id, { reason: 'the merged change never appeared on the live site within the grace window', verificationId: row.id });
+  }
+
+  await recordVerificationOutcome(row.id, 'still-present', evidence);
+  await learnFromOutcome(row, 'still-present', []);
+  // A deployment we watched and never saw land is a deploy problem; anything
+  // else means the change is live and the fix simply did not work.
+  const neverDeployed = !!deployment && deployment.status !== 'deployed';
+  await reconcileFailedVerification(row, neverDeployed ? RECONCILE.NOT_LIVE : RECONCILE.NOT_FIXED, evidence);
+  return { id: row.id, outcome: 'still-present' };
+}
+
+async function verifyOne(row, site) {
   if (row.generator_id === 'analytics-install') return verifyAnalyticsInstall(row);
+  // Rows scheduled by the wider coverage layer carry an explicit method.
+  if (row.method && row.method !== VERIFICATION_METHOD.TAG_RECHECK) return verifyByMethod(row, site);
 
   const fetched = await analyzePageUrl(row.page_url);
   if (!fetched.ok) {
@@ -177,12 +445,29 @@ async function verifyOne(row) {
 
   const { tags, tagsNow } = currentTagsFor(row, fetched.analysis);
   const stillFlagged = tags.some((t) => tagsNow.includes(t));
+
+  if (stillFlagged) {
+    // Same deploy-aware distinction the method verifiers make: a fix that is
+    // merged but not yet live must not be recorded as a failed fix.
+    const { deployment, graceElapsed } = await resolveDeploymentState(row);
+    if (deployment && !graceElapsed) {
+      await rescheduleVerification(row.id, { delayHours: AWAIT_RECHECK_HOURS, evidence: { tagsChecked: tags, tagsNow, awaitingDeployment: true } });
+      return { id: row.id, outcome: 'awaiting-deployment' };
+    }
+    if (deployment && graceElapsed && deployment.status === 'pending') {
+      await markDeploymentNotDetected(deployment.id, { reason: 'the merged change never appeared on the live site within the grace window', verificationId: row.id });
+    }
+  } else {
+    const { deployment } = await resolveDeploymentState(row);
+    if (deployment) await markDeploymentDetected(deployment.id, { via: 'tag-recheck', verificationId: row.id });
+  }
+
   const outcome = stillFlagged ? 'still-present' : 'verified-fixed';
   await recordVerificationOutcome(row.id, outcome, { tagsChecked: tags, tagsNow });
   await learnFromOutcome(row, outcome, tags);
 
-  if (outcome === 'still-present' && row.watchlist_item_id) {
-    await reopenIfClosed(row.site_id, row.watchlist_item_id);
+  if (outcome === 'still-present') {
+    await reconcileFailedVerification(row, RECONCILE.NOT_FIXED, { tagsChecked: tags, tagsNow });
   }
   return { id: row.id, outcome };
 }
@@ -196,9 +481,15 @@ async function verifyOne(row) {
 export async function runDueVerifications() {
   const due = await getDueVerifications();
   const results = [];
+  // One site row per site per pass, not per verification — a batch PR routinely
+  // produces many due rows for the same tenant.
+  const siteCache = new Map();
   for (const row of due) {
     try {
-      results.push(await verifyOne(row));
+      if (!siteCache.has(row.site_id)) {
+        siteCache.set(row.site_id, await getSiteById(row.site_id).catch(() => null));
+      }
+      results.push(await verifyOne(row, siteCache.get(row.site_id)));
     } catch (err) {
       console.warn(`[fix-verification] row ${row.id} failed:`, err.message);
     }

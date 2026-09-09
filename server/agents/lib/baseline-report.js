@@ -3,6 +3,8 @@ import { getLatestAgentRuns } from '../../store/agent-runs.js';
 import { listOpenRecommendations } from '../../store/recommendations.js';
 import { getLatestAuditRun, getAuditPageFindings } from '../../store/audit-runs.js';
 import { saveBaselineReport } from '../../store/baseline-reports.js';
+import { listCompetitorProfiles, getLatestCompetitorScores } from '../../store/competitor-profiles.js';
+import { getSiteProfile } from '../../store/data-analyst.js';
 import { callLLM } from '../../llm.js';
 
 // The client-facing "day 0" document (server/migrations/150_baseline_reports.sql):
@@ -150,10 +152,38 @@ function summarizeAiVisibility(geoRun) {
   };
 }
 
-function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRun) {
+// Real named competitors for the "who you're up against" section — pulled
+// from whatever the weekly competitor-intelligence agent already discovered
+// and stored (see store/competitor-profiles.js), never re-run here. Excludes
+// domains already flagged as not a genuine business rival (excluded_reason,
+// migration 133) and caps to the top few so the report names specific
+// competitors instead of dumping a long list.
+//
+// `rank` is the real, deterministic "how do they rank against you" fact — a
+// same-methodology structural score for both sites (see competitor-analysis.js
+// summarizeAnalysis), computed here rather than left to `comparison.verdict`
+// (LLM prose, which real reports showed drifting toward describing a single
+// on-page signal like FAQ schema instead of the actual scoreline). `verdict`
+// is kept as the one-sentence "why" underneath the number, when available.
+function summarizeCompetitors(profiles, structuralScores) {
+  const real = (profiles || []).filter((p) => !p.excluded_reason && p.comparison);
+  const scoreByDomain = new Map((structuralScores || []).map((s) => [s.domain, s]));
+  return real.slice(0, 3).map((p) => {
+    const s = scoreByDomain.get(p.domain);
+    return {
+      domain: p.domain,
+      ownScore: s?.own_score ?? null,
+      competitorScore: s?.competitor_score ?? null,
+      whatTheyDoBetter: p.comparison?.verdict || p.comparison?.positioning || '',
+    };
+  });
+}
+
+function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRun, competitorProfiles, competitorScores) {
   const byPriority = { high: 0, medium: 0, low: 0 };
   for (const r of recommendations) byPriority[r.priority] = (byPriority[r.priority] || 0) + 1;
   return {
+    competitors: summarizeCompetitors(competitorProfiles, competitorScores),
     openRecommendations: {
       total: recommendations.length,
       byPriority,
@@ -216,7 +246,7 @@ export async function buildBaselineReport(siteId) {
   const today = new Date().toISOString().slice(0, 10);
   const windowStart = new Date(Date.now() - KPI_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  const [dailySeries, healthScore, recommendations, auditRun, geoRuns] = await Promise.all([
+  const [dailySeries, healthScore, recommendations, auditRun, geoRuns, competitorProfiles, siteProfile] = await Promise.all([
     getDailySeries(siteId, windowStart, today),
     getHealthScoreOnOrBefore(siteId, today),
     listOpenRecommendations(siteId),
@@ -224,7 +254,12 @@ export async function buildBaselineReport(siteId) {
     // Best-effort, same tolerance as the in-progress audit below: a site
     // whose GEO audit hasn't run yet simply has no AI-visibility section.
     getLatestAgentRuns(siteId, ['geo-audit']).catch(() => []),
+    // Best-effort: the weekly competitor-intelligence agent may not have run
+    // yet for a brand-new site, so an empty list is a real, honest state.
+    listCompetitorProfiles(siteId).catch(() => []),
+    getSiteProfile(siteId).catch(() => null),
   ]);
+  const competitorScores = await getLatestCompetitorScores(siteId).catch(() => []);
   // Full site audit runs fire-and-forget alongside onboarding (see
   // runBaselineSequence) and can genuinely still be in progress when this
   // generates — that's fine, the same as review-report.js tolerating a
@@ -232,8 +267,12 @@ export async function buildBaselineReport(siteId) {
   // rather than blocking the baseline on a slow crawl finishing.
   const auditFindings = auditRun ? await getAuditPageFindings(auditRun.id, { limit: AUDIT_FINDINGS_LIMIT }) : [];
 
-  const kpiSnapshot = summarizeKpiSnapshot(dailySeries, healthScore);
-  const issuesSnapshot = summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRuns?.[0] || null);
+  const kpiSnapshot = {
+    ...summarizeKpiSnapshot(dailySeries, healthScore),
+    industry: siteProfile?.industry || null,
+    siteType: siteProfile?.site_type || null,
+  };
+  const issuesSnapshot = summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRuns?.[0] || null, competitorProfiles, competitorScores);
 
   const narrativeMd = await generateNarrative(site, kpiSnapshot, issuesSnapshot);
   return saveBaselineReport(siteId, { kpiSnapshot, issuesSnapshot, narrativeMd });
