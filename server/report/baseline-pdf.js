@@ -180,16 +180,46 @@ export function scoreStatusWord(score) {
 // competitor-analysis.js summarizeAnalysis / store/competitor-profiles.js
 // getLatestCompetitorScores) — falls back to the LLM's prose only when no
 // real score pair exists yet for this domain.
-export function competitorRankLine(c) {
-  if (c.ownScore == null || c.competitorScore == null) {
-    return c.whatTheyDoBetter || 'Ranking ahead of you for shared search terms.';
-  }
-  const ahead = c.competitorScore > c.ownScore;
-  return `${ahead ? 'Ranking ahead of you' : 'Ranking behind you'} — ${c.competitorScore}/100 vs. your ${c.ownScore}/100`;
+// A short "the [industry] space" phrase for the competitor headline below —
+// falls back to a still-concrete "your market" when site_profiles.industry
+// hasn't been set for this client yet, never a blank.
+function industryLabel(industry) {
+  return industry ? `the ${industry} space` : 'your market';
 }
 
-export function competitorRankColor(c) {
-  if (c.ownScore == null || c.competitorScore == null) return BRAND.muted;
+// The primary, client-facing line for a competitor row — leads with an
+// encouraging, forward-looking sentence tied to the client's own industry
+// and what WE do about the gap, rather than a bare score comparison (which
+// reads as a cold report card, not something that makes a client excited to
+// work with us). The real ownScore/competitorScore numbers still decide
+// which of the two sentences below applies (real fact driving the copy),
+// they're just never printed as a raw score in the client's own PDF.
+export function competitorPositiveLine(c, industry) {
+  const label = industryLabel(industry);
+  if (c.ownScore == null || c.competitorScore == null) {
+    return `${c.domain} is a real competitor for ${label} search terms — here's how we help you compete.`;
+  }
+  if (c.competitorScore > c.ownScore) {
+    return `${c.domain} is currently ahead of you in ${label} — closing gaps like this is exactly what our daily system does.`;
+  }
+  return `Good news — you're already ranking ahead of ${c.domain} in ${label}. We'll help you extend that lead.`;
+}
+
+// The label in front of whatTheyDoBetter (the LLM's one-sentence verdict) —
+// must agree with competitorPositiveLine's headline above it. "Where
+// they're ahead" only makes sense when the competitor's real score is
+// actually higher; printing it under a "you're already ahead" headline
+// would contradict the sentence directly above it.
+function competitorDetailLabel(c) {
+  if (c.ownScore == null || c.competitorScore == null) return 'What we found:';
+  return c.competitorScore > c.ownScore ? "Where they're ahead:" : 'One thing to watch:';
+}
+
+// A quick visual signal for each competitor row — red when they're actually
+// ahead (something to close), navy when the client already leads — so a
+// reader can scan the section at a glance without a printed number.
+function competitorAccentColor(c) {
+  if (c.ownScore == null || c.competitorScore == null) return BRAND.faint;
   return c.competitorScore > c.ownScore ? BRAND.red : BRAND.navy;
 }
 
@@ -237,6 +267,69 @@ function industrySearchExample(industry, siteName) {
   return match ? match[1] : `someone searching for exactly what ${siteName} offers`;
 }
 
+// What's actually changing in a client's own industry right now — the
+// "here's the trend, here's what it means for you" opener for page 2, so a
+// client sees themselves inside a real market shift before they see their
+// own numbers. Same substring-match approach as INDUSTRY_SEARCH_EXAMPLES
+// above, with a still-concrete (never blank) fallback for an unrecognized
+// or unset industry.
+const INDUSTRY_TRENDS = [
+  ['educat', 'Parents increasingly research programs entirely online before ever contacting a school, and now often ask an AI assistant to shortlist options before they visit a single website.'],
+  ['health', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['medical', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['dental', 'Patients increasingly search "near me" and ask AI assistants directly whether a provider treats their condition or accepts their insurance — often before they ever call.'],
+  ['real estate', 'Buyers increasingly do their research, and now even ask AI assistants to compare listings, long before they ever contact an agent.'],
+  ['legal', 'People increasingly search for legal help in a moment of urgency, and are starting to ask AI assistants to recommend a lawyer by name.'],
+  ['law', 'People increasingly search for legal help in a moment of urgency, and are starting to ask AI assistants to recommend a lawyer by name.'],
+  ['ecommerce', 'Shoppers increasingly ask AI assistants what to buy before they ever visit a retailer\'s own site.'],
+  ['retail', 'Shoppers increasingly ask AI assistants what to buy before they ever visit a retailer\'s own site.'],
+  ['hospitality', 'Travelers increasingly plan entire trips through AI assistants, which now recommend specific hotels and restaurants by name.'],
+  ['travel', 'Travelers increasingly plan entire trips through AI assistants, which now recommend specific hotels and restaurants by name.'],
+  ['finance', 'People increasingly ask AI assistants to compare financial products and providers before ever contacting one directly.'],
+  ['insurance', 'People increasingly ask AI assistants to compare coverage and providers before ever contacting one directly.'],
+  ['fitness', 'People increasingly search or ask an AI assistant for a nearby recommendation instead of browsing a list of gyms themselves.'],
+  ['restaurant', 'Diners increasingly ask an AI assistant where to eat, by name, before ever opening a search engine.'],
+  ['home service', 'People increasingly search or ask an AI assistant for a service provider the moment something breaks, and expect an immediate, trustworthy answer.'],
+  ['construction', 'People increasingly search or ask an AI assistant for a service provider the moment something breaks, and expect an immediate, trustworthy answer.'],
+];
+
+// A bare, quotable search phrase for a client's industry — feeds the
+// concrete example line under each of the SEO/AEO/GEO explainers on page 1,
+// so each one shows a real scenario instead of only the combined callout at
+// the bottom of the page. Same substring-match approach as the tables
+// above, with a still-concrete fallback for an unset/unrecognized industry.
+const INDUSTRY_QUERY_PHRASES = [
+  ['educat', '"best after-school program near me"'],
+  ['health', '"urgent care near me open now"'],
+  ['medical', '"urgent care near me open now"'],
+  ['dental', '"dentist near me that takes my insurance"'],
+  ['real estate', '"homes for sale in [area]"'],
+  ['legal', '"divorce lawyer near me"'],
+  ['law', '"divorce lawyer near me"'],
+  ['ecommerce', '"best [product] under $100"'],
+  ['retail', '"best [product] under $100"'],
+  ['hospitality', '"boutique hotel in [city]"'],
+  ['travel', '"best time to visit [destination]"'],
+  ['finance', '"best savings account rates"'],
+  ['insurance', '"cheapest car insurance near me"'],
+  ['fitness', '"gym near me with personal training"'],
+  ['restaurant', '"best [cuisine] restaurant near me"'],
+  ['home service', '"emergency plumber near me"'],
+  ['construction', '"emergency plumber near me"'],
+];
+
+function industryQueryPhrase(industry) {
+  const key = String(industry || '').toLowerCase();
+  const match = INDUSTRY_QUERY_PHRASES.find(([needle]) => key.includes(needle));
+  return match ? match[1] : '"[what you offer] near me"';
+}
+
+function industryTrendLine(industry) {
+  const key = String(industry || '').toLowerCase();
+  const match = INDUSTRY_TRENDS.find(([needle]) => key.includes(needle));
+  return match ? match[1] : 'More people are starting their research with a search engine or an AI assistant instead of going straight to a business\'s website — and increasingly expect a direct, trustworthy answer instead of a list of links to click through.';
+}
+
 function pageChrome({ eyebrow, sectionNumber, sectionTitle, body, footerNote, siteName, dateLabel, pageNumber }) {
   return `
   <section class="page">
@@ -274,25 +367,30 @@ function pageChrome({ eyebrow, sectionNumber, sectionTitle, body, footerNote, si
 // already carries the branding on every page.
 function whyMattersPage({ siteName, industry, dateLabel }) {
   const example = industrySearchExample(industry, siteName);
+  const queryPhrase = industryQueryPhrase(industry);
+  const industryNoun = industry ? industry.toLowerCase() : 'business like yours';
   const body = `
     <div class="hero">
-      <h1 class="hero-title">Digital Visibility<br/>Baseline Report</h1>
-      <p class="hero-client">${escapeHtml(siteName)}</p>
+      <h1 class="hero-title">Digital Growth<br/>Baseline Report</h1>
+      <p class="hero-client">Prepared for ${escapeHtml(siteName)}</p>
       <p class="hero-date">${escapeHtml(dateLabel).toUpperCase()}</p>
     </div>
-    <p class="section-intro">Three things decide whether people — and the AI tools they now search with — find ${escapeHtml(siteName)}.</p>
+    <p class="section-intro">This is where ${escapeHtml(siteName)} stands today — and exactly what it takes to become the business people find first, whether they're searching on Google or asking an AI assistant to recommend one nearby. Three things decide that:</p>
     <div class="explainer-list">
       <div class="explainer">
         <p class="explainer-term">SEO <span class="explainer-full">— Search Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure Google can find your site, understand what it offers, and rank it high enough that people actually click. Needs a technically healthy website, content that answers real questions, and other trustworthy sites linking to you.</p>
+        <p class="explainer-copy">SEO is what gets Google to find your site, understand what it offers, and rank it high enough that people actually click. It depends on a technically healthy website, content that answers real questions, and other trustworthy sites linking back to you.</p>
+        <p class="explainer-example">Example: someone searches ${queryPhrase} on Google, and ${escapeHtml(siteName)} appears on page one instead of buried below the fold.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">AEO <span class="explainer-full">— Answer Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure voice assistants and AI-powered search results (like Google's AI Overviews) can pull a short, accurate answer straight from your site instead of a competitor's. Needs clear FAQs, direct answers near the top of a page, and markup that tells AI what your content means.</p>
+        <p class="explainer-copy">AEO is what lets voice assistants and AI-powered search results — like Google's AI Overviews — pull a short, accurate answer straight from your site instead of a competitor's. It depends on clear FAQs, direct answers near the top of a page, and markup that tells AI exactly what your content means.</p>
+        <p class="explainer-example">Example: someone sees an AI Overview or asks a voice assistant about ${queryPhrase}, and the answer it reads back comes straight from ${escapeHtml(siteName)}.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">GEO <span class="explainer-full">— Generative Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure AI chatbots like ChatGPT, Claude, and Gemini know your business exists and recommend it when someone asks a relevant question. Needs a site that's easy for AI to read, consistent facts about your business across the web, and content AI can confidently cite.</p>
+        <p class="explainer-copy">GEO is what gets AI chatbots like ChatGPT, Claude, and Gemini to recognize your business and recommend it by name when someone asks a relevant question. It depends on a site that's easy for AI to read, consistent facts about your business across the web, and content AI can confidently cite.</p>
+        <p class="explainer-example">Example: someone asks ChatGPT to recommend a ${escapeHtml(industryNoun)}, and it names ${escapeHtml(siteName)} directly, unprompted.</p>
       </div>
     </div>
     <div class="callout">
@@ -306,35 +404,53 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
 
 // Page 2 — "Where You Stand Today": plain-language baseline of current
 // search/AI visibility and website health, plus real named competitors.
-function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAssessmentHtml, siteName, dateLabel }) {
+function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAssessmentHtml, siteName, dateLabel, industry }) {
   const score = kpi.healthScore ?? 0;
   const status = scoreStatusWord(score);
   const findingsCount = auditFindings ? numberFormat(auditFindings.total) : null;
   const findingsQualifier = auditFindings?.truncated ? 'at least ' : '';
 
-  const aiBlock = aiVisibility?.available
-    ? `<div class="mini-score"><span class="mini-score-value">${aiVisibility.overall}<span class="mini-score-max">/100</span></span><span class="mini-score-label">AI Visibility — can AI tools read and cite your site</span></div>`
-    : `<div class="mini-score"><span class="mini-score-value">—</span><span class="mini-score-label">AI Visibility — measurement not run yet, will appear in a future report</span></div>`;
+  const aiScore = aiVisibility?.available ? aiVisibility.overall : null;
+  const aiCaption = aiVisibility?.available
+    ? `Whether AI tools like ChatGPT and Google's AI Overviews can read, understand, and cite ${escapeHtml(siteName)}.`
+    : 'This measurement has not run yet for your site — it will appear in a future report.';
 
   const competitorRows = (competitors && competitors.length)
     ? competitors.map((c) => `
-    <div class="competitor-row">
-      <div class="competitor-head">
-        <span class="competitor-domain">${escapeHtml(c.domain)}</span>
-        <span class="competitor-rank" style="color:${competitorRankColor(c)}">${escapeHtml(competitorRankLine(c))}</span>
-      </div>
-      ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
+    <div class="competitor-row" style="border-left-color:${competitorAccentColor(c)}">
+      <span class="competitor-domain">${escapeHtml(c.domain)}</span>
+      <p class="competitor-headline">${escapeHtml(competitorPositiveLine(c, industry))}</p>
+      ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(competitorDetailLabel(c))} ${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
     </div>`).join('')
     : `<p class="section-intro">We're still identifying your closest competitors — this will be filled in as soon as that analysis completes.</p>`;
 
+  const industryName = industry || 'Your Industry';
   const body = `
-    <div class="score-moment">
-      <span class="score-value">${score} <span class="score-max">/ 100</span></span>
-      <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
-      <div class="score-bar"><div class="score-bar-fill" style="width:${Math.max(2, Math.min(100, score))}%"></div></div>
-      <p class="score-caption">${scoreExplanation(score)}${auditFindings ? ` We reviewed ${numberFormat(auditFindings.pagesAffected)} pages and found ${findingsQualifier}${findingsCount} things to fix.` : ''}</p>
+    <div class="industry-block">
+      <p class="label-small">${escapeHtml(industryName)} — What's Changing</p>
+      <p class="industry-copy">${escapeHtml(industryTrendLine(industry))}</p>
     </div>
-    ${aiBlock}
+    <p class="score-lead">Here's exactly where ${escapeHtml(siteName)} stands inside that shift today.</p>
+    <div class="stat-grid">
+      <div class="stat-card">
+        <p class="label-small">Website Health Score</p>
+        <div class="stat-score-row">
+          <span class="score-value">${score}<span class="score-max">/100</span></span>
+          <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${Math.max(2, Math.min(100, score))}%"></div></div>
+        <p class="score-caption">${scoreExplanation(score)}${auditFindings ? ` We reviewed ${numberFormat(auditFindings.pagesAffected)} pages and found ${findingsQualifier}${findingsCount} things to fix.` : ''}</p>
+      </div>
+      <div class="stat-card">
+        <p class="label-small">AI Visibility Score</p>
+        <div class="stat-score-row">
+          <span class="score-value">${aiScore ?? '—'}${aiScore != null ? '<span class="score-max">/100</span>' : ''}</span>
+          ${aiScore != null ? `<span class="score-status" style="color:${aiScore < 40 ? BRAND.red : BRAND.navy}">${aiScore < 40 ? 'NEEDS ATTENTION' : aiScore < 70 ? 'DEVELOPING' : 'STRONG'}</span>` : ''}
+        </div>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${aiScore != null ? Math.max(2, Math.min(100, aiScore)) : 0}%"></div></div>
+        <p class="score-caption">${aiCaption}</p>
+      </div>
+    </div>
     ${execAssessmentHtml ? `<div class="assessment"><p class="label-small">Where You Stand</p><div class="assessment-copy">${execAssessmentHtml}</div></div>` : ''}
     <div class="competitors">
       <p class="label-small">Who You're Up Against</p>
@@ -362,12 +478,11 @@ const ROADMAP_STAGES = [
 // the real audit), the autonomous agent, and the phased roadmap.
 function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
   const items = selectFeaturedRecommendations(openRecommendations?.items || [], MAX_RECOMMENDATION_ROWS);
-  const rows = items.map((item, i) => {
-    const num = String(i + 1).padStart(2, '0');
+  const rows = items.map((item) => {
     const { action, benefit } = recommendationClientCopy(item);
     return `
     <div class="rec-row">
-      <span class="rec-num">${num}</span>
+      <span class="rec-dot" style="background:${PRIORITY_COLOR[item.priority] || BRAND.muted}"></span>
       <div class="rec-body">
         <p class="rec-title">${escapeHtml(action)}</p>
         <p class="rec-desc">${escapeHtml(benefit)}</p>
@@ -407,21 +522,21 @@ function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
 // right after kickoff.
 function gettingStartedPage({ siteName, dateLabel }) {
   const body = `
-    <p class="section-intro">Here's what we'll need from you to get started, and what happens right after.</p>
+    <p class="section-intro">Here's what we'll need to get started, and exactly what happens once you're in.</p>
     <div class="starter-block">
       <p class="label-small">What We'll Need From You</p>
       <ul class="starter-list">
-        <li>Access to Google Search Console and Google Analytics for ${escapeHtml(siteName)}</li>
-        <li>One point of contact who can approve bigger changes we flag</li>
-        <li>Access to your website/CMS, so low-risk fixes can be applied directly</li>
+        <li><strong>Access to Google Search Console and Google Analytics</strong> for ${escapeHtml(siteName)} — so we can see your real search and traffic data from day one, not guess at it.</li>
+        <li><strong>One point of contact</strong> who can approve the bigger changes we flag — keeps decisions moving instead of stalling on back-and-forth.</li>
+        <li><strong>Access to your website or CMS</strong> — so low-risk fixes can go live directly, without waiting on your team every time.</li>
       </ul>
     </div>
     <div class="starter-block">
       <p class="label-small">Right After Kickoff</p>
       <ul class="starter-list">
-        <li>We run a full audit and freeze this report as your day-0 baseline</li>
-        <li>Our system starts its daily checks immediately</li>
-        <li>You'll see your first fixes within days, and a Milestones report tracking real progress against this baseline</li>
+        <li><strong>We run a full audit</strong> and freeze this report as your day-0 baseline — the exact numbers every future report is measured against.</li>
+        <li><strong>Our system starts its daily checks immediately</strong> — no ramp-up period, no waiting for a "next sprint."</li>
+        <li><strong>You'll see your first fixes within days</strong>, and a Milestones report tracking real progress against this baseline.</li>
       </ul>
     </div>
     <div class="commitment">
@@ -452,6 +567,7 @@ export function renderBaselineReportHtml(report, site) {
     standTodayPage({
       kpi, auditFindings: issues.auditFindings, aiVisibility: issues.aiVisibility,
       competitors: issues.competitors, execAssessmentHtml, siteName: site.name, dateLabel,
+      industry: kpi.industry,
     }),
     howWeHelpPage({ openRecommendations: issues.openRecommendations, siteName: site.name, dateLabel }),
     gettingStartedPage({ siteName: site.name, dateLabel }),
@@ -480,7 +596,7 @@ const REPORT_CSS = `
   body { font-family: 'DM Sans', -apple-system, 'Helvetica Neue', Arial, sans-serif; color: ${BRAND.navy}; }
   .page {
     width: 210mm; min-height: 297mm; position: relative;
-    background: #fff; padding: 20mm 18mm 16mm; margin: 0 auto;
+    background: #fff; padding: 15mm 18mm 12mm; margin: 0 auto;
     display: flex; flex-direction: column;
     page-break-after: always; break-after: page;
     box-shadow: 0 1px 3px rgba(15,23,42,0.08), 0 8px 24px rgba(15,23,42,0.06);
@@ -501,13 +617,13 @@ const REPORT_CSS = `
   .page-header-meta { text-align: right; }
   .page-header-label { display: block; font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: ${BRAND.faint}; font-weight: 600; }
   .page-header-sub { display: block; font-size: 9px; color: ${BRAND.muted}; margin-top: 2px; }
-  .page-divider { height: 1px; background: ${BRAND.divider}; margin: 6mm 0 8mm; }
+  .page-divider { height: 1px; background: ${BRAND.divider}; margin: 4mm 0 5mm; }
 
   .section-marker { display: flex; align-items: baseline; gap: 4mm; margin-bottom: 4mm; }
   .section-number { font-family: 'DM Mono', monospace; font-size: 12px; color: ${BRAND.faint}; }
   .section-title { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: ${BRAND.navy}; }
   .eyebrow { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: ${BRAND.faint}; }
-  .section-intro { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.6; max-width: 150mm; margin: 0 0 8mm; }
+  .section-intro { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.55; max-width: 150mm; margin: 0 0 5mm; }
 
   /* Content flows from the top of the available space and stops — it is
      NOT centered/stretched to fill the full A4 height. That forced
@@ -528,37 +644,42 @@ const REPORT_CSS = `
   .page-footer-note { font-size: 8.5px; color: ${BRAND.faint}; margin: 2mm 0 0; }
 
   /* ---- hero (compact cover treatment on page 1, not a full page) ---- */
-  .hero { margin-bottom: 10mm; }
+  .hero { margin-bottom: 5mm; }
   .hero-title { font-size: 32px; line-height: 1.08; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 4mm; color: ${BRAND.navy}; }
   .hero-client { font-size: 15px; font-weight: 500; color: ${BRAND.navy}; margin: 0 0 1mm; }
   .hero-date { font-size: 10px; letter-spacing: 0.1em; color: ${BRAND.faint}; margin: 0; }
 
   /* ---- SEO/AEO/GEO explainers ---- */
   .explainer-list { margin-top: 2mm; }
-  .explainer { padding: 5mm 0; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
+  .explainer { padding: 3.5mm 0; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
   .explainer-term { font-size: 15px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 2mm; }
   .explainer-full { font-size: 11px; font-weight: 500; color: ${BRAND.faint}; }
   .explainer-copy { font-size: 12px; color: ${BRAND.muted}; line-height: 1.6; max-width: 155mm; margin: 0; }
+  .explainer-example { font-size: 11px; font-style: italic; color: ${BRAND.navy}; line-height: 1.4; max-width: 155mm; margin: 2mm 0 0; }
 
-  .callout { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.red}; break-inside: avoid; page-break-inside: avoid; }
+  .callout { margin-top: 5mm; padding: 5mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.red}; break-inside: avoid; page-break-inside: avoid; }
   .callout-copy { font-size: 12.5px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
 
   /* ---- compact AI-visibility score, page 2 ---- */
-  .mini-score { display: flex; align-items: baseline; gap: 5mm; margin: 8mm 0; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
-  .mini-score-value { font-family: 'DM Mono', monospace; font-size: 28px; font-weight: 500; color: ${BRAND.navy}; flex-shrink: 0; }
-  .mini-score-max { font-size: 12px; color: ${BRAND.faint}; }
-  .mini-score-label { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; }
+  /* ---- paired health/AI-visibility stat cards, page 2 ---- */
+  .stat-grid { display: flex; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
+  .stat-card { flex: 1; min-width: 0; padding: 4.5mm 5mm; background: #fff; border: 1px solid ${BRAND.divider}; border-radius: 3px; }
+  .stat-score-row { display: flex; align-items: baseline; gap: 3mm; flex-wrap: wrap; margin-top: 1mm; }
+
+  /* ---- industry trend opener, page 2 ---- */
+  .industry-block { margin-bottom: 4mm; padding: 4.5mm 6mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
+  .industry-copy { font-size: 12.5px; color: ${BRAND.navy}; line-height: 1.6; max-width: 150mm; margin: 2mm 0 0; }
+  .score-lead { font-size: 11.5px; color: ${BRAND.faint}; margin: 0 0 3mm; }
 
   /* ---- competitors, page 2 ---- */
-  .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
-  .competitor-row { padding: 3mm 0; break-inside: avoid; page-break-inside: avoid; }
-  .competitor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6mm; }
-  .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12.5px; font-weight: 500; color: ${BRAND.navy}; }
-  .competitor-rank { font-size: 10px; letter-spacing: 0.04em; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1mm 0 0; max-width: 150mm; }
+  .competitors { margin-top: 5mm; padding-top: 5mm; border-top: 1px solid ${BRAND.divider}; }
+  .competitor-row { padding: 2mm 0 2mm 5mm; margin: 2mm 0; border-left: 2.5px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
+  .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: ${BRAND.faint}; }
+  .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 0; max-width: 150mm; }
+  .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
 
   /* ---- autonomous-agent note, page 3 ---- */
-  .agent-note { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.navy}; break-inside: avoid; page-break-inside: avoid; }
+  .agent-note { margin-top: 5mm; padding: 4.5mm 6mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.navy}; break-inside: avoid; page-break-inside: avoid; }
   .agent-copy { font-size: 12px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
 
   /* ---- getting-started lists, page 4 ---- */
@@ -571,25 +692,24 @@ const REPORT_CSS = `
   .commitment .label-small { color: rgba(255,255,255,0.55); margin-bottom: 3mm; }
   .commitment-copy { font-size: 12.5px; line-height: 1.7; color: #fff; margin: 0; max-width: 155mm; }
 
-  .assessment { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
+  .assessment { margin-top: 5mm; padding-top: 5mm; border-top: 1px solid ${BRAND.divider}; }
   .label-small { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: ${BRAND.faint}; font-weight: 700; margin-bottom: 4mm; }
   .assessment-copy p { font-size: 13.5px; line-height: 1.8; color: ${BRAND.navy}; max-width: 150mm; margin: 0 0 4mm; }
   .assessment-copy strong { color: ${BRAND.navy}; font-weight: 700; }
 
   /* ---- health score ---- */
-  .score-moment { margin: 6mm 0 10mm; break-inside: avoid; page-break-inside: avoid; }
-  .score-value { font-family: 'DM Mono', monospace; font-size: 52px; font-weight: 500; color: ${BRAND.navy}; }
-  .score-max { font-size: 22px; color: ${BRAND.faint}; }
-  .score-status { display: inline-block; margin-left: 6mm; font-size: 11px; letter-spacing: 0.1em; font-weight: 700; vertical-align: middle; }
-  .score-bar { width: 130mm; height: 5px; background: ${BRAND.divider}; margin: 8mm 0 6mm; border-radius: 2px; overflow: hidden; }
+  .score-value { font-family: 'DM Mono', monospace; font-size: 34px; font-weight: 500; color: ${BRAND.navy}; }
+  .score-max { font-size: 15px; color: ${BRAND.faint}; }
+  .score-status { font-size: 9.5px; letter-spacing: 0.08em; font-weight: 700; }
+  .score-bar { width: 100%; height: 4px; background: ${BRAND.divider}; margin: 4mm 0 4mm; border-radius: 2px; overflow: hidden; }
   .score-bar-fill { height: 100%; background: ${BRAND.navy}; border-radius: 2px; }
-  .score-caption { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.6; max-width: 140mm; }
+  .score-caption { font-size: 11px; color: ${BRAND.muted}; line-height: 1.55; margin: 0; }
 
   /* ---- recommendation rows ---- */
   .rec-list { margin-top: 2mm; }
-  .rec-row { display: flex; align-items: flex-start; gap: 6mm; padding: 6mm 0; break-inside: avoid; page-break-inside: avoid; }
+  .rec-row { display: flex; align-items: flex-start; gap: 5mm; padding: 3.5mm 0; break-inside: avoid; page-break-inside: avoid; }
   .rec-divider { height: 1px; background: ${BRAND.divider}; }
-  .rec-num { font-family: 'DM Mono', monospace; font-size: 20px; color: ${BRAND.faint}; width: 12mm; flex-shrink: 0; }
+  .rec-dot { width: 2.5mm; height: 2.5mm; border-radius: 50%; flex-shrink: 0; margin-top: 2mm; }
   .rec-body { flex: 1; }
   .rec-title { font-size: 13.5px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 2mm; }
   .rec-desc { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 0; max-width: 120mm; }
@@ -597,13 +717,13 @@ const REPORT_CSS = `
   .rec-summary { font-size: 10.5px; color: ${BRAND.faint}; margin-top: 6mm; }
 
   /* ---- roadmap ---- */
-  .roadmap { margin-top: 10mm; }
+  .roadmap { margin-top: 5mm; }
   .roadmap-stage { display: flex; align-items: flex-start; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
-  .roadmap-marker { width: 10mm; height: 10mm; border-radius: 50%; border: 1.5px solid ${BRAND.navy}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .roadmap-marker span { font-family: 'DM Mono', monospace; font-size: 10px; color: ${BRAND.navy}; }
+  .roadmap-marker { width: 10mm; height: 10mm; border-radius: 50%; background: ${BRAND.navy}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .roadmap-marker span { font-family: 'DM Mono', monospace; font-size: 10px; color: #fff; font-weight: 500; }
   .roadmap-title { font-size: 14px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 1mm; }
   .roadmap-copy { font-size: 11.5px; color: ${BRAND.muted}; margin: 0; }
-  .roadmap-line { width: 1.5px; height: 8mm; background: ${BRAND.divider}; margin: 1mm 0 1mm 5mm; }
+  .roadmap-line { width: 1.5px; height: 5mm; background: ${BRAND.divider}; margin: 1mm 0 1mm 5mm; }
 
   .closing { margin-top: 20mm; text-align: center; }
   .closing-logo { display: flex; justify-content: center; margin: 0 auto 6mm; }
