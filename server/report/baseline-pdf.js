@@ -110,7 +110,7 @@ export function recommendationClientCopy(item) {
   const issue = String(item.issue || '');
   if (item.type === 'faq') return { action: 'Answer the real questions your customers ask', benefit: 'so AI tools and Google can quote your answer directly instead of a competitor\'s' };
   if (item.type === 'landing-page') return { action: 'Build a dedicated page for a topic you\'re missing', benefit: 'so you show up for searches you currently don\'t rank for at all' };
-  if (item.type === 'schema' || item.type === 'schema-repair') return { action: 'Add the technical tags search engines read', benefit: 'so Google and AI assistants understand exactly what your page is about' };
+  if (item.type === 'schema' || item.type === 'schema-repair') return { action: 'Add the structured data search engines rely on', benefit: 'so Google and AI assistants understand exactly what your page is about' };
   if (item.type === 'broken-link-fix') return { action: 'Fix a link pointing somewhere it shouldn\'t', benefit: 'so visitors and AI tools don\'t hit a dead end on your site' };
   if (item.type === 'alt-text') return { action: 'Describe your images for search engines', benefit: 'so your images can be found in search and understood by AI' };
   if (/comparison|alternatives|best of/i.test(issue)) return { action: 'Show how you compare to the alternatives', benefit: 'so people actively deciding between options can find and pick you' };
@@ -338,15 +338,15 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
     <div class="explainer-list">
       <div class="explainer">
         <p class="explainer-term">SEO <span class="explainer-full">— Search Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure Google can find your site, understand what it offers, and rank it high enough that people actually click. Needs a technically healthy website, content that answers real questions, and other trustworthy sites linking to you.</p>
+        <p class="explainer-copy">SEO is what gets Google to find your site, understand what it offers, and rank it high enough that people actually click. It depends on a technically healthy website, content that answers real questions, and other trustworthy sites linking back to you.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">AEO <span class="explainer-full">— Answer Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure voice assistants and AI-powered search results (like Google's AI Overviews) can pull a short, accurate answer straight from your site instead of a competitor's. Needs clear FAQs, direct answers near the top of a page, and markup that tells AI what your content means.</p>
+        <p class="explainer-copy">AEO is what lets voice assistants and AI-powered search results — like Google's AI Overviews — pull a short, accurate answer straight from your site instead of a competitor's. It depends on clear FAQs, direct answers near the top of a page, and markup that tells AI exactly what your content means.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">GEO <span class="explainer-full">— Generative Engine Optimization</span></p>
-        <p class="explainer-copy">Making sure AI chatbots like ChatGPT, Claude, and Gemini know your business exists and recommend it when someone asks a relevant question. Needs a site that's easy for AI to read, consistent facts about your business across the web, and content AI can confidently cite.</p>
+        <p class="explainer-copy">GEO is what gets AI chatbots like ChatGPT, Claude, and Gemini to recognize your business and recommend it by name when someone asks a relevant question. It depends on a site that's easy for AI to read, consistent facts about your business across the web, and content AI can confidently cite.</p>
       </div>
     </div>
     <div class="callout">
@@ -465,7 +465,7 @@ function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
 // right after kickoff.
 function gettingStartedPage({ siteName, dateLabel }) {
   const body = `
-    <p class="section-intro">Here's what we'll need from you to get started, and what happens right after.</p>
+    <p class="section-intro">Here's what we'll need to get started, and exactly what happens once you're in.</p>
     <div class="starter-block">
       <p class="label-small">What We'll Need From You</p>
       <ul class="starter-list">
