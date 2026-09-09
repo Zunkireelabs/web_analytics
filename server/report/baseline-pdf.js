@@ -172,6 +172,27 @@ export function scoreStatusWord(score) {
   return 'STRONG';
 }
 
+// A real, deterministic "how do they rank against you" line — the client
+// asked specifically for a rank comparison here, not the LLM's free-text
+// verdict (which on a real report drifted toward describing one on-page
+// signal like FAQ schema instead of an actual scoreline). Uses the same
+// same-methodology structural score both sites were crawled with (see
+// competitor-analysis.js summarizeAnalysis / store/competitor-profiles.js
+// getLatestCompetitorScores) — falls back to the LLM's prose only when no
+// real score pair exists yet for this domain.
+export function competitorRankLine(c) {
+  if (c.ownScore == null || c.competitorScore == null) {
+    return c.whatTheyDoBetter || 'Ranking ahead of you for shared search terms.';
+  }
+  const ahead = c.competitorScore > c.ownScore;
+  return `${ahead ? 'Ranking ahead of you' : 'Ranking behind you'} — ${c.competitorScore}/100 vs. your ${c.ownScore}/100`;
+}
+
+export function competitorRankColor(c) {
+  if (c.ownScore == null || c.competitorScore == null) return BRAND.muted;
+  return c.competitorScore > c.ownScore ? BRAND.red : BRAND.navy;
+}
+
 // Deterministic, real-data-grounded caption — see this file's top comment
 // for why this is computed rather than pulled from narrative_md.
 function scoreExplanation(score) {
@@ -296,7 +317,14 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
     : `<div class="mini-score"><span class="mini-score-value">—</span><span class="mini-score-label">AI Visibility — measurement not run yet, will appear in a future report</span></div>`;
 
   const competitorRows = (competitors && competitors.length)
-    ? competitors.map((c) => `<div class="competitor-row"><span class="competitor-domain">${escapeHtml(c.domain)}</span><p class="competitor-copy">${escapeHtml(c.whatTheyDoBetter || 'Currently ranking ahead of you for shared search terms.')}</p></div>`).join('')
+    ? competitors.map((c) => `
+    <div class="competitor-row">
+      <div class="competitor-head">
+        <span class="competitor-domain">${escapeHtml(c.domain)}</span>
+        <span class="competitor-rank" style="color:${competitorRankColor(c)}">${escapeHtml(competitorRankLine(c))}</span>
+      </div>
+      ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
+    </div>`).join('')
     : `<p class="section-intro">We're still identifying your closest competitors — this will be filled in as soon as that analysis completes.</p>`;
 
   const body = `
@@ -359,14 +387,14 @@ function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
     </div>${i < ROADMAP_STAGES.length - 1 ? '<div class="roadmap-line"></div>' : ''}`).join('');
 
   const body = `
-    <p class="section-intro">What ${escapeHtml(siteName)} is missing today, based on our audit — ${numberFormat(total)} open items in total, the highest-impact ones below:</p>
+    <p class="section-intro">This is how we grow ${escapeHtml(siteName)}'s visibility — turning what's holding you back today into real movement in search and AI rankings. Out of ${numberFormat(total)} things we found, here's where we start:</p>
     <div class="rec-list">${rows}</div>
     <div class="agent-note">
       <p class="label-small">Every Day, Automatically</p>
       <p class="agent-copy">${AUTONOMOUS_AGENT_COPY}</p>
     </div>
     <div class="roadmap">
-      <p class="label-small">The Roadmap</p>
+      <p class="label-small">From Baseline To Growth</p>
       ${stages}
     </div>`;
   return pageChrome({
@@ -520,7 +548,9 @@ const REPORT_CSS = `
   /* ---- competitors, page 2 ---- */
   .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
   .competitor-row { padding: 3mm 0; break-inside: avoid; page-break-inside: avoid; }
+  .competitor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6mm; }
   .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12.5px; font-weight: 500; color: ${BRAND.navy}; }
+  .competitor-rank { font-size: 10px; letter-spacing: 0.04em; font-weight: 700; text-align: right; flex-shrink: 0; }
   .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1mm 0 0; max-width: 150mm; }
 
   /* ---- autonomous-agent note, page 3 ---- */

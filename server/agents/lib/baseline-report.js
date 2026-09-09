@@ -3,7 +3,7 @@ import { getLatestAgentRuns } from '../../store/agent-runs.js';
 import { listOpenRecommendations } from '../../store/recommendations.js';
 import { getLatestAuditRun, getAuditPageFindings } from '../../store/audit-runs.js';
 import { saveBaselineReport } from '../../store/baseline-reports.js';
-import { listCompetitorProfiles } from '../../store/competitor-profiles.js';
+import { listCompetitorProfiles, getLatestCompetitorScores } from '../../store/competitor-profiles.js';
 import { getSiteProfile } from '../../store/data-analyst.js';
 import { callLLM } from '../../llm.js';
 
@@ -157,22 +157,33 @@ function summarizeAiVisibility(geoRun) {
 // and stored (see store/competitor-profiles.js), never re-run here. Excludes
 // domains already flagged as not a genuine business rival (excluded_reason,
 // migration 133) and caps to the top few so the report names specific
-// competitors instead of dumping a long list. `comparison.verdict` is the
-// one sentence competitor-analysis.js asks the model for on "the single most
-// actionable gap" — the closest existing field to "what they do better".
-function summarizeCompetitors(profiles) {
+// competitors instead of dumping a long list.
+//
+// `rank` is the real, deterministic "how do they rank against you" fact — a
+// same-methodology structural score for both sites (see competitor-analysis.js
+// summarizeAnalysis), computed here rather than left to `comparison.verdict`
+// (LLM prose, which real reports showed drifting toward describing a single
+// on-page signal like FAQ schema instead of the actual scoreline). `verdict`
+// is kept as the one-sentence "why" underneath the number, when available.
+function summarizeCompetitors(profiles, structuralScores) {
   const real = (profiles || []).filter((p) => !p.excluded_reason && p.comparison);
-  return real.slice(0, 3).map((p) => ({
-    domain: p.domain,
-    whatTheyDoBetter: p.comparison?.verdict || p.comparison?.positioning || '',
-  }));
+  const scoreByDomain = new Map((structuralScores || []).map((s) => [s.domain, s]));
+  return real.slice(0, 3).map((p) => {
+    const s = scoreByDomain.get(p.domain);
+    return {
+      domain: p.domain,
+      ownScore: s?.own_score ?? null,
+      competitorScore: s?.competitor_score ?? null,
+      whatTheyDoBetter: p.comparison?.verdict || p.comparison?.positioning || '',
+    };
+  });
 }
 
-function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRun, competitorProfiles) {
+function summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRun, competitorProfiles, competitorScores) {
   const byPriority = { high: 0, medium: 0, low: 0 };
   for (const r of recommendations) byPriority[r.priority] = (byPriority[r.priority] || 0) + 1;
   return {
-    competitors: summarizeCompetitors(competitorProfiles),
+    competitors: summarizeCompetitors(competitorProfiles, competitorScores),
     openRecommendations: {
       total: recommendations.length,
       byPriority,
@@ -248,6 +259,7 @@ export async function buildBaselineReport(siteId) {
     listCompetitorProfiles(siteId).catch(() => []),
     getSiteProfile(siteId).catch(() => null),
   ]);
+  const competitorScores = await getLatestCompetitorScores(siteId).catch(() => []);
   // Full site audit runs fire-and-forget alongside onboarding (see
   // runBaselineSequence) and can genuinely still be in progress when this
   // generates — that's fine, the same as review-report.js tolerating a
@@ -260,7 +272,7 @@ export async function buildBaselineReport(siteId) {
     industry: siteProfile?.industry || null,
     siteType: siteProfile?.site_type || null,
   };
-  const issuesSnapshot = summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRuns?.[0] || null, competitorProfiles);
+  const issuesSnapshot = summarizeIssuesSnapshot(recommendations, auditRun, auditFindings, geoRuns?.[0] || null, competitorProfiles, competitorScores);
 
   const narrativeMd = await generateNarrative(site, kpiSnapshot, issuesSnapshot);
   return saveBaselineReport(siteId, { kpiSnapshot, issuesSnapshot, narrativeMd });
