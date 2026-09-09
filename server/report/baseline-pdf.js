@@ -100,8 +100,32 @@ export function recommendationTitle(item) {
   return String(item.type || 'Recommendation').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Client-facing "what we'll do" + "why it helps you get found" for a
+// recommendation row — the plain-language counterpart to recommendationTitle
+// above (which stays an internal/technical label, still used verbatim by the
+// existing test suite). Keyed off the same real type/issue fields, never a
+// new fact; falls back to a generic-but-honest pair for anything unrecognized
+// rather than printing a raw internal type name in a client's PDF.
+export function recommendationClientCopy(item) {
+  const issue = String(item.issue || '');
+  if (item.type === 'faq') return { action: 'Answer the real questions your customers ask', benefit: 'so AI tools and Google can quote your answer directly instead of a competitor\'s' };
+  if (item.type === 'landing-page') return { action: 'Build a dedicated page for a topic you\'re missing', benefit: 'so you show up for searches you currently don\'t rank for at all' };
+  if (item.type === 'schema' || item.type === 'schema-repair') return { action: 'Add the technical tags search engines read', benefit: 'so Google and AI assistants understand exactly what your page is about' };
+  if (item.type === 'broken-link-fix') return { action: 'Fix a link pointing somewhere it shouldn\'t', benefit: 'so visitors and AI tools don\'t hit a dead end on your site' };
+  if (item.type === 'alt-text') return { action: 'Describe your images for search engines', benefit: 'so your images can be found in search and understood by AI' };
+  if (/comparison|alternatives|best of/i.test(issue)) return { action: 'Show how you compare to the alternatives', benefit: 'so people actively deciding between options can find and pick you' };
+  if (/author|byline/i.test(issue)) return { action: 'Show who wrote your content', benefit: 'so AI assistants trust and credit your expertise when citing you' };
+  if (/breadcrumb/i.test(issue)) return { action: 'Add clear page navigation trails', benefit: 'so search engines understand how your site fits together' };
+  if (/freshness|last.?updated/i.test(issue)) return { action: 'Show when your content was last updated', benefit: 'so search engines know your information is current' };
+  return { action: recommendationTitle(item), benefit: 'so your site is easier to find and trust' };
+}
+
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
-const PRIORITY_LABEL = { high: 'HIGH PRIORITY', medium: 'MEDIUM PRIORITY', low: 'LOW PRIORITY' };
+// Plain ordering language for a client, not internal priority jargon —
+// "HIGH PRIORITY" describes our triage process, not something a client
+// needs to parse; "we're doing this first" describes the same fact in terms
+// of what happens to them.
+const PRIORITY_ORDER_LABEL = { high: 'DOING THIS FIRST', medium: 'NEXT UP', low: 'ALSO ON THE LIST' };
 const PRIORITY_COLOR = { high: BRAND.red, medium: BRAND.navy, low: BRAND.muted };
 
 // Trimmed from 8 to 5 for the 4-page compact layout — the "How Coming To
@@ -312,16 +336,15 @@ function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
   const items = selectFeaturedRecommendations(openRecommendations?.items || [], MAX_RECOMMENDATION_ROWS);
   const rows = items.map((item, i) => {
     const num = String(i + 1).padStart(2, '0');
-    const title = recommendationTitle(item);
-    const descHtml = descriptionRepeatsTitle(title, item.issue) ? '' : `<p class="rec-desc">${escapeHtml(item.issue)}</p>`;
+    const { action, benefit } = recommendationClientCopy(item);
     return `
     <div class="rec-row">
       <span class="rec-num">${num}</span>
       <div class="rec-body">
-        <p class="rec-title">${escapeHtml(title)}</p>
-        ${descHtml}
+        <p class="rec-title">${escapeHtml(action)}</p>
+        <p class="rec-desc">${escapeHtml(benefit)}</p>
       </div>
-      <span class="rec-priority" style="color:${PRIORITY_COLOR[item.priority] || BRAND.muted}">${PRIORITY_LABEL[item.priority] || item.priority?.toUpperCase() || ''}</span>
+      <span class="rec-priority" style="color:${PRIORITY_COLOR[item.priority] || BRAND.muted}">${PRIORITY_ORDER_LABEL[item.priority] || ''}</span>
     </div>`;
   }).join('<div class="rec-divider"></div>');
   const total = openRecommendations?.total || items.length;
