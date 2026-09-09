@@ -89,7 +89,8 @@ async function main() {
   });
   try {
     const user = await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
-    console.log(`Created site #${site.id} "${site.name}" and user #${user.id} "${normalizedEmail}".`);
+    console.log(`Created client #${site.client_number} (site #${site.id} "${site.name}") and user #${user.id} "${normalizedEmail}".`);
+    console.log('GSC/GA4 are not connected for this site yet.');
 
     // Register the Data Analyst side as soon as the tenant exists, so the
     // nightly Python pipeline picks it up the moment GSC/GA4 land — rather

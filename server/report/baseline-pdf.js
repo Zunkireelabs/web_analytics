@@ -110,7 +110,7 @@ export function recommendationClientCopy(item) {
   const issue = String(item.issue || '');
   if (item.type === 'faq') return { action: 'Answer the real questions your customers ask', benefit: 'so AI tools and Google can quote your answer directly instead of a competitor\'s' };
   if (item.type === 'landing-page') return { action: 'Build a dedicated page for a topic you\'re missing', benefit: 'so you show up for searches you currently don\'t rank for at all' };
-  if (item.type === 'schema' || item.type === 'schema-repair') return { action: 'Add the technical tags search engines read', benefit: 'so Google and AI assistants understand exactly what your page is about' };
+  if (item.type === 'schema' || item.type === 'schema-repair') return { action: 'Add the structured data search engines rely on', benefit: 'so Google and AI assistants understand exactly what your page is about' };
   if (item.type === 'broken-link-fix') return { action: 'Fix a link pointing somewhere it shouldn\'t', benefit: 'so visitors and AI tools don\'t hit a dead end on your site' };
   if (item.type === 'alt-text') return { action: 'Describe your images for search engines', benefit: 'so your images can be found in search and understood by AI' };
   if (/comparison|alternatives|best of/i.test(issue)) return { action: 'Show how you compare to the alternatives', benefit: 'so people actively deciding between options can find and pick you' };
