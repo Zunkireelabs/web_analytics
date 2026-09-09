@@ -189,9 +189,50 @@ describe('JSX/TSX (React/Next.js)', () => {
     assert.match(result.containerDescription, /component's own returned root element/);
   });
 
-  test('refuses when the file has more than one JSX-returning function (ambiguous which is "the page")', () => {
+  test('picks the default export when local helper components share the file', () => {
+    // Live on site 1: src/app/[slug]/page.tsx defines 4 JSX-returning
+    // functions and refused as ambiguous every day. The default export IS
+    // the framework's answer to "which one is the route's component".
     const file = 'function Icon() { return <svg><path /></svg>; }\n' +
       'export default function Page() { return <main><p>hi</p></main>; }\n';
+    const result = detectInsertionPoint(file, 'page.tsx');
+    assert.equal(result.ok, true);
+  });
+
+  test('picks the default export when it is exported by name further down the file', () => {
+    const file = 'function Icon() { return <svg><path /></svg>; }\n' +
+      'function Page() { return <main><p>hi</p></main>; }\n' +
+      'export default Page;\n';
+    const result = detectInsertionPoint(file, 'page.tsx');
+    assert.equal(result.ok, true);
+  });
+
+  test('an inline .map() arrow inside the page is not a rival component', () => {
+    // The widest real-world case: any list-rendering page returns JSX from an
+    // implicit-return arrow, which counted as a second "component" and made
+    // the whole file ambiguous.
+    const file = 'export default function Page({ items }) {\n' +
+      '  return <main><ul>{items.map((i) => <li key={i}>{i}</li>)}</ul></main>;\n}\n';
+    const result = detectInsertionPoint(file, 'page.tsx');
+    assert.equal(result.ok, true);
+    // Anchored to the page's own <main>, not to the <li> the arrow returns.
+    assert.ok(file.slice(result.insertBeforeOffset).startsWith('</main>'));
+  });
+
+  test('still refuses when several components return JSX and none is the default export', () => {
+    const file = 'export function Icon() { return <svg><path /></svg>; }\n' +
+      'export function Page() { return <main><p>hi</p></main>; }\n';
+    const result = detectInsertionPoint(file, 'page.tsx');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'multiple-jsx-returns-ambiguous');
+  });
+
+  test('still refuses when the page component itself has several returns (early loading/empty states)', () => {
+    // Narrowing to the default export says which FUNCTION is the page; it
+    // never says which of that function's branches is the real body.
+    const file = 'export default function Page({ loading }) {\n' +
+      '  if (loading) return <main><p>loading</p></main>;\n' +
+      '  return <main><p>hi</p></main>;\n}\n';
     const result = detectInsertionPoint(file, 'page.tsx');
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'multiple-jsx-returns-ambiguous');

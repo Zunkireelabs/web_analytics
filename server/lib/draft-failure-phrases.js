@@ -26,6 +26,14 @@ export const NO_FILE_MAPPING_FRAGMENT = 'No url_file_map entry matches';
 export const NO_MARKERS_CONFIGURED_FRAGMENT = 'No markers configured for';
 export const UNVERIFIED_PLACEHOLDER_FRAGMENT = 'unverified placeholder field';
 
+// broken-link-fix's own mapping gap (implementers/backend.js). It reads as a
+// per-item failure but is the same class of problem as
+// NO_FILE_MAPPING_FRAGMENT: the href genuinely exists on the live page, and
+// the file carrying it — very often a shared header/footer, not the page's
+// own mapped file — simply isn't reachable from url_file_map or the bounded
+// local search. Nothing about the item changes between attempts.
+export const LINK_TARGET_UNRESOLVABLE_FRAGMENT = 'No file could be found or safely stripped for href';
+
 // The human design-review sign-off gate this fragment came from was removed
 // entirely by commit 8a32037 ("Remove the human design-review gate; automate
 // it at ship time instead") — no code path produces this string any more.
