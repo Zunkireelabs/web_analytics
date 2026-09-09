@@ -410,9 +410,10 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
   const findingsCount = auditFindings ? numberFormat(auditFindings.total) : null;
   const findingsQualifier = auditFindings?.truncated ? 'at least ' : '';
 
-  const aiBlock = aiVisibility?.available
-    ? `<div class="mini-score"><span class="mini-score-value">${aiVisibility.overall}<span class="mini-score-max">/100</span></span><span class="mini-score-label">AI Visibility — can AI tools read and cite your site</span></div>`
-    : `<div class="mini-score"><span class="mini-score-value">—</span><span class="mini-score-label">AI Visibility — measurement not run yet, will appear in a future report</span></div>`;
+  const aiScore = aiVisibility?.available ? aiVisibility.overall : null;
+  const aiCaption = aiVisibility?.available
+    ? `Whether AI tools like ChatGPT and Google's AI Overviews can read, understand, and cite ${escapeHtml(siteName)}.`
+    : 'This measurement has not run yet for your site — it will appear in a future report.';
 
   const competitorRows = (competitors && competitors.length)
     ? competitors.map((c) => `
@@ -430,14 +431,26 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
       <p class="industry-copy">${escapeHtml(industryTrendLine(industry))}</p>
     </div>
     <p class="score-lead">Here's exactly where ${escapeHtml(siteName)} stands inside that shift today.</p>
-    <div class="score-moment">
-      <p class="label-small">Website Health Score</p>
-      <span class="score-value">${score} <span class="score-max">/ 100</span></span>
-      <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
-      <div class="score-bar"><div class="score-bar-fill" style="width:${Math.max(2, Math.min(100, score))}%"></div></div>
-      <p class="score-caption">${scoreExplanation(score)}${auditFindings ? ` We reviewed ${numberFormat(auditFindings.pagesAffected)} pages and found ${findingsQualifier}${findingsCount} things to fix.` : ''}</p>
+    <div class="stat-grid">
+      <div class="stat-card">
+        <p class="label-small">Website Health Score</p>
+        <div class="stat-score-row">
+          <span class="score-value">${score}<span class="score-max">/100</span></span>
+          <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
+        </div>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${Math.max(2, Math.min(100, score))}%"></div></div>
+        <p class="score-caption">${scoreExplanation(score)}${auditFindings ? ` We reviewed ${numberFormat(auditFindings.pagesAffected)} pages and found ${findingsQualifier}${findingsCount} things to fix.` : ''}</p>
+      </div>
+      <div class="stat-card">
+        <p class="label-small">AI Visibility Score</p>
+        <div class="stat-score-row">
+          <span class="score-value">${aiScore ?? '—'}${aiScore != null ? '<span class="score-max">/100</span>' : ''}</span>
+          ${aiScore != null ? `<span class="score-status" style="color:${aiScore < 40 ? BRAND.red : BRAND.navy}">${aiScore < 40 ? 'NEEDS ATTENTION' : aiScore < 70 ? 'DEVELOPING' : 'STRONG'}</span>` : ''}
+        </div>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${aiScore != null ? Math.max(2, Math.min(100, aiScore)) : 0}%"></div></div>
+        <p class="score-caption">${aiCaption}</p>
+      </div>
     </div>
-    ${aiBlock}
     ${execAssessmentHtml ? `<div class="assessment"><p class="label-small">Where You Stand</p><div class="assessment-copy">${execAssessmentHtml}</div></div>` : ''}
     <div class="competitors">
       <p class="label-small">Who You're Up Against</p>
@@ -648,10 +661,10 @@ const REPORT_CSS = `
   .callout-copy { font-size: 12.5px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
 
   /* ---- compact AI-visibility score, page 2 ---- */
-  .mini-score { display: flex; align-items: baseline; gap: 5mm; margin: 8mm 0; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; break-inside: avoid; page-break-inside: avoid; }
-  .mini-score-value { font-family: 'DM Mono', monospace; font-size: 28px; font-weight: 500; color: ${BRAND.navy}; flex-shrink: 0; }
-  .mini-score-max { font-size: 12px; color: ${BRAND.faint}; }
-  .mini-score-label { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; }
+  /* ---- paired health/AI-visibility stat cards, page 2 ---- */
+  .stat-grid { display: flex; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
+  .stat-card { flex: 1; min-width: 0; padding: 6mm 6mm; background: #fff; border: 1px solid ${BRAND.divider}; border-radius: 3px; }
+  .stat-score-row { display: flex; align-items: baseline; gap: 3mm; flex-wrap: wrap; margin-top: 1mm; }
 
   /* ---- industry trend opener, page 2 ---- */
   .industry-block { margin-bottom: 6mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
@@ -685,13 +698,12 @@ const REPORT_CSS = `
   .assessment-copy strong { color: ${BRAND.navy}; font-weight: 700; }
 
   /* ---- health score ---- */
-  .score-moment { margin: 6mm 0 10mm; break-inside: avoid; page-break-inside: avoid; }
-  .score-value { font-family: 'DM Mono', monospace; font-size: 52px; font-weight: 500; color: ${BRAND.navy}; }
-  .score-max { font-size: 22px; color: ${BRAND.faint}; }
-  .score-status { display: inline-block; margin-left: 6mm; font-size: 11px; letter-spacing: 0.1em; font-weight: 700; vertical-align: middle; }
-  .score-bar { width: 130mm; height: 5px; background: ${BRAND.divider}; margin: 8mm 0 6mm; border-radius: 2px; overflow: hidden; }
+  .score-value { font-family: 'DM Mono', monospace; font-size: 34px; font-weight: 500; color: ${BRAND.navy}; }
+  .score-max { font-size: 15px; color: ${BRAND.faint}; }
+  .score-status { font-size: 9.5px; letter-spacing: 0.08em; font-weight: 700; }
+  .score-bar { width: 100%; height: 4px; background: ${BRAND.divider}; margin: 4mm 0 4mm; border-radius: 2px; overflow: hidden; }
   .score-bar-fill { height: 100%; background: ${BRAND.navy}; border-radius: 2px; }
-  .score-caption { font-size: 12.5px; color: ${BRAND.muted}; line-height: 1.6; max-width: 140mm; }
+  .score-caption { font-size: 11px; color: ${BRAND.muted}; line-height: 1.55; margin: 0; }
 
   /* ---- recommendation rows ---- */
   .rec-list { margin-top: 2mm; }
