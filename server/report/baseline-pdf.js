@@ -215,6 +215,14 @@ function competitorDetailLabel(c) {
   return c.competitorScore > c.ownScore ? "Where they're ahead:" : 'One thing to watch:';
 }
 
+// A quick visual signal for each competitor row — red when they're actually
+// ahead (something to close), navy when the client already leads — so a
+// reader can scan the section at a glance without a printed number.
+function competitorAccentColor(c) {
+  if (c.ownScore == null || c.competitorScore == null) return BRAND.faint;
+  return c.competitorScore > c.ownScore ? BRAND.red : BRAND.navy;
+}
+
 // Deterministic, real-data-grounded caption — see this file's top comment
 // for why this is computed rather than pulled from narrative_md.
 function scoreExplanation(score) {
@@ -285,6 +293,37 @@ const INDUSTRY_TRENDS = [
   ['construction', 'People increasingly search or ask an AI assistant for a service provider the moment something breaks, and expect an immediate, trustworthy answer.'],
 ];
 
+// A bare, quotable search phrase for a client's industry — feeds the
+// concrete example line under each of the SEO/AEO/GEO explainers on page 1,
+// so each one shows a real scenario instead of only the combined callout at
+// the bottom of the page. Same substring-match approach as the tables
+// above, with a still-concrete fallback for an unset/unrecognized industry.
+const INDUSTRY_QUERY_PHRASES = [
+  ['educat', '"best after-school program near me"'],
+  ['health', '"urgent care near me open now"'],
+  ['medical', '"urgent care near me open now"'],
+  ['dental', '"dentist near me that takes my insurance"'],
+  ['real estate', '"homes for sale in [area]"'],
+  ['legal', '"divorce lawyer near me"'],
+  ['law', '"divorce lawyer near me"'],
+  ['ecommerce', '"best [product] under $100"'],
+  ['retail', '"best [product] under $100"'],
+  ['hospitality', '"boutique hotel in [city]"'],
+  ['travel', '"best time to visit [destination]"'],
+  ['finance', '"best savings account rates"'],
+  ['insurance', '"cheapest car insurance near me"'],
+  ['fitness', '"gym near me with personal training"'],
+  ['restaurant', '"best [cuisine] restaurant near me"'],
+  ['home service', '"emergency plumber near me"'],
+  ['construction', '"emergency plumber near me"'],
+];
+
+function industryQueryPhrase(industry) {
+  const key = String(industry || '').toLowerCase();
+  const match = INDUSTRY_QUERY_PHRASES.find(([needle]) => key.includes(needle));
+  return match ? match[1] : '"[what you offer] near me"';
+}
+
 function industryTrendLine(industry) {
   const key = String(industry || '').toLowerCase();
   const match = INDUSTRY_TRENDS.find(([needle]) => key.includes(needle));
@@ -328,6 +367,8 @@ function pageChrome({ eyebrow, sectionNumber, sectionTitle, body, footerNote, si
 // already carries the branding on every page.
 function whyMattersPage({ siteName, industry, dateLabel }) {
   const example = industrySearchExample(industry, siteName);
+  const queryPhrase = industryQueryPhrase(industry);
+  const industryNoun = industry ? industry.toLowerCase() : 'business like yours';
   const body = `
     <div class="hero">
       <h1 class="hero-title">Digital Growth<br/>Baseline Report</h1>
@@ -339,14 +380,17 @@ function whyMattersPage({ siteName, industry, dateLabel }) {
       <div class="explainer">
         <p class="explainer-term">SEO <span class="explainer-full">— Search Engine Optimization</span></p>
         <p class="explainer-copy">SEO is what gets Google to find your site, understand what it offers, and rank it high enough that people actually click. It depends on a technically healthy website, content that answers real questions, and other trustworthy sites linking back to you.</p>
+        <p class="explainer-example">Example: someone searches ${queryPhrase} on Google, and ${escapeHtml(siteName)} appears on page one instead of buried below the fold.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">AEO <span class="explainer-full">— Answer Engine Optimization</span></p>
         <p class="explainer-copy">AEO is what lets voice assistants and AI-powered search results — like Google's AI Overviews — pull a short, accurate answer straight from your site instead of a competitor's. It depends on clear FAQs, direct answers near the top of a page, and markup that tells AI exactly what your content means.</p>
+        <p class="explainer-example">Example: someone sees an AI Overview or asks a voice assistant about ${queryPhrase}, and the answer it reads back comes straight from ${escapeHtml(siteName)}.</p>
       </div>
       <div class="explainer">
         <p class="explainer-term">GEO <span class="explainer-full">— Generative Engine Optimization</span></p>
         <p class="explainer-copy">GEO is what gets AI chatbots like ChatGPT, Claude, and Gemini to recognize your business and recommend it by name when someone asks a relevant question. It depends on a site that's easy for AI to read, consistent facts about your business across the web, and content AI can confidently cite.</p>
+        <p class="explainer-example">Example: someone asks ChatGPT to recommend a ${escapeHtml(industryNoun)}, and it names ${escapeHtml(siteName)} directly, unprompted.</p>
       </div>
     </div>
     <div class="callout">
@@ -372,7 +416,7 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
 
   const competitorRows = (competitors && competitors.length)
     ? competitors.map((c) => `
-    <div class="competitor-row">
+    <div class="competitor-row" style="border-left-color:${competitorAccentColor(c)}">
       <span class="competitor-domain">${escapeHtml(c.domain)}</span>
       <p class="competitor-headline">${escapeHtml(competitorPositiveLine(c, industry))}</p>
       ${c.whatTheyDoBetter ? `<p class="competitor-copy">${escapeHtml(competitorDetailLabel(c))} ${escapeHtml(c.whatTheyDoBetter)}</p>` : ''}
@@ -383,10 +427,11 @@ function standTodayPage({ kpi, auditFindings, aiVisibility, competitors, execAss
   const body = `
     <div class="industry-block">
       <p class="label-small">${escapeHtml(industryName)} — What's Changing</p>
-      <p class="section-intro">${escapeHtml(industryTrendLine(industry))}</p>
+      <p class="industry-copy">${escapeHtml(industryTrendLine(industry))}</p>
     </div>
-    <p class="section-intro" style="margin-top:0;">Here's exactly where ${escapeHtml(siteName)} stands inside that shift today:</p>
+    <p class="score-lead">Here's exactly where ${escapeHtml(siteName)} stands inside that shift today.</p>
     <div class="score-moment">
+      <p class="label-small">Website Health Score</p>
       <span class="score-value">${score} <span class="score-max">/ 100</span></span>
       <span class="score-status" style="color:${status === 'NEEDS ATTENTION' ? BRAND.red : BRAND.navy}">${status}</span>
       <div class="score-bar"><div class="score-bar-fill" style="width:${Math.max(2, Math.min(100, score))}%"></div></div>
@@ -420,12 +465,11 @@ const ROADMAP_STAGES = [
 // the real audit), the autonomous agent, and the phased roadmap.
 function howWeHelpPage({ openRecommendations, siteName, dateLabel }) {
   const items = selectFeaturedRecommendations(openRecommendations?.items || [], MAX_RECOMMENDATION_ROWS);
-  const rows = items.map((item, i) => {
-    const num = String(i + 1).padStart(2, '0');
+  const rows = items.map((item) => {
     const { action, benefit } = recommendationClientCopy(item);
     return `
     <div class="rec-row">
-      <span class="rec-num">${num}</span>
+      <span class="rec-dot" style="background:${PRIORITY_COLOR[item.priority] || BRAND.muted}"></span>
       <div class="rec-body">
         <p class="rec-title">${escapeHtml(action)}</p>
         <p class="rec-desc">${escapeHtml(benefit)}</p>
@@ -469,17 +513,17 @@ function gettingStartedPage({ siteName, dateLabel }) {
     <div class="starter-block">
       <p class="label-small">What We'll Need From You</p>
       <ul class="starter-list">
-        <li>Access to Google Search Console and Google Analytics for ${escapeHtml(siteName)}</li>
-        <li>One point of contact who can approve bigger changes we flag</li>
-        <li>Access to your website/CMS, so low-risk fixes can be applied directly</li>
+        <li><strong>Access to Google Search Console and Google Analytics</strong> for ${escapeHtml(siteName)} — so we can see your real search and traffic data from day one, not guess at it.</li>
+        <li><strong>One point of contact</strong> who can approve the bigger changes we flag — keeps decisions moving instead of stalling on back-and-forth.</li>
+        <li><strong>Access to your website or CMS</strong> — so low-risk fixes can go live directly, without waiting on your team every time.</li>
       </ul>
     </div>
     <div class="starter-block">
       <p class="label-small">Right After Kickoff</p>
       <ul class="starter-list">
-        <li>We run a full audit and freeze this report as your day-0 baseline</li>
-        <li>Our system starts its daily checks immediately</li>
-        <li>You'll see your first fixes within days, and a Milestones report tracking real progress against this baseline</li>
+        <li><strong>We run a full audit</strong> and freeze this report as your day-0 baseline — the exact numbers every future report is measured against.</li>
+        <li><strong>Our system starts its daily checks immediately</strong> — no ramp-up period, no waiting for a "next sprint."</li>
+        <li><strong>You'll see your first fixes within days</strong>, and a Milestones report tracking real progress against this baseline.</li>
       </ul>
     </div>
     <div class="commitment">
@@ -598,6 +642,7 @@ const REPORT_CSS = `
   .explainer-term { font-size: 15px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 2mm; }
   .explainer-full { font-size: 11px; font-weight: 500; color: ${BRAND.faint}; }
   .explainer-copy { font-size: 12px; color: ${BRAND.muted}; line-height: 1.6; max-width: 155mm; margin: 0; }
+  .explainer-example { font-size: 11.5px; font-style: italic; color: ${BRAND.navy}; line-height: 1.5; max-width: 155mm; margin: 3mm 0 0; }
 
   .callout { margin-top: 8mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.red}; break-inside: avoid; page-break-inside: avoid; }
   .callout-copy { font-size: 12.5px; line-height: 1.6; color: ${BRAND.navy}; margin: 0; }
@@ -609,11 +654,13 @@ const REPORT_CSS = `
   .mini-score-label { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; }
 
   /* ---- industry trend opener, page 2 ---- */
-  .industry-block { margin-bottom: 6mm; }
+  .industry-block { margin-bottom: 6mm; padding: 6mm 7mm; background: ${BRAND.surface}; border-left: 3px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
+  .industry-copy { font-size: 12.5px; color: ${BRAND.navy}; line-height: 1.6; max-width: 150mm; margin: 2mm 0 0; }
+  .score-lead { font-size: 11.5px; color: ${BRAND.faint}; margin: 0 0 3mm; }
 
   /* ---- competitors, page 2 ---- */
   .competitors { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
-  .competitor-row { padding: 4mm 0; break-inside: avoid; page-break-inside: avoid; }
+  .competitor-row { padding: 3mm 0 3mm 5mm; margin: 3mm 0; border-left: 2.5px solid ${BRAND.faint}; break-inside: avoid; page-break-inside: avoid; }
   .competitor-domain { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; color: ${BRAND.faint}; }
   .competitor-headline { font-size: 13px; font-weight: 600; color: ${BRAND.navy}; line-height: 1.5; margin: 0; max-width: 150mm; }
   .competitor-copy { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 1.5mm 0 0; max-width: 150mm; }
@@ -650,7 +697,7 @@ const REPORT_CSS = `
   .rec-list { margin-top: 2mm; }
   .rec-row { display: flex; align-items: flex-start; gap: 6mm; padding: 6mm 0; break-inside: avoid; page-break-inside: avoid; }
   .rec-divider { height: 1px; background: ${BRAND.divider}; }
-  .rec-num { font-family: 'DM Mono', monospace; font-size: 20px; color: ${BRAND.faint}; width: 12mm; flex-shrink: 0; }
+  .rec-dot { width: 2.5mm; height: 2.5mm; border-radius: 50%; flex-shrink: 0; margin-top: 2mm; }
   .rec-body { flex: 1; }
   .rec-title { font-size: 13.5px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 2mm; }
   .rec-desc { font-size: 11.5px; color: ${BRAND.muted}; line-height: 1.5; margin: 0; max-width: 120mm; }
@@ -660,8 +707,8 @@ const REPORT_CSS = `
   /* ---- roadmap ---- */
   .roadmap { margin-top: 10mm; }
   .roadmap-stage { display: flex; align-items: flex-start; gap: 6mm; break-inside: avoid; page-break-inside: avoid; }
-  .roadmap-marker { width: 10mm; height: 10mm; border-radius: 50%; border: 1.5px solid ${BRAND.navy}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .roadmap-marker span { font-family: 'DM Mono', monospace; font-size: 10px; color: ${BRAND.navy}; }
+  .roadmap-marker { width: 10mm; height: 10mm; border-radius: 50%; background: ${BRAND.navy}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .roadmap-marker span { font-family: 'DM Mono', monospace; font-size: 10px; color: #fff; font-weight: 500; }
   .roadmap-title { font-size: 14px; font-weight: 700; color: ${BRAND.navy}; margin: 0 0 1mm; }
   .roadmap-copy { font-size: 11.5px; color: ${BRAND.muted}; margin: 0; }
   .roadmap-line { width: 1.5px; height: 8mm; background: ${BRAND.divider}; margin: 1mm 0 1mm 5mm; }
