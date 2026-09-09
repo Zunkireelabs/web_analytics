@@ -424,6 +424,10 @@ function gettingStartedPage({ siteName, dateLabel }) {
         <li>You'll see your first fixes within days, and a Milestones report tracking real progress against this baseline</li>
       </ul>
     </div>
+    <div class="commitment">
+      <p class="label-small">Our Commitment</p>
+      <p class="commitment-copy">This isn't a one-time report — it's an active system working on ${escapeHtml(siteName)} every single day, moving you from where you stand today toward real, measurable growth. Every fix is logged, every score is tracked, and every future report is measured against this exact baseline — so you always know precisely what's working, in numbers, not promises.</p>
+    </div>
     <div class="closing">
       <div class="closing-logo">${brandMark(26, 16)}</div>
       <p class="closing-tag">AI-Powered Website Growth</p>
@@ -561,6 +565,11 @@ const REPORT_CSS = `
   .starter-block { margin-top: 6mm; }
   .starter-list { margin: 0; padding-left: 5mm; }
   .starter-list li { font-size: 12.5px; color: ${BRAND.navy}; line-height: 1.8; }
+
+  /* ---- closing commitment statement, page 4 ---- */
+  .commitment { margin-top: 10mm; padding: 7mm 8mm; background: ${BRAND.navy}; border-radius: 3px; break-inside: avoid; page-break-inside: avoid; }
+  .commitment .label-small { color: rgba(255,255,255,0.55); margin-bottom: 3mm; }
+  .commitment-copy { font-size: 12.5px; line-height: 1.7; color: #fff; margin: 0; max-width: 155mm; }
 
   .assessment { margin-top: 8mm; padding-top: 8mm; border-top: 1px solid ${BRAND.divider}; }
   .label-small { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: ${BRAND.faint}; font-weight: 700; margin-bottom: 4mm; }
