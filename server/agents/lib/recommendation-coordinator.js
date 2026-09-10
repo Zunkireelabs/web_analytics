@@ -41,6 +41,25 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
   'llms-txt', 'security-headers', 'html-lang', 'sitemap', 'robots-fix',
 ]);
 
+// Every `reportOnly.kind` any agent raises (agents/types.js's ReportOnly) —
+// a confirmed, real defect with no safe automatic fix, by the detecting
+// agent's own deliberate choice not to set recommendedAction. None of these
+// has (or should ever get) a matching file under generators/, so a row of
+// this type can never be drafted; its blocked_reason is not a gate verdict,
+// it's the whole reason the row exists. refreshBlockedRecommendations below
+// is the one place that distinction wasn't honored — see its comment.
+// Kept as a static list rather than checking generators/registry.js's
+// getGenerator() (which would return the correct null just as well): that
+// function `import()`s every file under generators/ on first call, several
+// of which transitively pull in the OpenAI SDK, and refreshBlockedRecommendations
+// runs inside a request/cron path this file's own tests deliberately keep
+// free of that chain.
+const REPORT_ONLY_KINDS = new Set([
+  'query-cannibalization', 'authority-backlinks-lost', 'duplicate-content',
+  'device-ctr-deficit', 'competitor-outranking', 'competitor-backlink-gap',
+  'font-size-inconsistency', 'keyword-cluster-gap',
+]);
+
 // The real key for a recommendation row — (siteId, page, generatorId) isn't
 // always enough on its own: analytics-install's GA4 and Facebook Pixel
 // findings share the same generatorId AND the same page (the homepage), so
@@ -83,10 +102,45 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // its own row — it silently disappears into finding_ids on whichever topic
 // synced first. `topic` is the real identity of a blog-outline
 // recommendation, the same way `href` is for broken-link-fix.
+// A page reachable at both its `www.` and bare-domain variant (or with vs.
+// without a trailing slash) is the same resource, but the crawler's `page`
+// param is whichever exact URL variant that particular crawl happened to
+// request — so two crawls of the identical page can otherwise mint two
+// different dedup keys and split into two Action Center cards for the same
+// underlying issue. Confirmed as a real report: the same crm.zunkiree.com
+// dead link showed as one recommendation keyed to
+// https://www.zunkireelabs.com/products/ai-crm/ and a second keyed to
+// https://zunkireelabs.com/products/ai-crm/ (no `www.`).
+//
+// Deliberately scoped to ONLY broken-link-fix/missing-page-create, not
+// applied generally (e.g. to the plain `return item.params?.page || ''`
+// fallback below, or expand-content/content-integrity-repair's page
+// component). Those other keys are compared verbatim against the ALREADY
+// STORED `rec.page` column inside recheckRecommendation's generic re-detect
+// match (`recommendationPageKey(...) === rec.page`, below) — normalizing
+// their formula would silently stop matching every existing row whose
+// stored `page` isn't already in the new normalized form (any trailing
+// slash, any `www.`), misreading "still detected" as "resolved" and closing
+// it. broken-link-fix/missing-page-create never reach that comparison (this
+// function returns earlier, via recheckLink against `params.href` alone),
+// so they're the only two safe to normalize without a backfill.
+function normalizePageForKey(page) {
+  if (!page) return page;
+  try {
+    const u = new URL(page);
+    u.hostname = u.hostname.replace(/^www\./i, '');
+    u.hash = '';
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) u.pathname = u.pathname.slice(0, -1);
+    return u.toString();
+  } catch {
+    return page;
+  }
+}
+
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
-  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${item.params?.page || ''}::${item.params?.href || ''}`;
+  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${normalizePageForKey(item.params?.page) || ''}::${item.params?.href || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   // Same failure mode as blog-outline above: landing-page has no `page`
   // param either (country-intelligence.js calls it with {market}/{city},
@@ -322,6 +376,24 @@ export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent
   const gates = createRecommendationGates(siteId, site);
   let updated = 0;
   for (const rec of rows) {
+    // A reportOnly-kind row (REPORT_ONLY_KINDS above) has no real generator
+    // behind it — recommendations.js deliberately skips gates.evaluate for
+    // these at detection time, with the exact same reasoning: "every gate
+    // answers 'can we safely DRAFT this?', and the row exists precisely
+    // because nothing will be drafted. Running them would mean asking a
+    // url_file_map/design question about a fix that does not exist." This
+    // refresh pass was the one place that reasoning wasn't applied — it
+    // re-evaluates every open BLOCKED row through the generic gates
+    // regardless of type, and for an unregistered generatorId every gate
+    // case falls through to "not blocked", silently wiping the deliberate,
+    // permanent blocked_reason back to null on the very next daily pass
+    // (confirmed live: a query-cannibalization row's blocked_reason went
+    // from its real text to null within the same run that inserted it,
+    // exposing a dead "Generate Solution Draft" button that 404s with
+    // `Unknown generator "query-cannibalization"` on click). Skipping here,
+    // before gates ever sees it, is the fix — leaving the row exactly as
+    // syncFromGrounded's own inline refresh already set it.
+    if (REPORT_ONLY_KINDS.has(rec.recommendation_type)) continue;
     const gate = await gates.evaluate(rec.recommendation_type, rec.params || {}).catch(() => null);
     if (!gate) continue; // could not verify this run — leave the row untouched
     // gate.drop (page proven gone) is deliberately not acted on here: closing

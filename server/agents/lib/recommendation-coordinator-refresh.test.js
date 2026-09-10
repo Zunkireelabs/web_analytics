@@ -138,3 +138,24 @@ describe('refreshBlockedRecommendations — a gate that proves the page is gone 
     assert.equal(refreshed[0].blockedReason, null);
   });
 });
+
+// Regression coverage for a real report: a query-cannibalization
+// recommendation's blocked_reason went from its real, correct text to null
+// within minutes of being created — the gate re-evaluation this pass runs
+// falls through to "not blocked" for a generatorId with no real generator,
+// silently clearing a block that was never a gate verdict to begin with.
+// This left a dead "Generate Solution Draft" button on the card that 404s
+// with `Unknown generator "query-cannibalization"` on click.
+describe('refreshBlockedRecommendations — a reportOnly-kind row (no real generator)', () => {
+  test('never reaches gates.evaluate and is left exactly as detection set it', async () => {
+    blockedRows = [{ id: 6628, recommendation_type: 'query-cannibalization', params: { page: 'https://zunkireelabs.com/' }, detecting_agents: ['query-intelligence'] }];
+    evaluateImpl = () => { throw new Error('must not be reached — reportOnly kinds skip gates entirely'); };
+
+    const result = await refreshBlockedRecommendations(1);
+
+    assert.equal(result.checked, 1);
+    assert.equal(result.updated, 0);
+    assert.equal(refreshed.length, 0);
+    assert.equal(evaluateCalls.length, 0);
+  });
+});

@@ -6,6 +6,9 @@ import { searchImage, buildImageQueries, configured as imagesConfigured } from '
 import { usedPhotoIds } from './lib/blog-image-usage.js';
 import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { getSeoPolicy } from '../store/site-seo-policy.js';
+import { getSiteProfile } from '../store/data-analyst.js';
+import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -95,9 +98,11 @@ export async function generate({ siteId, params }) {
   if (!topic) throw Object.assign(new Error('topic is required'), { status: 400 });
   const { start, end } = params.start && params.end ? params : defaultRange();
 
-  const [site, otherPagesRaw] = await Promise.all([
+  const [site, otherPagesRaw, seoPolicy, siteProfile] = await Promise.all([
     getSiteById(siteId),
     getSearchPerformanceRange(siteId, start, end, 'page', CANDIDATE_LIMIT),
+    getSeoPolicy(siteId),
+    getSiteProfile(siteId),
   ]);
   const domain = knownDomain(site);
   const otherPages = filterOwnDomainPages(otherPagesRaw, ownDomains(site));
@@ -114,8 +119,28 @@ export async function generate({ siteId, params }) {
   const grounded = fetched.ok && hasSufficientGroundingContent(fetched.analysis);
   const groundingExcerpt = grounded ? fetched.analysis.bodyText.slice(0, GROUNDING_EXCERPT_CHARS) : null;
 
+  // Every tenant's own real business/industry steers topic focus — an
+  // explicit site_seo_policy override when set (e.g. Zunkiree's own
+  // multi-industry rule), else the industry already inferred generically
+  // for THIS site from its own real GSC queries (site_profiles). Neither
+  // source existing means genuinely nothing is known yet — no fallback
+  // guess, no industry line at all (2026-09-10 multi-tenant SEO rule).
+  const industries = tenantIndustries(seoPolicy, siteProfile);
+  const industryFocus = industries?.length
+    ? `Write for readers in this business's own industry/industries where the topic allows it — their real ` +
+      `problems, services, products, software, automation, website, CRM, booking, or management needs: ` +
+      `${industries.join(', ')}. `
+    : '';
+  // Baseline for every tenant (a policy row can only ever add stricter
+  // constraints, per no_invented_data's schema default — never opt back
+  // into inventing numbers): no fabricated search-volume/demand figures.
+  const noInventedDataNote = seoPolicy?.no_invented_data !== false
+    ? 'Do not state or imply specific search-volume, ranking, or demand figures (e.g. "X searches per month") ' +
+      'unless such data is explicitly given to you below — write about the topic\'s real substance instead. '
+    : '';
+
   const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
-    `topic — this is a fresh piece, not based on an existing page. ` +
+    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + noInventedDataNote +
     (groundingExcerpt
       ? 'Any claim about this specific business (its services, offerings, or policies) must be grounded ONLY in the ' +
         '"Real site content" text given below — never invent one. General topic knowledge not specific to this ' +
