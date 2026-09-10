@@ -11,6 +11,7 @@ import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/h
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
 import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
@@ -27,7 +28,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -41,7 +42,7 @@ export const meta = {
 // onboarding/migration warm-cache tool) iterates the SAME real set of
 // marker-merge action types this implementer actually handles, rather than
 // keeping its own independent, driftable copy of the list.
-export const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
+export const MARKER_MERGE_TYPES = new Set(['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'analytics-install', 'breadcrumbs']);
 
 // MARKER_FIELD_BY_ACTION_TYPE (imported above, from url-file-map.js — the
 // same table PLATFORM_DEFAULT_MARKERS now builds its defaults from) is used
@@ -965,6 +966,36 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
+  // Responsive preview (generators/lib/responsive-preview-gate.js) — every
+  // check above is structural/static; this is the one that actually renders
+  // the exact content about to publish, in a real browser, at mobile/tablet/
+  // desktop widths, and diffs against the live page's own baseline so a
+  // pre-existing site defect is never blamed on this draft. Scoped the same
+  // as the freshness check above (design-sensitive types, visible mode only)
+  // — a schema-only/meta-title splice has nothing rendered to check.
+  //
+  // Informational by default (RESPONSIVE_GATE_ENFORCE), the same rollout
+  // posture checkDesignIntegrityGate used before it started refusing drafts:
+  // this needs a real headless-browser round trip against the live site —
+  // slower and less battle-tested in production than every static check
+  // above it — so it ships watching first, blocking once that's proven out.
+  let responsivePreview = null;
+  const componentField = MARKER_FIELD_BY_ACTION_TYPE[draft.action_type];
+  const marker = componentField && markerMap[componentField];
+  if (mode === 'visible' && componentKey && marker && built.values[componentField]) {
+    responsivePreview = await checkResponsivePreview({
+      pageUrl: page, marker, newContentHtml: built.values[componentField],
+    }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+
+    if (responsivePreview.ok && responsivePreview.broken && process.env.RESPONSIVE_GATE_ENFORCE === 'true') {
+      return {
+        ok: false, reason: 'responsive-regression',
+        error: `This content breaks the page's layout at a real device width: ${describeResponsiveRegressions(responsivePreview.regressions)}.`,
+        regressions: responsivePreview.regressions,
+      };
+    }
+  }
+
   // Resolves any marker in markerMap that isn't already in the live file —
   // the universal insertion engine (insertion-engine.js's resolveInsertion):
   // learned-strategy-first (strategy-registry.js), then real structural
@@ -993,6 +1024,10 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   return {
     ok: true, filePath, oldContent: file.content, newContent: spliced.newContent, changedRegions: spliced.changedRegions,
     renderMode: mode, renderModeConfidence: inspection?.confidence ?? null, renderModeReason: inspection?.reason ?? null,
+    // Carried through even when not enforced (RESPONSIVE_GATE_ENFORCE unset)
+    // so a caller/log can see what the check WOULD have refused, during the
+    // watch-before-block rollout window — never silently discarded.
+    responsivePreview,
   };
 }
 

@@ -268,8 +268,82 @@ export async function checkTemplateFreshness({ pageUrl, templateEntry, fetchPage
   const missingClasses = classes.filter((cls) => !classExistsInCss(cls, css));
   // `css` is included so a caller with a stale result can filter the template
   // down to what actually ships (filterTemplateToLiveClasses) without a
-  // second fetch of the exact same stylesheets.
-  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes, css };
+  // second fetch of the exact same stylesheets. `html` likewise, so a caller
+  // that also wants checkTemplateStructuralMatch below doesn't re-fetch the
+  // exact same page.
+  return { ok: true, stale: missingClasses.length > 0, missingClasses, checkedClasses: classes, css, html };
+}
+
+// A regex that matches this exact markup SHAPE on a real page: every
+// `{{PLACEHOLDER}}` becomes a wildcard (the real question/answer/heading
+// content there is unpredictable by design and must not be required
+// verbatim), and any run of literal whitespace becomes a whitespace-run
+// match (real repo indentation can differ trivially from the captured copy
+// without the shape having changed — same tolerance checkTemplateFreshness's
+// own class-matching already has for CSS). Every other character — tag
+// names, real attribute values, an Alpine `x-data`/`@click` directive, a
+// `<button>`/`<svg>` that a plain `<dl>` doesn't have — must match
+// literally. That literal survival is exactly the evidence this check
+// exists to require, where checkTemplateFreshness's class-existence check
+// cannot: two structurally unrelated components can share every individual
+// utility class (a flat `<dl>` and a rich Alpine accordion can both use
+// `text-2xl`, `font-normal`) while looking nothing alike.
+function structuralPattern(markup) {
+  const trimmed = (markup || '').trim();
+  // A guard against a pathological template producing a runaway regex, not
+  // a realistic limit for any real captured component — never silently
+  // "pass" on this, since that would be exactly the false confidence this
+  // check exists to prevent; the caller reports it as inconclusive instead.
+  if (!trimmed || trimmed.length > 8000) return null;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const withWildcards = escaped.replace(/\\\{\\\{[A-Z_]+\\\}\\\}/g, '[\\s\\S]*?');
+  // Zero-OR-more, not one-or-more: whitespace between tags is purely
+  // cosmetic and can be added, removed, or reformatted (a repo prettify
+  // pass, minification) without the actual SHAPE changing — only literal
+  // tag/attribute text is real evidence of shape.
+  const withWhitespace = withWildcards.replace(/\s+/g, '\\s*');
+  // A tag boundary with NO whitespace in the captured copy must equally
+  // tolerate whitespace being introduced on the live page — the \s+->\s*
+  // substitution above only touches whitespace that already existed in the
+  // captured copy; this covers the opposite direction.
+  return withWhitespace.replace(/></g, '>\\s*<');
+}
+
+// Whether TEMPLATE's markup shape still exists, structurally, anywhere on
+// the given reference page — not just whether its classes resolve in CSS
+// somewhere on the site (checkTemplateFreshness's own, narrower question).
+//
+// Only safe to call against a REFERENCE page that is genuinely expected to
+// contain this component right now (the site's homepage — sitePageUrl(site),
+// the same default every self-heal/re-derivation/backfill call site above
+// already uses — or wherever the template was actually captured from). Never
+// call this against an in-progress DRAFT's own target page: that page
+// legitimately does not have the component yet, which is the entire reason
+// the draft exists — checkTemplateFreshness's own CSS-only check is correct
+// there (backend.js's apply-time gate) precisely because Tailwind ships one
+// stylesheet for the whole site, so class-existence is meaningful on ANY
+// page, while structure is only meaningful on a page that actually has the
+// real thing.
+//
+// `html` lets a caller that already fetched this page for
+// checkTemplateFreshness's own CSS check (checkTemplateFreshness's return
+// now carries it) skip a second, redundant fetch of the exact same URL.
+export async function checkTemplateStructuralMatch({ pageUrl, templateEntry, fetchPage = fetchText, html = null }) {
+  if (!templateEntry?.wrapper) return { ok: true, structurallyStale: false, missingStructure: [] };
+
+  const page = html ?? await fetchPage(pageUrl);
+  if (!page) return { ok: false, error: `Could not fetch ${pageUrl} to check its current live structure.` };
+
+  const missing = [];
+  for (const [slot, markup] of [['wrapper', templateEntry.wrapper], ['row', templateEntry.row]]) {
+    if (!markup) continue;
+    const pattern = structuralPattern(markup);
+    if (!pattern) continue; // all-placeholder, empty, or too-large a slot has no shape to check — never a false failure
+    let re;
+    try { re = new RegExp(pattern); } catch { continue; } // never let a pathological pattern crash verification
+    if (!re.test(page)) missing.push(slot);
+  }
+  return { ok: true, structurallyStale: missing.length > 0, missingStructure: missing };
 }
 
 // The same placeholder contract marker-merge.js's renderFaqHtml/
@@ -744,6 +818,24 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
   // no to that, or the stamp means only "these strings exist".
   const label = bodySlotLooksLikeLabel(actionType, template, freshness.css);
   if (label) return { ok: false, reason: 'body-slot-is-label', error: label };
+
+  // Class existence is not structure. Every check above answers "do these
+  // classes resolve on this site somewhere" — this is the one that answers
+  // "does this template's actual SHAPE still exist on the page it claims to
+  // represent." A flat <dl> and a real Alpine accordion can share every
+  // individual class while being nothing alike; only this catches that (see
+  // checkTemplateStructuralMatch's own comment — the 2026-09-10 incident
+  // this exists to prevent).
+  const structural = await checkTemplateStructuralMatch({ pageUrl, templateEntry: template, fetchPage, html: freshness.html })
+    .catch((err) => ({ ok: false, error: err.message }));
+  if (!structural.ok) return { ok: false, reason: 'unreachable', error: structural.error };
+  if (structural.structurallyStale) {
+    return {
+      ok: false, reason: 'structural-mismatch',
+      error: `This template's captured markup shape (${structural.missingStructure.join(', ')}) no longer appears anywhere on ${pageUrl} — its classes are still live, but the actual component structure doesn't match. Re-capture it from a real, current example of the component instead of trusting class-existence alone.`,
+      missingStructure: structural.missingStructure,
+    };
+  }
 
   return {
     ok: true,

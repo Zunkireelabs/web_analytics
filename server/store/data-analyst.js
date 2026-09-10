@@ -100,10 +100,13 @@ export async function saveKeywordClusters(siteId, clusters) {
 // weekly discovery pass finds again bumps observation_count and last_seen_at
 // on the SAME row rather than creating a duplicate, so
 // qualifyAndShipContentGaps (analyst-seo-mapping.js) can require 2+
-// observations before a gap is even eligible to ship. A gap a human already
-// accepted/dismissed falls outside the partial index, so a resighting there
-// inserts a fresh row exactly as before — re-approval/re-dismissal behavior
-// is unchanged.
+// observations before a gap is even eligible to ship. A topic a human already
+// accepted/dismissed falls outside that partial index, so the INSERT is
+// additionally guarded by a NOT EXISTS check against any accepted/dismissed
+// row for the same (site_id, topic) — otherwise a resighting there would
+// insert a brand-new pending_review row for a topic already rejected once,
+// which is exactly the "reworded/rejected idea resurfacing" the multi-tenant
+// growth spec forbids.
 // observation_count counts DISTINCT WEEKS a topic was genuinely re-observed,
 // not raw calls to this function (migration 143). The increment is gated on
 // last_observed_week strictly advancing, which matters for two reasons:
@@ -124,14 +127,25 @@ export async function saveKeywordClusters(siteId, clusters) {
 // discoveryWeek defaults to the current ISO-week Monday computed in SQL rather
 // than in the caller, so two processes on different hosts (or one with a skewed
 // clock) can't disagree about which week they're writing.
+// topic_cluster/cluster_role (migration 156): optional — set only when the
+// discovery pass (find_gaps, data-analyst-agent) judged several of the gaps
+// it's proposing IN THE SAME CALL to be genuinely related, and grouped them
+// under one cluster name with a single 'pillar' + the rest 'supporting'.
+// Never computed here — this function only persists what the caller already
+// decided, same as every other field on this row.
 export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis', { discoveryWeek = null } = {}) {
   for (const g of gaps) {
     await query(
       `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source,
-                                 first_discovery_week, last_observed_week)
-       VALUES ($1, $2, $3, $4, 'pending_review', $5,
-               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
-               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date))
+                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role)
+       SELECT $1, $2, $3, $4, 'pending_review', $5,
+              COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
+              COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
+              $7, $8
+        WHERE NOT EXISTS (
+          SELECT 1 FROM keyword_gaps
+           WHERE site_id = $1 AND topic = $2 AND status IN ('accepted', 'dismissed')
+        )
        ON CONFLICT (site_id, topic) WHERE status = 'pending_review' DO UPDATE SET
          last_seen_at = now(),
          observation_count = keyword_gaps.observation_count
@@ -139,10 +153,29 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
                    THEN 1 ELSE 0 END),
          last_observed_week = GREATEST(EXCLUDED.last_observed_week,
                                        COALESCE(keyword_gaps.last_observed_week, EXCLUDED.last_observed_week)),
-         reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason)`,
-      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek]
+         reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason),
+         topic_cluster = COALESCE(EXCLUDED.topic_cluster, keyword_gaps.topic_cluster),
+         cluster_role = COALESCE(EXCLUDED.cluster_role, keyword_gaps.cluster_role)`,
+      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null]
     );
   }
+}
+
+// Siblings of one gap within the SAME topic cluster — used only to give a
+// pillar/supporting draft real context about the rest of its cluster (see
+// analyst-seo-mapping.js's clusterContextFor), never to build the cluster
+// itself (that's decided once, in find_gaps, and normalized in
+// _normalize_clusters before it's ever saved).
+export async function getKeywordGapsInCluster(siteId, topicCluster, excludeGapId) {
+  if (!topicCluster) return [];
+  const { rows } = await query(
+    `SELECT id, topic, cluster_role, status
+       FROM keyword_gaps
+      WHERE site_id = $1 AND topic_cluster = $2 AND id != $3
+      ORDER BY (cluster_role = 'pillar') DESC, created_at ASC`,
+    [siteId, topicCluster, excludeGapId ?? -1]
+  );
+  return rows;
 }
 
 export async function getKeywordClusters(siteId, clusterType) {
@@ -165,6 +198,7 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
+            topic_cluster, cluster_role,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs

@@ -156,6 +156,10 @@ export const MARKER_FIELD_BY_ACTION_TYPE = {
   canonical: 'canonical',
   'open-graph': 'openGraph',
   'expand-content': 'expandedContent',
+  // Deliberately the SAME field as expand-content — see refresh-content.js's
+  // own comment: reusing the real, already-onboarded marker every site has
+  // for expand-content, rather than requiring a second onboarding pass.
+  'refresh-content': 'expandedContent',
   'qa-content': 'qaContent',
   breadcrumbs: 'breadcrumbSchema',
 };
@@ -195,6 +199,7 @@ const MARKER_NAME_BY_ACTION_TYPE = {
   canonical: 'CANONICAL',
   'open-graph': 'OPENGRAPH',
   'expand-content': 'EXPANDEDCONTENT',
+  'refresh-content': 'EXPANDEDCONTENT',
   'qa-content': 'QACONTENT',
   breadcrumbs: 'BREADCRUMBSCHEMA',
 };

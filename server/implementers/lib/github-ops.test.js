@@ -19,7 +19,17 @@ const defaults = {
   getFileContent: async () => null,
   mergeBranchFromBase: async () => ({ ok: true, conflicted: false, synced: false }),
   compareCommits: async () => ({ files: [] }),
+  // checkBatchSequencing's only dependency — no unresolved prior batch by
+  // default, so every test above (none of which cares about sequencing)
+  // keeps seeing today's batch as clear to start.
+  getUnresolvedPriorBatchBranch: async () => null,
 };
+
+mock.module(resolve('../../store/drafts.js'), {
+  namedExports: {
+    getUnresolvedPriorBatchBranch: (...a) => defaults.getUnresolvedPriorBatchBranch(...a),
+  },
+});
 
 mock.module(resolve('../../github/client.js'), {
   namedExports: {
@@ -48,7 +58,7 @@ mock.module(resolve('../../github/client.js'), {
 
 const {
   pushDraftBranch, openPrForBranch, openRollbackPr, batchBranchName, beginBatchPush, endBatchPush,
-  getOrInitBatchBranch, batchBranchConflictError,
+  getOrInitBatchBranch, batchBranchConflictError, checkBatchSequencing,
 } = await import('./github-ops.js');
 
 const site = { id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main' };
@@ -456,5 +466,81 @@ describe('batchBranchName', () => {
 
   test('falls back to UTC for a site with no timezone set', () => {
     assert.equal(batchBranchName({ id: 3 }, new Date('2026-08-13T23:00:00Z')), 'action-center/batch-3-2026-08-13');
+  });
+});
+
+// The sequencing guarantee itself: closes the gap that let
+// action-center/batch-1-2026-09-08 fork from a stale `main` before
+// action-center/batch-1-2026-09-07's delayed PR (#86) had merged, colliding
+// on a shared file once it finally did. auto-remediation.js's early-exit is
+// what actually skips a run — these tests only cover the pure decision this
+// function hands back, and that it asks the store scoped to THIS site and
+// excludes THIS site's own today-branch.
+describe('checkBatchSequencing', () => {
+  const originalGetUnresolved = defaults.getUnresolvedPriorBatchBranch;
+  const restore = () => { defaults.getUnresolvedPriorBatchBranch = originalGetUnresolved; };
+
+  test('1. previous batch merged (store reports nothing unresolved) → not blocked, today can start', async () => {
+    defaults.getUnresolvedPriorBatchBranch = async () => null;
+    try {
+      const result = await checkBatchSequencing({ id: 1 }, new Date('2026-09-10T02:00:00Z'));
+      assert.equal(result.blocked, false);
+      assert.equal(result.todayBranchName, 'action-center/batch-1-2026-09-10');
+    } finally { restore(); }
+  });
+
+  test('2. previous batch still has an open PR → blocked, reports which branch/PR is holding it', async () => {
+    defaults.getUnresolvedPriorBatchBranch = async (siteId, todayBranchName) => {
+      assert.equal(siteId, 1);
+      assert.equal(todayBranchName, 'action-center/batch-1-2026-09-10');
+      return { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'https://github.com/acme/site/pull/86', status: 'pr_opened' };
+    };
+    try {
+      const result = await checkBatchSequencing({ id: 1 }, new Date('2026-09-10T02:00:00Z'));
+      assert.equal(result.blocked, true);
+      assert.equal(result.priorBranch, 'action-center/batch-1-2026-09-09');
+      assert.equal(result.priorPrUrl, 'https://github.com/acme/site/pull/86');
+      assert.equal(result.priorStatus, 'pr_opened');
+    } finally { restore(); }
+  });
+
+  test('3. previous batch closed without merge → the store already stops returning it (status flips off pr_opened), so this reports clear', async () => {
+    // checkDraftPrStatus (routes/action-center.js) marks a closed-without-
+    // merge draft 'abandoned' the moment the hourly poll/webhook sees it —
+    // this function never has to know about that transition itself, it just
+    // reflects whatever the store currently reports as unresolved.
+    defaults.getUnresolvedPriorBatchBranch = async () => null;
+    try {
+      const result = await checkBatchSequencing({ id: 1 }, new Date('2026-09-10T02:00:00Z'));
+      assert.equal(result.blocked, false);
+    } finally { restore(); }
+  });
+
+  test('4. one site\'s unresolved PR does not block another site — each call is scoped to its own site id', async () => {
+    const seenSiteIds = [];
+    defaults.getUnresolvedPriorBatchBranch = async (siteId) => {
+      seenSiteIds.push(siteId);
+      // Only site 1 has something unresolved; site 2 must see none of it.
+      return siteId === 1 ? { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' } : null;
+    };
+    try {
+      const blockedSite = await checkBatchSequencing({ id: 1 }, new Date('2026-09-10T02:00:00Z'));
+      const clearSite = await checkBatchSequencing({ id: 2 }, new Date('2026-09-10T02:00:00Z'));
+      assert.equal(blockedSite.blocked, true);
+      assert.equal(clearSite.blocked, false);
+      assert.deepEqual(seenSiteIds, [1, 2]);
+    } finally { restore(); }
+  });
+
+  test('a branch pushed with commits but no PR opened yet also counts as unresolved (pass-0 recovery territory)', async () => {
+    defaults.getUnresolvedPriorBatchBranch = async () => (
+      { branch_name: 'action-center/batch-1-2026-09-09', pr_number: null, pr_url: null, status: 'branch_pushed' }
+    );
+    try {
+      const result = await checkBatchSequencing({ id: 1 }, new Date('2026-09-10T02:00:00Z'));
+      assert.equal(result.blocked, true);
+      assert.equal(result.priorStatus, 'branch_pushed');
+      assert.equal(result.priorPrUrl, null);
+    } finally { restore(); }
   });
 });

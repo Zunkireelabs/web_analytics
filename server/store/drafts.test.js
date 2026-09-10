@@ -5,6 +5,7 @@ let issued;
 
 let implementedFindingIdsRows = [];
 let pendingDraftFilePathsRows = [];
+let unresolvedPriorBatchRows = [];
 let countFailedAttemptsRows = [];
 let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
 let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
@@ -20,6 +21,9 @@ function fakeQuery(text, params = []) {
   }
   if (sql.startsWith('SELECT DISTINCT target_file_path FROM drafts')) {
     return { rows: pendingDraftFilePathsRows };
+  }
+  if (sql.startsWith('SELECT branch_name, pr_number, pr_url, status')) {
+    return { rows: unresolvedPriorBatchRows };
   }
   if (sql.startsWith('SELECT COUNT(*)::int AS n FROM drafts WHERE site_id = $1 AND action_type = ANY')) {
     return { rows: [{ n: 0 }] };
@@ -55,10 +59,10 @@ mock.module(resolve('../db.js'), {
 const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
-  createDraft, getPendingDraftFilePaths,
+  createDraft, getPendingDraftFilePaths, getUnresolvedPriorBatchBranch,
 } = await import('./drafts.js');
 
-beforeEach(() => { issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
+beforeEach(() => { issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; unresolvedPriorBatchRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
 
 // Prompt 7 audit / migration 118: the app-level getDraftByFindingId-then-
 // insert check in generateDraft() has a real concurrent window (LLM
@@ -142,6 +146,36 @@ describe('getPendingDraftFilePaths', () => {
   test('an empty result set is an empty Set, not undefined/null', async () => {
     const result = await getPendingDraftFilePaths(7);
     assert.deepEqual(result, new Set());
+  });
+});
+
+// The BATCH-level sibling of getPendingDraftFilePaths: closes the gap that
+// let action-center/batch-1-2026-09-07's delayed merge collide with
+// action-center/batch-1-2026-09-08 (see github-ops.js's checkBatchSequencing).
+describe('getUnresolvedPriorBatchBranch', () => {
+  test('query excludes today\'s own branch, scopes to this site\'s batch- prefix, and checks both unresolved shapes', async () => {
+    await getUnresolvedPriorBatchBranch(7, 'action-center/batch-7-2026-09-10');
+    const q = issued.find((q) => q.sql.startsWith('SELECT branch_name, pr_number, pr_url, status'));
+    assert.ok(q, 'expected the unresolved-prior-batch query to run');
+    assert.match(q.sql, /branch_name LIKE \$2/);
+    assert.match(q.sql, /branch_name <> \$3/);
+    assert.match(q.sql, /status = 'pr_opened' AND pr_state = 'open'/);
+    assert.match(q.sql, /status = 'branch_pushed' AND pr_number IS NULL/);
+    assert.equal(q.params[0], 7);
+    assert.equal(q.params[1], 'action-center/batch-7-%');
+    assert.equal(q.params[2], 'action-center/batch-7-2026-09-10');
+  });
+
+  test('returns null when no unresolved prior branch exists', async () => {
+    const result = await getUnresolvedPriorBatchBranch(7, 'action-center/batch-7-2026-09-10');
+    assert.equal(result, null);
+  });
+
+  test('returns the row when an earlier day still has an open PR', async () => {
+    unresolvedPriorBatchRows = [{ branch_name: 'action-center/batch-7-2026-09-09', pr_number: 86, pr_url: 'https://github.com/x/y/pull/86', status: 'pr_opened' }];
+    const result = await getUnresolvedPriorBatchBranch(7, 'action-center/batch-7-2026-09-10');
+    assert.equal(result.branch_name, 'action-center/batch-7-2026-09-09');
+    assert.equal(result.pr_url, 'https://github.com/x/y/pull/86');
   });
 });
 

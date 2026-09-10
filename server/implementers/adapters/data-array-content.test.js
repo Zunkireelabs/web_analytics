@@ -211,6 +211,83 @@ describe('data-array-content computeScalarFieldChange — designProfile plumbing
   });
 });
 
+// Regression for the 2026-09-10 incident (PR #92, 7 zunkireelabs.com blog
+// posts): this adapter's scalarValuesFromDraft/computeScalarFieldChange
+// computed `page` from the draft but never passed it into buildMergeValues,
+// so marker-merge.js's blog-context sanitization (isBlogPage/
+// sanitizeCapturedTemplate — added 2026-09-09 for exactly this class of
+// defect) silently never ran for ANY page generated through this
+// data-array adapter (i.e. every pagination-generated page, blog posts
+// included) — only the marker-splice path (backend.js) ever threaded page
+// through. A site's captured section-scale componentTemplates.faq (real
+// homepage markup, container + section-headline heading) shipped verbatim
+// into blog article body copy as a result.
+describe('data-array-content computeScalarFieldChange — blog page context reaches buildMergeValues', () => {
+  const sectionScaleFaqTemplate = {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+  };
+  const blogJsonFixture = JSON.stringify([
+    { id: 'exploring-the-best-it-companies-in-nepal' },
+    { id: 'some-guide' },
+  ]);
+  const fetchBlogPosts = async () => ({ content: blogJsonFixture });
+  // `fields` (a plain string field holding rendered HTML), same shape as the
+  // existing designProfile-plumbing test's `qaContent: 'qaHtml'` above —
+  // this is the actual code path (computeScalarFieldChange ->
+  // scalarValuesFromDraft -> buildMergeValues) the 2026-09-10 incident went
+  // through. An `itemsField` config (raw question/answer items, no rendered
+  // HTML/componentTemplates involved at all) never touches buildMergeValues
+  // and isn't the shape that broke.
+  const tenantBlogFaq = {
+    id: 1,
+    url_file_map: {
+      siteRoot: { componentTemplates: { faq: sectionScaleFaqTemplate } },
+      patterns: [
+        { match: '^/blog/([^/]+)/?$', adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/blog.json', idField: 'id', fields: { faq: 'faqHtml' } } } },
+      ],
+    },
+  };
+
+  test('a blog-post draft strips the captured template\'s section-container/heading-scale classes', async () => {
+    const r = await computeChange(tenantBlogFaq, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/blog/exploring-the-best-it-companies-in-nepal/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchBlogPosts);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'faq');
+    assert.ok(written, 'expected the faqHtml field to be written');
+    assert.doesNotMatch(written.after, /container-custom/, 'blog post must not get the section-level container');
+    assert.doesNotMatch(written.after, /md:text-3xl/, 'blog post must not get the section-headline-scale heading');
+  });
+
+  test('a page type this site conventionally builds AS its own section (a service page) keeps the site\'s real captured styling untouched', async () => {
+    const tenantNonBlogFaq = {
+      ...tenantBlogFaq,
+      url_file_map: {
+        ...tenantBlogFaq.url_file_map,
+        // Same adapter/template/data file, but a /services/ route — per
+        // classifyPageType this is a page type sites conventionally build
+        // with their own dedicated, section-scale FAQ block (same
+        // established behavior marker-merge.test.js's 2026-09-09 regression
+        // coverage already locks in for /services/), so the real captured
+        // styling should ship unmodified here.
+        patterns: [
+          { match: '^/services/([^/]+)/?$', adapters: { faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/blog.json', idField: 'id', fields: { faq: 'faqHtml' } } } },
+        ],
+      },
+    };
+    const r = await computeChange(tenantNonBlogFaq, {
+      action_type: 'faq',
+      content: { page: 'https://zunkireelabs.com/services/some-guide/', items: [{ question: 'Q?', answer: 'A' }] },
+    }, fetchBlogPosts);
+    assert.equal(r.ok, true);
+    const written = r.changedRegions.find((c) => c.field === 'faq');
+    assert.match(written.after, /container-custom/);
+    assert.match(written.after, /md:text-3xl/);
+  });
+});
+
 // nestedField — location × service pages (e.g. /locations/kathmandu/aeo-seo/),
 // where the real content lives at services.<serviceId> on the location
 // object: a plain KEYED object, not another id-matched array entry. Real

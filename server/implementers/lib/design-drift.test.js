@@ -15,7 +15,7 @@ mock.module(resolve('../../store/design-integrity-verdicts.js'), {
 });
 
 const {
-  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness,
+  extractLiteralClassNames, extractStylesheetHrefs, checkTemplateFreshness, checkTemplateStructuralMatch,
   templateActionRequiresRow, resolveOrCreateComponentTemplate,
   isTemplateVerified, stampTemplateVerification, componentTemplateVerification,
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
@@ -455,7 +455,10 @@ describe('resolveOrCreateComponentTemplate', () => {
     const result = await resolveOrCreateComponentTemplate(site, 'faq', {
       ...noopDeps(),
       saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
-      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head></html>',
+      // Body actually contains the real shape, not just a page with the
+      // right stylesheet link — the self-heal now checks structure too
+      // (checkTemplateStructuralMatch), not just class-existence.
+      fetchPage: async () => `<html><head><link rel="stylesheet" href="/main.css"></head><body>${wrapper.replace('{{ROWS}}', row.replace('{{QUESTION}}', 'Q?').replace('{{ANSWER}}', 'A.'))}</body></html>`,
       fetchStylesheet: async () => '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}',
     });
 
@@ -485,7 +488,13 @@ describe('resolveOrCreateComponentTemplate', () => {
     // siteWithProfile only ever merges extra.siteRoot, so website_domain has
     // to be applied on top of its result, not passed through it.
     const liveSite = (extra = {}) => ({ ...siteWithProfile(extra), website_domain: 'zunkireelabs.com' });
-    const html = '<html><head><link rel="stylesheet" href="/main.css"></head></html>';
+    // Body actually contains a content-wrapper shape (projectContentWrapper's
+    // `<div class="...">{{BODY}}</div>`, filled with real content) — the
+    // structural check now runs on top of class-existence, so the fetched
+    // page has to genuinely contain the wrapper's shape, not just link the
+    // right stylesheet.
+    const html = '<html><head><link rel="stylesheet" href="/main.css"></head>'
+      + '<body><div class="max-w-3xl mx-auto">Real page content.</div></body></html>';
 
     test('a projection whose classes are all live is stamped freshness-check, the strongest evidence', async () => {
       // max-w-3xl mx-auto (container) and text-lg/text-gray-600/text-blue-600
@@ -854,11 +863,83 @@ describe('checkTemplateFreshness', () => {
   });
 });
 
+// A page whose body actually contains one real, filled-in example of
+// wrapper/row — realistic evidence a structural check should find, the same
+// way a real captured template's source page always does. Built once so
+// every "this template genuinely matches the live page" test below shares
+// identical, obviously-consistent fixtures instead of each writing its own
+// slightly-different page body.
+function pageContaining(wrapper, row) {
+  const filledRow = row.replace('{{QUESTION}}', 'What is this?').replace('{{ANSWER}}', 'An answer.');
+  const body = wrapper.replace('{{ROWS}}', filledRow);
+  return `<html><head><link rel="stylesheet" href="/assets/main.css"></head><body>${body}</body></html>`;
+}
+
+describe('checkTemplateStructuralMatch', () => {
+  const wrapper = '<section class="py-12 bg-gray-50"><div x-data="{ activeIndex: null }">{{ROWS}}</div></section>';
+  const row = '<div class="py-5"><button @click="activeIndex = 1"><span>{{QUESTION}}</span></button><p>{{ANSWER}}</p></div>';
+
+  test('matches when the real page body contains the template\'s shape, placeholders filled with real content', async () => {
+    const html = pageContaining(wrapper, row);
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, html });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, false);
+    assert.deepEqual(result.missingStructure, []);
+  });
+
+  // The actual 2026-09-10 incident, reproduced directly: a captured flat <dl>
+  // template whose individual classes are all perfectly real and live
+  // (checkTemplateFreshness would pass it every time), spliced against a
+  // page whose real component is a completely different shape (an Alpine
+  // accordion with a <button>/x-data, not a <dl>). Every class the flat
+  // template names may well exist somewhere on this same page's own CSS —
+  // structural match doesn't care about CSS at all, only about whether this
+  // markup SHAPE is literally present.
+  test('does not match a structurally different component even when its classes would be live (the 2026-09-10 incident)', async () => {
+    const wrongTemplate = {
+      wrapper: '<dl class="py-12 md:py-20">{{ROWS}}</dl>',
+      row: '<dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt><dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+    };
+    // The real page has the real accordion, not a <dl> anywhere.
+    const html = pageContaining(wrapper, row);
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: wrongTemplate, html });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, true);
+    assert.deepEqual(result.missingStructure, ['wrapper', 'row']);
+  });
+
+  test('tolerates indentation/whitespace differences between the captured copy and the live page', async () => {
+    const spacedWrapper = wrapper.replace('><div', '>\n  <div').replace('>{{ROWS}}', '>\n    {{ROWS}}');
+    const html = pageContaining(spacedWrapper, row);
+    // Checked against the ORIGINAL (unspaced) captured template — real repo
+    // formatting drift, not a shape change, must not be flagged.
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, html });
+    assert.equal(result.structurallyStale, false);
+  });
+
+  test('a template with no wrapper has nothing to check, not a false failure', async () => {
+    const result = await checkTemplateStructuralMatch({ pageUrl: 'https://example.com/', templateEntry: {}, html: '<html></html>' });
+    assert.equal(result.ok, true);
+    assert.equal(result.structurallyStale, false);
+  });
+
+  test('an unfetchable page fails as unreachable, never as a silent pass', async () => {
+    const result = await checkTemplateStructuralMatch({
+      pageUrl: 'https://example.com/', templateEntry: { wrapper, row }, fetchPage: async () => null,
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  });
+});
+
 describe('verifyTemplateAgainstLiveSite', () => {
   const wrapper = '<section class="py-12"><div class="divide-y divide-gray-200">{{ROWS}}</div></section>';
   const row = '<div class="py-5"><span>{{QUESTION}}</span><p>{{ANSWER}}</p></div>';
   const liveCss = '.py-12{a}.divide-y>:not([hidden]){a}.divide-gray-200{a}.py-5{a}';
-  const html = '<html><head><link rel="stylesheet" href="/assets/main.css"></head></html>';
+  // Body actually contains the shape (see checkTemplateStructuralMatch above)
+  // — every "should verify cleanly" test below needs this now that structure
+  // is checked too, not just CSS class existence.
+  const html = pageContaining(wrapper, row);
 
   test('a real, live-matching template is verified and stamped freshness-check', async () => {
     const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
@@ -910,6 +991,26 @@ describe('verifyTemplateAgainstLiveSite', () => {
     const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'unreachable');
+  });
+
+  // The actual regression this whole feature exists to close: a template
+  // whose classes are all live (checkTemplateFreshness alone would pass it)
+  // but whose structure is a completely different, unrelated component —
+  // must be rejected, not stamped as the strongest verification tier.
+  test('a template with live classes but the wrong structure is rejected as structural-mismatch, never stamped', async () => {
+    const wrongShape = {
+      wrapper: '<dl class="py-12">{{ROWS}}</dl>',
+      row: '<dt class="divide-y">{{QUESTION}}</dt><dd class="divide-gray-200 py-5">{{ANSWER}}</dd>',
+    };
+    // Every class wrongShape uses is real and live in liveCss, so a
+    // class-existence-only check would pass this — the live page's real
+    // component is the <section>/divide-y accordion above, not a <dl>.
+    const result = await verifyTemplateAgainstLiveSite('faq', wrongShape, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'structural-mismatch');
+    assert.ok(result.missingStructure.length > 0);
   });
 });
 

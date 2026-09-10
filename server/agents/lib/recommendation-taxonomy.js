@@ -57,6 +57,7 @@ const BY_SOURCE_AND_GENERATOR = {
 const BY_GENERATOR = {
   'meta-title': { bucket: 'seo', category: 'Meta Titles' },
   'expand-content': { bucket: 'seo', category: 'Content Expansion' },
+  'refresh-content': { bucket: 'seo', category: 'Content Refresh' },
   'landing-page': { bucket: 'seo', category: 'Landing Pages' },
   'broken-link-fix': { bucket: 'seo', category: 'Broken Links' },
   'missing-page-create': { bucket: 'seo', category: 'Broken Links' },

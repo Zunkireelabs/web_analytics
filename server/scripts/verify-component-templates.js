@@ -37,6 +37,7 @@ import { updateSiteRepoConfig } from '../db.js';
 import {
   COMPONENT_TEMPLATE_KEY,
   checkTemplateFreshness,
+  checkTemplateStructuralMatch,
   validatePlaceholders,
   stampTemplateVerification,
   TEMPLATE_VERIFIED_BY,
@@ -118,7 +119,25 @@ async function verifySite(site, { apply, pageUrl: pageUrlOverride }) {
       continue;
     }
 
-    console.log(`  - ${componentKey}: PASS — all ${freshness.checkedClasses.length} class(es) verified live${apply ? ' → stamping' : ' (dry run, not stamped)'}`);
+    // Class existence alone is not enough — see checkTemplateStructuralMatch's
+    // own comment. This is the exact gap that let site 1's flat <dl>
+    // componentTemplates.faq (every class real, structure nothing like the
+    // site's real Alpine accordion) get stamped PASS by this script on
+    // 2026-09-10, which a subsequent content-repair run would then have
+    // used to rip the real accordion out of the homepage.
+    const structural = await checkTemplateStructuralMatch({ pageUrl, templateEntry: template, html: freshness.html });
+    if (!structural.ok) {
+      console.log(`  - ${componentKey}: INCONCLUSIVE — ${structural.error}`);
+      continue;
+    }
+    if (structural.structurallyStale) {
+      console.log(`  - ${componentKey}: FAIL — captured markup shape (${structural.missingStructure.join(', ')}) no longer found on ${pageUrl}; classes are live but the structure doesn't match the real component.`);
+      console.log('      -> stays blocked. Re-capture this template from a real, current example (server/scripts/capture-component-template.js) rather than trusting class-existence alone.');
+      failed++;
+      continue;
+    }
+
+    console.log(`  - ${componentKey}: PASS — all ${freshness.checkedClasses.length} class(es) verified live, structure confirmed on the page${apply ? ' → stamping' : ' (dry run, not stamped)'}`);
     nextTemplates[componentKey] = stampTemplateVerification(template, {
       verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK,
       verifiedRef: pageUrl,

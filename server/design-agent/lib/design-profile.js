@@ -49,7 +49,7 @@ export const DESIGN_PROFILE_VERSION = 2;
 // `class="py-12 md:py-20 py-12 md:py-20"` and `class="... gap-3 gap-3"` into
 // real customer pages. First occurrence wins, so fragment order still decides
 // precedence for any framework that resolves conflicts by source order.
-function cx(...parts) {
+export function cx(...parts) {
   const seen = new Set();
   const out = [];
   for (const part of parts) {

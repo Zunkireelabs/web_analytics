@@ -401,8 +401,14 @@ function extractBlocksInPage() {
 // serialization except for the handful of elements that are actually
 // defective (which is the evidence a fix would need to anchor against), and
 // every scan is bounded so a large DOM cannot turn one probe into a crawl.
+// Exported (not just used internally by captureResponsive below) so a
+// caller that has already navigated/mutated a page a different way — a
+// pre-ship preview of a draft's content spliced into the live page, e.g.
+// (see server/generators/lib/responsive-gate.js) — can run this exact same
+// measurement via page.evaluate(measureResponsiveInPage, minTapTargetPx)
+// without a second, redundant navigation.
 /* eslint-disable no-undef */
-function measureResponsiveInPage(minTapTargetPx) {
+export function measureResponsiveInPage(minTapTargetPx) {
   const vw = window.innerWidth;
 
   function isVisible(el) {

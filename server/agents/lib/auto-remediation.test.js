@@ -50,6 +50,12 @@ let approveOpensPr; // whether approveAndPublishDraft already opened the PR (the
 let recordedOutcomes; // Phase 5: [{generatorId, outcome}] recorded via the mocked recordOutcome below
 let learnedMap; // Phase 5: generatorId -> {demote, ...} fed to classifyRecommendation via the mocked getLearnedConfidenceMap
 let onboardingPending; // two-stage onboarding: whether the whole-site analysis job is still in flight
+// Batch sequencing gate (github-ops.js's checkBatchSequencing, real code —
+// not mocked — driven off this mocked store/drafts.js row): null means no
+// unresolved prior-day batch, so today's run proceeds; a row means a
+// previous day's batch branch/PR is still unresolved and today's run must
+// wait without generating or abandoning anything.
+let unresolvedPriorBatch;
 let learnedRepairQueueItems; // rows store/shipping-queue.js's listByState(QUEUED) would return, filtered to source='learned-repair' by the code under test
 let contentRepairQueueItems; // rows store/shipping-queue.js's listByState(PREPARED) would return, filtered to source='content-repair'/kind='file-edits'
 let contentRepairPushOn; // (queueId) => boolean — simulates a specific content-repair item's pushDraftBranch call failing
@@ -57,6 +63,7 @@ let contentRepairPushOn; // (queueId) => boolean — simulates a specific conten
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
   onboardingPending = false; // matches every existing test's assumption: analysis already done, repair may proceed
+  unresolvedPriorBatch = null; // matches every existing test's assumption: no prior-day batch is holding today's back
   recommendations = [];
   draftedFindingIds = new Set();
   pendingDraftFilePaths = new Set();
@@ -130,6 +137,12 @@ mock.module(resolve('../../store/drafts.js'), {
     // Feeds ship-pacing.js's convergence cap: finding_id -> how many times it
     // has already been drafted and abandoned for an item-specific reason.
     countFailedAttemptsByFinding: async () => failedAttempts,
+    // github-ops.js's checkBatchSequencing (real code, not mocked) calls this
+    // directly — it is the one piece of store/drafts.js that module reaches
+    // into, so it has to be present here too even though everything else in
+    // this describe block is exercised through auto-remediation.js's own
+    // imports.
+    getUnresolvedPriorBatchBranch: async () => unresolvedPriorBatch,
   },
 });
 const realRead = await import(resolve('../../store/read.js'));
@@ -334,6 +347,108 @@ describe('auto-remediation — two-stage onboarding gate', () => {
     recommendations = [rec(1)];
     const result = await autoRemediateSafeRecommendations(1);
     assert.equal(result.stoppedReason, 'disabled');
+  });
+});
+
+// Batch sequencing gate: closes the confirmed 2026-09-08 incident where
+// action-center/batch-1-2026-09-08 forked from `main` hours before
+// action-center/batch-1-2026-09-07's delayed PR (#86) merged, and the two
+// collided on a shared file the moment it finally did. github-ops.js's
+// checkBatchSequencing runs for real here (only its one store dependency,
+// getUnresolvedPriorBatchBranch, is mocked via `unresolvedPriorBatch` above)
+// — these tests are the actual class-2-divergence regression coverage.
+describe('auto-remediation — batch sequencing gate', () => {
+  beforeEach(reset);
+
+  test('1. previous batch merged (no unresolved prior branch) -> today starts normally', async () => {
+    unresolvedPriorBatch = null;
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.notEqual(result.stoppedReason, 'previous-batch-unresolved');
+    assert.equal(calls.generated.length, 1, 'today\'s batch proceeds and generates its draft');
+  });
+
+  test('2. previous batch still open -> today waits/retries, generating and shipping nothing', async () => {
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'https://github.com/acme/site/pull/86', status: 'pr_opened' };
+    recommendations = [rec(1), rec(2)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'previous-batch-unresolved');
+    assert.equal(result.shipped, 0);
+    assert.equal(result.failed, 0, 'a wait is not a failure');
+    assert.equal(result.attempted, 0);
+    assert.equal(calls.generated.length, 0, 'no draft is generated into a new branch while blocked');
+  });
+
+  test('3. previous batch closes without merge -> the store stops reporting it unresolved, and today\'s run recovers on the very next call', async () => {
+    // checkDraftPrStatus (routes/action-center.js, exercised for real against
+    // a live DB elsewhere) is what flips a closed-without-merge draft's
+    // status off 'pr_opened' the moment the hourly poll/webhook notices it —
+    // getUnresolvedPriorBatchBranch then simply stops returning that branch.
+    // Modeled here as the same mocked dependency changing between two calls,
+    // which is exactly what happens in production between two cron passes.
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1)];
+    const blockedResult = await autoRemediateSafeRecommendations(1);
+    assert.equal(blockedResult.stoppedReason, 'previous-batch-unresolved');
+    assert.equal(calls.generated.length, 0);
+
+    unresolvedPriorBatch = null; // the PR closed without merge; reconciliation already resolved it
+    const recoveredResult = await autoRemediateSafeRecommendations(1);
+    assert.notEqual(recoveredResult.stoppedReason, 'previous-batch-unresolved');
+    assert.equal(calls.generated.length, 1, 'the same recommendation is picked back up automatically, with no human intervention');
+  });
+
+  test('4. one site\'s unresolved PR does not block another site', async () => {
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1)];
+    const blockedSite = await autoRemediateSafeRecommendations(1);
+    assert.equal(blockedSite.stoppedReason, 'previous-batch-unresolved');
+
+    // A second site's own run is a completely independent call — the mocked
+    // getSiteById always returns the same `site` object in this file, but
+    // checkBatchSequencing's query is scoped by the siteId it's called with
+    // (see github-ops.test.js's own per-site-scoping coverage for the real
+    // SQL-level guarantee); this asserts the gate doesn't leak module-level
+    // state across two calls that pass different site ids.
+    unresolvedPriorBatch = null;
+    recommendations = [rec(2)];
+    const clearSite = await autoRemediateSafeRecommendations(2);
+    assert.notEqual(clearSite.stoppedReason, 'previous-batch-unresolved');
+    assert.equal(calls.generated.length, 1, 'the second (unblocked) site\'s own run still ships normally');
+  });
+
+  test('5. today\'s waiting recommendations are not abandoned — they stay open for the next pass', async () => {
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1), rec(2)];
+    await autoRemediateSafeRecommendations(1);
+    assert.equal(calls.abandoned.length, 0, 'nothing is marked abandoned while waiting on a prior batch');
+    assert.equal(calls.closed.length, 0, 'nothing is closed either — the recommendations are simply not touched yet');
+  });
+
+  test('6. no duplicate batch branch or draft/card is created across repeated waiting retries', async () => {
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1)];
+    await autoRemediateSafeRecommendations(1);
+    await autoRemediateSafeRecommendations(1);
+    await autoRemediateSafeRecommendations(1);
+    assert.equal(calls.generated.length, 0, 'three consecutive waiting retries generate zero drafts between them');
+    assert.equal(calls.prsOpened.length, 0, 'and open zero PRs — nothing exists yet to duplicate');
+  });
+
+  test('disabled still wins over an unresolved prior batch when both are true — the more fundamental reason is reported', async () => {
+    site.auto_remediation_enabled = false;
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'disabled');
+  });
+
+  test('onboarding-analysis-pending still wins over an unresolved prior batch when both are true', async () => {
+    onboardingPending = true;
+    unresolvedPriorBatch = { branch_name: 'action-center/batch-1-2026-09-09', pr_number: 86, pr_url: 'x', status: 'pr_opened' };
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.stoppedReason, 'onboarding-analysis-pending');
   });
 });
 

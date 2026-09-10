@@ -128,13 +128,20 @@ describe('opportunityDraftEligibility — generator mapping', () => {
     assert.deepEqual(action.params, { page: 'https://example.com/page', query: 'best widgets' });
   });
 
-  for (const type of ['page1-opportunity', 'declining', 'content-expansion']) {
+  for (const type of ['page1-opportunity', 'content-expansion']) {
     test(`${type} -> expand-content (a coverage/depth problem, no query needed)`, () => {
       const action = opportunityDraftEligibility(site, opp({ type }));
       assert.equal(action.generatorId, 'expand-content');
       assert.deepEqual(action.params, { page: 'https://example.com/page' });
     });
   }
+
+  test('declining -> refresh-content (a staleness problem on a page that already had traffic), carrying the real trend evidence', () => {
+    const trend = { priorClicks: 40, recentClicks: 10, priorPosition: 3, recentPosition: 6, dropPct: 75 };
+    const action = opportunityDraftEligibility(site, { ...opp({ type: 'declining', query: 'widgets' }), trend });
+    assert.equal(action.generatorId, 'refresh-content');
+    assert.deepEqual(action.params, { page: 'https://example.com/page', query: 'widgets', trend });
+  });
 
   test('finding_id is deterministic per (type, page, query)', () => {
     const action = opportunityDraftEligibility(site, opp({ type: 'quick-win', query: 'best widgets' }));
