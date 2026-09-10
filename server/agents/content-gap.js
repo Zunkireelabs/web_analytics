@@ -3,6 +3,9 @@ import { analyzePageUrl, contentGapsFor, GAP_TYPE_TO_GENERATOR, effortForGenerat
 import { priorityByRank, impactFromPriority, makeFinding, aggregateSystemicFinding } from './lib/findings.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { listCompetitorProfiles } from '../store/competitor-profiles.js';
+import { getSeoPolicy } from '../store/site-seo-policy.js';
+import { getSiteProfile } from '../store/data-analyst.js';
+import { tenantIndustries } from './lib/seo-tenant-context.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -55,12 +58,26 @@ const AI_SUGGESTION_MAX_ITEMS = 4;
 // to name likely-relevant subtopics the text doesn't seem to cover. This is
 // explicitly an inference, never a verified fact — kept in its own field,
 // never merged into the deterministic `gaps`, and always confidence-labeled.
-async function suggestMissingEntities(bodyText, queryText) {
+async function suggestMissingEntities(bodyText, queryText, seoPolicy, siteProfile) {
   if (!bodyText || !queryText) return { suggestions: [], error: 'no-context' };
+  // This tenant's own real business/industry (explicit site_seo_policy
+  // override when set, else the industry already inferred generically for
+  // THIS site from its own GSC queries via site_profiles) narrows which
+  // subtopics get suggested, without replacing the generic per-page gap
+  // analysis below. Neither source existing means no steer, not a guess
+  // (2026-09-10 multi-tenant SEO rule — dynamic per site_id, never
+  // hardcoded to one tenant).
+  const industries = tenantIndustries(seoPolicy, siteProfile);
+  const industryFocus = industries?.length
+    ? ` Prioritize subtopics real prospects in this business's own industry/industries would search for — their ` +
+      `problems, services, products, software/CRM/booking/automation/website needs — over generic ones: ` +
+      `${industries.join(', ')}.`
+    : '';
   const system = 'You are an SEO/AEO content analyst. Given a real search query and a page\'s actual fetched ' +
     `text, suggest up to ${AI_SUGGESTION_MAX_ITEMS} specific subtopics or entities commonly expected for that ` +
     'query which the text does NOT appear to cover. This is your inference from reading the page, not a verified ' +
-    'fact — never claim certainty, and if nothing clearly stands out, return fewer items or none. Respond with ' +
+    'fact — never claim certainty, and if nothing clearly stands out, return fewer items or none.' + industryFocus +
+    ' Respond with ' +
     'ONLY a JSON array (no prose, no markdown fences), each item shaped exactly as ' +
     '{"entity": "...", "confidence": "low"|"medium"|"high", "rationale": "one short sentence"}. If nothing stands out, respond with [].';
   const user = `Query: ${queryText}\n\nPage text (truncated): ${bodyText.slice(0, 3000)}`;
@@ -92,7 +109,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // ad-hoc check doesn't perturb the normal rotation order for every other
   // page. Same params-bypass pattern as technical-seo.js's params.pages.
   const explicitPages = params?.pages?.length ? params.pages : (params?.page ? [params.page] : null);
-  const [{ batch, impressionsByPage }, competitorProfiles] = await Promise.all([
+  const [{ batch, impressionsByPage }, competitorProfiles, seoPolicy, siteProfile] = await Promise.all([
     explicitPages
       ? getSearchPerformanceForPages(siteId, start, end, explicitPages).then((rows) => ({
         batch: explicitPages,
@@ -107,6 +124,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
       // casing needed here.
       : selectCandidatePages(siteId, 'content-gap', { start, end, batchSize: MAX_PAGES }),
     listCompetitorProfiles(siteId),
+    getSeoPolicy(siteId),
+    getSiteProfile(siteId),
   ]);
 
   // Real aggregate across tracked competitors' actual crawled homepages —
@@ -157,7 +176,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
     .slice(0, MAX_AI_SUGGESTION_PAGES);
   const aiResults = await Promise.all(aiCandidates.map(async (r) => ({
     page: r.page,
-    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery)),
+    ...(await suggestMissingEntities(r._analysis.bodyText, r._topQuery, seoPolicy, siteProfile)),
   })));
   const aiByPage = new Map(aiResults.map((a) => [a.page, a]));
 
