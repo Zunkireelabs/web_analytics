@@ -934,6 +934,59 @@ export async function getPendingDraftFilePaths(siteId) {
   return new Set(rows.map((r) => r.target_file_path));
 }
 
+// The BATCH-level sibling of getPendingDraftFilePaths above: that function
+// stops a second day's batch from redrafting the same FILE an earlier day's
+// still-open PR already touches; this stops a second day's batch from being
+// STARTED at all while an earlier day's batch branch is still unresolved —
+// closing the gap that let two independently-forked batch branches collide
+// on a shared file (a layout template, a `_data/*` array) the moment the
+// delayed PR finally merged (confirmed live: site 1, 2026-09-08 — PR #86 for
+// `action-center/batch-1-2026-09-07` didn't merge until 09:26 the next
+// morning, by which point `action-center/batch-1-2026-09-08` already had
+// hours of commits forked from the OLD `main`; the merge produced a
+// duplicated key that had to be fixed by hand).
+//
+// Answers purely from this table — no GitHub call, matching this codebase's
+// existing rule against adding a second poller (see
+// action-center-reconciler.js's module comment on the same point). This is
+// safe to rely on because every terminal PR outcome already flips a draft's
+// status OFF 'pr_opened' the moment the existing hourly poll or webhook
+// notices it (routes/action-center.js's checkDraftPrStatus): merged ->
+// 'implemented', closed-without-merge -> 'abandoned' (reason
+// 'pr_closed_without_merge'). So this function is always reading fresh
+// truth, never truth it has to refresh itself.
+//
+// Two branch states count as "unresolved":
+//   - status='pr_opened' AND pr_state='open' — a real open PR sitting
+//     un-reviewed.
+//   - status='branch_pushed' AND pr_number IS NULL — commits landed on
+//     GitHub but the PR-open call never completed. reconcileSite's pass 0
+//     (batch-pr-recovery.js) actively finishes or recovers these hourly, so
+//     this state is expected to be short-lived, but it is real unresolved
+//     work on a real branch and must still block a fresh fork of `main`
+//     until it resolves one way or the other.
+//
+// Scoped to this site's OWN batch branches (LIKE-matched on its own
+// `action-center/batch-<siteId>-` prefix) — two sites never block each
+// other here, independent of whether they share a GitHub credential.
+export async function getUnresolvedPriorBatchBranch(siteId, todayBranchName) {
+  const { rows } = await query(
+    `SELECT branch_name, pr_number, pr_url, status
+       FROM drafts
+      WHERE site_id = $1
+        AND branch_name LIKE $2
+        AND branch_name <> $3
+        AND (
+          (status = 'pr_opened' AND pr_state = 'open')
+          OR (status = 'branch_pushed' AND pr_number IS NULL)
+        )
+      ORDER BY branch_name ASC
+      LIMIT 1`,
+    [siteId, `action-center/batch-${siteId}-%`, todayBranchName]
+  );
+  return rows[0] || null;
+}
+
 // Marks a draft as rolled back without touching its real status column —
 // unlike markDraftAbandoned, this must work on 'implemented'/'merged_to_stage'
 // drafts too (that's exactly when rollback is available), and 'implemented'
