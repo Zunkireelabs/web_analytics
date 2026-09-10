@@ -28,7 +28,15 @@ function systemActorReq(siteId) {
 //     [--repo-url "https://github.com/zunkiree-labs/zunkireelabs-site"] \
 //     [--default-branch main] [--tech-stack astro] \
 //     [--github-pat-env-var GITHUB_PAT] \
+//     [--github-app-id <id> --github-app-private-key-env-var GITHUB_APP_PRIVATE_KEY_B64_<CLIENT>] \
 //     [--url-file-map path/to/url-file-map.json]
+//
+// --github-app-id / --github-app-private-key-env-var are for a client with
+// their OWN registered GitHub App (migration 154) rather than the shared
+// default one — this is what gives that tenant its own GitHub API rate-limit
+// budget instead of sharing the default App's with every other tenant. Omit
+// both to keep using the shared default App (still set via
+// --github-app-installation-id alone, as before).
 //
 // url-file-map.json shape (see server/implementers/types.js / migration 028):
 //   { "pages": {...}, "patterns": [...], "newContentTargets": {...}, "siteRoot": {...},
@@ -91,6 +99,21 @@ export async function performRepoConnect(site, flags) {
       throw new Error('--github-app-installation-id must be an integer (or "none" to clear it).');
     }
   }
+  // A client with their own registered GitHub App (migration 154) instead of
+  // the shared default one — gives this site its own GitHub API rate-limit
+  // budget rather than sharing the default App's with every other tenant.
+  // 'none' moves the site back onto the shared default App.
+  if (flags['github-app-id'] != null) {
+    update.githubAppId = flags['github-app-id'] === 'none' ? null : Number(flags['github-app-id']);
+    if (update.githubAppId !== null && !Number.isInteger(update.githubAppId)) {
+      throw new Error('--github-app-id must be an integer (or "none" to clear it).');
+    }
+  }
+  if (flags['github-app-private-key-env-var'] != null) {
+    update.githubAppPrivateKeyEnvVar = flags['github-app-private-key-env-var'] === 'none'
+      ? null
+      : flags['github-app-private-key-env-var'];
+  }
   if (flags['url-file-map'] != null) update.urlFileMap = JSON.parse(readFileSync(flags['url-file-map'], 'utf8'));
 
   if (!Object.keys(update).length) {
@@ -106,6 +129,8 @@ export async function performRepoConnect(site, flags) {
   if (update.techStack !== undefined) console.log(`  tech_stack → ${updated.tech_stack}`);
   if (update.githubPatEnvVar !== undefined) console.log(`  github_pat_env_var → ${updated.github_pat_env_var}`);
   if (update.githubAppInstallationId !== undefined) console.log(`  github_app_installation_id → ${updated.github_app_installation_id ?? '(none — uses PAT)'}`);
+  if (update.githubAppId !== undefined) console.log(`  github_app_id → ${updated.github_app_id ?? '(none — uses the shared default App)'}`);
+  if (update.githubAppPrivateKeyEnvVar !== undefined) console.log(`  github_app_private_key_env_var → ${updated.github_app_private_key_env_var ?? '(none)'}`);
   if (update.urlFileMap !== undefined) console.log('  url_file_map → updated');
 
   if (updated.repo_owner && updated.repo_name) {
@@ -243,17 +268,17 @@ async function main() {
   const siteId = Number(flags['site-id']);
   if (!siteId) {
     throw new Error(
-      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--url-file-map path.json]'
+      'Usage: connect-repo.js --site-id <id> --repo-owner <org> --repo-name <repo> [--repo-url <url>] [--default-branch main] [--tech-stack astro] [--github-pat-env-var GITHUB_PAT] [--github-app-installation-id <id>|none] [--github-app-id <id>|none] [--github-app-private-key-env-var <VAR>|none] [--url-file-map path.json]'
     );
   }
 
   const site = await getSiteById(siteId);
   if (!site) throw new Error(`No site found with id ${siteId}.`);
 
-  const anyFlag = ['repo-owner', 'repo-name', 'repo-url', 'default-branch', 'tech-stack', 'github-pat-env-var', 'github-app-installation-id', 'url-file-map']
+  const anyFlag = ['repo-owner', 'repo-name', 'repo-url', 'default-branch', 'tech-stack', 'github-pat-env-var', 'github-app-installation-id', 'github-app-id', 'github-app-private-key-env-var', 'url-file-map']
     .some((k) => flags[k] != null);
   if (!anyFlag) {
-    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --url-file-map.');
+    throw new Error('Pass at least one of --repo-owner, --repo-name, --repo-url, --default-branch, --tech-stack, --github-pat-env-var, --github-app-installation-id, --github-app-id, --github-app-private-key-env-var, --url-file-map.');
   }
 
   await performRepoConnect(site, flags);
