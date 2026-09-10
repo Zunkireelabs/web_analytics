@@ -108,6 +108,77 @@ describe('closeStaleRecommendations — broken-link-fix key matching', () => {
   });
 });
 
+// Regression for a real bug fixed 2026-09-10: a recommendation sourced
+// entirely from an agent OUTSIDE this sync pass's own detection roster
+// (analyst-insights, analyst-keyword-gaps, growth-opportunities — none of
+// which run as part of buildRecommendations/syncFromGrounded) was being
+// superseded on the very next unrelated Node grounded-agent sync, because
+// the old rotation-batch guard's `.every()` was vacuously true for an agent
+// id that could never appear in batchRotatedAgentIds in the first place.
+// Confirmed via a direct call to the real function before the fix (not just
+// reasoning about the code): a fabricated analyst-insights row was closed
+// even though nothing had re-verified it at all.
+describe('closeStaleRecommendations — authoritativeAgentIds (rows outside this pass\'s own roster)', () => {
+  test('a row whose only detecting_agent is outside authoritativeAgentIds is never closed, regardless of batchRotatedAgentIds/agentCheckedKeys', async () => {
+    rows = [{
+      id: 999,
+      page: 'https://example.com/declining-page',
+      recommendation_type: 'expand-content',
+      detecting_agents: ['analyst-insights'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(['technical-seo::https://example.com/declining-page']),
+      batchRotatedAgentIds: new Set(['technical-seo', 'security-headers']),
+      authoritativeAgentIds: new Set(['technical-seo', 'security-headers', 'meta-title']),
+    });
+
+    assert.equal(closedCount, 0);
+    assert.equal(updated, null);
+  });
+
+  test('a row whose detecting_agent IS in authoritativeAgentIds is still closed once genuinely re-verified clean, same as before this fix', async () => {
+    rows = [{
+      id: 1000,
+      page: 'https://example.com/fixed-page',
+      recommendation_type: 'meta-title',
+      detecting_agents: ['technical-seo'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(['technical-seo::https://example.com/fixed-page']),
+      batchRotatedAgentIds: new Set(['technical-seo', 'security-headers']),
+      authoritativeAgentIds: new Set(['technical-seo', 'security-headers', 'meta-title']),
+    });
+
+    assert.equal(closedCount, 1);
+    assert.deepEqual(updated, [1000]);
+  });
+
+  test('with no authoritativeAgentIds given at all, behavior is unchanged from before this fix (defensive default for any other future caller)', async () => {
+    rows = [{
+      id: 1001,
+      page: 'https://example.com/no-roster-given',
+      recommendation_type: 'expand-content',
+      detecting_agents: ['analyst-insights'],
+    }];
+    updated = null;
+
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      batchRotatedAgentIds: new Set(['technical-seo']),
+    });
+
+    // No authoritativeAgentIds means the guard is skipped entirely, same
+    // as the pre-fix code path — 'analyst-insights' is not in
+    // batchRotatedAgentIds so it still closes. Documented here so a
+    // caller that omits the new param does not silently believe it is
+    // protected by it.
+    assert.equal(closedCount, 1);
+  });
+});
+
 // The block invariant, at the persistence layer.
 //
 // blocked_reason IS NOT NULL => risk_tier = 'manual'. Migration 108 enforces

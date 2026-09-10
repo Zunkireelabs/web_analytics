@@ -10,6 +10,7 @@ import { getSiteById } from '../../store/read.js';
 import { daysAgoInTz } from '../../util/dates.js';
 import { runAgent } from '../runner.js';
 import { safeMessage } from '../../lib/errors.js';
+import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -325,6 +326,13 @@ export async function syncFromGrounded(siteId, grounded) {
       agentCheckedKeys: grounded.agentCheckedKeys,
       linkCrawlCheckedKeys: grounded.linkCrawlCheckedKeys,
       batchRotatedAgentIds: grounded.batchRotatedAgentIds,
+      // This pass only ever re-detects findings from Node's own grounded
+      // agent roster — a row sourced entirely from analyst-insights,
+      // analyst-keyword-gaps, or growth-opportunities (none of which run as
+      // part of buildRecommendations) must never be closed here on the
+      // strength of THIS roster's silence about it. See closeStaleRecommendations'
+      // own comment for the incident this fixed.
+      authoritativeAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
     });
   }
   // Direct evidence, not absence-of-evidence: unlike closeStaleRecommendations

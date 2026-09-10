@@ -394,13 +394,20 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 // Called once per site per sync from recommendation-coordinator.js's
 // syncFromGrounded — see that file for how stillDetectedKeys is built.
 //
-// checked = { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds },
-// built by buildRecommendations (agents/lib/recommendations.js). Most agents
-// only examine a bounded rotation batch per run — a page missing from this
-// run's findings usually means "not re-checked today," not "fixed," so
-// closing on absence alone was making recommendations vanish in bulk (then
-// often reappear later) without ever being confirmed clean. A stale row is
-// only closed when we're sure it was actually re-verified:
+// checked = { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds,
+// authoritativeAgentIds }, built by buildRecommendations (agents/lib/
+// recommendations.js) and recommendation-coordinator.js's syncFromGrounded.
+// authoritativeAgentIds is the roster this specific sync pass actually
+// re-checks (RECOMMENDATION_AGENT_IDS, agents/lib/insights.js) — a row whose
+// detecting_agents are ENTIRELY outside that roster (analyst-insights,
+// analyst-keyword-gaps, growth-opportunities: sources with no detection step
+// in THIS pass at all) is skipped outright, before any of the logic below
+// runs. Most agents only examine a bounded rotation batch per run — a page
+// missing from this run's findings usually means "not re-checked today," not
+// "fixed," so closing on absence alone was making recommendations vanish in
+// bulk (then often reappear later) without ever being confirmed clean. A
+// stale row is only closed when we're sure it was actually re-verified:
+//   - not this pass's business at all (see authoritativeAgentIds above): left untouched
 //   - no page (site-level/collapsed key, e.g. cookie-policy, security-headers
 //     as a fix action): unchanged — these are recomputed in full every run
 //   - broken-link-fix: only if the page's outbound links were part of this
@@ -410,7 +417,7 @@ export async function setRecommendationExecutionState(id, { executionJobId, exec
 //     isn't rotation-batched (checks everything every run, so its silence is
 //     already trustworthy) or did re-check this exact page this run
 export async function closeStaleRecommendations(siteId, stillDetectedKeys, checked = {}) {
-  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds } = checked;
+  const { agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, authoritativeAgentIds } = checked;
   const { rows } = await query(
     `SELECT id, page, recommendation_type, detecting_agents FROM recommendations WHERE site_id = $1 AND status = 'open'`,
     [siteId]
@@ -419,6 +426,18 @@ export async function closeStaleRecommendations(siteId, stillDetectedKeys, check
     .filter((r) => {
       const key = `${r.recommendation_type}::${r.page}`;
       if (stillDetectedKeys.has(key)) return false;
+      // A row this call has no authority over — none of its detecting_agents
+      // belong to the roster this sync pass actually re-checks (see
+      // authoritativeAgentIds' own comment below) — must never be touched.
+      // Confirmed real bug, fixed 2026-09-10: before this guard, a row whose
+      // ONLY detecting_agent was e.g. 'analyst-insights' (never a member of
+      // batchRotatedAgentIds, which only ever holds Node RECOMMENDATION_AGENT_IDS)
+      // made the .every() check below vacuously true and got superseded on
+      // the very next unrelated Node grounded-agent sync — same UTC morning
+      // it was created, before the shipping pass ever saw it. Silence from a
+      // detection pass that was never asked about this row's source in the
+      // first place is not evidence the finding resolved.
+      if (authoritativeAgentIds && !(r.detecting_agents || []).some((agentId) => authoritativeAgentIds.has(agentId))) return false;
       if (!r.page) return true;
       // r.page is recommendationPageKey()'s `${sourcePage}::${href}` compound for this
       // type (see recommendation-coordinator.js), but linkCrawlCheckedKeys holds bare
