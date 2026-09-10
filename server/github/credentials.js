@@ -45,6 +45,20 @@ export function usesGithubApp(site) {
   return site?.github_app_installation_id != null;
 }
 
+// This tenant's own registered App identity, when it has one (migration 154),
+// so its shipping run draws against its own GitHub API rate-limit budget
+// instead of sharing the shared default App's. Returns null for every site
+// that hasn't registered its own App — resolveGithubToken then falls back to
+// the shared default App, exactly as before this existed. Never falls back
+// itself: a site that declared a github_app_id but has no matching key env
+// var comes back with privateKeyB64 unset, which appConfigured below reports
+// as unconfigured rather than silently trying the wrong App's key.
+function siteAppCredentials(site) {
+  if (site?.github_app_id == null) return null;
+  const envVar = site.github_app_private_key_env_var;
+  return { appId: site.github_app_id, privateKeyB64: (envVar ? process.env[envVar] : null) ?? null };
+}
+
 // The credential this site should authenticate with, or null if none is
 // available. Never throws for a missing credential — callers decide whether
 // that is fatal (authHeaders) or merely disables a feature (code search).
@@ -66,13 +80,19 @@ export function usesGithubApp(site) {
 //     with tenant A's credential. Failing to find a credential is recoverable
 //     and loud; using the wrong tenant's is neither.
 //
+//     Which App identity signs for that installation is itself resolved per
+//     site (siteAppCredentials, migration 154): a tenant with their own
+//     registered App uses it — and its own separate rate-limit budget —
+//     while every other site keeps using the shared default App, unchanged.
+//
 //  3. Otherwise the per-site PAT, exactly as before.
 export async function resolveGithubToken(site, { forSearch = false } = {}) {
   if (forSearch) return searchToken(site);
 
   if (usesGithubApp(site)) {
-    if (!appConfigured()) return null;
-    return getInstallationToken(site.github_app_installation_id);
+    const credentials = siteAppCredentials(site);
+    if (!appConfigured(credentials)) return null;
+    return getInstallationToken(site.github_app_installation_id, { credentials });
   }
 
   return process.env[githubTokenEnvVar(site)] || null;

@@ -38,7 +38,7 @@ const REFRESH_MARGIN_MS = 10 * 60 * 1000;
 // this path exists to remove.
 const tokenCache = new Map();
 
-function privateKey() {
+function privateKeyFromEnv() {
   // Base64 is the primary form because the deploy writes .env wholesale and a
   // PEM's newlines do not survive that intact. A raw PEM is still accepted for
   // local development, where a multi-line value is workable.
@@ -47,21 +47,42 @@ function privateKey() {
   return process.env.GITHUB_APP_PRIVATE_KEY || null;
 }
 
+// Resolves which App identity to sign with. `credentials` is an explicit
+// { appId, privateKeyB64 } pair for a tenant with their own registered App
+// (migration 154); omitted (the default for every call site that predates
+// per-client Apps) it reads the shared default App from env, exactly as
+// before this per-client path existed. Deliberately no merging between the
+// two — a site that declared its own App id but has no matching key must
+// fail closed, not silently sign with the shared default App's key against
+// its own (different) App id, which would just fail confusingly at GitHub
+// instead of here.
+function resolveCredentials(credentials) {
+  if (credentials) {
+    const key = credentials.privateKeyB64
+      ? Buffer.from(credentials.privateKeyB64, 'base64').toString('utf8')
+      : null;
+    return { appId: credentials.appId || null, key };
+  }
+  return { appId: process.env.GITHUB_APP_ID || null, key: privateKeyFromEnv() };
+}
+
 // Whether App auth is usable at all. Callers use this to decide between the App
 // and PAT paths without having to catch a configuration error.
-export function appConfigured() {
-  return Boolean(process.env.GITHUB_APP_ID && privateKey());
+export function appConfigured(credentials = null) {
+  const { appId, key } = resolveCredentials(credentials);
+  return Boolean(appId && key);
 }
 
 const b64url = (input) => Buffer.from(input).toString('base64url');
 
 // A signed App JWT. Exported for tests and diagnostics; normal callers want
 // getInstallationToken below.
-export function createAppJwt(now = Date.now()) {
-  const appId = process.env.GITHUB_APP_ID;
-  const key = privateKey();
+export function createAppJwt(now = Date.now(), credentials = null) {
+  const { appId, key } = resolveCredentials(credentials);
   if (!appId || !key) {
-    throw new Error('GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64.');
+    throw new Error(credentials
+      ? `GitHub App ${credentials.appId || '(unknown)'} is not configured for this site — check its App id and private key env var.`
+      : 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64.');
   }
   const issuedAt = Math.floor(now / 1000) - JWT_CLOCK_SKEW_S;
   const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
@@ -74,7 +95,7 @@ export function createAppJwt(now = Date.now()) {
 // A token scoped to one tenant's installation, cached until shortly before it
 // expires. Throws if the App is unconfigured or GitHub refuses — never returns a
 // token belonging to a different installation, which is the whole point.
-export async function getInstallationToken(installationId, { fetchImpl = fetch, now = Date.now } = {}) {
+export async function getInstallationToken(installationId, { fetchImpl = fetch, now = Date.now, credentials = null } = {}) {
   if (!installationId) throw new Error('An installation id is required to mint a GitHub App token.');
 
   const cached = tokenCache.get(installationId);
@@ -83,7 +104,7 @@ export async function getInstallationToken(installationId, { fetchImpl = fetch, 
   const res = await fetchImpl(`${API_BASE}/app/installations/${installationId}/access_tokens`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${createAppJwt(now())}`,
+      Authorization: `Bearer ${createAppJwt(now(), credentials)}`,
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
     },

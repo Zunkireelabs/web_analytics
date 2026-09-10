@@ -31,6 +31,14 @@ import { appConfigured, createAppJwt, getInstallationToken } from '../github/app
 import { usesGithubApp } from '../github/credentials.js';
 import { pool } from '../db.js';
 
+// Mirrors credentials.js's siteAppCredentials — null (the shared default
+// App) for every site that hasn't registered its own (migration 154).
+function siteAppCredentials(site) {
+  if (!site || site.github_app_id == null) return null;
+  const envVar = site.github_app_private_key_env_var;
+  return { appId: site.github_app_id, privateKeyB64: (envVar ? process.env[envVar] : null) ?? null };
+}
+
 const API_BASE = 'https://api.github.com';
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`);
 const bad = (m) => console.log(`  \x1b[31m✗\x1b[0m ${m}`);
@@ -75,20 +83,29 @@ async function main() {
   console.log(`\nVerifying GitHub App installation ${installationId}${site ? ` for site #${site.id} "${site.name}"` : ''}\n`);
   let failed = false;
 
+  // A site with its own registered App (migration 154) verifies against that
+  // App's credentials instead of the shared default's, so this catches the
+  // same misconfiguration class (wrong id, wrong/missing key) per tenant.
+  const credentials = siteAppCredentials(site);
+
   // 1 — configuration
-  if (!appConfigured()) {
-    bad('GITHUB_APP_ID and/or the private key are not set.');
-    info('Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64 (base64 of the .pem GitHub gave you):');
-    info("  base64 -i your-app.private-key.pem | tr -d '\\n'");
+  if (!appConfigured(credentials)) {
+    bad(credentials
+      ? `GitHub App ${credentials.appId} is not configured — its private key env var (${site.github_app_private_key_env_var || '(not set)'}) is missing or empty.`
+      : 'GITHUB_APP_ID and/or the private key are not set.');
+    info(credentials
+      ? 'Set the env var named by that site\'s github_app_private_key_env_var to the base64 of its .pem.'
+      : 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64 (base64 of the .pem GitHub gave you):');
+    if (!credentials) info("  base64 -i your-app.private-key.pem | tr -d '\\n'");
     return process.exitCode = 1;
   }
-  ok(`App configured (id ${process.env.GITHUB_APP_ID})`);
+  ok(`App configured (id ${credentials?.appId ?? process.env.GITHUB_APP_ID})`);
 
   // 2 — the key genuinely belongs to that App. This is the step that catches a
   // mismatched or truncated key, and it fails confusingly everywhere else.
   let jwt;
   try {
-    jwt = createAppJwt();
+    jwt = createAppJwt(Date.now(), credentials);
   } catch (err) {
     bad(`Could not sign an App JWT: ${err.message}`);
     info('The private key is likely malformed — check the base64 round-trips to a "-----BEGIN RSA PRIVATE KEY-----" block.');
@@ -123,7 +140,7 @@ async function main() {
   // 4 — minting
   let token;
   try {
-    token = await getInstallationToken(installationId);
+    token = await getInstallationToken(installationId, { credentials });
     ok('Minted an installation token');
   } catch (err) {
     bad(`Could not mint an installation token: ${err.message}`);
