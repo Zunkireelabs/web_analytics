@@ -134,8 +134,13 @@ export async function checkResponsivePreview({
     browser = await launchBrowserFn();
   } catch (err) {
     // Infra failure, not evidence anything is broken — same fail-open
-    // discipline every other live-site check in this pipeline uses.
-    return { ok: false, reason: 'unreachable', error: `Could not launch a browser to preview this change: ${err.message}` };
+    // discipline every other live-site check in this pipeline uses. Bare
+    // err.message, not interpolated into a longer string — same convention
+    // design-drift.js's own 'unreachable' returns use (check-error-leaks.js/
+    // server/lib/errors.js: a caught exception's raw text may be returned
+    // as diagnostic detail on an internal result object, but never built
+    // into a new string via template interpolation).
+    return { ok: false, reason: 'unreachable', error: err.message };
   }
 
   try {
@@ -145,7 +150,7 @@ export async function checkResponsivePreview({
     try {
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
     } catch (err) {
-      return { ok: false, reason: 'unreachable', error: `Could not load ${pageUrl} to preview this change: ${err.message}` };
+      return { ok: false, reason: 'unreachable', pageUrl, error: err.message };
     }
 
     const before = {};
