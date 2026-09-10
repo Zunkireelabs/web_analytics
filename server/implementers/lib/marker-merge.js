@@ -171,6 +171,32 @@ export const ANALYTICS_PROVIDER_FIELDS = { ga4: 'analyticsScriptGa4', 'facebook-
 const HEAD_SCOPED_FIELDS = new Set(['canonical', 'openGraph', ...Object.values(ANALYTICS_PROVIDER_FIELDS)]);
 const HEAD_MARKER_NAME = 'HEAD';
 
+// Fields that, when no nested SEOAI:HEAD region can be found or created in
+// the page's own file, can fall back to a front-matter LINE value instead —
+// the site's shared layout renders it into <head> itself. This is the common
+// case on a shared-layout SSG (Eleventy/Hugo/Jekyll/11ty, ...), where <head>
+// exists only once, in one shared layout file, never in the individual page
+// file a canonical/open-graph draft actually targets — so the nested-HEAD
+// convention above can never apply there, the same way meta-title's `title`
+// field already relies on a front-matter value the layout reads
+// (`{{ title }}`), not an HTML <title> tag spliced into the page file.
+// Confirmed real, not hypothetical: chayceproperties.com (Eleventy, one
+// shared src/_includes/base.njk) — every page's own file is a body fragment
+// with no literal <head>, so canonical/open-graph were fatally blocked on
+// every single page until this fallback existed.
+//
+// Maps the generator's field name to the literal front-matter KEY this
+// fallback writes — a new key (not reusing the field name), a real,
+// one-time template variable a human wires into the layout once, same
+// one-time step the SEOAI:HEAD region itself already is.
+//
+// open-graph is deliberately NOT here yet: it emits several composite
+// values (og:title/description/image, twitter:*) under one field, which
+// would need several distinct front-matter keys and matching generator
+// changes to support the same way — a real, separate follow-up, not a
+// quick addition alongside canonical's single-URL case.
+const LINE_HEAD_FALLBACK_KEY = { canonical: 'canonicalUrl' };
+
 // Exposed so callers (backend.js's computeMarkerMerge) can give a more
 // specific "marker not found" error for a head-scoped field — pointing at
 // the missing HEAD region itself, not just the field's own marker name.
@@ -236,8 +262,12 @@ export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) 
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
     if (blockRegex(HEAD_MARKER_NAME).test(fileContent)) return 'self-heals';
-    if (!detectors.detectHead) return 'fatal-no-head-region';
-    return detectors.detectHead(fileContent).ok ? 'self-heals' : 'fatal-no-head-region';
+    if (detectors.detectHead && detectors.detectHead(fileContent).ok) return 'self-heals';
+    // Front-matter fallback (LINE_HEAD_FALLBACK_KEY above) — only reachable
+    // once a real <head> is confirmed absent from this file, never preferred
+    // over a genuine nested-HEAD region.
+    if (LINE_HEAD_FALLBACK_KEY[field] && frontMatterLength(fileContent) != null) return 'self-heals';
+    return 'fatal-no-head-region';
   }
   if (isPlainMarkdownFile(filePath)) return 'self-heals';
   if (!detectors.detectBody) return 'fatal-no-safe-anchor';
@@ -270,6 +300,26 @@ function insertHeadScopedMarker(fileContent, markerName) {
   const [full, start, inner, end] = match;
   const newInner = `${inner}\n<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
   return fileContent.slice(0, match.index) + start + newInner + end + fileContent.slice(match.index + full.length);
+}
+
+// LINE_HEAD_FALLBACK_KEY's own insertion: adds a brand-new front-matter key
+// (never one that already exists — insertLineMarker below only ever
+// annotates an EXISTING line, by design, so it can't be reused here) just
+// before the closing `---` fence, with an empty placeholder value and the
+// field's marker comment already attached. Purely additive to the front
+// matter block, so it can never misinterpret or disturb an existing key —
+// unlike insertLineMarker's escaping concerns, there is no existing value
+// here to preserve. spliceMarkers' normal LINE-marker splice (applyMarker)
+// then fills in the real value the same way it fills in `title`'s.
+function insertNewFrontMatterField(fileContent, key, markerName) {
+  const fmLen = frontMatterLength(fileContent);
+  if (fmLen == null) return null;
+  const frontMatter = fileContent.slice(0, fmLen);
+  const rest = fileContent.slice(fmLen);
+  const closing = /^([\s\S]*?)(---\r?\n)$/.exec(frontMatter);
+  if (!closing) return null;
+  const newFrontMatter = `${closing[1]}${key}: "" # SEOAI:${markerName}\n${closing[2]}`;
+  return newFrontMatter + rest;
 }
 
 // The front-matter block only, `---\n...\n---\n` at the very start of the
@@ -361,7 +411,9 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
       continue;
     }
     if (HEAD_SCOPED_FIELDS.has(field)) {
-      const updated = insertHeadScopedMarker(content, markerName);
+      const fallbackKey = LINE_HEAD_FALLBACK_KEY[field];
+      const updated = insertHeadScopedMarker(content, markerName)
+        ?? (fallbackKey ? insertNewFrontMatterField(content, fallbackKey, markerName) : null);
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here
     }
@@ -432,7 +484,24 @@ export function spliceMarkers(fileContent, markerMap, values) {
     if (!(field in values)) continue; // this draft type doesn't set this field
     const found = findMarker(fileContent, markerName);
     if (!found) { missingMarkers.push(markerName); continue; }
-    changedRegions.push({ field, markerName, before: found.old, after: values[field] });
+    // A field with a LINE_HEAD_FALLBACK_KEY (currently just `canonical`)
+    // carries TWO real representations of the same content — a full HTML
+    // tag for the nested-HEAD-region convention, a bare value for the
+    // front-matter LINE convention — because buildMergeValues is computed
+    // before it's known which convention this file's marker actually ended
+    // up using (ensureMarkers/resolveInsertion decide that, at insertion
+    // time). `found.kind` (from the SAME findMarker call above, against the
+    // SAME already-resolved file) is the one place that answer is already
+    // known, so it picks the matching representation here rather than
+    // guessing earlier. Every other field's value is still a plain string,
+    // unchanged — this only ever applies to values buildMergeValues built as
+    // `{block, line}` on purpose.
+    let after = values[field];
+    if (after && typeof after === 'object' && !Array.isArray(after)) {
+      after = found.kind === 'line' ? after.line : after.block;
+      if (after == null) { missingMarkers.push(markerName); continue; }
+    }
+    changedRegions.push({ field, markerName, before: found.old, after });
   }
 
   if (missingMarkers.length) return { ok: false, missingMarkers };
@@ -1065,7 +1134,19 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   if (actionType === 'canonical') {
     if (mode === 'schema-only') return { ok: false, error: '"canonical" has no schema-only representation.' };
     if (!content.canonicalUrl) return { ok: false, error: 'This canonical draft has no URL.' };
-    return { ok: true, values: { canonical: `<link rel="canonical" href="${escapeHtml(content.canonicalUrl)}">` } };
+    // Object-shaped, not a plain string — see LINE_HEAD_FALLBACK_KEY and
+    // spliceMarkers' own comment above for why: this same draft can land
+    // either as a nested-HEAD-region <link> tag or a front-matter value,
+    // and which one wins isn't known yet at this point in the pipeline.
+    return {
+      ok: true,
+      values: {
+        canonical: {
+          block: `<link rel="canonical" href="${escapeHtml(content.canonicalUrl)}">`,
+          line: content.canonicalUrl,
+        },
+      },
+    };
   }
 
   if (actionType === 'open-graph') {

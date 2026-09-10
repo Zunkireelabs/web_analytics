@@ -107,6 +107,43 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.deepEqual(inserted, []);
     assert.equal(content, file); // untouched
   });
+
+  // Regression coverage for the chayceproperties.com incident: a shared-
+  // layout SSG page file (Eleventy front matter + a `layout:` reference, no
+  // literal <head> of its own) has no nested-HEAD anchor to auto-create, but
+  // DOES have front matter — the LINE_HEAD_FALLBACK_KEY fallback should kick
+  // in instead of failing honestly.
+  test('ensureMarkers falls back to a new front-matter field for canonical when no HEAD region exists but front matter does', () => {
+    const file = '---\ntitle: "Get Started"\nlayout: base.njk\n---\nPage body.\n';
+    const { content, inserted } = ensureMarkers(file, { canonical: 'CANONICAL' });
+    assert.deepEqual(inserted, ['CANONICAL']);
+    assert.match(content, /canonicalUrl: "" # SEOAI:CANONICAL/);
+    assert.doesNotMatch(content, /SEOAI:HEAD/); // no nested-HEAD region was invented
+  });
+
+  test('spliceMarkers picks the bare-URL value for a front-matter-fallback canonical marker', () => {
+    const file = '---\ntitle: "Get Started"\nlayout: base.njk\n---\nPage body.\n';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: { block: '<link rel="canonical" href="https://example.com/get-started/">', line: 'https://example.com/get-started/' },
+    });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /canonicalUrl: "https:\/\/example\.com\/get-started\/" # SEOAI:CANONICAL/);
+    assert.doesNotMatch(spliced.newContent, /<link rel="canonical"/); // the HTML-tag variant was never written into front matter
+  });
+
+  test('a real nested-HEAD region still wins over the front-matter fallback when both are available', () => {
+    const file = '---\ntitle: "Get Started"\n---\n<head>\n<!-- SEOAI:HEAD:START --><!-- SEOAI:HEAD:END -->\n</head>\nPage body.\n';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap);
+    assert.doesNotMatch(ensured, /canonicalUrl:/); // no front-matter field invented
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: { block: '<link rel="canonical" href="https://example.com/get-started/">', line: 'https://example.com/get-started/' },
+    });
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/get-started\/">/);
+  });
 });
 
 describe('body-scoped fields (expand-content)', () => {
@@ -178,10 +215,11 @@ describe('body-scoped fields (expand-content)', () => {
 });
 
 describe('buildMergeValues — canonical/open-graph/expand-content', () => {
-  test('canonical produces a single link tag', () => {
+  test('canonical produces both a link tag (nested-HEAD convention) and a bare URL (front-matter LINE fallback)', () => {
     const result = buildMergeValues('canonical', { canonicalUrl: 'https://example.com/page' });
     assert.equal(result.ok, true);
-    assert.equal(result.values.canonical, '<link rel="canonical" href="https://example.com/page">');
+    assert.equal(result.values.canonical.block, '<link rel="canonical" href="https://example.com/page">');
+    assert.equal(result.values.canonical.line, 'https://example.com/page');
   });
 
   test('canonical fails honestly with no URL', () => {

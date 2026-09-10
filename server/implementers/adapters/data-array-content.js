@@ -159,7 +159,21 @@ function scalarValuesFromDraft(actionType, content, componentTemplates, designPr
     if (content.metaDescription) values.metaDescription = content.metaDescription;
     return { ok: true, values };
   }
-  return buildMergeValues(actionType, content || {}, 'visible', componentTemplates, designProfile, { page });
+  const result = buildMergeValues(actionType, content || {}, 'visible', componentTemplates, designProfile, { page });
+  // marker-merge.js's buildMergeValues can return an object-shaped value
+  // ({block, line}) for a field with a front-matter LINE fallback (currently
+  // just `canonical` — see LINE_HEAD_FALLBACK_KEY there) — that choice is
+  // resolved against a page's real template FILE at splice time, which this
+  // adapter has no equivalent of: it writes straight into a data-array
+  // entry's own plain field, always the same "full tag" shape this path has
+  // always written. Unwrap to `.block` so that stays true regardless of
+  // which fields marker-merge.js grows this shape for in the future.
+  if (result.ok && result.values) {
+    for (const [key, value] of Object.entries(result.values)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) result.values[key] = value.block;
+    }
+  }
+  return result;
 }
 
 // Writes a draft's rendered value(s) into an existing object's own plain
