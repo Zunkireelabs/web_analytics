@@ -1,4 +1,5 @@
-import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections } from '../../design-agent/lib/design-profile.js';
+import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx } from '../../design-agent/lib/design-profile.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
 // Marker-based splice — the only merge strategy this codebase uses for
 // editing an EXISTING page's real template file, because it never requires
 // parsing or understanding an unknown site's real templating syntax
@@ -505,16 +506,72 @@ const FIXED_HEIGHT_CLASS_RE = /^h-(\[[^\]]+\]|\d+)$/;
 // constrained content column — reapplying the site's wider section
 // container on top of that stretches/misaligns the block against the
 // column around it, which is the same 2026-09-09 defect (site 8862's
-// wrapper also carried `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`). Only the
-// WRAPPER is stripped of these — row-level typography (font size/weight/
-// color) still carries over so the questions/answers still look like the
-// rest of the site, just flowing in the post's own column instead of
-// fighting it for width.
+// wrapper also carried `max-w-7xl mx-auto px-4 sm:px-6 lg:px-8`). The
+// WRAPPER is stripped of these; row-level weight/color still carry over so
+// the questions/answers still look like the rest of the site, just flowing
+// in the post's own column instead of fighting it for width. Row-level
+// font-SIZE gets its own, narrower strip below (BLOG_UNSAFE_HEADING_SIZE_RE)
+// — a section-headline-scale heading is exactly as wrong nested in an
+// article as a full-bleed section container is.
 const BLOG_UNSAFE_WRAPPER_CLASS_RE = /^(container(-\w+)?|max-w-\S+|mx-auto)$/;
 
-const BLOG_PATH_RE = /\/blog\//i;
-function isBlogPage(pageUrl) {
-  return typeof pageUrl === 'string' && BLOG_PATH_RE.test(pageUrl);
+// A captured row heading (an FAQ question, e.g.) carries whatever font-size
+// utility the source element had — correct when that source was itself a
+// section headline (a homepage FAQ block's question IS the section's visual
+// anchor), wrong when the same markup is spliced inline into a blog post's
+// body copy, where a section-headline-scale heading reads as an oversized,
+// out-of-place H1 sitting in the middle of a paragraph flow (2026-09-10:
+// site 1's captured componentTemplates.faq/qaContent row carried
+// `text-2xl md:text-3xl`, rendering as an H1-sized heading inside every
+// blog post it was spliced into). Same reasoning as BLOG_UNSAFE_WRAPPER_CLASS_RE
+// above, applied to the row instead of the wrapper — text-3xl and up is
+// section-headline scale in virtually every real Tailwind config; text-2xl
+// and below is ordinary in-article subheading scale and is left alone.
+// Responsive variants (`md:text-3xl`) carry the same prefix.
+const BLOG_UNSAFE_HEADING_SIZE_RE = /^(?:[\w-]+:)?text-(3xl|4xl|5xl|6xl|7xl|8xl|9xl)$/;
+
+// Generalized beyond "blog" (2026-09-10): the real question was never
+// specifically about /blog/ — it's whether the TARGET page is one where an
+// inserted component is a small addition to an established page (an
+// article, a legal page, a location/service page, ...) versus a page type
+// this site conventionally builds AS a full-bleed section/page (a
+// homepage, a landing page, a dedicated FAQ page, a blog LISTING).
+// classifyPageType (design-agent/live-analysis/schema.js) is the same
+// classifier the rest of the platform already uses for page-type-aware
+// guidance (page-templates.js) — reusing it here means a legal page, a
+// location page, or any future client's equivalent all get the same
+// protection a blog post did, not just URLs containing "/blog/".
+// Deliberately NOT 'service'/'location' (or 'homepage'/'landing'/'faq'):
+// those page types conventionally have their OWN dedicated, section-scale
+// FAQ/CTA block as part of the page's normal design (the 2026-09-09 fix's
+// own regression coverage treats a /services/ page's real section sizing as
+// correct, not a defect to strip). 'blog-article' and 'legal' are pure prose
+// flow with no section-building convention at all; 'other' is genuinely
+// unclassified — safest to treat as inline (strip the unsafe classes) than
+// to assume unknown page structure can host a full-bleed section.
+const INLINE_CONTENT_PAGE_TYPES = new Set(['blog-article', 'legal', 'other']);
+
+function isInlineContentPage(pageUrl) {
+  if (typeof pageUrl !== 'string' || !pageUrl) return false;
+  return INLINE_CONTENT_PAGE_TYPES.has(classifyPageType(pageUrl));
+}
+
+// When the site's OWN design profile has real, live-observed typography for
+// a SUBHEADING role on this exact page type (profile.pageTypePatterns —
+// same evidence page-templates.js's canonical page templates already draw
+// on), that is a strictly better correction than blindly stripping the
+// captured template's oversized class down to nothing: it's the real class
+// this site already uses for an in-page subheading on THIS page type, not a
+// guess. Only 'subheading' counts — 'heading' is the page's own H1/top-level
+// anchor, never the right role for an inserted FAQ question or similar.
+// Returns null (never invents a class) when the site has no such evidence,
+// which is the common case — most sites have no pageTypePatterns at all yet.
+function groundedInlineHeadingClass(designProfile, pageUrl) {
+  const pageType = typeof pageUrl === 'string' ? classifyPageType(pageUrl) : null;
+  const hierarchy = pageType && designProfile?.pageTypePatterns?.[pageType]?.textHierarchy;
+  if (!Array.isArray(hierarchy)) return null;
+  const entry = hierarchy.find((h) => h?.role === 'subheading' && h.classes);
+  return entry ? entry.classes : null;
 }
 
 function stripClassesMatching(html, predicate) {
@@ -536,14 +593,23 @@ export function stripFixedHeightClass(html) {
 }
 
 // Applied to every captured template right before render — DEFAULT_* templates
-// carry no classes at all, so this is a no-op for them.
-export function sanitizeCapturedTemplate(template, { blog = false } = {}) {
+// carry no classes at all, so this is a no-op for them. `inline` replaces
+// the old blog-only `blog` flag (see isInlineContentPage above);
+// `groundedHeadingClass`, when the site's own design profile has real
+// evidence for this exact page type, REPLACES the stripped heading-size
+// class with the site's own real subheading class instead of leaving the
+// row with no size class at all — a grounded correction, not just removal.
+export function sanitizeCapturedTemplate(template, { inline = false, groundedHeadingClass = null } = {}) {
   if (!template) return template;
+  const strippedRow = stripClassesMatching(stripFixedHeightClass(template.row),
+    (c) => inline && BLOG_UNSAFE_HEADING_SIZE_RE.test(c));
   return {
     ...template,
     wrapper: stripClassesMatching(stripFixedHeightClass(template.wrapper),
-      (c) => blog && BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c)),
-    row: stripFixedHeightClass(template.row),
+      (c) => inline && BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c)),
+    row: (inline && groundedHeadingClass && strippedRow !== template.row)
+      ? strippedRow.replace(/class="([^"]*)"/, (full, list) => `class="${cx(list, groundedHeadingClass)}"`)
+      : strippedRow,
   };
 }
 
@@ -913,11 +979,13 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
   // 2026-09-09's (one site's Design Agent capture stamping `h-[70px]` onto
   // EVERY component wrapper: faq, qaContent, expandContent, internalLinks,
   // contentWrapper alike) can't ship on any of them, present or future.
+  const inline = isInlineContentPage(page);
+  const groundedHeadingClass = inline ? groundedInlineHeadingClass(designProfile, page) : null;
   const templateFor = (actionType_, configured, fallback) => sanitizeCapturedTemplate(
     configured
     || (designProfile ? projectComponentTemplate(designProfile, actionType_) : null)
     || fallback,
-    { blog: isBlogPage(page) },
+    { inline, groundedHeadingClass },
   );
 
   // expand-content only: a page whose OWN sections are built from the site's
@@ -932,7 +1000,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     if (page && pageUsesCardSections(designProfile, page)) {
       const chosen = componentTemplates.expandContentCard
         || (designProfile ? projectExpandContentCard(designProfile) : null);
-      if (chosen) return sanitizeCapturedTemplate(chosen, { blog: isBlogPage(page) });
+      if (chosen) return sanitizeCapturedTemplate(chosen, { inline, groundedHeadingClass });
     }
     return templateFor('expand-content', componentTemplates.expandContent, DEFAULT_EXPAND_TEMPLATE);
   };

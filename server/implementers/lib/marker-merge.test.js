@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml } from './marker-merge.js';
+import { ensureMarkers, spliceMarkers, isHeadScopedField, isNoEofInsertField, buildMergeValues, findMarkerCorruption, renderExpandedHtml, sanitizeCapturedTemplate } from './marker-merge.js';
 
 // Regression coverage for the zunkireelabs-web PR #87 incident: two
 // independent title drafts (one landed on main, one on the batch branch)
@@ -951,5 +951,103 @@ describe('renderExpandedHtml — a markdown table gets the site\'s own table sty
     }];
     const html = renderExpandedHtml(withEmptyCell, undefined, STYLE);
     assert.match(html, /<td class="acme-td-first">Speed<\/td><td class="acme-td"><\/td><td class="acme-td">Slow<\/td>/);
+  });
+});
+
+// Regression for the 2026-09-10 incident: site 1's captured
+// componentTemplates.faq/qaContent (a homepage section's real markup —
+// `container-custom py-12 md:py-20` wrapper, `text-2xl md:text-3xl` row
+// heading) got spliced verbatim into 7 blog posts' body copy via PR #92,
+// rendering an oversized, H1-looking heading inside a full-width section
+// nested in the article column. sanitizeCapturedTemplate already stripped
+// section-container classes off the WRAPPER for a blog page (2026-09-09
+// fix); this adds the matching strip for a section-headline-scale class on
+// the ROW (which the 09-09 fix deliberately left untouched), and generalizes
+// the whole mechanism from a URL-substring "/blog/" guess to the platform's
+// real page-type classifier (classifyPageType/pageTypePatterns), so any page
+// type — legal, location, service, a future client's own equivalent — gets
+// the same protection, not just URLs containing "/blog/".
+describe('sanitizeCapturedTemplate — page-type-aware heading-size correction', () => {
+  const captured = {
+    wrapper: '<dl class="container-custom py-12 md:py-20">\n{{ROWS}}\n</dl>',
+    row: '  <dt class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</dt>\n  <dd class="text-lg text-gray-600">{{ANSWER}}</dd>',
+  };
+
+  test('outside inline-content context, both wrapper and row classes are left untouched', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: false });
+    assert.match(result.wrapper, /container-custom/);
+    assert.match(result.row, /text-2xl md:text-3xl/);
+  });
+
+  test('inline context strips the wrapper\'s section-container classes (existing 09-09 behavior)', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true });
+    assert.doesNotMatch(result.wrapper, /container-custom/);
+  });
+
+  test('with no grounded substitute, inline context strips only the section-headline-scale (3xl+) row class; 2xl and weight/color survive', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true });
+    // text-2xl is ordinary in-article subheading scale (site-editor/H2-ish
+    // sizing) and is deliberately left alone — only text-3xl-and-up, which
+    // is section-headline scale in virtually every real Tailwind config, is
+    // unsafe to reuse inline.
+    assert.match(result.row, /text-2xl/);
+    assert.doesNotMatch(result.row, /md:text-3xl/);
+    assert.match(result.row, /font-normal/);
+    assert.match(result.row, /text-gray-900/);
+    // Row's OWN answer text (text-lg) is ordinary in-article scale, not a
+    // section headline — must survive untouched.
+    assert.match(result.row, /text-lg/);
+  });
+
+  test('with a real grounded subheading class for this page type, that class replaces the stripped one instead of leaving nothing', () => {
+    const result = sanitizeCapturedTemplate(captured, { inline: true, groundedHeadingClass: 'text-xl font-semibold' });
+    assert.doesNotMatch(result.row, /md:text-3xl/);
+    assert.match(result.row, /text-xl/);
+    assert.match(result.row, /font-semibold/);
+    // Original weight/color untouched — the grounded class is ADDED, not a
+    // wholesale replacement of everything the site's own captured markup said.
+    assert.match(result.row, /font-normal/);
+    assert.match(result.row, /text-gray-900/);
+  });
+
+  test('buildMergeValues threads a blog page URL through to strip the row heading\'s 3xl+ scale too', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.doesNotMatch(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues leaves a homepage (a page type this site builds as its own full-bleed FAQ section) untouched', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/' });
+    assert.equal(result.ok, true);
+    assert.match(result.values.faq, /text-2xl md:text-3xl/);
+    assert.match(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues corrects a NON-blog inline page type too (a legal page) — not a URL-substring special case', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, null, { page: 'https://example.com/legal/privacy-policy/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.doesNotMatch(result.values.faq, /container-custom/);
+  });
+
+  test('buildMergeValues uses the site\'s real captured subheading class for a page type it has real evidence for', () => {
+    const designProfile = {
+      pageTypePatterns: {
+        'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-xl font-semibold text-slate-800' }] },
+      },
+    };
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, designProfile, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.match(result.values.faq, /text-xl font-semibold text-slate-800/);
   });
 });
