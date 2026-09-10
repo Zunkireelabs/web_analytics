@@ -18,7 +18,16 @@ const LIVE_CSS = [
   '.py-12{padding:3rem 0}', '.divide-y>:not([hidden]){border-top-width:1px}', '.divide-gray-200{border-color:#e5e7eb}',
 ].join('\n');
 
-const PAGE_HTML = '<html><head><link rel="stylesheet" href="/assets/main.css"></head><body></body></html>';
+// Body actually contains real examples of every shape this test file
+// verifies (FAQ/QA's shared accordion shape, plus internalLinks' distinct
+// `<ul>` shape) — structural verification checks this too now, not just
+// class-existence (see design-drift.js's checkTemplateStructuralMatch).
+const INTERNAL_LINKS_WRAPPER = '<section class="py-12"><ul class="space-y-3">{{ROWS}}</ul></section>';
+const INTERNAL_LINKS_ROW = '<li><a href="{{URL}}" class="text-lg">{{ANCHOR_TEXT}}</a></li>';
+const PAGE_HTML = '<html><head><link rel="stylesheet" href="/assets/main.css"></head><body>'
+  + FAQ_WRAPPER.replace('{{ROWS}}', FAQ_ROW.replace('{{QUESTION}}', 'Q?').replace('{{ANSWER}}', 'A.'))
+  + INTERNAL_LINKS_WRAPPER.replace('{{ROWS}}', INTERNAL_LINKS_ROW.replace('{{URL}}', '/page').replace('{{ANCHOR_TEXT}}', 'Page'))
+  + '</body></html>';
 
 let saved;
 let audited;
