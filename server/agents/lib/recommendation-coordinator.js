@@ -83,10 +83,45 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 // its own row — it silently disappears into finding_ids on whichever topic
 // synced first. `topic` is the real identity of a blog-outline
 // recommendation, the same way `href` is for broken-link-fix.
+// A page reachable at both its `www.` and bare-domain variant (or with vs.
+// without a trailing slash) is the same resource, but the crawler's `page`
+// param is whichever exact URL variant that particular crawl happened to
+// request — so two crawls of the identical page can otherwise mint two
+// different dedup keys and split into two Action Center cards for the same
+// underlying issue. Confirmed as a real report: the same crm.zunkiree.com
+// dead link showed as one recommendation keyed to
+// https://www.zunkireelabs.com/products/ai-crm/ and a second keyed to
+// https://zunkireelabs.com/products/ai-crm/ (no `www.`).
+//
+// Deliberately scoped to ONLY broken-link-fix/missing-page-create, not
+// applied generally (e.g. to the plain `return item.params?.page || ''`
+// fallback below, or expand-content/content-integrity-repair's page
+// component). Those other keys are compared verbatim against the ALREADY
+// STORED `rec.page` column inside recheckRecommendation's generic re-detect
+// match (`recommendationPageKey(...) === rec.page`, below) — normalizing
+// their formula would silently stop matching every existing row whose
+// stored `page` isn't already in the new normalized form (any trailing
+// slash, any `www.`), misreading "still detected" as "resolved" and closing
+// it. broken-link-fix/missing-page-create never reach that comparison (this
+// function returns earlier, via recheckLink against `params.href` alone),
+// so they're the only two safe to normalize without a backfill.
+function normalizePageForKey(page) {
+  if (!page) return page;
+  try {
+    const u = new URL(page);
+    u.hostname = u.hostname.replace(/^www\./i, '');
+    u.hash = '';
+    if (u.pathname.length > 1 && u.pathname.endsWith('/')) u.pathname = u.pathname.slice(0, -1);
+    return u.toString();
+  } catch {
+    return page;
+  }
+}
+
 export function recommendationPageKey(item) {
   if (item.generatorId === 'analytics-install') return `analytics:${item.params?.provider || 'unknown'}`;
   if (item.generatorId === 'expand-content') return `${item.params?.page || ''}::${item.params?.focus || ''}`;
-  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${item.params?.page || ''}::${item.params?.href || ''}`;
+  if (item.generatorId === 'broken-link-fix' || item.generatorId === 'missing-page-create') return `${normalizePageForKey(item.params?.page) || ''}::${item.params?.href || ''}`;
   if (item.generatorId === 'blog-outline') return `topic::${item.params?.topic || ''}`;
   // Same failure mode as blog-outline above: landing-page has no `page`
   // param either (country-intelligence.js calls it with {market}/{city},

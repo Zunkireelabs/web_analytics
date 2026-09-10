@@ -76,6 +76,28 @@ describe('recommendationPageKey — broken-link-fix keys by href, not just page'
     const keyB = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page, href: 'https://example.com/dead-2' } });
     assert.notEqual(keyA, keyB);
   });
+
+  // Regression coverage for a real report: the identical crm.zunkiree.com
+  // dead link, cited from what is really one page, produced two separate
+  // Action Center cards — one keyed to the `www.` crawl
+  // (https://www.zunkireelabs.com/products/ai-crm/), the other to the bare
+  // -domain crawl (https://zunkireelabs.com/products/ai-crm/) of the same
+  // resource. `page` is only ever a discriminator here (`href` is the real
+  // identity, per the suite above) so www/bare-domain/trailing-slash
+  // variants of that discriminator must collapse to the same key.
+  test('the same dead href first crawled via www. and bare-domain variants of the same page produces the same key', () => {
+    const href = 'https://crm.zunkiree.com';
+    const keyWww = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page: 'https://www.zunkireelabs.com/products/ai-crm/', href } });
+    const keyBare = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page: 'https://zunkireelabs.com/products/ai-crm/', href } });
+    assert.equal(keyWww, keyBare);
+  });
+
+  test('a trailing-slash-only variant of the same page produces the same key', () => {
+    const href = 'https://crm.zunkiree.com';
+    const keyWithSlash = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page: 'https://zunkireelabs.com/products/ai-crm/', href } });
+    const keyWithoutSlash = recommendationPageKey({ generatorId: 'broken-link-fix', params: { page: 'https://zunkireelabs.com/products/ai-crm', href } });
+    assert.equal(keyWithSlash, keyWithoutSlash);
+  });
 });
 
 // Regression coverage for a real report: blog-outline findings have no
