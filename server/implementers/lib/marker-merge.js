@@ -1022,9 +1022,13 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     return { ok: true, values: { openGraph: tags } };
   }
 
-  if (actionType === 'expand-content') {
-    if (mode === 'schema-only') return { ok: false, error: '"expand-content" has no schema-only representation.' };
-    if (!content.sections?.length) return { ok: false, error: 'This content-expansion draft has no sections.' };
+  if (actionType === 'expand-content' || actionType === 'refresh-content') {
+    if (mode === 'schema-only') return { ok: false, error: `"${actionType}" has no schema-only representation.` };
+    if (!content.sections?.length) return { ok: false, error: `This ${actionType === 'refresh-content' ? 'content-refresh' : 'content-expansion'} draft has no sections.` };
+    // refresh-content deliberately shares expand-content's real, per-site
+    // 'expandedContent' marker/template — see refresh-content.js's own
+    // comment: a second marker would need every onboarded site re-onboarded
+    // before this could ever ship.
     return {
       ok: true,
       values: {
@@ -1100,6 +1104,7 @@ const PROBE_CONTENT_BY_ACTION_TYPE = {
   canonical: { canonicalUrl: 'https://example.invalid/x' },
   'open-graph': { ogTitle: 'x' },
   'expand-content': { sections: [{ heading: 'h', body: 'b' }] },
+  'refresh-content': { sections: [{ heading: 'h', body: 'b' }] },
   'qa-content': { items: [{ question: 'q', answer: 'a' }] },
 };
 

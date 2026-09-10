@@ -217,9 +217,50 @@ export async function buildGrowthOpportunities(siteId, { end } = {}) {
     counts: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, v.length])),
     total: all.length,
     opportunities: all,
+    // The multi-tenant growth spec's explicit priority order — one queue a
+    // caller (the daily loop, or a human on the Analyst page) can act down
+    // top-to-bottom without having to know that opportunityScore is on a
+    // different scale per type (see rankOpportunitiesUnified's own comment).
+    rankedQueue: rankOpportunitiesUnified(all),
     assumptions: { trafficGainNote: TRAFFIC_GAIN_NOTE, targetPosition: TARGET_POSITION },
     notes: {
       'ai-visibility': 'Not produced — AI Recommendation Rate has no per-query/per-page data to attribute an opportunity to.',
     },
   };
+}
+
+// Every opportunity type above already computes a REAL severity
+// (high/medium/low) from its own real evidence — impressions, click drop
+// %, or the keyword-gap's own classified priority. That tier is genuinely
+// comparable across types (it's always "how strong is the real evidence",
+// never a type-specific unit), so it is the PRIMARY sort key here.
+// opportunityScore is deliberately NOT the primary key: it's impressions
+// for content-expansion, a CTR-gap traffic estimate for quick-win, and a
+// raw click-count drop for declining — comparing those directly would be
+// exactly the fabricated-equivalence the rest of this file refuses to do
+// (see this file's own top-of-file comment on never estimating what isn't
+// real). Within the same severity tier, TYPE_RANK breaks the tie using the
+// spec's own stated preference order: striking-distance and CTR fixes on
+// pages that already rank beat a stale page needing a refresh, which beats
+// entirely new content, which beats a lower-confidence idea. Only once both
+// severity AND type agree does each type's own opportunityScore decide the
+// final order — a legitimate tiebreak within one type's own real unit.
+const TYPE_RANK = {
+  'quick-win': 0, // already ranks, cheapest real fix (title/meta) for the most immediate real gain
+  'page1-opportunity': 1, // striking distance — spec tier 2, exactly
+  'content-expansion': 2, // existing page, more demand to capture — spec tier 3
+  declining: 2, // existing page needs a refresh — same tier as content-expansion, both "improve what's already there"
+  'content-gap': 3, // net-new content for a real topic — spec tiers 4/5
+  'ai-visibility': 4, // lower-confidence / not yet evidenced — spec tier 6
+};
+const SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
+
+export function rankOpportunitiesUnified(opportunities) {
+  return [...opportunities].sort((a, b) => {
+    const severityDiff = (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3);
+    if (severityDiff) return severityDiff;
+    const typeDiff = (TYPE_RANK[a.type] ?? 5) - (TYPE_RANK[b.type] ?? 5);
+    if (typeDiff) return typeDiff;
+    return (b.opportunityScore ?? 0) - (a.opportunityScore ?? 0);
+  });
 }

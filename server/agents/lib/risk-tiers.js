@@ -29,7 +29,7 @@
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
-  'open-graph', 'expand-content', 'qa-content',
+  'open-graph', 'expand-content', 'refresh-content', 'qa-content',
   // Deterministic from the page's real URL path, no LLM — same shape as
   // canonical.js, which is already in this set for the same reason.
   'breadcrumbs',

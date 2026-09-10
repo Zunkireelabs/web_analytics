@@ -92,6 +92,11 @@ test('every registered generator has a considered dedup identity', async () => {
     'meta-title', 'faq', 'schema', 'schema-repair', 'internal-links', 'translation',
     'viewport', 'canonical', 'open-graph', 'redirect-fix', 'alt-text', 'breadcrumbs',
     'direct-answer', 'geo-audit', 'qa-content', 'duplicate-id-fix', 'title-fix',
+    // Same identity as declining's own opportunity type upstream
+    // (growth-opportunities.js dedupes 'declining' by page already) — unlike
+    // expand-content, refresh-content has no `focus` param to discriminate
+    // on, and only ever needs one open "this page needs a refresh" card.
+    'refresh-content',
   ]);
   const metas = await listGeneratorMeta();
   const undeclared = metas

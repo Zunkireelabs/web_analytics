@@ -176,9 +176,15 @@ export function registerAiActionsTools(server, siteId, permissionLevel) {
   }));
 
   server.registerTool('save_keyword_gaps', {
-    description: "Saves newly identified zero-coverage keyword topics as pending_review gaps — a human-review queue, never auto-applied. 'source' distinguishes the clustering-based pass from external keyword research.",
+    description: "Saves newly identified zero-coverage keyword topics as pending_review gaps — a human-review queue, never auto-applied. 'source' distinguishes the clustering-based pass from external keyword research. topic_cluster/cluster_role (optional) group several gaps proposed in the SAME call under one topic cluster — one 'pillar' plus the rest 'supporting' — when the discovery pass judged them genuinely related; omit both for a standalone gap.",
     inputSchema: {
-      gaps: z.array(z.object({ topic: z.string().min(1), reason: z.string().nullable().optional(), priority: z.enum(['high', 'medium', 'low']).default('medium') })),
+      gaps: z.array(z.object({
+        topic: z.string().min(1),
+        reason: z.string().nullable().optional(),
+        priority: z.enum(['high', 'medium', 'low']).default('medium'),
+        topic_cluster: z.string().nullable().optional(),
+        cluster_role: z.enum(['pillar', 'supporting']).nullable().optional(),
+      })),
       source: z.enum(['internal_analysis', 'claude_research']).default('internal_analysis'),
     },
   }, withErrorHandling('save_keyword_gaps', async ({ gaps, source }) => {

@@ -2,8 +2,9 @@ import { knownDomain, hostnameOf, filterOwnDomainPages } from './site-domain.js'
 import {
   getRelatedQueriesForTopic, getProductCapabilities, setGapClassification, getKeywordClusters, getKeywordGaps,
   recordCapabilityVisibilitySnapshot, getRecentCapabilityVisibilitySnapshots,
-  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus,
+  appendKeywordGapEvidenceSnapshot, updateKeywordGapStatus, getKeywordGapsInCluster,
 } from '../../store/data-analyst.js';
+import { getLearnedGapConfidence, temperPriorityBoost } from './gap-learning.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { buildGrowthOpportunities } from './growth-opportunities.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from './page-content.js';
@@ -305,6 +306,30 @@ export function requestedBlogEligibility(gap) {
   };
 }
 
+// Real "build topic cluster" support (multi-tenant growth spec): when
+// find_gaps (data-analyst-agent) grouped this gap with 2+ siblings under one
+// topic_cluster name (persisted + normalized server-side, see migration 156
+// and _normalize_clusters), tells the generator about its real siblings —
+// grounded ONLY in the other gaps' own real topic strings, never invented —
+// so a pillar page is written broad enough to link out, and a supporting
+// article stays narrow instead of re-covering the pillar. Returns null for
+// an ungrouped gap (topic_cluster is the common case, per find_gaps' own
+// "don't force it" instruction) or when this gap's siblings can't be read.
+async function buildClusterContext(siteId, gap) {
+  const siblings = await getKeywordGapsInCluster(siteId, gap.topic_cluster, gap.id).catch(() => []);
+  if (!siblings.length) return null;
+  if (gap.cluster_role === 'pillar') {
+    const supporting = siblings.filter((s) => s.cluster_role === 'supporting').map((s) => s.topic);
+    return supporting.length
+      ? `This is the PILLAR page for the topic cluster "${gap.topic_cluster}" — write it broad enough to naturally reference, and later link out to, its planned supporting articles: ${supporting.join(', ')}.`
+      : null;
+  }
+  const pillar = siblings.find((s) => s.cluster_role === 'pillar');
+  return pillar
+    ? `This is a SUPPORTING article in the topic cluster "${gap.topic_cluster}" — its pillar page covers "${pillar.topic}". Stay focused on this narrower angle rather than re-covering the pillar's full breadth; reference the pillar topic naturally where relevant.`
+    : null;
+}
+
 // Turns an approved keyword gap into a real, actionable Action Center
 // recommendation — Gate 1 only ("we should act on this"). It just queues a
 // recommendation row; drafting, validation, PR, and the human merge
@@ -354,7 +379,14 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
       // objective, "commercial intent must matter"). Anything else keeps its
       // existing priority untouched (setGapClassification's COALESCE).
       const isCommercialIntent = classification && (classification.searchIntent === 'commercial' || classification.searchIntent === 'transactional');
-      const boostedPriority = isCommercialIntent && classification.productRelevance === 'direct' ? 'high' : undefined;
+      const naiveBoost = isCommercialIntent && classification.productRelevance === 'direct' ? 'high' : undefined;
+      // Real learning loop, not just a static rule: THIS site's own measured
+      // GSC impact from past commercial+direct gaps can withhold a boost the
+      // static rule above would otherwise always grant — see gap-learning.js.
+      const learnedGapMap = naiveBoost ? await getLearnedGapConfidence(siteId).catch(() => new Map()) : null;
+      const boostedPriority = naiveBoost
+        ? temperPriorityBoost(learnedGapMap, classification.searchIntent, classification.productRelevance, naiveBoost)
+        : undefined;
       const updated = await setGapClassification(siteId, gap.id, {
         searchIntent: classification?.searchIntent, productRelevance: classification?.productRelevance,
         priority: boostedPriority, existingPageMatch,
@@ -377,7 +409,8 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
         .map((q) => `"${q.dim_value}" (${q.impressions} impr, ${q.clicks} clicks, pos ${q.avg_position ?? '—'})`)
         .join('; ')}.`
     : 'No matching real GSC queries found for this topic in the last 90 days — a true zero-coverage gap.';
-  const reason = [gap.reason, evidence].filter(Boolean).join(' ');
+  const clusterContext = gap.topic_cluster ? await buildClusterContext(siteId, gap) : null;
+  const reason = [gap.reason, evidence, clusterContext].filter(Boolean).join(' ');
 
   // No real generator exists for this shape (see gapDraftEligibility's own
   // doc comment) — recorded as a real, visible, blocked recommendation
@@ -592,13 +625,16 @@ export function seoDraftEligibility(site, insight) {
 // the gaps PUT route — which also runs relevance classification and the
 // existing-page check gapDraftEligibility needs. Mirrors
 // generatorForDecliningPage below: a CTR/click gap is a presentation problem
-// (title/meta), everything else here is a coverage/depth problem
-// (expand-content) — no generator here needs to guess a topic, same
-// discipline as seoDraftEligibility.
+// (title/meta), a real click/position DROP on a page that already had
+// traffic is a staleness problem (refresh-content — corrects/updates what's
+// already there, grounded in the real trend numbers), everything else here
+// is a coverage/depth problem (expand-content, which only ever ADDS new
+// subtopics) — no generator here needs to guess a topic, same discipline as
+// seoDraftEligibility.
 const OPPORTUNITY_GENERATORS = {
   'quick-win': (opp) => ({ generatorId: 'meta-title', params: { page: opp.page, query: opp.query } }),
   'page1-opportunity': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
-  declining: (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
+  declining: (opp) => ({ generatorId: 'refresh-content', params: { page: opp.page, query: opp.query, trend: opp.trend || null } }),
   'content-expansion': (opp) => ({ generatorId: 'expand-content', params: { page: opp.page } }),
 };
 
