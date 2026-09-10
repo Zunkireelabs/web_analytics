@@ -30,14 +30,22 @@ const TIER_FLOOR = {
 };
 
 // No single generator may take more than this share of one day's budget on
-// the merit pass. This is the "don't let the biggest backlog eat the day"
-// rule: expand-content alone had 234 eligible candidates against a 60-slot
-// budget, and pure merit ordering would hand it every slot that tier-1 and
-// tier-2 work didn't claim. Applied only to the merit pass — if the budget
-// still isn't full afterwards, the final pass below ignores it, because
-// leaving capacity unused to enforce variety would be worse than the
-// imbalance it prevents.
-export const GENERATOR_SHARE_CAP = 0.5;
+// the merit pass. This used to default to 0.5 (the "don't let the biggest
+// backlog eat the day" rule: expand-content alone had 234 eligible
+// candidates against a 60-slot budget, and pure merit ordering would hand it
+// every slot that tier-1 and tier-2 work didn't claim).
+//
+// Set to 1 (no cap) as of 2026-09-10 per explicit product decision: a
+// generator carrying a genuinely dominant backlog (GEO Signals' expand-
+// content/qa-content — 472 eligible vs everything else on the site
+// combined) should be free to claim as much of the day's ceiling as it
+// earns on merit, not be artificially throttled back to preserve variety
+// while its backlog sits unaddressed. Kept as a named, overridable constant
+// (rather than deleted outright) so the "don't let one generator eat the
+// day" protection can be reintroduced for a specific site/generator later
+// without re-deriving this logic — TIER_FLOOR below still guarantees a
+// minimum presence for the lower-severity tiers regardless of this value.
+export const GENERATOR_SHARE_CAP = 1;
 
 /**
  * @param opts { candidates, remaining, pageMetrics, learnedMap }
