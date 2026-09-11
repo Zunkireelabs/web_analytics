@@ -172,7 +172,18 @@ export async function computeAltTextMerge(site, draft, beforeRef = baseBranch(si
       if (result.ok) {
         return { ok: true, filePath: source.dataFile, newContent: result.newContent, oldContent: sourceFile.content };
       }
-      if (result.reason === 'already-resolved') return result;
+      // 'no-match' means THIS source's entry didn't apply — worth trying
+      // another configured source, or falling through to Layer 2. Every
+      // other reason is a definitive verdict on this specific item (already
+      // has real alt text, or the src/alt cross-check caught a mismatch)
+      // that must surface as-is — silently falling through to Layer 2 would
+      // replace a precise, actionable reason with "anchor not found
+      // anywhere", exactly the misleading-message problem Layer 2 itself
+      // was built to fix. Real incident, site 1 (2026-09-11): without this,
+      // draft #1608's mismatch refusal ("doesn't match the drafted image")
+      // was getting overwritten by Layer 2's generic failure before a human
+      // ever saw the real reason.
+      if (result.reason !== 'no-match') return result;
     }
   }
 
