@@ -355,3 +355,114 @@ Integration Health → "GitHub (Action Center)" is `ok` with no
 
 If it isn't clean, that's the actual list of what's still blocking — work
 through it here rather than discovering each gap one stuck draft at a time.
+
+## 6. Check the site's tech stack BEFORE assuming markers are the fix
+
+`fatal-no-head-region`/`fatal-no-front-matter`/`fatal-no-safe-anchor` all
+LOOK like "place a marker" (§2), but on 2026-09-11 (Admizz Education,
+admizz-web-dev) that assumption was wrong for an entire framework class:
+**Next.js App Router**. A `.tsx` page there sets its SEO fields via a
+literal `export const metadata = {...}` object (Next's own convention), not
+front matter and not a literal `<head>` in the page file — so
+`fatal-no-front-matter` (meta-title) and `fatal-no-head-region`
+(canonical/open-graph) on a `.tsx`/`.jsx` file are a **routing** problem,
+not a missing-anchor problem: placing a marker there does nothing, because
+Next never renders it. The fix is `url_file_map.pages[url].adapters` /
+`patterns[].adapters`, routing `meta-title`/`canonical`/`open-graph` to the
+`nextjs-metadata-export` adapter (`server/implementers/adapters/`) instead —
+zero repo changes needed, since the adapter writes directly into the
+existing `metadata` object. Confirmed fix: 441 previously-fatal page/type
+combinations became `ADAPTER-ROUTED` the moment this was wired, no PR
+required. **Before treating any `.tsx`/`.jsx` App Router site's fatal gaps
+as a marker-placement job, check whether `nextjs-metadata-export` is
+already wired for meta-title/canonical/open-graph — if not, that's the
+actual fix.**
+
+A related, narrower Next.js case: some pages' real content is entirely
+data-shaped — `return <SomeTemplate data={pageData} />` with no JSX body at
+all (`self-closing-root-no-body` from `structural-detect.js`). `faq` on
+those routes through the sibling `page-data-object` adapter instead (finds
+the page's own `const <var> = {...}` behind the `data={...}` prop, splices
+its `faqItems` array) — `schema` has no adapter for these yet; the current
+plan is auto-deriving FAQPage JSON-LD from the same `faqItems` array at the
+shared template level rather than a per-page draft (2026-09-11 product
+decision, not yet built).
+
+**Also learned the same day**: a Next.js adapter that falls back to
+"insert as new" whenever `findScalarFieldRange` returns null must not
+assume null means "field absent" — it can also mean "field present but its
+value isn't a plain string literal" (e.g. `title: cityData.meta.title`, a
+reference into an external data file). Treating that as absent silently
+inserts a DUPLICATE same-named key (syntactically valid, last-one-wins at
+runtime, but leaves the original as confusing dead code and duplicates
+again on every future draft). `js-data-splice.js`'s `scalarFieldKeyExists`
+exists to tell the two cases apart — any new adapter built on top of
+`findScalarFieldRange`'s insert-as-new fallback should check it first.
+
+## 7. Eleventy/Hugo/Jekyll shared-layout sites: `fatal-no-head-region` on open-graph is NOT always a real gap — check the live page before touching code
+
+If every page's `<head>` lives only in one shared layout file (`base.njk`
+et al.), never in the individual page file a draft targets, `canonical`
+already has a front-matter LINE fallback for this (commit `978ca47`,
+2026-09-10, confirmed on chayceproperties.com) — writes a new
+`canonicalUrl:` front-matter field instead of requiring a nested `<head>`.
+`open-graph` does NOT have an equivalent fallback — deliberately left on the
+nested-only path in that same commit ("a separate follow-up") because it
+emits two composite values (`ogTitle`/`ogDescription`) under one field, not
+canonical's single URL.
+
+**Before building that follow-up, `curl` the live page and check whether OG
+tags are already correct.** Confirmed 2026-09-11 on TWO sites with the
+identical audit symptom (`open-graph`/`fatal-no-head-region`, no literal
+`<head>` in the page file) with OPPOSITE real answers:
+
+- **zunkireelabs.com**: `fatal` on 115 of 125 gaps — but `base.njk` already
+  renders `<meta property="og:title" content="{{ title or site.meta.title }}">`
+  (and description/image/url/type/locale) automatically from the SAME
+  `title`/`description` front matter meta-title already manages, on every
+  page, unconditionally. `curl https://zunkireelabs.com/about/` confirmed
+  correct live OG tags; zero open-graph drafts have ever failed in the
+  `drafts` table. **This is a false positive** — nothing to fix, the layout
+  already covers it, and per-page OG editing would be redundant with
+  meta-title. No code needed.
+- **chayceproperties.com**: same audit symptom, `curl
+  https://chayceproperties.com/` showed **zero** `og:*` tags at all — a
+  real gap. Fixed by placing a real `SEOAI:HEAD` marker inside the page's
+  own `headExtra:` front-matter block (§2's pattern, not a new mechanism).
+
+So: `fatal-no-head-region` on `open-graph` means "this file has no
+detectable per-page head region" — it does NOT mean "OG tags are broken on
+the live site." A shared layout can legitimately auto-derive OG from
+already-managed fields, in which case the honest fix is recognizing that
+(and possibly suppressing the audit noise, not yet done), never building
+new splice plumbing for a field that already works. The
+`LINE_HEAD_FALLBACK_KEY` two-key extension described in earlier drafts of
+this section is only the right fix when the live page is ALSO actually
+missing OG tags — verify with `curl` first, every time, on every new
+Eleventy-family site.
+
+One narrower version of the same root cause: a page whose real head content
+is injected via a YAML block-literal front-matter field (Chayce's
+`headExtra: |`) rather than a bare `<head>` tag — same fix as §2's HEAD
+marker, just placed inside that block-literal's text instead of a literal
+`<head>...</head>`, since that's the file's actual mechanism for reaching
+the rendered `<head>`. One marker placement there fixed all 7 of Chayce's
+gaps at once (they were all the same physical `index.njk`, just different
+tracking query strings on the discovered "page" list — check the audit's
+candidate list for this shape before treating every URL as a separate fix).
+
+## 8. FAQ (and other generated) content needs page-type relevance, not just page-name matching
+
+Found 2026-09-11 on zunkireelabs.com/careers/: a live, SEOAI:FAQ-marker-
+wrapped FAQ block asking "What is Zunkiree Search?" / "What is Agentic as a
+Service (GaaS)?" — product questions, on the careers page. No matching row
+in the `drafts` table, so this wasn't this app's generator misfiring; most
+likely a hand-authored template bootstrap that copy-pasted another page's
+FAQ block wholesale and wrapped it in SEOAI markers to match the site's own
+convention. Lesson either way: **the presence of SEOAI markers around
+content is not proof the content is actually relevant to that page** — spot
+check rendered FAQ/schema/expand-content against the page's own topic during
+onboarding (§5's audit only checks structural/config validity, never
+semantic relevance), and never overwrite it with fabricated "corrected"
+content — this needs the same real-facts-only sourcing as every other
+content gap in this runbook (§3).
