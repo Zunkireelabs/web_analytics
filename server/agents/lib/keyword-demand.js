@@ -23,10 +23,31 @@ import { configured as dataForSeoKeywordsConfigured, fetchKeywordIdeas } from '.
 import { saveKeywordGaps } from '../../store/data-analyst.js';
 import { getLatestKeywordDemandRunDates, saveKeywordDemandRun } from '../../store/keyword-demand.js';
 import { previousWeek, previousMonth, monthBounds } from '../../util/dates.js';
+import { resolveSiteLocations } from './site-locations.js';
 
 const MAX_SEED_TERMS = 8; // a homepage describes a handful of real offerings, not dozens
 const MAX_GAPS_PER_RUN = 20; // one month's worth of real candidate topics — the weekly ship cycle works through these gradually, same volume as the existing LLM-research step (RESEARCH_KEYWORDS_PER_TOPIC=20)
 const DIFFICULTY_TO_PRIORITY = { low: 'high', medium: 'medium', high: 'low' }; // mirrors keyword_clustering.py's own mapping: easier to rank = higher priority
+
+// A hybrid-scope site (real home market + real global reach, e.g. Admizz or
+// Zunkiree Labs itself, see migration 159) queries more than one location —
+// merge by keyword text, keeping whichever location reported the higher
+// real search volume for it, then re-sort (fetchKeywordIdeas already
+// returns each location's own results sorted desc by volume; merging two
+// already-sorted lists needs its own re-sort, not a naive concat).
+async function fetchIdeasAcrossLocations(seedTerms, locations) {
+  const byKeyword = new Map();
+  for (const location of locations) {
+    const ideas = await fetchKeywordIdeas(seedTerms, location);
+    for (const idea of ideas) {
+      const existing = byKeyword.get(idea.keyword);
+      if (!existing || (idea.searchVolume || 0) > (existing.searchVolume || 0)) {
+        byKeyword.set(idea.keyword, { ...idea, locationCode: location.locationCode });
+      }
+    }
+  }
+  return [...byKeyword.values()].sort((a, b) => b.searchVolume - a.searchVolume);
+}
 
 function difficultyBucket(score) {
   if (score == null) return 'medium';
@@ -94,9 +115,8 @@ export async function runKeywordDemandIfDue(site) {
     return null;
   }
 
-  const locationCode = Number(process.env.COMPETITOR_LOCATION_CODE || 2840); // 2840 = United States, same market assumption as the SERP adapter
-  const languageCode = process.env.COMPETITOR_LANGUAGE_CODE || 'en';
-  const ideas = await fetchKeywordIdeas(seedTerms, { locationCode, languageCode });
+  const locations = resolveSiteLocations(site);
+  const ideas = await fetchIdeasAcrossLocations(seedTerms, locations);
   const top = ideas.slice(0, MAX_GAPS_PER_RUN);
 
   if (top.length) {
@@ -104,6 +124,7 @@ export async function runKeywordDemandIfDue(site) {
       topic: idea.keyword,
       reason: `Real Google search demand (~${idea.searchVolume}/mo) for this site's own offerings, from DataForSEO — not an LLM guess.`,
       priority: DIFFICULTY_TO_PRIORITY[difficultyBucket(idea.difficulty)],
+      location_code: idea.locationCode,
     }));
     await saveKeywordGaps(site.id, gaps, 'dataforseo_demand');
   }

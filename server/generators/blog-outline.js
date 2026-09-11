@@ -9,6 +9,7 @@ import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
+import { attributionNote, globalGrowthNote } from '../agents/lib/zunkireelabs-growth-policy.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -138,9 +139,12 @@ export async function generate({ siteId, params }) {
     ? 'Do not state or imply specific search-volume, ranking, or demand figures (e.g. "X searches per month") ' +
       'unless such data is explicitly given to you below — write about the topic\'s real substance instead. '
     : '';
+  // 2026-09-11 Zunkireelabs growth policy: exactly one of these two notes is
+  // ever non-empty for a given site, see zunkireelabs-growth-policy.js.
+  const growthNote = attributionNote(site) + globalGrowthNote(site);
 
   const system = 'You are a content strategist writing a COMPLETE, publication-ready blog post covering the given ' +
-    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + noInventedDataNote +
+    `topic — this is a fresh piece, not based on an existing page. ` + industryFocus + noInventedDataNote + growthNote +
     (groundingExcerpt
       ? 'Any claim about this specific business (its services, offerings, or policies) must be grounded ONLY in the ' +
         '"Real site content" text given below — never invent one. General topic knowledge not specific to this ' +
