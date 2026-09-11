@@ -21,7 +21,7 @@ const {
   componentTemplateActionTypeFor, TEMPLATE_VERIFIED_BY,
   persistDerivedComponentTemplates, sitePageUrl, verifyTemplateAgainstLiveSite,
   contentWrapperAvailability, filterTemplateToLiveClasses, withDesignContext, DESIGN_CONTEXT_GENERATOR_IDS,
-  bodySlotLooksLikeLabel,
+  bodySlotLooksLikeLabel, captureClassRules, checkClassRuleDrift,
   observedClassesByRole, checkTypographyRole, verifyProfileRoles,
   designReviewFingerprint, designReviewState, checkDesignIntegrityGate,
 } = await import('./design-drift.js');
@@ -1011,6 +1011,71 @@ describe('verifyTemplateAgainstLiveSite', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'structural-mismatch');
     assert.ok(result.missingStructure.length > 0);
+  });
+
+  // Same-name, different meaning: neither checkTemplateFreshness (existence
+  // only) nor checkTemplateStructuralMatch (same markup shape) can see a
+  // class whose real declaration changed behind an unchanged name.
+  test('first pass: no prior baseline, nothing to compare — passes and captures one', async () => {
+    const result = await verifyTemplateAgainstLiveSite('faq', { wrapper, row }, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.stamped.verifiedClassRules, { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' });
+  });
+
+  test('re-verification: a class whose real CSS declaration changed is rejected as class-rule-drift, stamp not refreshed', async () => {
+    const priorStamp = { wrapper, row, verifiedClassRules: { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' } };
+    // Same class names, same markup shape (liveCss still defines every one
+    // of them) — but .py-5's real rule body is now different text.
+    const rebrandedCss = liveCss.replace('.py-5{a}', '.py-5{b}');
+    const result = await verifyTemplateAgainstLiveSite('faq', priorStamp, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => rebrandedCss,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'class-rule-drift');
+    assert.equal(result.drifted.length, 1);
+    assert.equal(result.drifted[0].cls, 'py-5');
+    assert.equal(result.stamped, undefined, 'a rejected re-verification must not carry a fresh stamp');
+  });
+
+  test('re-verification: every prior rule body still matches — passes, no drift', async () => {
+    const priorStamp = { wrapper, row, verifiedClassRules: { 'py-12': 'a', 'divide-y': 'a', 'divide-gray-200': 'a', 'py-5': 'a' } };
+    const result = await verifyTemplateAgainstLiveSite('faq', priorStamp, {
+      pageUrl: 'https://zunkireelabs.com', fetchPage: async () => html, fetchStylesheet: async () => liveCss,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+describe('captureClassRules / checkClassRuleDrift', () => {
+  test('captureClassRules skips a class with no real rule body, includes every class that has one', () => {
+    const rules = captureClassRules(['py-5', 'not-a-real-class'], '.py-5{padding:1.25rem 0}');
+    assert.deepEqual(rules, { 'py-5': 'padding:1.25rem 0' });
+  });
+
+  test('captureClassRules normalizes whitespace so a cosmetic reformat is not a drift', () => {
+    const rules = captureClassRules(['py-5'], '.py-5 {\n  padding: 1.25rem   0;\n}');
+    assert.equal(rules['py-5'], 'padding: 1.25rem 0;');
+  });
+
+  test('checkClassRuleDrift only compares classes present in both snapshots', () => {
+    const before = { 'py-5': 'padding:1.25rem 0', 'gone-now': 'x' };
+    const { drifted } = checkClassRuleDrift(before, '.py-5{padding:1.25rem 0}');
+    assert.equal(drifted.length, 0, 'gone-now has no live rule body at all — that is checkTemplateFreshness missingClasses\' job, not this one\'s');
+  });
+
+  test('checkClassRuleDrift flags a real value change', () => {
+    const before = { 'py-5': 'padding:1.25rem 0' };
+    const { drifted } = checkClassRuleDrift(before, '.py-5{padding:0.5rem 0}');
+    assert.equal(drifted.length, 1);
+    assert.equal(drifted[0].before, 'padding:1.25rem 0');
+    assert.equal(drifted[0].after, 'padding:0.5rem 0');
+  });
+
+  test('an empty/missing baseline compares nothing — never a false drift on a first pass', () => {
+    assert.deepEqual(checkClassRuleDrift(null, '.py-5{padding:1.25rem 0}').drifted, []);
+    assert.deepEqual(checkClassRuleDrift({}, '.py-5{padding:1.25rem 0}').drifted, []);
   });
 });
 

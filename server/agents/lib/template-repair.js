@@ -91,7 +91,7 @@ export async function repairSiteTemplates(siteId, {
   // template at all" and "this site's faq template is already verified" are
   // different facts, and collapsing them makes the summary unreadable — a site
   // with one verified template out of five would report skipped:5 either way.
-  const counts = { verified: 0, stale: 0, bodySlotIsLabel: 0, structuralMismatch: 0, unreachable: 0, skipped: 0, absent: 0, invalidated: 0 };
+  const counts = { verified: 0, stale: 0, bodySlotIsLabel: 0, structuralMismatch: 0, classRuleDrift: 0, unreachable: 0, skipped: 0, absent: 0, invalidated: 0 };
 
   // One shared fetch cache across every key checked in this pass.
   const cache = makeSharedPageCache();
@@ -130,7 +130,7 @@ export async function repairSiteTemplates(siteId, {
     // per-draft gate (checkTemplateFreshness alone, no structural check —
     // see that function's own comment for why) has no way to know the
     // deeper check already disproved it.
-    const isRealDefect = result.reason === 'stale' || result.reason === 'body-slot-is-label' || result.reason === 'structural-mismatch';
+    const isRealDefect = result.reason === 'stale' || result.reason === 'body-slot-is-label' || result.reason === 'structural-mismatch' || result.reason === 'class-rule-drift';
     if (isRealDefect && wasVerified) {
       repaired = { ...(repaired || templates), [componentKey]: { ...template, verifiedAt: null, verifiedBy: null, verifiedRef: null } };
       counts.invalidated++;
@@ -154,6 +154,13 @@ export async function repairSiteTemplates(siteId, {
       // as a timeout. It's the opposite: a real, confirmed shape mismatch.
       counts.structuralMismatch++;
       log.warn(`[template-repair] site ${siteId}: ${componentKey}'s captured shape no longer matches the live site (${result.error}) — leaving it unverified for the Design Agent to re-derive.`);
+    } else if (result.reason === 'class-rule-drift') {
+      // Same-name, different meaning: the class still exists and the markup
+      // shape still matches, but the CSS declaration behind it changed (a
+      // rebrand/design-token change) — the one design-integrity signal none
+      // of the other checks here can see.
+      counts.classRuleDrift++;
+      log.warn(`[template-repair] site ${siteId}: ${componentKey} — ${result.error}`);
     } else {
       counts.unreachable++;
     }
