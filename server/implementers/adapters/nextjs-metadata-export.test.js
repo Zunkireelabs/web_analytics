@@ -42,6 +42,22 @@ const NO_ALTERNATES_FIXTURE = `export const metadata: Metadata = {
 };
 `;
 
+// Real shape (Admizz Education's src/app/birgunj/page.tsx, 2026-09-11) — the
+// title/canonical fields aren't literal strings at all, they're references
+// into a separate shared data file (`birgunjData.meta.title`). Neither
+// findScalarFieldRange nor the confirmed-existing-alternates check above
+// applies here — this is the case scalarFieldKeyExists exists for.
+const EXTERNAL_DATA_REF_FIXTURE = `import { cityData } from "@/data/cities/birgunj";
+
+export const metadata: Metadata = {
+  title: cityData.meta.title,
+  description: cityData.meta.description,
+  alternates: {
+    canonical: cityData.meta.canonical,
+  },
+};
+`;
+
 const site = {
   id: 8862,
   url_file_map: {
@@ -49,6 +65,7 @@ const site = {
       '/about': { file: 'src/app/about/page.tsx', adapters: { 'meta-title': { id: 'nextjs-metadata-export' }, canonical: { id: 'nextjs-metadata-export' }, 'open-graph': { id: 'nextjs-metadata-export' }, schema: { id: 'nextjs-metadata-export' } } },
       '/home-no-alternates': { file: 'src/app/home-no-alternates/page.tsx', adapters: { canonical: { id: 'nextjs-metadata-export' } } },
       '/dynamic': { file: 'src/app/dynamic/page.tsx', adapters: { 'meta-title': { id: 'nextjs-metadata-export' } } },
+      '/birgunj': { file: 'src/app/birgunj/page.tsx', adapters: { 'meta-title': { id: 'nextjs-metadata-export' }, canonical: { id: 'nextjs-metadata-export' } } },
     },
   },
 };
@@ -56,6 +73,7 @@ const site = {
 const fetchPage = async () => ({ content: PAGE_FIXTURE });
 const fetchDynamic = async () => ({ content: NO_METADATA_FIXTURE });
 const fetchNoAlternates = async () => ({ content: NO_ALTERNATES_FIXTURE });
+const fetchExternalDataRef = async () => ({ content: EXTERNAL_DATA_REF_FIXTURE });
 
 describe('findMetadataObjectRange', () => {
   test('finds the real export const metadata object, not the JSX braces below it', () => {
@@ -148,6 +166,27 @@ describe('computeChange', () => {
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'no-insertion-marker');
     assert.match(r.error, /alternates/);
+  });
+
+  test('title sourced from an external data-file reference (not a string literal) -> refuses instead of inserting a duplicate key', async () => {
+    const r = await computeChange(site, {
+      action_type: 'meta-title',
+      content: { page: 'https://admizzeducation.com/birgunj', selectedTitle: 'New Title' },
+    }, fetchExternalDataRef);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'non-literal-existing-value');
+    // Must not silently produce a file with two "title:" keys — the
+    // original reference-backed field, and duplicate splices, and
+    // insertNewScalarField was never called with useful output to check.
+  });
+
+  test('canonical sourced from an external data-file reference -> refuses, does not touch the reference or duplicate the key', async () => {
+    const r = await computeChange(site, {
+      action_type: 'canonical',
+      content: { page: 'https://admizzeducation.com/birgunj', canonicalUrl: 'https://admizzeducation.com/birgunj' },
+    }, fetchExternalDataRef);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'non-literal-existing-value');
   });
 
   test('schema has no metadata-export equivalent — refused, not silently no-op', async () => {

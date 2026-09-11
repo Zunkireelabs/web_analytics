@@ -97,6 +97,10 @@ test('every registered generator has a considered dedup identity', async () => {
     // expand-content, refresh-content has no `focus` param to discriminate
     // on, and only ever needs one open "this page needs a refresh" card.
     'refresh-content',
+    // One location×service page has exactly one missing container to
+    // bootstrap — the page alone is the identity, same as meta-title/schema
+    // for the same URL shape (see agents/lib/location-service-gap.js).
+    'location-service-bootstrap',
   ]);
   const metas = await listGeneratorMeta();
   const undeclared = metas

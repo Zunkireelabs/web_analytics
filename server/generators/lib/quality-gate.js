@@ -4,6 +4,7 @@ import { findSchemaIssues } from './schema-structure-guard.js';
 import { findEmptySections } from './empty-section-guard.js';
 import { checkPositioning } from './positioning-guard.js';
 import { findUnverifiedLegalClaims } from './legal-fact-guard.js';
+import { findUngroundedClaims } from './claim-grounding-guard.js';
 import { checkDesignConsistency } from './design-consistency-gate.js';
 import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
@@ -69,6 +70,19 @@ const NON_LLM_GENERATOR_IDS = new Set(['duplicate-id-fix', 'geo-audit']);
 // Quality Gate failure.
 const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
 
+// Same "found a real, systemic exception" gap closed here as
+// LEGAL_FACT_CHECKED_GENERATOR_IDS above: every content-generation
+// generator's "don't invent a fact/claim/number" instruction (landing-
+// page.js's "pricing, awards, client counts"; blog-outline.js's/direct-
+// answer.js's "ground every claim... never invent a fact, statistic, or
+// offering") was previously enforced only by asking the model nicely —
+// nothing downstream checked compliance the way legal-fact-guard.js
+// already does for the three legal generators. Confirmed via a
+// full-codebase sweep, 2026-09-11; all three now populate
+// `content.groundingContext` with the real supporting text they gave the
+// model, which is what claim-grounding-guard.js checks against.
+const CLAIM_GROUNDED_GENERATOR_IDS = new Set(['landing-page', 'blog-outline', 'direct-answer']);
+
 // siteId is optional and only used by the positioning check — every
 // existing caller that doesn't pass one (there are none left after this
 // change, but a future one could be) simply skips it, same as a site with
@@ -91,6 +105,7 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
   const isNonLlmContent = NON_LLM_GENERATOR_IDS.has(generatorId);
   const needsPositioningCheck = siteId != null && POSITIONING_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
+  const needsClaimGroundingCheck = CLAIM_GROUNDED_GENERATOR_IDS.has(generatorId);
   const needsDesignConsistencyCheck = DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId);
   const issues = [
     ...(isNonLlmContent ? [] : findScaffoldingIssues(content, generatorId)),
@@ -105,6 +120,7 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     ...findEmptySections(content),
     ...(needsPositioningCheck ? await checkPositioning(content, siteId) : []),
     ...(needsLegalFactCheck ? findUnverifiedLegalClaims(content) : []),
+    ...(needsClaimGroundingCheck ? findUngroundedClaims(content) : []),
     ...(needsDesignConsistencyCheck ? checkDesignConsistency(content).issues : []),
     // Applies to EVERY generator, same "not scoped to an allow-list"
     // discipline as checkPlaceholders above — any generator could in

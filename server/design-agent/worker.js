@@ -306,9 +306,8 @@ function installShutdownHandlers(worker) {
 // (server/design-agent/native-repair/), same job shape (job.params.payload)
 // the old OpenHands dispatcher already expected. code-self-repair.js's
 // default handler was migrated the same way (see that file). openhands-
-// handler.js and design_task.py are left in place, but unreferenced by any
-// active path, until both migrations are verified on staging — see
-// project memory / the plan this was built from for the deletion step.
+// handler.js and design_task.py themselves were deleted once both
+// migrations were verified on staging (see e94953d).
 export function createDispatchingHandler(options = {}) {
   const liveAnalysisHandler = createLiveDesignAnalysisHandler(options);
   const capabilityRepairHandler = createNativeCapabilityRepairHandler(options);

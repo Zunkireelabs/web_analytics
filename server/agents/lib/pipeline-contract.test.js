@@ -35,7 +35,15 @@ const { riskTierForGenerator } = await import('./risk-tiers.js');
 // Listed here so "has no implementer" stays a recorded decision rather than
 // something a future reader has to rediscover — and so any OTHER generator
 // losing its implementer fails this test loudly.
-const DELIBERATELY_NO_IMPLEMENTER = new Set(['geo-audit']);
+// location-service-bootstrap is real and applies for real, but not via the
+// registry's own generatorId -> implementer map: implementers/resolve.js's
+// resolveImplementerForApply/resolveImplementerForMerge special-case it
+// directly to the data-array-content adapter (it always targets that
+// adapter by construction — see resolve.js's own comment) before
+// getImplementerForGenerator is ever consulted for it. Listed here so that
+// remains a recorded decision rather than something this test flags as a
+// dead end.
+const DELIBERATELY_NO_IMPLEMENTER = new Set(['geo-audit', 'location-service-bootstrap']);
 
 describe('agent -> generator -> implementer pipeline contract', () => {
   test('every recommendation-source agent is actually registered', async () => {

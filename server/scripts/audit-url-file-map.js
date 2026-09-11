@@ -4,14 +4,15 @@ import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
 import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
-import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
+import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers/lib/marker-merge.js';
 import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { getFileContent } from '../github/client.js';
+import { getFileContent, getDefaultBranchSha } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
+import { fetchHtml } from '../agents/lib/page-content.js';
 
 // Read-only config-completeness audit for a site's url_file_map — surfaces
 // exactly the class of gap that let the homepage-FAQ and /compare/-FAQ
@@ -71,6 +72,23 @@ const DETECTORS = { detectBody: detectInsertionPoint, detectHead: detectHeadRegi
 // marker to check) are deliberately excluded — they're not marker-based.
 const ACTION_TYPES = ['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content'];
 
+// Every net-new-content action type a recommendation agent can generate for
+// ANY site, regardless of what this particular site's keyword/GSC data
+// happens to surface at onboarding time — unlike ACTION_TYPES above, these
+// have no existing page to check a marker against; the only real question is
+// whether url_file_map.newContentTargets has an entry to write one to at
+// all. Not knowing in advance which of these a site's growth agents will
+// eventually ask for is exactly why this has to be a proactive checklist
+// run once at onboarding rather than a per-recommendation surprise: Admizz
+// (site 8862) onboarded with only landing-page/cookie-policy/terms-of-service
+// configured, and its first blog-outline/direct-answer/translation
+// recommendations sat blocked with "no url_file_map.newContentTargets[...]
+// configured" for days before anyone noticed (2026-09-11).
+const NEW_CONTENT_ACTION_TYPES = [
+  'landing-page', 'blog-outline', 'direct-answer', 'translation',
+  'cookie-policy', 'privacy-policy', 'terms-of-service',
+];
+
 // analytics-install is marker-based too, but SITEWIDE (installs GA4/Meta
 // Pixel once, in the site's shared layout template) rather than per-page —
 // backend.js's computeMarkerMerge routes it through
@@ -101,6 +119,106 @@ function defaultRange() {
   return { start, end };
 }
 
+// A `fatal-no-head-region` verdict on `openGraph` means "this file has no
+// detectable per-page head region to splice a marker into" — it does NOT
+// mean OG tags are actually broken on the live site. Real, opposite cases
+// confirmed 2026-09-11 on two shared-layout (Eleventy) sites with the
+// identical audit symptom: zunkireelabs.com's base.njk already renders
+// correct og:title/og:description automatically from the same title/
+// description front matter meta-title manages (curl confirmed; zero
+// open-graph drafts have ever failed in the drafts table) — a false
+// positive, nothing to fix. chayceproperties.com had zero og:* tags at all
+// on the live page — a real gap. Same "fatal" reason, opposite ground
+// truth, and nothing about url_file_map's static config can tell them
+// apart — only the live page can. This is that check, automated, so a
+// future onboarding doesn't have to rediscover the distinction by hand
+// (see the action-center-onboarding skill's §7 for the full story).
+//
+// Deliberately narrow: only ever runs for `openGraph` gaps classified
+// `fatal-no-head-region` (the one case this ambiguity applies to), never
+// downgrades any other field or reason, and fails closed on any fetch
+// error or missing/empty tag — an unverifiable page stays reported fatal,
+// same "never guess" discipline as every other check in this script.
+const OG_LIVE_CHECK_CONCURRENCY = 4;
+
+function extractMetaContent(html, property) {
+  const re = new RegExp(`<meta[^>]+property=["']${property}["'][^>]*>`, 'i');
+  const tag = re.exec(html)?.[0];
+  if (!tag) return null;
+  const content = /content=["']([^"']*)["']/i.exec(tag)?.[1];
+  return content && content.trim() ? content.trim() : null;
+}
+
+// Presence alone is a weak signal — a tag can exist and be non-empty while
+// still being placeholder text nobody meant to ship ("TODO", "Lorem ipsum",
+// a bare "Untitled"/"Home", or a suspiciously short 1-2 word fragment no
+// real og:title/description would be). This is deliberately a narrow,
+// high-confidence denylist, not a quality judgment — it exists to catch
+// leftover scaffolding text, not to second-guess a short-but-real title. A
+// borderline case is left alone rather than flagged; false positives here
+// would just retrain a human to ignore this section.
+const OG_PLACEHOLDER_RE = /^\s*(todo|tbd|lorem ipsum|placeholder|untitled|coming soon|test|xxx+)\s*$/i;
+
+function looksLikeOgPlaceholder(value) {
+  const trimmed = (value || '').trim();
+  return OG_PLACEHOLDER_RE.test(trimmed) || trimmed.length < 4;
+}
+
+async function verifyLiveOpenGraph(pageUrl, fetch = fetchHtml) {
+  const fetched = await fetch(pageUrl);
+  if (!fetched.ok) return { ok: false, reason: fetched.error };
+  const title = extractMetaContent(fetched.html, 'og:title');
+  const description = extractMetaContent(fetched.html, 'og:description');
+  if (!title || !description) return { ok: false, reason: `live page missing ${!title ? 'og:title' : 'og:description'}` };
+  if (looksLikeOgPlaceholder(title)) return { ok: false, reason: `og:title looks like placeholder text ("${title}"), not real content` };
+  if (looksLikeOgPlaceholder(description)) return { ok: false, reason: `og:description looks like placeholder text ("${description}"), not real content` };
+  return { ok: true, title, description };
+}
+
+// Batches with bounded concurrency rather than Promise.all on the whole
+// list — this can run against 100+ pages on a large site, and courtesy to
+// the live target (and this script's own runtime) matters more than
+// shaving a few seconds off an on-demand audit.
+async function verifyLiveOpenGraphBatch(entries) {
+  const results = new Map();
+  let i = 0;
+  async function worker() {
+    while (i < entries.length) {
+      const entry = entries[i++];
+      results.set(entry.page, await verifyLiveOpenGraph(entry.page));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(OG_LIVE_CHECK_CONCURRENCY, entries.length) }, worker));
+  return results;
+}
+
+// A "fatal-no-head-region" verdict for a HEAD-scoped field (canonical,
+// openGraph, any analytics-install provider) on a shared-layout SSG file
+// with no literal <head> is CORRECT — a human placing a one-time marker
+// there is this codebase's own intended workflow (§2 of the
+// action-center-onboarding skill), same as the literal-<head> case. What
+// actually costs time is finding WHERE in that file the real head region
+// lives, when it isn't a bare <head> tag — e.g. Chayce's `headExtra: |`
+// front-matter block-literal, which base.njk injects straight into its own
+// real <head> at build time (confirmed 2026-09-11). This is a read-only
+// HINT for that investigation step, not a new auto-insertion mechanism —
+// deliberately heuristic (a plain regex, not real YAML parsing) since
+// nothing here writes anything; a wrong guess only wastes a human's next
+// look, never corrupts a file the way a wrong auto-splice would.
+function findHeadCandidateFrontMatterFields(fileContent) {
+  const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(fileContent);
+  if (!fmMatch) return [];
+  const fm = fmMatch[1];
+  const candidates = [];
+  const blockFieldRe = /^(\w+):\s*\|\s*\r?\n([\s\S]*?)(?=\r?\n\w+:|\r?\n?$)/gm;
+  let m;
+  while ((m = blockFieldRe.exec(fm))) {
+    const [, key, body] = m;
+    if (/<link\b|<style\b|<script\b|<meta\b/i.test(body)) candidates.push(key);
+  }
+  return candidates;
+}
+
 // Exported so connect-repo.js can run this same check automatically right
 // after url_file_map is set, instead of relying on the operator to remember
 // a separate `npm run audit-url-file-map` step (the exact class of gap this
@@ -112,6 +230,27 @@ export async function auditSite(siteId) {
     console.log(`Site #${siteId} "${site.name}": no repo configured yet — skipping (nothing to audit against).`);
     return;
   }
+
+  // Credential check FIRST, before anything else this audit does — every
+  // section below makes its own authenticated GitHub calls and silently
+  // degrades a dead credential into a wall of "file not found"/"could not
+  // check" noise (getFileContent swallows the error into `false`/warnings
+  // per-path, since a genuinely missing file has to look the same as one
+  // this audit couldn't read). A human onboarding a site, or an agent about
+  // to start generating recommendations for it, needs this as one clear
+  // PASS/FAIL up front, not inferred from which of thirty file checks
+  // happened to fail. Real incident, site 8864 (2026-09-11): 18
+  // recommendations sat blocked on "GitHub credentials are missing or no
+  // longer valid" without this ever being checked as its own first step.
+  let credentialsOk = false;
+  try {
+    await getDefaultBranchSha(site);
+    credentialsOk = true;
+  } catch (err) {
+    console.log(`\n-- GITHUB CREDENTIALS -- FAIL: ${err.message}`);
+    console.log('   Every other section below will misreport as missing files/markers until this is fixed — resolve this first, then re-run.');
+  }
+  if (credentialsOk) console.log('\n-- GITHUB CREDENTIALS -- OK, repo reachable.');
 
   const { start, end } = defaultRange();
   const rawPages = await getSearchPerformanceRange(siteId, start, end, 'page', PAGE_LIMIT);
@@ -189,7 +328,25 @@ export async function auditSite(siteId) {
     ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content, DETECTORS),
   }));
   const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
-  const markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
+  let markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
+
+  // See verifyLiveOpenGraph's own comment above for why this exists: a
+  // `fatal-no-head-region` verdict on openGraph specifically can't be
+  // trusted without checking the live page, since a shared layout can
+  // legitimately auto-derive OG tags from an already-managed field. One
+  // fetch per unique live URL among the candidates, not per (field) row.
+  const ogFatalCandidates = markersFatal.filter((m) => m.markerField === 'openGraph' && m.gap === 'fatal-no-head-region');
+  const ogLiveVerifiedOk = [];
+  if (ogFatalCandidates.length) {
+    const uniquePages = [...new Map(ogFatalCandidates.map((m) => [m.page, m])).values()];
+    const liveResults = await verifyLiveOpenGraphBatch(uniquePages);
+    markersFatal = markersFatal.filter((m) => {
+      if (!(m.markerField === 'openGraph' && m.gap === 'fatal-no-head-region')) return true;
+      const result = liveResults.get(m.page);
+      if (result?.ok) { ogLiveVerifiedOk.push({ ...m, live: result }); return false; }
+      return true; // fetch failed or tags missing/empty — stays reported fatal, never guessed clean
+    });
+  }
 
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);
   for (const { page, actionType } of noFileMapping) console.log(`  [${actionType}] ${page}`);
@@ -207,9 +364,24 @@ export async function auditSite(siteId) {
     console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (will auto-create SEOAI:${markerName})`);
   }
 
+  console.log(`\n-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (${ogLiveVerifiedOk.length}) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)`);
+  for (const { page, filePath } of ogLiveVerifiedOk) {
+    console.log(`  ${page} -> ${filePath}`);
+  }
+
   console.log(`\n-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (${markersFatal.length}) --`);
+  const headCandidateCache = new Map(); // filePath -> field names, computed once per file
   for (const { page, actionType, filePath, markerField, markerName, gap } of markersFatal) {
-    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName}, reason: ${gap})`);
+    let hint = '';
+    if (gap === 'fatal-no-head-region' && isHeadScopedField(markerField)) {
+      if (!headCandidateCache.has(filePath)) {
+        const cached = fileCache.get(filePath);
+        headCandidateCache.set(filePath, cached && cached !== 'error' ? findHeadCandidateFrontMatterFields(cached.content) : []);
+      }
+      const candidates = headCandidateCache.get(filePath);
+      if (candidates.length) hint = ` — possible head region: front-matter field(s) "${candidates.join('", "')}" (verify then place the SEOAI:HEAD marker inside, see onboarding skill §2/§7)`;
+    }
+    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName}, reason: ${gap})${hint}`);
   }
 
   console.log(`\n-- ADAPTER-ROUTED, not deep-checked here (${adapterRouted.length}) --`);
@@ -249,6 +421,18 @@ export async function auditSite(siteId) {
   if (Object.keys(newContentTargets).length && !renderCapabilityGaps.length) {
     console.log('  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.');
   }
+
+  // Coverage, not correctness: which net-new content types this site has NO
+  // target for at all. Not fatal by design — a site may genuinely never need
+  // e.g. translation — but it must be a visible, explicit choice made once
+  // at onboarding ("configure it now, or accept these will block later"),
+  // not a gap nobody looked at until a recommendation for it showed up
+  // blocked. See NEW_CONTENT_ACTION_TYPES above for the real incident this
+  // closes.
+  const missingContentTargets = NEW_CONTENT_ACTION_TYPES.filter((t) => !newContentTargets[t]);
+  console.log(`\n-- NEW CONTENT TARGETS NOT CONFIGURED (${missingContentTargets.length}/${NEW_CONTENT_ACTION_TYPES.length}) -- (not fatal; any recommendation of this type will block until configured)`);
+  for (const actionType of missingContentTargets) console.log(`  [${actionType}] no url_file_map.newContentTargets["${actionType}"] entry`);
+  if (!missingContentTargets.length) console.log('  OK — every known net-new content type has a target configured.');
 
   // Author/org avatar aspect-ratio check (avatar-aspect-check.js) — catches
   // the zunkireelabs-web incident shape (a wide wordmark logo declared as
@@ -358,7 +542,7 @@ export async function auditSite(siteId) {
     }
   }
 
-  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
+  const clean = credentialsOk && noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
     && nginxMarkerOk !== false && analyticsInstallGap === null && renderCapabilityGaps.length === 0
     && avatarAspectFatal.length === 0
     && ACTION_TYPES.every((t) => noMarkers[t].length === 0);
@@ -426,3 +610,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = 1;
   });
 }
+
+export const __testables = { looksLikeOgPlaceholder, verifyLiveOpenGraph, extractMetaContent };

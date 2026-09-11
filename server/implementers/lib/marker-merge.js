@@ -261,7 +261,8 @@ export function classifyMarkerGap(field, filePath, fileContent, detectors = {}) 
     return frontMatterLength(fileContent) != null ? 'self-heals' : 'fatal-no-front-matter';
   }
   if (HEAD_SCOPED_FIELDS.has(field)) {
-    if (blockRegex(HEAD_MARKER_NAME).test(fileContent)) return 'self-heals';
+    const headRegex = isJsxFile(filePath) ? jsxBlockRegex(HEAD_MARKER_NAME) : blockRegex(HEAD_MARKER_NAME);
+    if (headRegex.test(fileContent)) return 'self-heals';
     if (detectors.detectHead && detectors.detectHead(fileContent).ok) return 'self-heals';
     // Front-matter fallback (LINE_HEAD_FALLBACK_KEY above) — only reachable
     // once a real <head> is confirmed absent from this file, never preferred
@@ -289,16 +290,30 @@ function isPlainMarkdownFile(filePath) {
 }
 
 // Auto-creates a head-scoped field's own empty marker, nested inside the
-// site's already-placed <!-- SEOAI:HEAD:START/END --> region — never at
-// EOF. Returns null when that region doesn't exist yet (an onboarding step
-// the operator hasn't done for this template), leaving spliceMarkers'
-// existing "marker not found" failure as the honest outcome, same
-// discipline as insertLineMarker's null-on-unsafe return below.
-function insertHeadScopedMarker(fileContent, markerName) {
-  const match = blockRegex(HEAD_MARKER_NAME).exec(fileContent);
+// site's already-placed SEOAI:HEAD region — never at EOF. Returns null when
+// that region doesn't exist yet (an onboarding step the operator hasn't done
+// for this template), leaving spliceMarkers' existing "marker not found"
+// failure as the honest outcome, same discipline as insertLineMarker's
+// null-on-unsafe return below.
+//
+// `filePath`-aware on both sides: the HEAD region itself may exist in either
+// convention (a `.jsx`/`.tsx` file gets one via ensureHeadRegion's own
+// isJsxFile check, insertion-engine.js), so this must match whichever form
+// is actually present — and the nested marker it creates must match that
+// SAME form, never assume HTML-comment. Confirmed real: admizz-web-dev
+// (Next.js App Router) shipped a raw `<!-- SEOAI:HEAD:START -->` into
+// layout.tsx and broke the build (`Expected '</', got '!'`) — JSX has no
+// HTML-comment syntax, so that text is parsed as markup, not a comment.
+function insertHeadScopedMarker(fileContent, markerName, filePath) {
+  const jsx = isJsxFile(filePath);
+  const regex = jsx ? jsxBlockRegex(HEAD_MARKER_NAME) : blockRegex(HEAD_MARKER_NAME);
+  const match = regex.exec(fileContent);
   if (!match) return null;
   const [full, start, inner, end] = match;
-  const newInner = `${inner}\n<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  const nested = jsx
+    ? `{/* SEOAI:${markerName}:START */}{/* SEOAI:${markerName}:END */}`
+    : `<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
+  const newInner = `${inner}\n${nested}`;
   return fileContent.slice(0, match.index) + start + newInner + end + fileContent.slice(match.index + full.length);
 }
 
@@ -412,7 +427,7 @@ export function ensureMarkers(fileContent, markerMap, filePath) {
     }
     if (HEAD_SCOPED_FIELDS.has(field)) {
       const fallbackKey = LINE_HEAD_FALLBACK_KEY[field];
-      const updated = insertHeadScopedMarker(content, markerName)
+      const updated = insertHeadScopedMarker(content, markerName, filePath)
         ?? (fallbackKey ? insertNewFrontMatterField(content, fallbackKey, markerName) : null);
       if (updated) { content = updated; inserted.push(markerName); }
       continue; // no EOF fallback — an honest "marker not found" is correct here

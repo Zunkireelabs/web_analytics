@@ -326,6 +326,28 @@ export function resolveLinkDataSources(site, pageUrl) {
   return getMatchingPattern(site, pageUrl)?.linkDataSources || [];
 }
 
+// Same shape/discovery reasoning as resolveLinkDataSources above, for
+// alt-text-inject.js's own version of the identical problem: an image's
+// `src` (and, once configured, its `alt`) can be rendered from a shared
+// data file via a template variable (`<img src="{{ service.heroImage }}"
+// alt="">`) rather than hardcoded in the page's own file OR any file at
+// all as literal text — confirmed on zunkireelabs-web's service pages
+// (2026-09-11): `service.heroImage` in `servicesDetails.json` drives a
+// build-time-hashed output filename (`/assets/images/data-systems-hero.webp`
+// source -> `/assets/data-systems-hero-ByIjgOS7.webp` rendered), so no
+// literal-text search, however complete, can ever find that `src` string —
+// it was never written down anywhere as text. alt-text-inject's Layer 2
+// (repo-local-search) correctly finds a shared LAYOUT that merely renders
+// hardcoded `alt=""`, but the fix belongs in the DATA the layout reads, not
+// the layout markup itself. Shape: [{ dataFile, srcField, altField,
+// format? }, ...] — same id convention as linkDataSources (the page URL's
+// own last path segment), `format` defaults to 'json-array'.
+export function resolveAltTextDataSources(site, pageUrl) {
+  const entry = getPageEntry(site, pageUrl);
+  if (entry?.altTextDataSources) return entry.altTextDataSources;
+  return getMatchingPattern(site, pageUrl)?.altTextDataSources || [];
+}
+
 // Render mode (visible vs. schema-only) is NOT resolved here, and
 // deliberately has no static config surface — see
 // implementers/lib/render-inspector.js. It's decided fresh on every call by

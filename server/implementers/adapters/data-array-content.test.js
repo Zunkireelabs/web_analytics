@@ -388,6 +388,61 @@ describe('data-array-content isDataReady — pre-flight check mirrors computeCha
   });
 });
 
+// 'location-service-bootstrap' is the SAFE_RECOVERY write path
+// (agents/lib/location-service-gap.js decides WHETHER to authorize it;
+// this only tests what actually gets written once authorized) — it creates
+// the missing EMPTY services.<id> container, never any content, so the same
+// generators exercised above can then write real fields into it exactly the
+// way they already do for kathmandu's real services.
+describe('data-array-content computeChange — location-service-bootstrap (structural recovery)', () => {
+  const baseConfig = tenantAWithNestedServices.url_file_map.patterns[0].adapters['meta-title'];
+
+  test('location has no services object at all -> creates services AND the nested entry, both empty', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.equal(r.bootstrap, true);
+    assert.match(r.newContent, /id:\s*"pokhara"[\s\S]*?services:\s*\{\s*["']?aeo-seo["']?:\s*\{\s*\}/);
+    // sibling location's real content untouched
+    assert.match(r.newContent, /title: "AI Development Services in Kathmandu"/);
+  });
+
+  test('location already has a services object but not this service -> adds only the new key, siblings untouched', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/quantum-computing/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /["']?quantum-computing["']?:\s*\{\s*\}/);
+    assert.match(r.newContent, /"ai-development":\s*\{/); // untouched sibling
+  });
+
+  test('entry already exists -> refuses rather than overwriting real content', async () => {
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/kathmandu/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'already-exists');
+  });
+
+  test('the newly-created container is then a normal, ready insertion point for a real generator', async () => {
+    const bootstrapped = await computeChange(tenantAWithNestedServices, {
+      action_type: 'location-service-bootstrap',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', baseConfig },
+    }, fetchLocations);
+    const fetchBootstrapped = async () => ({ content: bootstrapped.newContent });
+    const r = await computeChange(tenantAWithNestedServices, {
+      action_type: 'meta-title',
+      content: { page: 'https://zunkireelabs.com/locations/pokhara/aeo-seo/', selectedTitle: 'SEO & AEO in Pokhara' },
+    }, fetchBootstrapped);
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /title: "SEO & AEO in Pokhara"/);
+  });
+});
+
 describe('data-array-content computeChange — json-array format, synthetic fixture', () => {
   const jsonFixture = JSON.stringify([
     { id: 'widget-a', name: 'Widget A', faqs: [{ question: 'Hand-authored', answer: 'Kept as-is' }] },

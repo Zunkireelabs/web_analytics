@@ -65,7 +65,7 @@ export function buildCorrectionFeedback(issues, { site = null, canonicalTemplate
   if (!correctable.length) return null;
 
   const lines = [
-    'CORRECTION REQUIRED — your previous answer was generated and then checked against this site\'s own real design, and it did not match. Fix exactly these problems and keep everything else you already wrote:',
+    'CORRECTION REQUIRED — your previous answer was generated and then checked against this site\'s own real design and known facts, and something did not match. Fix exactly these problems and keep everything else you already wrote:',
   ];
   correctable.forEach((issue, idx) => {
     lines.push(`${idx + 1}. ${issue.detail || issue.patternId} -> ${issue.correction}`);

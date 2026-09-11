@@ -120,6 +120,13 @@ export async function generate({ siteId, params }) {
     supportingSections: Array.isArray(parsed.supportingSections) ? parsed.supportingSections : [],
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    // Same convention as landing-page.js's/blog-outline.js's
+    // content.groundingContext — for claim-grounding-guard.js
+    // (quality-gate.js) to check against. This generator's own prompt is
+    // the strictest of the three (always "ground every claim", with no
+    // "treat it as a creative draft" fallback), so this is the tightest
+    // real-context match of the three generators sharing this check.
+    groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Direct-answer draft for "${query}" (${wordCount(directAnswer)} words)` };
 }

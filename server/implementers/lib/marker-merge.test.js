@@ -90,6 +90,31 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.match(spliced.newContent, /<link rel="canonical" href="https:\/\/example\.com\/">/);
   });
 
+  // Regression coverage for the admizz-web-dev (Next.js App Router) build
+  // break: a head-scoped marker nested inside a .tsx file's own JSX-style
+  // HEAD region must itself use JSX comment syntax — a raw HTML comment
+  // isn't a comment inside JSX and breaks compilation (`Expected '</',
+  // got '!'`). Confirmed on layout.tsx PR #31, 2026-09-11.
+  test('ensureMarkers nests a head-scoped marker in JSX comment syntax when the HEAD region itself is JSX-style', () => {
+    const file = '<html><head>\n{/* SEOAI:HEAD:START */}{/* SEOAI:HEAD:END */}\n</head></html>';
+    const { content, inserted } = ensureMarkers(file, { canonical: 'CANONICAL' }, 'src/app/layout.tsx');
+    assert.deepEqual(inserted, ['CANONICAL']);
+    assert.match(content, /\{\/\* SEOAI:HEAD:START \*\/\}[\s\S]*\{\/\* SEOAI:CANONICAL:START \*\/\}\{\/\* SEOAI:CANONICAL:END \*\/\}[\s\S]*\{\/\* SEOAI:HEAD:END \*\/\}/);
+    assert.doesNotMatch(content, /<!--/); // never a raw HTML comment inside a .tsx file
+  });
+
+  test('full round trip on a .tsx file: JSX HEAD region present -> auto-create -> splice succeeds', () => {
+    const file = '<html><head>\n{/* SEOAI:HEAD:START */}{/* SEOAI:HEAD:END */}\n</head></html>';
+    const markerMap = { canonical: 'CANONICAL' };
+    const { content: ensured } = ensureMarkers(file, markerMap, 'src/app/layout.tsx');
+    const spliced = spliceMarkers(ensured, markerMap, { canonical: '<link rel="canonical" href="https://example.com/">' });
+    assert.equal(spliced.ok, true);
+    // A JSX-kind marker splices via dangerouslySetInnerHTML (raw HTML can't
+    // be interpolated directly into JSX) — same as any other jsx-kind splice.
+    assert.match(spliced.newContent, /dangerouslySetInnerHTML/);
+    assert.match(spliced.newContent, /<link rel=\\"canonical\\" href=\\"https:\/\/example\.com\/\\">/);
+  });
+
   // Plain Markdown/MDX is the one shape where EOF really is inside the
   // rendered body (see isNoEofInsertField's comment) — every OTHER body
   // field, including faq, now needs real structural detection

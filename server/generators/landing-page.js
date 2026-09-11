@@ -62,6 +62,12 @@ export async function generate({ siteId, params }) {
     cta: parsed.cta || '',
     metaTitle: parsed.metaTitle || '',
     metaDescription: parsed.metaDescription || '',
+    // The exact real supporting data this draft was grounded in — same
+    // convention as compliance-draft.js's `content.factsUsed` — so
+    // claim-grounding-guard.js (quality-gate.js) can check "is this claim
+    // actually backed by something real" without re-deriving or guessing
+    // at what the model was given.
+    groundingContext: context || '',
   };
   return { content, summary: `Landing page draft for "${target}"` };
 }

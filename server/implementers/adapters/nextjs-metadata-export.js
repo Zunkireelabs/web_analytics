@@ -2,7 +2,7 @@ import { getFileContent } from '../../github/client.js';
 import { pushDraftBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from '../lib/github-ops.js';
 import { resolveAdapter, resolveFile } from '../lib/url-file-map.js';
 import {
-  scanBalanced, findObjectFieldRange, findScalarFieldRange, spliceScalarField, insertNewScalarField,
+  scanBalanced, findObjectFieldRange, findScalarFieldRange, spliceScalarField, insertNewScalarField, scalarFieldKeyExists,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
 
@@ -125,6 +125,17 @@ function writeFields(content, objRange, fieldMap, values) {
     const newValue = values[valueKey];
     if (newValue == null) continue;
     const before = findScalarFieldRange(content, objRange, fieldName);
+    if (!before && scalarFieldKeyExists(content, objRange, fieldName)) {
+      // The key is already there but findScalarFieldRange wouldn't touch it
+      // (a template-literal interpolation, or — the real case this guards —
+      // a reference expression like `birgunjData.meta.title` sourced from
+      // another module). Falling through to insertNewScalarField here would
+      // append a second same-named key rather than genuinely writing the
+      // field: syntactically valid (the duplicate silently wins at runtime)
+      // but leaves the original reference as dead, confusing source, and
+      // would duplicate again on every future draft. Refuse instead.
+      return { ok: false, error: `${fieldName} already has a non-string value in this file (e.g. a reference to another module's data) that this adapter can't safely overwrite — needs a one-time manual edit to make it a plain string literal first.` };
+    }
     const beforeValue = before ? content.slice(before.valueStart, before.valueEnd) : '(none)';
     const spliced = before
       ? spliceScalarField(content, objRange, fieldName, newValue)
@@ -133,7 +144,7 @@ function writeFields(content, objRange, fieldMap, values) {
     content = spliced;
     changedRegions.push({ field: valueKey, targetField: fieldName, before: beforeValue, after: JSON.stringify(newValue) });
   }
-  return { content, objRange, changedRegions };
+  return { ok: true, content, objRange, changedRegions };
 }
 
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site)) {
@@ -169,6 +180,7 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
 
   if (topLevel) {
     const written = writeFields(content, objRange, topLevel, values);
+    if (!written.ok) return { ok: false, reason: 'non-literal-existing-value', error: `${filePath}: ${written.error}` };
     content = written.content;
     objRange = written.objRange;
     changedRegions = changedRegions.concat(written.changedRegions);
@@ -180,6 +192,7 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
       return { ok: false, reason: 'no-insertion-marker', error: `${filePath}'s metadata object has no existing "${nested.parentField}" object for this adapter to write into — add one by hand once, the same one-time-anchor rule every other implementer here follows, before this can apply.` };
     }
     const written = writeFields(content, parentRange, nested.fields, values);
+    if (!written.ok) return { ok: false, reason: 'non-literal-existing-value', error: `${filePath}: ${written.error}` };
     content = written.content;
     changedRegions = changedRegions.concat(written.changedRegions);
   }

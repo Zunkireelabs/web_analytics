@@ -137,11 +137,11 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
   for (const g of gaps) {
     await query(
       `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source,
-                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role)
+                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role, location_code)
        SELECT $1, $2, $3, $4, 'pending_review', $5,
               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
-              $7, $8
+              $7, $8, $9
         WHERE NOT EXISTS (
           SELECT 1 FROM keyword_gaps
            WHERE site_id = $1 AND topic = $2 AND status IN ('accepted', 'dismissed')
@@ -155,8 +155,9 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
                                        COALESCE(keyword_gaps.last_observed_week, EXCLUDED.last_observed_week)),
          reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason),
          topic_cluster = COALESCE(EXCLUDED.topic_cluster, keyword_gaps.topic_cluster),
-         cluster_role = COALESCE(EXCLUDED.cluster_role, keyword_gaps.cluster_role)`,
-      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null]
+         cluster_role = COALESCE(EXCLUDED.cluster_role, keyword_gaps.cluster_role),
+         location_code = COALESCE(EXCLUDED.location_code, keyword_gaps.location_code)`,
+      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null, g.location_code || null]
     );
   }
 }

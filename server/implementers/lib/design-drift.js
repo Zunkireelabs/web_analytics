@@ -185,6 +185,65 @@ export function classExistsInCss(cls, css) {
   return false;
 }
 
+// The declaration-block TEXT for a class selector (everything between its
+// first matching { and }), normalized (collapsed whitespace, trimmed) so a
+// cosmetic reformat of the same CSS doesn't read as a change. Shared by
+// classIsLabelStyle (below) and checkClassRuleDrift — the same "find the
+// real rule body" primitive, previously duplicated inline in the former.
+//
+// Real gap this exists for: classExistsInCss answers "does the live site
+// still define .bg-white at all" — true even if a rebrand redefined what
+// .bg-white (or a custom CSS variable it references) actually renders as. A
+// site's HTML can keep the exact same class names forever while a design
+// system/Tailwind-config/CSS-variable change silently changes what those
+// names mean. Existence was never evidence of an unchanged VALUE.
+function extractCssRuleBody(cls, css) {
+  const needle = `.${escapeForCssSelector(cls)}`;
+  let idx = css.indexOf(needle);
+  while (idx !== -1) {
+    const after = css[idx + needle.length];
+    if (after !== undefined && !IDENT_CONTINUATION.test(after)) {
+      const open = css.indexOf('{', idx);
+      const close = open === -1 ? -1 : css.indexOf('}', open);
+      if (open !== -1 && close !== -1) return css.slice(open + 1, close).replace(/\s+/g, ' ').trim();
+    }
+    idx = css.indexOf(needle, idx + 1);
+  }
+  return null;
+}
+
+// { className: ruleBodyText } for every class that has a real rule in `css`
+// — a class extractCssRuleBody can't find a body for (custom CSS with no
+// matching selector, or purely structural/never-styled) is simply absent
+// from the result, not an error; callers compare only classes present in
+// BOTH snapshots (see checkClassRuleDrift), same "can't tell, don't guess"
+// stance as everywhere else in this module.
+export function captureClassRules(classes, css) {
+  const rules = {};
+  for (const cls of classes) {
+    const body = extractCssRuleBody(cls, css);
+    if (body != null) rules[cls] = body;
+  }
+  return rules;
+}
+
+// Compares a template's previously-captured rule bodies (stored on the stamp
+// as `verifiedClassRules` — see stampTemplateVerification) against what the
+// live CSS defines for those same classes right now. Only classes present in
+// BOTH snapshots are compared: a class that's dropped out of the live CSS
+// entirely is already caught by checkTemplateFreshness's own missingClasses
+// check, and a class with no captured rule body in the first place was never
+// asserted to be stable, so neither is this function's job to flag.
+export function checkClassRuleDrift(verifiedClassRules, liveCss) {
+  if (!verifiedClassRules || typeof verifiedClassRules !== 'object') return { drifted: [] };
+  const drifted = [];
+  for (const [cls, before] of Object.entries(verifiedClassRules)) {
+    const after = extractCssRuleBody(cls, liveCss);
+    if (after != null && after !== before) drifted.push({ cls, before, after });
+  }
+  return { drifted };
+}
+
 // Rebuilds every literal `class="..."` attribute in a template, keeping only
 // the tokens that resolve in the given CSS. Field/HTML structure, Alpine
 // bindings (`:class="..."`, which this never touches — same exclusion as
@@ -419,9 +478,19 @@ export const TEMPLATE_VERIFIED_BY = {
 // identifies the evidence — a design_generate job id, a user id, or the page
 // URL a freshness check ran against — so a later "why is this trusted?" has a
 // real answer instead of a bare boolean.
-export function stampTemplateVerification(template, { verifiedBy, verifiedRef = null, at = new Date() } = {}) {
+export function stampTemplateVerification(template, { verifiedBy, verifiedRef = null, at = new Date(), classRules = null } = {}) {
   if (!template) return template;
-  return { ...template, verifiedAt: at.toISOString(), verifiedBy, verifiedRef: verifiedRef == null ? null : String(verifiedRef) };
+  return {
+    ...template,
+    verifiedAt: at.toISOString(),
+    verifiedBy,
+    verifiedRef: verifiedRef == null ? null : String(verifiedRef),
+    // A fresh baseline every time this stamps (never merged with whatever
+    // the template happened to carry before) — a class that's since been
+    // dropped from the checked set must not leave a stale rule body sitting
+    // around to be compared against nothing on some future run.
+    verifiedClassRules: classRules || {},
+  };
 }
 
 // The single predicate the gate asks. Deliberately structural-only (is there a
@@ -837,6 +906,27 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
     };
   }
 
+  const currentClassRules = captureClassRules(freshness.checkedClasses, freshness.css);
+
+  // Same-name, different meaning: a class can exist AND keep the exact same
+  // markup shape while a design-system/Tailwind-config/CSS-variable change
+  // silently redefines what it renders as (a rebrand that repoints a color
+  // token, say) — checkTemplateFreshness only proves the selector still
+  // exists, never that its declaration is unchanged. Only meaningful once
+  // there's a prior baseline to compare against (verifiedClassRules is only
+  // ever written by a PASSING verification, so its absence just means this
+  // is the template's first pass — nothing to compare yet, not a failure).
+  if (template.verifiedClassRules && Object.keys(template.verifiedClassRules).length) {
+    const { drifted } = checkClassRuleDrift(template.verifiedClassRules, freshness.css);
+    if (drifted.length) {
+      return {
+        ok: false, reason: 'class-rule-drift',
+        error: `${drifted.length} class(es) still exist on ${pageUrl} but their real CSS definition changed since this template was last verified (e.g. "${drifted[0].cls}" was "${drifted[0].before}", is now "${drifted[0].after}") — a design-system/rebrand change, not a missing class. Re-verify once the new look is confirmed correct.`,
+        drifted,
+      };
+    }
+  }
+
   return {
     ok: true,
     reason: 'passed',
@@ -844,6 +934,7 @@ export async function verifyTemplateAgainstLiveSite(actionType, template, { page
     stamped: stampTemplateVerification(template, {
       verifiedBy: TEMPLATE_VERIFIED_BY.FRESHNESS_CHECK,
       verifiedRef: pageUrl,
+      classRules: currentClassRules,
     }),
   };
 }

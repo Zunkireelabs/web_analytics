@@ -28,6 +28,7 @@ import {
   UNVERIFIED_PLACEHOLDER_FRAGMENT,
   DESIGN_NOT_REVIEWED_FRAGMENT,
   LINK_TARGET_UNRESOLVABLE_FRAGMENT,
+  LINK_CONFIRMED_ABSENT_FRAGMENT,
 } from './draft-failure-phrases.js';
 
 // What the pipeline should DO. Kept separate from FAILURE_CLASS because
@@ -231,7 +232,7 @@ const RULES = [
     // nothing left to publish in schema-only mode." (25 live rows.) Another
     // draft won the race and fixed the underlying issue. Retrying cannot
     // succeed and should not: there is nothing left to do.
-    match: (r) => /already has an? .*schema/i.test(r) || /nothing left to publish/i.test(r),
+    match: (r) => /already has an? .*schema/i.test(r) || /nothing left to publish/i.test(r) || /nothing left to apply/i.test(r),
     failureClass: null,
     policy: RETRY_POLICY.ALREADY_RESOLVED,
     summary: 'Another change already fixed this — there is nothing left to apply.',
@@ -254,6 +255,31 @@ const RULES = [
     summary: 'This site’s GitHub credentials are missing or no longer valid.',
   },
   {
+    // "Auto-ship failed: mergeBranchFromBase failed (403): {"message":
+    // "Resource not accessible by integration",...}" — GitHub's own
+    // documented behavior for a fine-grained PAT hitting the classic
+    // "Merge a branch" REST endpoint (github-ops.js's getOrInitBatchBranch
+    // calls it to sync every SAME-DAY batch branch with base before a
+    // second-or-later draft can push): fine-grained PATs don't support that
+    // endpoint at all, the same class of gap this codebase already worked
+    // around for /search/code (repo-local-search.js) and for App
+    // installation tokens generally. Verified live against site 1
+    // (2026-09-11, fine-grained github_pat_... token): 5 identical 403s in
+    // one run, all against a GEO (geo-signals) expand-content
+    // recommendation whose content had nothing to do with the failure —
+    // EVERY draft that day past the first hits this identically, since it's
+    // the shared batch-sync step, not anything about the item. Retrying
+    // cannot ever succeed with this token type, so ITEM_DEFECT (this
+    // codebase's "will recur until the item itself changes") is the wrong
+    // read too — nothing about the item can change this. Needs either a
+    // classic PAT/App token for this site or a Git-Data-API-based sync that
+    // doesn't call /merges at all.
+    match: (r) => /mergeBranchFromBase failed \(403\)/.test(r) && /resource not accessible by integration/i.test(r),
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This site’s GitHub token can’t use the branch-merge endpoint the daily batch sync needs (a known fine-grained-PAT limitation) — every draft after the first each day fails identically, regardless of content.',
+  },
+  {
     // The repository-local search fallback (repo-local-search.js) is
     // deliberately bounded (MAX_LOCAL_SEARCH_FILES real candidate files per
     // search) rather than a repo-wide grep — for a repo with more real
@@ -269,6 +295,31 @@ const RULES = [
     summary: 'This repository has more real candidate files than the bounded local search can scan in one pass — needs a url_file_map entry or manual confirmation.',
   },
   {
+    // Ordered BEFORE the generic LINK_TARGET_UNRESOLVABLE_FRAGMENT rule below
+    // — that rule's message is always a superset of this one's, so it would
+    // otherwise win first and give the wrong advice. Since the repo-local
+    // search fallback started reading the whole repo as one tarball
+    // (2026-09-08), a "no candidates found" result is no longer a bounded
+    // sample coming up empty — it's a completed, full-coverage search. When
+    // NOTHING page-specific, no configured data source, and no site-wide
+    // config file matched either, "add a url_file_map entry" is not just
+    // unhelpful here, it's provably wrong: there is nowhere left to map to.
+    // Verified live against site 1 (2026-09-11): every "shared header/footer"
+    // case this generic rule used to catch (twitter/github/linkedin social
+    // links, product doc links, app subdomain logins) now resolves via the
+    // site-wide JSON config or a configured data source instead of ever
+    // reaching this branch — what's left reaching it is a finding whose href
+    // is not hardcoded anywhere in the repo at all, i.e. stale (already fixed
+    // on the live site, or never a static link to begin with). Treated as
+    // ALREADY_RESOLVED so it stops parking as a human-blocked card telling
+    // someone to add a mapping that cannot possibly help, and instead closes
+    // so a fresh crawl can re-raise it if it's still genuinely broken.
+    match: (r) => r.includes(LINK_CONFIRMED_ABSENT_FRAGMENT),
+    failureClass: null,
+    policy: RETRY_POLICY.ALREADY_RESOLVED,
+    summary: 'This link is not hardcoded anywhere in the repository — the finding is likely stale rather than missing a mapping.',
+  },
+  {
     // Ordered AFTER the credential and bounded-search rules above so their
     // more specific diagnoses still win on the link-strip messages that carry
     // them; this catches the plain "…none matched." variant, which otherwise
@@ -278,6 +329,12 @@ const RULES = [
     // that misclassification let 75 findings produce 296 drafts — ship-pacing
     // grants MAX_FAILED_ATTEMPTS per recovery cycle, so an ITEM_DEFECT that
     // can never converge re-drafts on a schedule instead of blocking once.
+    //
+    // Only reaches here when the fully-searched case above did NOT match —
+    // i.e. repo-local search actually found candidate files containing the
+    // string (stripLink just couldn't apply cleanly to any of them), which
+    // is still a real "the file holding it isn't the one we can safely edit"
+    // situation, unlike the confirmed-absent case.
     match: (r) => r.includes(LINK_TARGET_UNRESOLVABLE_FRAGMENT),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,

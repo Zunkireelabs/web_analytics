@@ -31,7 +31,7 @@ from datetime import date, timedelta
 from app.collectors.base import Collector, Observation
 from app.intelligence import keyword_clustering as ic
 from app.mcp_client.tools import (
-    get_gsc_breakdown, get_site_profile,
+    get_gsc_breakdown, get_keyword_gaps, get_site_profile,
     save_keyword_clusters, save_keyword_gaps, save_site_profile,
 )
 
@@ -129,15 +129,37 @@ class KeywordClusteringCollector(Collector):
         )
 
         if new_profile and new_profile["main_topics"]:
-            await self._run_external_research(mcp, client, new_profile, keywords, gaps)
+            await self._run_external_research(mcp, client, new_profile, keywords, gaps, window_end)
 
         return []
 
-    async def _run_external_research(self, mcp, client, profile: dict, keywords: list[dict], step3_gaps: list[dict]) -> None:
+    async def _run_external_research(self, mcp, client, profile: dict, keywords: list[dict], step3_gaps: list[dict], window_end: date) -> None:
         """Step 4 — independent of Steps 1-3 above beyond reusing the
         profile just produced and this run's own already-fetched keyword
         set (in place of the retired script's second DB round-trip for
         position lookups — see the module docstring)."""
+        # Skip the LLM guess entirely when this site already has a real,
+        # search-volume-backed keyword_gaps batch from THIS calendar month
+        # (Node's server/agents/lib/keyword-demand.js, source=
+        # 'dataforseo_demand' — see its own module docstring). That path only
+        # runs once DataForSEO is configured; sites without it keep using
+        # this LLM-guess step unchanged, so keyword-gap discovery is never
+        # lost while waiting on credentials.
+        existing_gaps = await get_keyword_gaps(mcp)
+        this_month = window_end.replace(day=1)
+        has_real_demand_batch = any(
+            g.get("source") == "dataforseo_demand"
+            and g.get("created_at")
+            and date.fromisoformat(g["created_at"][:10]) >= this_month
+            for g in existing_gaps
+        )
+        if has_real_demand_batch:
+            logger.info(
+                "client %s: real DataForSEO keyword-demand data already exists for this month — skipping LLM-guess research.",
+                client.id,
+            )
+            return
+
         # Only this run's own emissions seed the dedupe set. Previously the
         # already-persisted gaps were folded in here too, which meant a topic
         # was researched, matched, and then dropped before save_keyword_gaps

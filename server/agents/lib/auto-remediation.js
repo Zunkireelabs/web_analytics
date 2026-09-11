@@ -1125,11 +1125,14 @@ export async function shipDraftForRecommendation(siteId, { generatorId, params, 
   // identically (the credential is genuinely missing, and the existing
   // NEEDS_HUMAN classification is correct and now better evidenced).
   if (!approved.branch_name && CREDENTIAL_FAILURE_PATTERN.test(approved.apply_error || '')) {
-    console.warn(`[auto-remediation] ${clientLabel} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
+    // No `site` row fetched in this function (unlike autoRemediateSafeRecommendations's
+    // own clientLabel, which needs site.client_number) — `siteId` alone is
+    // enough for a log line here.
+    console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential resolution failed ("${approved.apply_error}") — retrying once before treating it as a real outcome.`);
     await new Promise((r) => setTimeout(r, CREDENTIAL_RETRY_DELAY_MS));
     approved = await approveAndPublishDraftUnattended(siteId, draft.id, { userId: null, deferPr });
     if (approved.branch_name) {
-      console.warn(`[auto-remediation] ${clientLabel} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
+      console.warn(`[auto-remediation] site ${siteId} draft ${draft.id}: credential retry SUCCEEDED — the first failure was transient, not a real configuration gap.`);
     }
   }
 

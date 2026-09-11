@@ -10,6 +10,13 @@ mock.module(resolve('../../db.js'), {
       savedConfig = { siteId, urlFileMap };
       return { id: siteId, url_file_map: urlFileMap, repo_owner: 'a', repo_name: 'b' };
     },
+    // Not called by anything this test exercises — only present because
+    // mock.module replaces db.js's ENTIRE export surface, and the module
+    // under test's own import chain (pagination-adapter-discovery.js ->
+    // github-ops.js -> store/drafts.js -> store/fix-verifications.js) has a
+    // static `import { query } from '../db.js'` that fails to even load
+    // without it.
+    query: async () => ({ rows: [] }),
   },
 });
 
