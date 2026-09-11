@@ -149,12 +149,29 @@ function extractMetaContent(html, property) {
   return content && content.trim() ? content.trim() : null;
 }
 
-async function verifyLiveOpenGraph(pageUrl) {
-  const fetched = await fetchHtml(pageUrl);
+// Presence alone is a weak signal — a tag can exist and be non-empty while
+// still being placeholder text nobody meant to ship ("TODO", "Lorem ipsum",
+// a bare "Untitled"/"Home", or a suspiciously short 1-2 word fragment no
+// real og:title/description would be). This is deliberately a narrow,
+// high-confidence denylist, not a quality judgment — it exists to catch
+// leftover scaffolding text, not to second-guess a short-but-real title. A
+// borderline case is left alone rather than flagged; false positives here
+// would just retrain a human to ignore this section.
+const OG_PLACEHOLDER_RE = /^\s*(todo|tbd|lorem ipsum|placeholder|untitled|coming soon|test|xxx+)\s*$/i;
+
+function looksLikeOgPlaceholder(value) {
+  const trimmed = (value || '').trim();
+  return OG_PLACEHOLDER_RE.test(trimmed) || trimmed.length < 4;
+}
+
+async function verifyLiveOpenGraph(pageUrl, fetch = fetchHtml) {
+  const fetched = await fetch(pageUrl);
   if (!fetched.ok) return { ok: false, reason: fetched.error };
   const title = extractMetaContent(fetched.html, 'og:title');
   const description = extractMetaContent(fetched.html, 'og:description');
   if (!title || !description) return { ok: false, reason: `live page missing ${!title ? 'og:title' : 'og:description'}` };
+  if (looksLikeOgPlaceholder(title)) return { ok: false, reason: `og:title looks like placeholder text ("${title}"), not real content` };
+  if (looksLikeOgPlaceholder(description)) return { ok: false, reason: `og:description looks like placeholder text ("${description}"), not real content` };
   return { ok: true, title, description };
 }
 
@@ -593,3 +610,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = 1;
   });
 }
+
+export const __testables = { looksLikeOgPlaceholder, verifyLiveOpenGraph, extractMetaContent };
