@@ -115,6 +115,109 @@ describe('createRecommendationGates — healNewContentTarget wiring', () => {
   });
 });
 
+// A missing services.<id> entry used to be a permanent drop
+// ('adapter-data-not-ready') — these cover the SAFE_RECOVERY wiring: a
+// qualifying gap now gets ONE real recommendation created for it (via the
+// SAME store functions/dedup key every other writer uses) and the ORIGINAL
+// recommendation stays open with a real, honest blocked reason instead of
+// silently vanishing as "healthy". agents/lib/location-service-gap.js's own
+// evidence logic is out of scope here — this only tests that the gate wires
+// its verdict correctly, via the module's `resolveGap` injection point.
+describe('createRecommendationGates — location-service-bootstrap (SAFE_RECOVERY) wiring', () => {
+  const nestedSite = {
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main',
+    url_file_map: {
+      patterns: [{
+        match: '^/locations/([^/]+)/([^/]+)/?$',
+        adapters: { 'meta-title': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/locations.js', idField: 'id', nestedField: 'services', fields: { title: 'title' } } },
+      }],
+    },
+  };
+  const page = 'https://acme.com/locations/pokhara/aeo-seo/';
+  // A real location with NO services entry for this service — exactly the
+  // adapter-data-not-ready shape, content irrelevant beyond that (the real
+  // evidence check is stubbed via resolveGap in these tests).
+  const missingEntryFile = 'export default [{ id: "pokhara", name: "Pokhara" }];';
+
+  test('SAFE_RECOVERY: creates the bootstrap recommendation once, keeps the original open with an honest reason (never drops it)', async () => {
+    const inserted = [];
+    const gates = createRecommendationGates(1, nestedSite, {
+      ...neutralDeps(),
+      fetchFile: async () => ({ content: missingEntryFile }),
+      resolveGap: async () => ({ verdict: 'SAFE_RECOVERY', reason: 'test', evidence: { locationId: 'pokhara', serviceId: 'aeo-seo' } }),
+      getCachedGap: async () => null,
+      saveGap: async (siteId, dataFile, locationId, serviceId, verdict) => verdict,
+      findOpenRec: async () => null,
+      insertRec: async (siteId, payload) => { inserted.push(payload); return { id: 1 }; },
+    });
+
+    const result = await gates.evaluate('meta-title', { page });
+
+    assert.equal(result.drop, null);
+    assert.match(result.blockedReason, /hasn't been derived yet/);
+    assert.equal(inserted.length, 1);
+    assert.equal(inserted[0].recommendationType, 'location-service-bootstrap');
+    assert.equal(inserted[0].riskTier, 'safe');
+    assert.equal(inserted[0].params.baseConfig.dataFile, 'src/_data/locations.js');
+  });
+
+  test('INSUFFICIENT_DATA: keeps the original drop, never creates a bootstrap recommendation', async () => {
+    let insertCalls = 0;
+    const gates = createRecommendationGates(1, nestedSite, {
+      ...neutralDeps(),
+      fetchFile: async () => ({ content: missingEntryFile }),
+      resolveGap: async () => ({ verdict: 'INSUFFICIENT_DATA', reason: 'no-verified-search-demand' }),
+      getCachedGap: async () => null,
+      saveGap: async (siteId, dataFile, locationId, serviceId, verdict) => verdict,
+      findOpenRec: async () => null,
+      insertRec: async () => { insertCalls++; return { id: 1 }; },
+    });
+
+    const result = await gates.evaluate('meta-title', { page });
+
+    assert.equal(result.drop, 'adapter-data-not-ready');
+    assert.equal(insertCalls, 0);
+  });
+
+  test('does not create a duplicate recommendation when one is already open, and evaluates the gap only once per pass', async () => {
+    let resolveCalls = 0;
+    let insertCalls = 0;
+    const gates = createRecommendationGates(1, nestedSite, {
+      ...neutralDeps(),
+      fetchFile: async () => ({ content: missingEntryFile }),
+      resolveGap: async () => { resolveCalls++; return { verdict: 'SAFE_RECOVERY', reason: 'test', evidence: {} }; },
+      getCachedGap: async () => null,
+      saveGap: async (siteId, dataFile, locationId, serviceId, verdict) => verdict,
+      findOpenRec: async () => ({ id: 99 }), // already exists
+      insertRec: async () => { insertCalls++; return { id: 1 }; },
+    });
+
+    await gates.evaluate('meta-title', { page });
+    await gates.evaluate('meta-title', { page });
+
+    assert.equal(insertCalls, 0, 'an already-open bootstrap recommendation must not be duplicated');
+    assert.equal(resolveCalls, 1, 'the same gap in one pass must not re-evaluate evidence twice');
+  });
+
+  test('a cached prior verdict is reused instead of re-evaluating evidence', async () => {
+    let resolveCalls = 0;
+    const gates = createRecommendationGates(1, nestedSite, {
+      ...neutralDeps(),
+      fetchFile: async () => ({ content: missingEntryFile }),
+      resolveGap: async () => { resolveCalls++; return { verdict: 'SAFE_RECOVERY', reason: 'test', evidence: {} }; },
+      getCachedGap: async () => ({ verdict: 'SAFE_RECOVERY', reason: 'cached', evidence: {} }),
+      saveGap: async () => { throw new Error('must not save when already cached'); },
+      findOpenRec: async () => null,
+      insertRec: async (siteId, payload) => ({ id: 1 }),
+    });
+
+    const result = await gates.evaluate('meta-title', { page });
+
+    assert.equal(resolveCalls, 0);
+    assert.equal(result.drop, null);
+  });
+});
+
 // The Action Center's own real complaint (2026-08-24): componentTemplateVerification/
 // contentWrapperAvailability are deliberately synchronous/in-memory-only (see
 // design-drift.js's own "safe on the hot path" comment — they're also read

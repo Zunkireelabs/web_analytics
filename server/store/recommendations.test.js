@@ -179,6 +179,47 @@ describe('closeStaleRecommendations — authoritativeAgentIds (rows outside this
   });
 });
 
+// agents/lib/recommendation-gates.js's ensureLocationServiceRecovery is a
+// narrow, deliberate exception to "only the coordinator writes
+// recommendations": it inserts a 'location-service-bootstrap' row directly,
+// with detecting_agent 'location-service-gap-resolver' — a synthetic id that
+// is NOT, and must never become, a member of RECOMMENDATION_AGENT_IDS (the
+// only roster syncFromGrounded ever passes as authoritativeAgentIds). This
+// locks that in with the REAL roster, not a synthetic one: if someone later
+// adds 'location-service-gap-resolver' to RECOMMENDATION_AGENT_IDS (e.g.
+// mistaking it for a real detecting agent), this test starts failing and
+// says why, instead of silently letting the very next unrelated Node
+// grounded-agent sync supersede every bootstrap recommendation on its first
+// pass — before auto-remediation ever gets to ship it.
+describe('closeStaleRecommendations — location-service-bootstrap rows survive a normal sync', () => {
+  test('a location-service-bootstrap row is never closed by silence from the real RECOMMENDATION_AGENT_IDS roster', async () => {
+    const { RECOMMENDATION_AGENT_IDS } = await import('../agents/lib/insights.js');
+    assert.ok(
+      !RECOMMENDATION_AGENT_IDS.includes('location-service-gap-resolver'),
+      'location-service-gap-resolver must stay outside the Node grounded-agent roster — it is not one of those agents'
+    );
+
+    rows = [{
+      id: 2000,
+      page: 'https://example.com/locations/round-rock/drain-cleaning/',
+      recommendation_type: 'location-service-bootstrap',
+      detecting_agents: ['location-service-gap-resolver'],
+    }];
+    updated = null;
+
+    // Same call shape syncFromGrounded actually makes — an unrelated
+    // grounded-agent sync that never even looked at this page/type.
+    const closedCount = await closeStaleRecommendations(1, new Set(), {
+      agentCheckedKeys: new Set(),
+      batchRotatedAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
+      authoritativeAgentIds: new Set(RECOMMENDATION_AGENT_IDS),
+    });
+
+    assert.equal(closedCount, 0);
+    assert.equal(updated, null);
+  });
+});
+
 // The block invariant, at the persistence layer.
 //
 // blocked_reason IS NOT NULL => risk_tier = 'manual'. Migration 108 enforces

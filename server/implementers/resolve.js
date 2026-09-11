@@ -50,6 +50,24 @@ import { CONFIDENCE_THRESHOLD } from './lib/render-inspector.js';
 // re-litigated into the same uncertain stop on retry.
 export async function resolveImplementerForApply(site, draft, renderModeOverride) {
   const page = draft.content?.page || draft.input?.page;
+
+  // 'location-service-bootstrap' (agents/lib/location-service-gap.js) always
+  // targets the data-array-content adapter by construction — it only ever
+  // exists to create the empty services.<id> container that adapter's own
+  // computeChange writes into for a real generator's fields afterward. It
+  // deliberately carries its OWN copy of the base adapter config
+  // (draft.content.baseConfig, captured from whichever real generator's
+  // config already resolved for this page — see recommendation-gates.js)
+  // rather than requiring every tenant to also register a url_file_map
+  // adapters['location-service-bootstrap'] entry alongside their real one:
+  // that would be a second, redundant onboarding step for something this
+  // draft type can only ever mean.
+  if (draft.action_type === 'location-service-bootstrap') {
+    const adapter = await getAdapter('data-array-content');
+    if (!adapter) return { error: 'No adapter registered for "data-array-content" — location-service-bootstrap cannot apply.' };
+    return { implementer: adapter, implementerId: 'adapter:data-array-content' };
+  }
+
   const adapterConfig = resolveAdapter(site, page, draft.action_type);
 
   if (adapterConfig && draft.action_type === 'faq') {

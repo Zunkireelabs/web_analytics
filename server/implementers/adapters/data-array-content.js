@@ -91,7 +91,7 @@ function idFromPageUrl(pageUrl) {
 // second-to-last path segment, inner id is the last. Requires at least two
 // path segments; anything shorter honestly returns nulls rather than
 // guessing which single segment means what.
-function nestedIdsFromPageUrl(pageUrl) {
+export function nestedIdsFromPageUrl(pageUrl) {
   let path;
   try { path = new URL(pageUrl).pathname; } catch { return { id: null, nestedId: null }; }
   const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
@@ -330,10 +330,75 @@ async function computeSchemaFieldChange(site, draft, fetchFile, beforeRef, confi
   };
 }
 
+// Creates the missing EMPTY `services.<serviceId>` container on an existing
+// location — never any real content (see agents/lib/location-service-gap.js's
+// doc comment: this only ever runs once that module has already confirmed a
+// safe recovery, and even then it writes nothing but `{}`). Once this lands,
+// the location×service page is indistinguishable from one that always had
+// content there — computeScalarFieldChange/computeSchemaFieldChange's own
+// "insert if missing, once" field-level logic (already exercised by every
+// other location×service page in this file) does the real, grounded content
+// writing on the very next normal draft for this page.
+//
+// `draft.content.baseConfig` is the SAME data-array-content adapter config
+// already resolved (by recommendation-gates.js) for whichever real generator
+// first hit `adapter-data-not-ready` on this page — carried through rather
+// than re-resolved here so this needs no adapter config of its own keyed on
+// the literal 'location-service-bootstrap' action type (see
+// implementers/resolve.js's matching special case for why that lookup is
+// skipped for this one action type).
+async function computeLocationServiceBootstrapChange(site, draft, fetchFile, beforeRef) {
+  const page = draft.content?.page || draft.input?.page;
+  const config = draft.content?.baseConfig;
+  if (!config?.dataFile || !config?.nestedField) {
+    return { ok: false, reason: 'invalid-config', error: 'location-service-bootstrap draft is missing its base adapter config (dataFile/nestedField).' };
+  }
+  const { id, nestedId } = nestedIdsFromPageUrl(page);
+  if (!id || !nestedId) return { ok: false, reason: 'no-file-mapping', error: `Could not derive a location + service id pair from "${page || '(no page)'}".` };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+
+  const format = config.format || 'js-export-array';
+  const idField = config.idField || 'id';
+  let objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+
+  let content = file.content;
+  let servicesRange = findObjectFieldRange(content, objRange, config.nestedField, format);
+  if (servicesRange && findObjectFieldRange(content, servicesRange, nestedId, format)) {
+    return { ok: false, reason: 'already-exists', error: `"${id}" already has a "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — nothing to bootstrap.` };
+  }
+
+  if (!servicesRange) {
+    content = insertNewObjectField(content, objRange, config.nestedField, {}, format);
+    objRange = { start: objRange.start, end: objRange.end + (content.length - file.content.length) };
+    servicesRange = findObjectFieldRange(content, objRange, config.nestedField, format);
+  }
+  content = insertNewObjectField(content, servicesRange, nestedId, {}, format);
+
+  const check = assertValidContent(content, format);
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  }
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent: content,
+    changedRegions: [{ field: 'bootstrap', markerName: `${config.nestedField}.${nestedId}`, before: '(none)', after: '{}' }],
+    // Distinct purely for callers that want to confirm this was a
+    // structural bootstrap rather than a content write, without string-
+    // matching `changedRegions`.
+    bootstrap: true,
+  };
+}
+
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site), analyzePage = analyzePageUrl) {
   const page = draft.content?.page || draft.input?.page;
+  if (draft.action_type === 'location-service-bootstrap') {
+    return computeLocationServiceBootstrapChange(site, draft, fetchFile, beforeRef);
+  }
   const config = resolveAdapter(site, page, draft.action_type);
   if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
@@ -421,14 +486,23 @@ export async function apply(site, draft) {
   return pushDraftBranch(site, draft, [{ path: computed.filePath, content: computed.newContent }], batchInfo);
 }
 
+// 'location-service-bootstrap' carries its own base config (see
+// computeLocationServiceBootstrapChange's doc comment) rather than one
+// resolveAdapter can find under its own literal action type — same fallback
+// resolve.js's resolveImplementerForApply already applies for routing.
+function resolveDataArrayConfig(site, page, draft) {
+  if (draft.action_type === 'location-service-bootstrap') return draft.content?.baseConfig || null;
+  return resolveAdapter(site, page, draft.action_type);
+}
+
 export async function mergeToStage(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const config = resolveAdapter(site, page, draft.action_type);
+  const config = resolveDataArrayConfig(site, page, draft);
   return openPrWithSnapshot(site, draft, config?.dataFile);
 }
 
 export async function rollback(site, draft) {
   const page = draft.content?.page || draft.input?.page;
-  const config = resolveAdapter(site, page, draft.action_type);
+  const config = resolveDataArrayConfig(site, page, draft);
   return rollbackFromSnapshot(site, draft, config?.dataFile, config?.format || 'js-export-array');
 }

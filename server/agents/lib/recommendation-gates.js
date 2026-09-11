@@ -12,6 +12,10 @@ import { autoHealFileMapping, buildPermalinkIndex } from '../../implementers/lib
 import { autoHealNewContentTarget } from '../../implementers/lib/discover-content-target.js';
 import { discoverPaginationRoutes, matchPaginationRoute, paginationBlockedReason, paginationHeadTagAutoHandled } from '../../implementers/lib/pagination-routes.js';
 import { healPaginationAdapter } from '../../implementers/lib/pagination-adapter-discovery.js';
+import { nestedIdsFromPageUrl } from '../../implementers/adapters/data-array-content.js';
+import { evaluateLocationServiceGap, GAP_CLASS } from './location-service-gap.js';
+import { getCachedGapEvaluation, saveGapEvaluation } from '../../store/location-service-gaps.js';
+import { findOpenRecommendation, insertRecommendation } from '../../store/recommendations.js';
 
 // The gates that decide whether a candidate recommendation is real, and
 // whether it may enter the unattended chain.
@@ -86,6 +90,14 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
     checkSoftNotFound = isSoftNotFound,
     designAgentStatus = getDesignAgentStatus,
     log = console,
+    // Injectable purely for tests — real defaults exercise the actual
+    // evidence check (DataForSEO + repo content) and the actual
+    // recommendations store.
+    resolveGap = evaluateLocationServiceGap,
+    getCachedGap = getCachedGapEvaluation,
+    saveGap = saveGapEvaluation,
+    findOpenRec = findOpenRecommendation,
+    insertRec = insertRecommendation,
   } = deps;
 
   // Reassignable: healing persists newly-discovered url_file_map entries and
@@ -301,6 +313,69 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
   // Runs every gate for one candidate, in the order that produces the most
   // useful answer: cheap config checks first, network evidence only when
   // something is actually about to be reported.
+  // Deduped per (dataFile, locationId, serviceId) for this whole pass — many
+  // findings across a sync can reference the very same missing container
+  // (e.g. a schema AND a meta-title recommendation for the identical page).
+  const gapAttempted = new Set();
+
+  // A missing location×service entry used to be a permanent, unattended
+  // dead end: `drop: 'adapter-data-not-ready'` closed the finding as if the
+  // site were healthy, with no path back except a human manually editing the
+  // tenant's data file. This is the one place that changes: real, verified
+  // evidence (agents/lib/location-service-gap.js) can now justify creating
+  // the EMPTY container automatically, after which the very same generator
+  // that hit this gate drafts the real content on its own next run — no
+  // content is invented here or by this function.
+  //
+  // Ensuring the recovery recommendation exists is a narrow, deliberate
+  // exception to recommendation-coordinator.js's "only the coordinator
+  // writes recommendations" convention (see that file's own header comment):
+  // this still only ever runs from inside a gate the coordinator itself
+  // invoked, uses the SAME store functions and the SAME (site_id, page,
+  // recommendation_type) dedup constraint every other writer relies on, and
+  // exists specifically because the gate is the one place that already has
+  // the resolved adapter config this recovery needs — re-deriving it a
+  // second time inside the coordinator's own findings loop would duplicate
+  // resolveAdapter's page-pattern matching for no benefit.
+  async function ensureLocationServiceRecovery(page, adapterConfig) {
+    const { id: locationId, nestedId: serviceId } = nestedIdsFromPageUrl(page);
+    if (!locationId || !serviceId) return false;
+
+    const dedupeKey = `${adapterConfig.dataFile}::${locationId}::${serviceId}`;
+    if (gapAttempted.has(dedupeKey)) {
+      const cached = await getCachedGap(siteId, adapterConfig.dataFile, locationId, serviceId).catch(() => null);
+      return cached?.verdict === GAP_CLASS.SAFE_RECOVERY;
+    }
+    gapAttempted.add(dedupeKey);
+
+    let cached = await getCachedGap(siteId, adapterConfig.dataFile, locationId, serviceId).catch(() => null);
+    if (!cached) {
+      const verdict = await resolveGap(site, page, adapterConfig, { fetchFile: cachedFetchFile }).catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: location-service gap evaluation failed for ${page}: ${err.message}`);
+        return { verdict: GAP_CLASS.INSUFFICIENT_DATA, reason: 'evaluation-failed' };
+      });
+      cached = await saveGap(siteId, adapterConfig.dataFile, locationId, serviceId, verdict).catch(() => verdict);
+    }
+    if (cached.verdict !== GAP_CLASS.SAFE_RECOVERY) return false;
+
+    const existing = await findOpenRec(siteId, page, 'location-service-bootstrap').catch(() => null);
+    if (!existing) {
+      await insertRec(siteId, {
+        page, recommendationType: 'location-service-bootstrap',
+        issue: `Missing content container for "${serviceId}" in "${locationId}"`,
+        reason: 'Real search demand and a tenant-declared expansion location justify creating the missing content container automatically.',
+        params: { page, baseConfig: adapterConfig },
+        findingId: `location-service-gap:${dedupeKey}`,
+        detectingAgent: 'location-service-gap-resolver',
+        priority: 'medium',
+        riskTier: 'safe',
+      }).catch((err) => {
+        log.warn(`[recommendation-gates] site ${siteId}: could not create location-service-bootstrap recommendation for ${page}: ${err.message}`);
+      });
+    }
+    return true;
+  }
+
   async function evaluate(generatorId, params) {
     if (!site) return { drop: null, blockedReason: null };
     const page = params?.page;
@@ -434,6 +509,17 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
       const adapterConfig = resolveAdapter(site, page, generatorId);
       if (adapterConfig?.id === 'data-array-content'
         && !(await isDataReady(site, page, adapterConfig, cachedFetchFile, baseBranch(site)))) {
+        // Nested (location×service) gaps get one more, real chance before
+        // being dropped as unfixable — see ensureLocationServiceRecovery
+        // above. A flat (non-nested) adapter gap has no equivalent recovery
+        // path (there's no "container" to bootstrap, the id itself would
+        // have to be invented) and keeps the original, unchanged behavior.
+        if (adapterConfig.nestedField && await ensureLocationServiceRecovery(page, adapterConfig)) {
+          return {
+            drop: null,
+            blockedReason: 'The required location/service content container hasn\'t been derived yet — generating it automatically before this can be applied.',
+          };
+        }
         return { drop: 'adapter-data-not-ready', blockedReason: null };
       }
     }

@@ -23,6 +23,19 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// json-array always quotes keys (valid JSON has no other form); js-export-
+// array only NEEDS to when the key isn't a bare valid JS identifier — e.g. a
+// hyphenated slug like "ai-development" used as a services.<id> property
+// name (a real, common case: this platform's own location×service pages key
+// their nested content on a URL slug). Rendering an unquoted hyphenated key
+// would be a silent syntax break (`ai-development: {}` parses as a
+// subtraction expression, not a property), so both insertNewScalarField and
+// insertNewObjectField below share this rather than each guessing.
+function renderKey(fieldName, format) {
+  if (format === 'json-array' || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(fieldName)) return JSON.stringify(fieldName);
+  return fieldName;
+}
+
 // Scans forward from `start` (the position just after an already-consumed
 // opening bracket), returning the index of the matching closing bracket —
 // or -1 if content ends before the brackets balance. String/comment content
@@ -400,7 +413,7 @@ export function insertNewScalarField(content, objRange, fieldName, newValue, for
   const trimmed = interior.replace(/\s+$/, '');
   const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
   const insertPoint = objRange.start + 1 + trimmed.length;
-  const key = format === 'json-array' ? JSON.stringify(fieldName) : fieldName;
+  const key = renderKey(fieldName, format);
   const escaped = escapeJsStringLiteral(String(newValue), '"');
   const insertion = `${needsComma ? ',' : ''}\n    ${key}: "${escaped}"\n  `;
   return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
@@ -439,7 +452,7 @@ export function insertNewObjectField(content, objRange, fieldName, newValue, for
   const trimmed = interior.replace(/\s+$/, '');
   const needsComma = trimmed.length > 0 && !trimmed.endsWith(',');
   const insertPoint = objRange.start + 1 + trimmed.length;
-  const key = format === 'json-array' ? JSON.stringify(fieldName) : fieldName;
+  const key = renderKey(fieldName, format);
   const insertion = `${needsComma ? ',' : ''}\n    ${key}: ${renderObjectLiteral(newValue, '    ')}\n  `;
   return content.slice(0, insertPoint) + insertion + content.slice(objRange.end);
 }
