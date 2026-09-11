@@ -71,19 +71,17 @@ const NON_LLM_GENERATOR_IDS = new Set(['duplicate-id-fix', 'geo-audit']);
 const LEGAL_FACT_CHECKED_GENERATOR_IDS = new Set(['cookie-policy', 'privacy-policy', 'terms-of-service']);
 
 // Same "found a real, systemic exception" gap closed here as
-// LEGAL_FACT_CHECKED_GENERATOR_IDS above, for a different generator
-// category: a creative-draft generator's "don't invent pricing/awards/
-// client counts" instruction (landing-page.js's own system prompt) was
-// previously enforced only by asking the model nicely — nothing downstream
-// checked compliance the way legal-fact-guard.js already does for the
-// three legal generators. Scoped to landing-page.js first (confirmed via a
-// full-codebase sweep, 2026-09-11, as the generator most exposed to this —
-// eligible for unattended SAFE_TO_AUTO_EXECUTE shipping with the least
-// existing safeguard); blog-outline.js/direct-answer.js share the same
-// "never invent a claim" prompt instruction and should be added here as a
-// mechanical follow-up once each is confirmed to also populate
-// `content.groundingContext` the same way landing-page.js now does.
-const CLAIM_GROUNDED_GENERATOR_IDS = new Set(['landing-page']);
+// LEGAL_FACT_CHECKED_GENERATOR_IDS above: every content-generation
+// generator's "don't invent a fact/claim/number" instruction (landing-
+// page.js's "pricing, awards, client counts"; blog-outline.js's/direct-
+// answer.js's "ground every claim... never invent a fact, statistic, or
+// offering") was previously enforced only by asking the model nicely —
+// nothing downstream checked compliance the way legal-fact-guard.js
+// already does for the three legal generators. Confirmed via a
+// full-codebase sweep, 2026-09-11; all three now populate
+// `content.groundingContext` with the real supporting text they gave the
+// model, which is what claim-grounding-guard.js checks against.
+const CLAIM_GROUNDED_GENERATOR_IDS = new Set(['landing-page', 'blog-outline', 'direct-answer']);
 
 // siteId is optional and only used by the positioning check — every
 // existing caller that doesn't pass one (there are none left after this

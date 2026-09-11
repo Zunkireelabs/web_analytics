@@ -48,7 +48,30 @@ test('landing-page: claims backed by the real groundingContext pass cleanly', as
   assert.equal(result.clean, true);
 });
 
-test('the claim-grounding check is scoped to landing-page only — an unrelated generator with the same text is unaffected', async () => {
+test('blog-outline: an ungrounded price claim fails the gate', async () => {
+  const content = {
+    title: 'How Much Does AI Development Cost',
+    sections: [{ heading: 'Pricing', body: 'Expect to pay around $5,000 for a typical project.' }],
+    groundingContext: 'This business builds AI systems and enterprise software.',
+  };
+  const result = await runQualityGate(content, 'blog-outline');
+  assert.equal(result.clean, false);
+  assert.ok(result.issues.some((i) => i.patternId === 'ungrounded-claim'));
+});
+
+test('direct-answer: a claim backed by the real groundingContext passes cleanly', async () => {
+  const content = {
+    title: 'AI Development in Nepal',
+    heading: 'Who builds AI systems in Kathmandu?',
+    directAnswer: 'Several companies in Kathmandu, including ones with 500 clients since 2018, build custom AI systems.',
+    supportingSections: [],
+    groundingContext: 'Real data: this business has served 500 clients since 2018.',
+  };
+  const result = await runQualityGate(content, 'direct-answer');
+  assert.equal(result.clean, true);
+});
+
+test('the claim-grounding check is scoped to CLAIM_GROUNDED_GENERATOR_IDS only — an unrelated generator with the same text is unaffected', async () => {
   const content = {
     sections: [{ heading: 'Why Us', body: 'We have served 500+ clients and are the industry-leading provider of real, grounded prose that is long enough to avoid other guards.' }],
   };

@@ -52,8 +52,19 @@ const SUPERLATIVE_PHRASES = [
   'official partner', 'certified partner', 'trusted by', 'as seen on', 'featured in',
 ];
 
+// Field names vary by generator (landing-page.js: headline/subheadline;
+// blog-outline.js: title; direct-answer.js: title/heading/directAnswer +
+// supportingSections instead of sections) — every field a claim could
+// plausibly appear in across the currently-scoped generators (see
+// CLAIM_GROUNDED_GENERATOR_IDS, quality-gate.js), not a per-generator
+// branch, so a future generator added to that set only needs its own field
+// names added here once rather than a whole new checker.
 function sectionText(content) {
-  const parts = [content?.headline, content?.subheadline, ...(content?.sections || []).flatMap((s) => [s?.heading, s?.body])];
+  const parts = [
+    content?.headline, content?.subheadline, content?.title, content?.heading, content?.directAnswer,
+    ...(content?.sections || []).flatMap((s) => [s?.heading, s?.body]),
+    ...(content?.supportingSections || []).flatMap((s) => [s?.heading, s?.body]),
+  ];
   return parts.filter(Boolean).join('\n');
 }
 

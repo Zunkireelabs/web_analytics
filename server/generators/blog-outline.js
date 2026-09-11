@@ -226,6 +226,16 @@ export async function generate({ siteId, params }) {
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
     ...(featuredImage ? { featuredImage } : {}),
+    // The real supporting text this draft was grounded in — same
+    // convention as landing-page.js's content.groundingContext, for
+    // claim-grounding-guard.js (quality-gate.js) to check business-specific
+    // claims (client counts, pricing, "industry-leading"-style authority
+    // phrases) against. Deliberately excludes general topic/industry
+    // knowledge with no business-specific claim shape — this generator's
+    // own prompt explicitly allows writing from that when ungrounded, and
+    // the guard only flags claim-SHAPED text (a scale/price/percent/
+    // superlative pattern), not prose in general.
+    groundingContext: [context, groundingExcerpt].filter(Boolean).join('\n\n'),
   };
   return { content, summary: `Blog post draft for "${topic}" (${totalWords(sections)} words, ${sections.length} section(s))` };
 }
