@@ -59,6 +59,27 @@ describe('findUngroundedClaims', () => {
     assert.equal(findUngroundedClaims(content).length, 1);
   });
 
+  // The false-positive risk raised for blog-outline.js: general industry
+  // commentary has the same digit+unit shape as a business-specific claim
+  // but is explicitly allowed by that generator's own prompt when the
+  // sentence isn't actually about the author's business.
+  test('does NOT flag a general industry statistic with no "we/our" framing', () => {
+    const content = draft([{ heading: 'Industry Trends', body: '70% of businesses now use some form of AI automation, according to recent industry reports.' }], 'This business builds AI systems.');
+    assert.equal(findUngroundedClaims(content).length, 0);
+  });
+
+  test('DOES flag the same digits when the sentence frames it as a claim about the author\'s own business', () => {
+    const content = draft([{ heading: 'Our Track Record', body: 'We have helped 70% of our clients cut costs significantly.' }], 'This business builds AI systems.');
+    const issues = findUngroundedClaims(content);
+    assert.equal(issues.length, 1);
+    assert.match(issues[0].detail, /70%/);
+  });
+
+  test('a general scale statistic with no business framing is not flagged, even with real client/company wording', () => {
+    const content = draft([{ heading: 'Market Size', body: 'Over 500,000 companies worldwide have adopted similar automation platforms.' }], 'This business builds AI systems.');
+    assert.equal(findUngroundedClaims(content).length, 0);
+  });
+
   test('no content or empty text never crashes and reports nothing', () => {
     assert.deepEqual(findUngroundedClaims(null), []);
     assert.deepEqual(findUngroundedClaims({}), []);

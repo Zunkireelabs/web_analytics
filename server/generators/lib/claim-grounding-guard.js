@@ -52,6 +52,39 @@ const SUPERLATIVE_PHRASES = [
   'official partner', 'certified partner', 'trusted by', 'as seen on', 'featured in',
 ];
 
+// First-person/possessive language a sentence uses when a claim is FRAMED
+// AS being about the author's own business, as opposed to general industry
+// commentary a blog post is explicitly allowed to write from general
+// knowledge (blog-outline.js's own prompt: "General topic knowledge not
+// specific to this business is fine to write from"). "70% of businesses
+// use AI" is a general stat with no fabrication risk this guard needs to
+// police; "we've helped 70% of our clients..." is a claim about THIS
+// business specifically — same digits, same shape, different risk. Scoped
+// to the scale/percent checks only (SCALE_CLAIM_RE, PERCENT_CLAIM_RE) —
+// price and superlative claims (PRICE_CLAIM_RE, SUPERLATIVE_PHRASES) have
+// no comparable "legitimately general" reading in this kind of content, so
+// requiring this framing there would just weaken real coverage for no
+// matching false-positive relief.
+const OWN_BUSINESS_FRAMING_RE = /\b(we|we're|we've|we'll|our|ours|us|this (?:business|company)|the company)\b/i;
+
+// The sentence containing `matchIndex` — split on real sentence-ending
+// punctuation, not the whole paragraph, so a claim's framing is judged by
+// its own sentence rather than borrowing "we" from an unrelated one two
+// sentences away.
+function sentenceAround(text, matchIndex) {
+  const start = Math.max(text.lastIndexOf('.', matchIndex), text.lastIndexOf('!', matchIndex), text.lastIndexOf('?', matchIndex), text.lastIndexOf('\n', matchIndex));
+  const endCandidates = ['.', '!', '?', '\n'].map((ch) => {
+    const i = text.indexOf(ch, matchIndex);
+    return i === -1 ? text.length : i;
+  });
+  const end = Math.min(...endCandidates);
+  return text.slice(start + 1, end);
+}
+
+function isFramedAsOwnBusinessClaim(text, matchIndex) {
+  return OWN_BUSINESS_FRAMING_RE.test(sentenceAround(text, matchIndex));
+}
+
 // Field names vary by generator (landing-page.js: headline/subheadline;
 // blog-outline.js: title; direct-answer.js: title/heading/directAnswer +
 // supportingSections instead of sections) — every field a claim could
@@ -83,6 +116,11 @@ export function findUngroundedClaims(content) {
     if (seenNumbers.has(key)) continue;
     seenNumbers.add(key);
     if (context.includes(number)) continue;
+    // Not framed as a claim about the author's own business at all (e.g.
+    // "70% of businesses adopt AI tools") — legitimate general knowledge,
+    // not a fabrication risk this check exists to catch. See
+    // OWN_BUSINESS_FRAMING_RE's own comment.
+    if (!isFramedAsOwnBusinessClaim(text, match.index)) continue;
     issues.push({
       path: 'content', patternId: 'ungrounded-claim',
       detail: `"${full.trim()}" is a specific claim not present in the supporting data this draft was given`,
@@ -99,8 +137,13 @@ export function findUngroundedClaims(content) {
     });
   }
 
-  for (const match of new Set((text.match(PERCENT_CLAIM_RE) || []))) {
+  const seenPercents = new Set();
+  for (const m of text.matchAll(PERCENT_CLAIM_RE)) {
+    const match = m[0];
+    if (seenPercents.has(match)) continue;
+    seenPercents.add(match);
     if (context.includes(match)) continue;
+    if (!isFramedAsOwnBusinessClaim(text, m.index)) continue;
     issues.push({
       path: 'content', patternId: 'ungrounded-claim',
       detail: `"${match}" is a specific statistic not present in the supporting data this draft was given`,
