@@ -3,6 +3,12 @@ import { getFileContent } from '../../github/client.js';
 import { baseBranch, pushDraftBranch } from './github-ops.js';
 import { detectConflictMarkers } from './conflict-marker-check.js';
 import { applyExactMatchPatches, describePatchFailure } from './exact-match-patch.js';
+import { searchRepoLocalForStrings } from './repo-local-search.js';
+
+// Small N — bounds worst-case file-content fetches from the repo-local
+// search fallback below, same rationale as backend.js's
+// CODE_SEARCH_MAX_CANDIDATES for broken-link-fix's own Layer 2.
+const ALT_TEXT_SEARCH_MAX_CANDIDATES = 5;
 
 // Injects a real alt="" attribute into each image generators/alt-text.js
 // drafted a caption for, by finding that image's EXACT original <img> tag
@@ -41,10 +47,42 @@ export async function computeAltTextMerge(site, draft, beforeRef = baseBranch(si
 
   const edits = items.map((item) => ({ anchor: item.originalTag, replacement: withAlt(item.originalTag, item.alt) }));
   const patched = applyExactMatchPatches(file.content, edits);
-  if (!patched.ok) {
-    return { ok: false, reason: 'source-anchor-not-found', error: describePatchFailure(filePath, patched) };
+  if (patched.ok) {
+    return { ok: true, filePath, newContent: patched.content, oldContent: file.content };
   }
-  return { ok: true, filePath, newContent: patched.content, oldContent: file.content };
+
+  // Layer 2: the page's own mapped file doesn't contain (all of) these
+  // exact <img> tags — real incident, site 1 (2026-09-09 onward): a
+  // component-based page's own file can be a thin wrapper with no image
+  // markup of its own at all (src/pages/services/data-systems.njk was 440
+  // bytes, no <img> anywhere in it), because the hero image actually
+  // renders from a shared component the page includes. Every retry hit the
+  // identical "anchor no longer found" message for two weeks, worded as if
+  // the page's content had changed, when the real problem is that this
+  // implementer only ever looked in one file. Same fallback shape as
+  // broken-link-fix's own Layer 2 (backend.js/repo-local-search.js): one
+  // full-repo scan (cached per site+ref for the run), tried against each
+  // real candidate file for the SAME full edit set — a partial match on a
+  // wrong file is not evidence, only a file containing every anchor this
+  // draft needs is a real candidate.
+  let candidates = [];
+  try {
+    const result = await searchRepoLocalForStrings(site, beforeRef, edits.map((e) => e.anchor), {});
+    candidates = result.matches.filter((p) => p !== filePath).slice(0, ALT_TEXT_SEARCH_MAX_CANDIDATES);
+  } catch {
+    // Missing credential or search outage — fall through to the honest
+    // page-file failure below rather than claiming a fallback that never ran.
+  }
+  for (const candidatePath of candidates) {
+    const candidateFile = await getFileContent(site, candidatePath, beforeRef);
+    if (!candidateFile || detectConflictMarkers(candidateFile.content)) continue;
+    const candidatePatched = applyExactMatchPatches(candidateFile.content, edits);
+    if (candidatePatched.ok) {
+      return { ok: true, filePath: candidatePath, newContent: candidatePatched.content, oldContent: candidateFile.content };
+    }
+  }
+
+  return { ok: false, reason: 'source-anchor-not-found', error: describePatchFailure(filePath, patched) };
 }
 
 export async function pushAltTextBranch(site, draft, batchInfo, beforeRef) {
