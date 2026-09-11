@@ -28,7 +28,7 @@ import { callLLM } from '../llm.js';
 export const meta = {
   id: 'content-integrity',
   name: 'Content Integrity Agent',
-  description: 'Checks already-live pages for broken/empty/misaligned table markup, comparison content shipped as raw text instead of a real table, FAQ content out of sync with its own schema or duplicated on a page, and the same FAQ question answered inconsistently across different pages.',
+  description: 'Checks already-live pages for broken/empty/misaligned table markup, comparison content shipped as raw text instead of a real table, FAQ content out of sync with its own schema or duplicated on a page, the same FAQ question answered inconsistently across different pages, and FAQ content that doesn\'t topically match the page it\'s on.',
   category: 'content',
   version: 1,
 };
@@ -98,6 +98,48 @@ export function findInconsistentFaqQuestions(reachable) {
   return [...questionAnswers.entries()]
     .filter(([, variants]) => variants.size >= 2)
     .map(([question, variants]) => ({ question, variants: [...variants.values()] }));
+}
+
+// Real incident (zunkireelabs.com/careers/, 2026-09-11): a live FAQ block
+// asked "What is Zunkiree Search?" / "What is Agentic as a Service (GaaS)?"
+// — product questions — on the careers page. No draft row existed for it
+// (this app's own generators never wrote it), so every OTHER check in this
+// file is structurally blind to it: the FAQ was internally consistent
+// (schema matched visible count, no duplication) — just wrong for the page
+// it was on. Catching that needs real topical judgment, not a structural
+// comparison, so this is the one check here scoped to a single extra LLM
+// call per run (not per page — same cost discipline as the narrative call
+// below, still O(1) calls per run) covering every reachable page that has
+// FAQ content. Same "verify, don't trust" discipline as nextjs-metadata-
+// export.js's ask/extract split: the model's answer is never trusted on
+// its own — only `page` values that were actually present in the input are
+// ever accepted back, so a hallucinated URL can't produce a finding for a
+// page that was never checked. Always manual-only (no recommendedAction):
+// fixing this means writing REAL page-relevant content, which this app
+// never fabricates, same rule every other content gap here follows.
+export async function findTopicallyMismatchedFaq(reachable, askLLM = callLLM) {
+  const candidates = reachable
+    .filter((r) => (r.analysis.faqVisibleItems || []).length >= 2)
+    .map((r) => ({ page: r.page, title: r.analysis.title || '', questions: (r.analysis.faqVisibleItems || []).slice(0, 6).map((i) => i.question) }));
+  if (!candidates.length) return [];
+
+  const system = 'You check whether a page\'s visible FAQ questions actually relate to that page\'s own topic '
+    + '(given by its <title>). Given a JSON array of {page, title, questions}, return ONLY a JSON array of the '
+    + '"page" values (exact strings copied from the input, nothing else) whose FAQ questions are clearly about a '
+    + 'DIFFERENT topic than the page\'s own title — e.g. product-feature FAQs on a careers/about/contact page. A '
+    + 'page whose FAQ is even a loose, reasonable match to its title must NOT be included. If none are mismatched, '
+    + 'return [].';
+  let raw;
+  try {
+    raw = await askLLM(system, JSON.stringify(candidates), { maxTokens: 300 });
+  } catch (err) {
+    console.warn('[agents] content-integrity FAQ-relevance check failed:', err.message);
+    return [];
+  }
+  let flagged;
+  try { flagged = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || '[]'); } catch { return []; }
+  if (!Array.isArray(flagged)) return [];
+  return candidates.filter((c) => flagged.includes(c.page));
 }
 
 export async function run({ siteId, start, end, pageCache, params }) {
@@ -241,7 +283,17 @@ export async function run({ siteId, start, end, pageCache, params }) {
     expectedImpact: { label: 'Medium', basis: 'computed', value: inconsistentFaqQuestions.length },
   }) : null;
 
-  const findings = [brokenTableFinding, rawTextTableFinding, faqMismatchFinding, faqSchemaWithoutVisibleFinding, duplicateFaqFinding, faqCrossPageFinding].filter(Boolean);
+  const topicMismatchedFaq = await findTopicallyMismatchedFaq(reachable);
+  const faqTopicMismatchFinding = topicMismatchedFaq.length ? makeFinding({
+    id: 'content-integrity:faq-topic-mismatch',
+    evidence: { affectedCount: topicMismatchedFaq.length, checkedCount: reachable.length, samples: topicMismatchedFaq.slice(0, 5).map((c) => ({ page: c.page, title: c.title, questions: c.questions })) },
+    whyItMatters: `${topicMismatchedFaq.length} of ${reachable.length} checked page(s) show a visible FAQ whose questions don't match the page's own topic (e.g. product FAQs on a careers/about page) — likely leftover or copy-pasted content, not something this app's own generators produced.`,
+    priority: 'medium',
+    recommendedAction: null,
+    expectedImpact: { label: 'Medium', basis: 'estimate', value: topicMismatchedFaq.length },
+  }) : null;
+
+  const findings = [brokenTableFinding, rawTextTableFinding, faqMismatchFinding, faqSchemaWithoutVisibleFinding, duplicateFaqFinding, faqCrossPageFinding, faqTopicMismatchFinding].filter(Boolean);
 
   const facts = {
     rangeStart: start, rangeEnd: end,
