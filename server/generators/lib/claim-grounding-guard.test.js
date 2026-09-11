@@ -61,22 +61,37 @@ describe('findUngroundedClaims', () => {
 
   // The false-positive risk raised for blog-outline.js: general industry
   // commentary has the same digit+unit shape as a business-specific claim
-  // but is explicitly allowed by that generator's own prompt when the
-  // sentence isn't actually about the author's business.
-  test('does NOT flag a general industry statistic with no "we/our" framing', () => {
+  // and is allowed by that generator's own prompt to be written from
+  // general knowledge — but only when it's actually presented as general
+  // knowledge (attributed/hedged), not as a bare unqualified fact. An
+  // unattributed "general-sounding" number is just as fabricatable as a
+  // business-specific one and must still be caught.
+  test('does NOT flag a general industry statistic that is explicitly attributed', () => {
     const content = draft([{ heading: 'Industry Trends', body: '70% of businesses now use some form of AI automation, according to recent industry reports.' }], 'This business builds AI systems.');
     assert.equal(findUngroundedClaims(content).length, 0);
   });
 
-  test('DOES flag the same digits when the sentence frames it as a claim about the author\'s own business', () => {
+  test('DOES flag the same digits when framed as a claim about the author\'s own business', () => {
     const content = draft([{ heading: 'Our Track Record', body: 'We have helped 70% of our clients cut costs significantly.' }], 'This business builds AI systems.');
     const issues = findUngroundedClaims(content);
     assert.equal(issues.length, 1);
     assert.match(issues[0].detail, /70%/);
   });
 
-  test('a general scale statistic with no business framing is not flagged, even with real client/company wording', () => {
+  test('DOES flag a general-sounding statistic with NO attribution and no business framing — bare invented numbers are not automatically safe', () => {
     const content = draft([{ heading: 'Market Size', body: 'Over 500,000 companies worldwide have adopted similar automation platforms.' }], 'This business builds AI systems.');
+    const issues = findUngroundedClaims(content);
+    assert.equal(issues.length, 1);
+    assert.match(issues[0].correction, /attribut/i);
+  });
+
+  test('does NOT flag the same unattributed-shape claim once it is actually backed by real groundingContext', () => {
+    const content = draft([{ heading: 'Market Size', body: 'Over 500,000 companies worldwide have adopted similar automation platforms.' }], 'Real data: 500,000 companies worldwide use this category of platform.');
+    assert.equal(findUngroundedClaims(content).length, 0);
+  });
+
+  test('a comma-formatted number in groundingContext still matches a comma-formatted claim (both normalized the same way)', () => {
+    const content = draft([{ heading: 'Our Scale', body: 'We have served 1,200,000 customers to date.' }], 'Real data: this business has served 1,200,000 customers to date.');
     assert.equal(findUngroundedClaims(content).length, 0);
   });
 

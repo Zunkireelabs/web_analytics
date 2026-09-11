@@ -56,16 +56,29 @@ const SUPERLATIVE_PHRASES = [
 // AS being about the author's own business, as opposed to general industry
 // commentary a blog post is explicitly allowed to write from general
 // knowledge (blog-outline.js's own prompt: "General topic knowledge not
-// specific to this business is fine to write from"). "70% of businesses
-// use AI" is a general stat with no fabrication risk this guard needs to
-// police; "we've helped 70% of our clients..." is a claim about THIS
-// business specifically — same digits, same shape, different risk. Scoped
-// to the scale/percent checks only (SCALE_CLAIM_RE, PERCENT_CLAIM_RE) —
-// price and superlative claims (PRICE_CLAIM_RE, SUPERLATIVE_PHRASES) have
-// no comparable "legitimately general" reading in this kind of content, so
-// requiring this framing there would just weaken real coverage for no
-// matching false-positive relief.
+// specific to this business is fine to write from"). "we've helped 70% of
+// our clients..." is a claim about THIS business specifically. A number
+// with NO such framing is not automatically safe, though — see
+// ATTRIBUTION_RE/isExemptGeneralStatistic below: it only gets a pass when
+// it's ALSO presented as attributed general knowledge, not stated as a bare
+// unqualified fact. Scoped to the scale/percent checks only (SCALE_CLAIM_RE,
+// PERCENT_CLAIM_RE) — price and superlative claims (PRICE_CLAIM_RE,
+// SUPERLATIVE_PHRASES) have no comparable "legitimately general" reading in
+// this kind of content, so applying either exemption there would just
+// weaken real coverage for no matching false-positive relief.
 const OWN_BUSINESS_FRAMING_RE = /\b(we|we're|we've|we'll|our|ours|us|this (?:business|company)|the company)\b/i;
+
+// A number with no first-person framing is not automatically safe just for
+// being "general" — an unattributed invented statistic ("70% of businesses
+// use AI") is still a fabrication, it's just fabricating about the topic
+// instead of about this specific business. What actually makes a general
+// stat legitimate is that it's presented as general knowledge, not stated
+// as this draft's own unqualified fact — i.e. it's attributed/hedged
+// ("according to...", "studies show...", "on average..."). No attribution
+// and no business framing is the worst combination, not the safest one: a
+// bare, confident-sounding invented number with nothing backing it either
+// way.
+const ATTRIBUTION_RE = /\b(according to|studies show|research shows|reports? (?:show|suggest|indicate)|survey|data suggests?|on average|typically|generally|industry (?:reports?|data|research))\b/i;
 
 // The sentence containing `matchIndex` — split on real sentence-ending
 // punctuation, not the whole paragraph, so a claim's framing is judged by
@@ -83,6 +96,16 @@ function sentenceAround(text, matchIndex) {
 
 function isFramedAsOwnBusinessClaim(text, matchIndex) {
   return OWN_BUSINESS_FRAMING_RE.test(sentenceAround(text, matchIndex));
+}
+
+// True only when the claim is legitimately exempt: general (no first-person
+// framing) AND explicitly attributed/hedged as general knowledge, not
+// stated as a bare unqualified fact. Anything else — framed as this
+// business's own claim, OR general-sounding but presented with no
+// attribution at all — still needs to check out against groundingContext.
+function isExemptGeneralStatistic(text, matchIndex) {
+  const sentence = sentenceAround(text, matchIndex);
+  return !OWN_BUSINESS_FRAMING_RE.test(sentence) && ATTRIBUTION_RE.test(sentence);
 }
 
 // Field names vary by generator (landing-page.js: headline/subheadline;
@@ -106,7 +129,12 @@ export function findUngroundedClaims(content) {
   if (!content || typeof content !== 'object') return issues;
   const text = sectionText(content);
   if (!text) return issues;
-  const context = (content.groundingContext || '').toLowerCase();
+  // Commas stripped here too, not just from the extracted claim number
+  // below — real prose almost always writes a large number WITH thousands
+  // separators ("500,000 customers"), so comparing a comma-stripped claim
+  // against comma-formatted context would falsely report a genuinely
+  // backed number as unsupported.
+  const context = (content.groundingContext || '').toLowerCase().replace(/(\d),(\d)/g, '$1$2');
 
   const seenNumbers = new Set();
   for (const match of text.matchAll(SCALE_CLAIM_RE)) {
@@ -116,15 +144,20 @@ export function findUngroundedClaims(content) {
     if (seenNumbers.has(key)) continue;
     seenNumbers.add(key);
     if (context.includes(number)) continue;
-    // Not framed as a claim about the author's own business at all (e.g.
-    // "70% of businesses adopt AI tools") — legitimate general knowledge,
-    // not a fabrication risk this check exists to catch. See
-    // OWN_BUSINESS_FRAMING_RE's own comment.
-    if (!isFramedAsOwnBusinessClaim(text, match.index)) continue;
+    // Exempt only when it's BOTH not framed as this business's own claim
+    // AND explicitly attributed as general knowledge (e.g. "according to
+    // industry reports") — a general-sounding number with no attribution
+    // at all is still an unqualified invented statistic, just about the
+    // topic instead of the business. See isExemptGeneralStatistic's own
+    // comment.
+    if (isExemptGeneralStatistic(text, match.index)) continue;
+    const isOwnClaim = isFramedAsOwnBusinessClaim(text, match.index);
     issues.push({
       path: 'content', patternId: 'ungrounded-claim',
       detail: `"${full.trim()}" is a specific claim not present in the supporting data this draft was given`,
-      correction: `Remove or rewrite "${full.trim()}" — this specific ${unit} figure isn't in the supporting data you were given. Only state a number if it's present in that data; otherwise write generally (e.g. "years of experience" instead of a made-up figure) or omit the claim entirely.`,
+      correction: isOwnClaim
+        ? `Remove or rewrite "${full.trim()}" — this specific ${unit} figure isn't in the supporting data you were given. Only state a number if it's present in that data; otherwise write generally (e.g. "years of experience" instead of a made-up figure) or omit the claim entirely.`
+        : `Remove or rewrite "${full.trim()}" — this reads as a factual statistic but isn't backed by the supporting data and has no attribution (e.g. "according to..."). Either attribute it to a real, named source or state it more generally without a specific invented number.`,
     });
   }
 
@@ -143,11 +176,14 @@ export function findUngroundedClaims(content) {
     if (seenPercents.has(match)) continue;
     seenPercents.add(match);
     if (context.includes(match)) continue;
-    if (!isFramedAsOwnBusinessClaim(text, m.index)) continue;
+    if (isExemptGeneralStatistic(text, m.index)) continue;
+    const isOwnClaim = isFramedAsOwnBusinessClaim(text, m.index);
     issues.push({
       path: 'content', patternId: 'ungrounded-claim',
       detail: `"${match}" is a specific statistic not present in the supporting data this draft was given`,
-      correction: `Remove or rewrite the "${match}" statistic — it isn't backed by the supporting data you were given. Only state a percentage if it's present in that data.`,
+      correction: isOwnClaim
+        ? `Remove or rewrite the "${match}" statistic — it isn't backed by the supporting data you were given. Only state a percentage if it's present in that data.`
+        : `Remove or rewrite the "${match}" statistic — it reads as a factual claim but isn't backed by the supporting data and has no attribution (e.g. "according to..."). Either attribute it to a real, named source or state it more generally without a specific invented number.`,
     });
   }
 
