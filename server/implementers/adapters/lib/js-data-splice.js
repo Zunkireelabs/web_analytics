@@ -345,6 +345,50 @@ export function findScalarFieldRange(content, objRange, fieldName, format = 'js-
   return found.length === 1 ? found[0] : null;
 }
 
+// Answers "does this key exist at all at the top level of objRange" —
+// regardless of whether its value is a plain string findScalarFieldRange
+// would accept. Exists so a caller that's about to fall back to
+// insertNewScalarField (its normal "this field has never been set before"
+// path) can first tell that apart from "this field exists but holds
+// something findScalarFieldRange won't touch" (a template-literal
+// interpolation, or — the real case this was written for — a reference
+// expression like `birgunjData.meta.title` sourced from another module).
+// Falling through to insert-as-new in that second case doesn't fail safely:
+// it appends a SECOND same-named key after the first, which is syntactically
+// valid JS (the later duplicate silently wins at runtime) but leaves the
+// original reference expression as dead, confusing source, and would
+// silently duplicate again on every subsequent draft against the same
+// field. Same depth-tracking scan as findScalarFieldRange, minus the
+// quoted-value requirement.
+export function scalarFieldKeyExists(content, objRange, fieldName, format = 'js-export-array') {
+  const keySrc = format === 'json-array' ? keyRegexSource(fieldName, format) : `(?<![A-Za-z0-9_$])${keyRegexSource(fieldName, format)}`;
+  const keyRe = new RegExp(keySrc, 'g');
+  keyRe.lastIndex = objRange.start + 1;
+  let m;
+  while ((m = keyRe.exec(content)) && m.index < objRange.end) {
+    let depth = 0;
+    let i = objRange.start + 1;
+    while (i < m.index) {
+      const c = content[i];
+      if (c === '"' || c === "'" || c === '`') {
+        const quote = c;
+        i++;
+        while (i < content.length && content[i] !== quote) { if (content[i] === '\\') i++; i++; }
+        i++;
+        continue;
+      }
+      if (c === '/' && content[i + 1] === '/') { const nl = content.indexOf('\n', i); i = nl === -1 ? content.length : nl + 1; continue; }
+      if (c === '/' && content[i + 1] === '*') { const e = content.indexOf('*/', i + 2); i = e === -1 ? content.length : e + 2; continue; }
+      if (c === '{' || c === '[') depth++;
+      else if (c === '}' || c === ']') depth--;
+      i++;
+    }
+    if (depth === 0) return true;
+    keyRe.lastIndex = m.index + 1;
+  }
+  return false;
+}
+
 // Escapes a value for embedding in a single-line, single/double-quoted JS
 // string literal: backslashes and the delimiting quote (as spliceScalarField
 // always did), PLUS raw newlines/carriage returns -- an unescaped line
