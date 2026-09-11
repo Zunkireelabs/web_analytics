@@ -1,14 +1,73 @@
-import { resolveFile } from './url-file-map.js';
+import { resolveFile, resolveAltTextDataSources } from './url-file-map.js';
 import { getFileContent } from '../../github/client.js';
 import { baseBranch, pushDraftBranch } from './github-ops.js';
 import { detectConflictMarkers } from './conflict-marker-check.js';
 import { applyExactMatchPatches, describePatchFailure } from './exact-match-patch.js';
 import { searchRepoLocalForStrings } from './repo-local-search.js';
+import {
+  findRootObjectBounds, findObjectFieldRange, findScalarFieldRange,
+  spliceScalarField, insertNewScalarField, assertValidContent,
+} from '../adapters/lib/js-data-splice.js';
 
 // Small N — bounds worst-case file-content fetches from the repo-local
 // search fallback below, same rationale as backend.js's
 // CODE_SEARCH_MAX_CANDIDATES for broken-link-fix's own Layer 2.
 const ALT_TEXT_SEARCH_MAX_CANDIDATES = 5;
+
+// Same convention as backend.js's own lastPathSegment (duplicated rather
+// than imported — importing from backend.js would be circular, since
+// backend.js imports computeAltTextMerge from this file; see
+// draft-failure-phrases.js's module comment for why this kind of small,
+// well-understood duplication is the accepted tradeoff here over a larger
+// shared-utility refactor). The id to match within an altTextDataSources
+// dataFile is the page URL's own last path segment.
+function lastPathSegment(pageUrl) {
+  let path;
+  try { path = new URL(pageUrl).pathname; } catch { return null; }
+  const segments = path.replace(/\/+$/, '').split('/').filter(Boolean);
+  return segments.length ? segments[segments.length - 1] : null;
+}
+
+// Layer 1.5 (see computeAltTextMerge): writes `alt` into a shared data
+// file's `altField` for this page's entry, when the image itself is
+// rendered by a shared layout from a data-driven `src` — see
+// resolveAltTextDataSources's module comment for the real incident this
+// exists for. Mirrors backend.js's applyLinkDataSourceEdit: id-keyed
+// (never content-sniffed against the drafted item's `src`, since a
+// build-time-hashed output filename has no literal correspondence to the
+// source data's own value to match against), refuses rather than guesses
+// whenever the shape isn't exactly what's configured.
+export function applyAltTextDataSourceEdit(content, page, alt, source) {
+  const id = lastPathSegment(page);
+  if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page}".` };
+
+  const format = source.format || 'json-array';
+  const rootBounds = findRootObjectBounds(content);
+  if (!rootBounds) return { ok: false, reason: 'no-match', error: `Could not find a root object in ${source.dataFile}.` };
+  const entryRange = findObjectFieldRange(content, rootBounds, id, format);
+  if (!entryRange) return { ok: false, reason: 'no-match', error: `No "${id}" entry found in ${source.dataFile}.` };
+
+  const altField = source.altField;
+  const existing = findScalarFieldRange(content, entryRange, altField, format);
+  if (existing) {
+    const currentValue = content.slice(existing.valueStart + 1, existing.valueEnd - 1);
+    if (currentValue.trim()) {
+      // Already has real alt text — another draft or a human got there
+      // first. Nothing left to apply, not a defect.
+      return { ok: false, reason: 'already-resolved', error: `"${id}" already has "${altField}": "${currentValue}" in ${source.dataFile} — nothing left to apply.` };
+    }
+    const newContent = spliceScalarField(content, entryRange, altField, alt, format);
+    if (!newContent) return { ok: false, reason: 'no-match', error: `Could not set "${altField}" on "${id}" in ${source.dataFile}.` };
+    const check = assertValidContent(newContent, format);
+    if (!check.ok) return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${source.dataFile}'s syntax (${check.error}) — refused to apply.` };
+    return { ok: true, newContent };
+  }
+
+  const newContent = insertNewScalarField(content, entryRange, altField, alt, format);
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${source.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  return { ok: true, newContent };
+}
 
 // Injects a real alt="" attribute into each image generators/alt-text.js
 // drafted a caption for, by finding that image's EXACT original <img> tag
@@ -49,6 +108,26 @@ export async function computeAltTextMerge(site, draft, beforeRef = baseBranch(si
   const patched = applyExactMatchPatches(file.content, edits);
   if (patched.ok) {
     return { ok: true, filePath, newContent: patched.content, oldContent: file.content };
+  }
+
+  // Layer 1.5: a data-driven image (see resolveAltTextDataSources' module
+  // comment) — the page's own file will NEVER contain this src as literal
+  // text, by construction, so it's tried before the full-repo Layer 2 scan
+  // below (which would burn a whole tarball read only to correctly find
+  // nothing). Restricted to single-image drafts on purpose: with 2+ images
+  // and one altField per data-source config, there's no reliable way to
+  // tell which item maps to which field without guessing — refuses rather
+  // than risk writing the wrong image's caption onto the wrong field.
+  if (items.length === 1) {
+    for (const source of resolveAltTextDataSources(site, page)) {
+      const sourceFile = await getFileContent(site, source.dataFile, beforeRef);
+      if (!sourceFile || detectConflictMarkers(sourceFile.content)) continue;
+      const result = applyAltTextDataSourceEdit(sourceFile.content, page, items[0].alt, source);
+      if (result.ok) {
+        return { ok: true, filePath: source.dataFile, newContent: result.newContent, oldContent: sourceFile.content };
+      }
+      if (result.reason === 'already-resolved') return result;
+    }
   }
 
   // Layer 2: the page's own mapped file doesn't contain (all of) these
