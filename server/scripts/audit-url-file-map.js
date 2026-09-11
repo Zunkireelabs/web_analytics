@@ -12,6 +12,7 @@ import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
 import { getFileContent, getDefaultBranchSha } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
+import { fetchHtml } from '../agents/lib/page-content.js';
 
 // Read-only config-completeness audit for a site's url_file_map — surfaces
 // exactly the class of gap that let the homepage-FAQ and /compare/-FAQ
@@ -116,6 +117,62 @@ function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
   const start = new Date(Date.now() - DEFAULT_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
   return { start, end };
+}
+
+// A `fatal-no-head-region` verdict on `openGraph` means "this file has no
+// detectable per-page head region to splice a marker into" — it does NOT
+// mean OG tags are actually broken on the live site. Real, opposite cases
+// confirmed 2026-09-11 on two shared-layout (Eleventy) sites with the
+// identical audit symptom: zunkireelabs.com's base.njk already renders
+// correct og:title/og:description automatically from the same title/
+// description front matter meta-title manages (curl confirmed; zero
+// open-graph drafts have ever failed in the drafts table) — a false
+// positive, nothing to fix. chayceproperties.com had zero og:* tags at all
+// on the live page — a real gap. Same "fatal" reason, opposite ground
+// truth, and nothing about url_file_map's static config can tell them
+// apart — only the live page can. This is that check, automated, so a
+// future onboarding doesn't have to rediscover the distinction by hand
+// (see the action-center-onboarding skill's §7 for the full story).
+//
+// Deliberately narrow: only ever runs for `openGraph` gaps classified
+// `fatal-no-head-region` (the one case this ambiguity applies to), never
+// downgrades any other field or reason, and fails closed on any fetch
+// error or missing/empty tag — an unverifiable page stays reported fatal,
+// same "never guess" discipline as every other check in this script.
+const OG_LIVE_CHECK_CONCURRENCY = 4;
+
+function extractMetaContent(html, property) {
+  const re = new RegExp(`<meta[^>]+property=["']${property}["'][^>]*>`, 'i');
+  const tag = re.exec(html)?.[0];
+  if (!tag) return null;
+  const content = /content=["']([^"']*)["']/i.exec(tag)?.[1];
+  return content && content.trim() ? content.trim() : null;
+}
+
+async function verifyLiveOpenGraph(pageUrl) {
+  const fetched = await fetchHtml(pageUrl);
+  if (!fetched.ok) return { ok: false, reason: fetched.error };
+  const title = extractMetaContent(fetched.html, 'og:title');
+  const description = extractMetaContent(fetched.html, 'og:description');
+  if (!title || !description) return { ok: false, reason: `live page missing ${!title ? 'og:title' : 'og:description'}` };
+  return { ok: true, title, description };
+}
+
+// Batches with bounded concurrency rather than Promise.all on the whole
+// list — this can run against 100+ pages on a large site, and courtesy to
+// the live target (and this script's own runtime) matters more than
+// shaving a few seconds off an on-demand audit.
+async function verifyLiveOpenGraphBatch(entries) {
+  const results = new Map();
+  let i = 0;
+  async function worker() {
+    while (i < entries.length) {
+      const entry = entries[i++];
+      results.set(entry.page, await verifyLiveOpenGraph(entry.page));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(OG_LIVE_CHECK_CONCURRENCY, entries.length) }, worker));
+  return results;
 }
 
 // Exported so connect-repo.js can run this same check automatically right
@@ -227,7 +284,25 @@ export async function auditSite(siteId) {
     ...m, gap: classifyMarkerGap(m.markerField, m.filePath, fileCache.get(m.filePath).content, DETECTORS),
   }));
   const markersSelfHealing = markersMissing.filter((m) => m.gap === 'self-heals');
-  const markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
+  let markersFatal = markersMissing.filter((m) => m.gap !== 'self-heals');
+
+  // See verifyLiveOpenGraph's own comment above for why this exists: a
+  // `fatal-no-head-region` verdict on openGraph specifically can't be
+  // trusted without checking the live page, since a shared layout can
+  // legitimately auto-derive OG tags from an already-managed field. One
+  // fetch per unique live URL among the candidates, not per (field) row.
+  const ogFatalCandidates = markersFatal.filter((m) => m.markerField === 'openGraph' && m.gap === 'fatal-no-head-region');
+  const ogLiveVerifiedOk = [];
+  if (ogFatalCandidates.length) {
+    const uniquePages = [...new Map(ogFatalCandidates.map((m) => [m.page, m])).values()];
+    const liveResults = await verifyLiveOpenGraphBatch(uniquePages);
+    markersFatal = markersFatal.filter((m) => {
+      if (!(m.markerField === 'openGraph' && m.gap === 'fatal-no-head-region')) return true;
+      const result = liveResults.get(m.page);
+      if (result?.ok) { ogLiveVerifiedOk.push({ ...m, live: result }); return false; }
+      return true; // fetch failed or tags missing/empty — stays reported fatal, never guessed clean
+    });
+  }
 
   console.log(`\n-- NO FILE MAPPING (${noFileMapping.length}) --`);
   for (const { page, actionType } of noFileMapping) console.log(`  [${actionType}] ${page}`);
@@ -243,6 +318,11 @@ export async function auditSite(siteId) {
   console.log(`\n-- MARKERS MISSING BUT SELF-HEALING (ensureMarkers creates these automatically at apply time — no action needed) (${markersSelfHealing.length}) --`);
   for (const { page, actionType, filePath, markerField, markerName } of markersSelfHealing) {
     console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (will auto-create SEOAI:${markerName})`);
+  }
+
+  console.log(`\n-- OPEN GRAPH LIVE-VERIFIED OK, not fatal (${ogLiveVerifiedOk.length}) -- (no per-page marker exists, but the live page already has correct og:title/og:description — likely auto-derived by the shared layout; nothing to fix)`);
+  for (const { page, filePath } of ogLiveVerifiedOk) {
+    console.log(`  ${page} -> ${filePath}`);
   }
 
   console.log(`\n-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (${markersFatal.length}) --`);
