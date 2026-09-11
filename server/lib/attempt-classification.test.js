@@ -78,6 +78,16 @@ test('a broken link with real search candidates that just don’t match still wa
   assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
 });
 
+test('a fine-grained PAT unable to use the merge-branch endpoint waits on a human, not the item', () => {
+  // Real message, site 1, 2026-09-11 — 5 identical occurrences in one run,
+  // all against different GEO content with nothing wrong with any of it.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: mergeBranchFromBase failed (403): {"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/branches/branches#merge-a-branch","status":"403"}',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
 test('missing markers wait on a human too', () => {
   // 10 + 9 live rows (Facebook Pixel and GA4).
   const { retryPolicy } = classifyAbandonReason(

@@ -255,6 +255,31 @@ const RULES = [
     summary: 'This site’s GitHub credentials are missing or no longer valid.',
   },
   {
+    // "Auto-ship failed: mergeBranchFromBase failed (403): {"message":
+    // "Resource not accessible by integration",...}" — GitHub's own
+    // documented behavior for a fine-grained PAT hitting the classic
+    // "Merge a branch" REST endpoint (github-ops.js's getOrInitBatchBranch
+    // calls it to sync every SAME-DAY batch branch with base before a
+    // second-or-later draft can push): fine-grained PATs don't support that
+    // endpoint at all, the same class of gap this codebase already worked
+    // around for /search/code (repo-local-search.js) and for App
+    // installation tokens generally. Verified live against site 1
+    // (2026-09-11, fine-grained github_pat_... token): 5 identical 403s in
+    // one run, all against a GEO (geo-signals) expand-content
+    // recommendation whose content had nothing to do with the failure —
+    // EVERY draft that day past the first hits this identically, since it's
+    // the shared batch-sync step, not anything about the item. Retrying
+    // cannot ever succeed with this token type, so ITEM_DEFECT (this
+    // codebase's "will recur until the item itself changes") is the wrong
+    // read too — nothing about the item can change this. Needs either a
+    // classic PAT/App token for this site or a Git-Data-API-based sync that
+    // doesn't call /merges at all.
+    match: (r) => /mergeBranchFromBase failed \(403\)/.test(r) && /resource not accessible by integration/i.test(r),
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This site’s GitHub token can’t use the branch-merge endpoint the daily batch sync needs (a known fine-grained-PAT limitation) — every draft after the first each day fails identically, regardless of content.',
+  },
+  {
     // The repository-local search fallback (repo-local-search.js) is
     // deliberately bounded (MAX_LOCAL_SEARCH_FILES real candidate files per
     // search) rather than a repo-wide grep — for a repo with more real
