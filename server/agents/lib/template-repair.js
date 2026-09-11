@@ -39,12 +39,16 @@ import { recordAuditEvent } from '../../store/admin/audit-log.js';
 // hypothetical — utility classes get reused across unrelated components
 // constantly) and nothing here would ever notice.
 //
-// Re-checking EVERY verified template on EVERY daily run would be needless
-// network load against every client's live site for no new information most
-// days — so this re-verifies on a cadence instead, same 7-day cycle the
-// design-profile rescan (queueDesignProfileRescanForAllSites, cron.js)
-// already uses for the same "is our captured snapshot still real" question.
-const REVERIFY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+// This whole file already runs once a day (runTemplateCapabilityRepairForAllSites,
+// cron.js) — a live client site drifting is exactly the kind of thing a
+// production tenant can't afford to sit undetected for a week, so the
+// re-verification window matches that same daily cadence rather than the
+// slower 7-day cycle queueDesignProfileRescanForAllSites uses for its own,
+// lower-stakes "is our captured snapshot still real" question. One extra
+// page-plus-stylesheet fetch per site per day for an already-verified
+// template is a cheap, worthwhile trade for catching a real design break
+// the morning it happens instead of up to a week later.
+const REVERIFY_AFTER_MS = 24 * 60 * 60 * 1000;
 
 function needsReverification(actionType, template) {
   const verdict = isTemplateVerified(actionType, template);
