@@ -68,6 +68,31 @@ saving this (migration 088) — read its output before moving on. Its result
 is also persisted and surfaced in Integration Health ("GitHub (Action
 Center)").
 
+**Read this output BEFORE letting any recommendation agent run against the
+site — not after the fact.** Two real incidents (both 2026-09-11) are why
+this line exists: Admizz (site 8862) onboarded with only
+`landing-page`/`cookie-policy`/`terms-of-service` in `newContentTargets`,
+and its first `blog-outline`/`direct-answer`/`translation`
+recommendations sat blocked for days before anyone read the audit output
+that had flagged this from day one; separately, a credential check is now
+the audit's first section specifically because a dead token used to
+degrade into 20+ scattered "file not found" lines with no single place
+that said "the credential itself is the problem." The audit now leads with
+two sections built for exactly this "check before the agent starts"
+moment, in order:
+
+1. **`GITHUB CREDENTIALS`** — one live, authenticated call, PASS/FAIL. If
+   this fails, ignore every other section below it in the same run — they
+   will misreport as missing files/markers until this is fixed.
+2. **`NEW CONTENT TARGETS NOT CONFIGURED`** — every net-new content type
+   (`landing-page`, `blog-outline`, `direct-answer`, `translation`,
+   `cookie-policy`, `privacy-policy`, `terms-of-service`) this site has NO
+   `newContentTargets` entry for at all. Not fatal by design — a site may
+   genuinely never need e.g. `translation` — but it must be a deliberate
+   choice made here, once, not a gap discovered later as a blocked card. If
+   the client's growth strategy will plausibly want any of these, configure
+   it now via `connect-repo`'s `--url-file-map`, in the same pass as §1a.
+
 ## 1a. Rendering capability — required before any net-new page can apply
 
 Every net-new-content action type (`landing-page`, `blog-outline`,

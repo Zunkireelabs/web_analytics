@@ -89,6 +89,26 @@ function allSvgBlocks(fileContent) {
 // the generator's own occurrences array (also document order, per
 // page-content.js's scan), and refuse rather than guess when the counts
 // don't match.
+// Decides what a live scope count that doesn't match the drafted plan's
+// occurrence count actually MEANS — split out as a pure function (no file
+// content, just the two counts) so it's testable without a real repo, and so
+// backend.js's computeDuplicateIdFixMerge doesn't have to inline this
+// judgment call. `null` scopes (findIdScopesInOrder found none at all) is
+// always 'changed' — never 'resolved', since zero occurrences is not the
+// same claim as "the duplicate was fixed", it could just as easily mean the
+// id itself was renamed away or removed entirely.
+//
+// Exactly 1 live occurrence, down from a drafted count of 2+, is the one
+// case that ISN'T ambiguous: one occurrence of an id is by definition not a
+// duplicate, so there is nothing left for this fix to do. Every other
+// mismatch (any other live count, or a live count with `scopes === null`)
+// stays 'changed' — genuinely can't tell what happened, so it's still
+// reported as "the file has changed since it was scanned", not guessed at.
+export function classifyScopeCountMismatch(scopes, draftedOccurrenceCount) {
+  if (scopes && scopes.length === 1 && draftedOccurrenceCount > 1) return 'resolved';
+  return 'changed';
+}
+
 export function findIdScopesInOrder(fileContent, id) {
   const escaped = escapeRegExp(id);
   const idAttr = new RegExp(`id=(["'])${escaped}\\1`, 'g');

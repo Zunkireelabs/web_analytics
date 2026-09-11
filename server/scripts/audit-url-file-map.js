@@ -9,7 +9,7 @@ import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
 import { ownDomains, filterOwnDomainPages } from '../agents/lib/site-domain.js';
-import { getFileContent } from '../github/client.js';
+import { getFileContent, getDefaultBranchSha } from '../github/client.js';
 import { baseBranch } from '../implementers/lib/github-ops.js';
 import { findRelevantMemory } from '../agent-memory.js';
 
@@ -71,6 +71,23 @@ const DETECTORS = { detectBody: detectInsertionPoint, detectHead: detectHeadRegi
 // marker to check) are deliberately excluded — they're not marker-based.
 const ACTION_TYPES = ['meta-title', 'faq', 'schema', 'internal-links', 'canonical', 'open-graph', 'expand-content', 'qa-content'];
 
+// Every net-new-content action type a recommendation agent can generate for
+// ANY site, regardless of what this particular site's keyword/GSC data
+// happens to surface at onboarding time — unlike ACTION_TYPES above, these
+// have no existing page to check a marker against; the only real question is
+// whether url_file_map.newContentTargets has an entry to write one to at
+// all. Not knowing in advance which of these a site's growth agents will
+// eventually ask for is exactly why this has to be a proactive checklist
+// run once at onboarding rather than a per-recommendation surprise: Admizz
+// (site 8862) onboarded with only landing-page/cookie-policy/terms-of-service
+// configured, and its first blog-outline/direct-answer/translation
+// recommendations sat blocked with "no url_file_map.newContentTargets[...]
+// configured" for days before anyone noticed (2026-09-11).
+const NEW_CONTENT_ACTION_TYPES = [
+  'landing-page', 'blog-outline', 'direct-answer', 'translation',
+  'cookie-policy', 'privacy-policy', 'terms-of-service',
+];
+
 // analytics-install is marker-based too, but SITEWIDE (installs GA4/Meta
 // Pixel once, in the site's shared layout template) rather than per-page —
 // backend.js's computeMarkerMerge routes it through
@@ -112,6 +129,27 @@ export async function auditSite(siteId) {
     console.log(`Site #${siteId} "${site.name}": no repo configured yet — skipping (nothing to audit against).`);
     return;
   }
+
+  // Credential check FIRST, before anything else this audit does — every
+  // section below makes its own authenticated GitHub calls and silently
+  // degrades a dead credential into a wall of "file not found"/"could not
+  // check" noise (getFileContent swallows the error into `false`/warnings
+  // per-path, since a genuinely missing file has to look the same as one
+  // this audit couldn't read). A human onboarding a site, or an agent about
+  // to start generating recommendations for it, needs this as one clear
+  // PASS/FAIL up front, not inferred from which of thirty file checks
+  // happened to fail. Real incident, site 8864 (2026-09-11): 18
+  // recommendations sat blocked on "GitHub credentials are missing or no
+  // longer valid" without this ever being checked as its own first step.
+  let credentialsOk = false;
+  try {
+    await getDefaultBranchSha(site);
+    credentialsOk = true;
+  } catch (err) {
+    console.log(`\n-- GITHUB CREDENTIALS -- FAIL: ${err.message}`);
+    console.log('   Every other section below will misreport as missing files/markers until this is fixed — resolve this first, then re-run.');
+  }
+  if (credentialsOk) console.log('\n-- GITHUB CREDENTIALS -- OK, repo reachable.');
 
   const { start, end } = defaultRange();
   const rawPages = await getSearchPerformanceRange(siteId, start, end, 'page', PAGE_LIMIT);
@@ -250,6 +288,18 @@ export async function auditSite(siteId) {
     console.log('  OK — every configured newContentTargets extension has a recorded, markdown-safe renderCapabilities entry.');
   }
 
+  // Coverage, not correctness: which net-new content types this site has NO
+  // target for at all. Not fatal by design — a site may genuinely never need
+  // e.g. translation — but it must be a visible, explicit choice made once
+  // at onboarding ("configure it now, or accept these will block later"),
+  // not a gap nobody looked at until a recommendation for it showed up
+  // blocked. See NEW_CONTENT_ACTION_TYPES above for the real incident this
+  // closes.
+  const missingContentTargets = NEW_CONTENT_ACTION_TYPES.filter((t) => !newContentTargets[t]);
+  console.log(`\n-- NEW CONTENT TARGETS NOT CONFIGURED (${missingContentTargets.length}/${NEW_CONTENT_ACTION_TYPES.length}) -- (not fatal; any recommendation of this type will block until configured)`);
+  for (const actionType of missingContentTargets) console.log(`  [${actionType}] no url_file_map.newContentTargets["${actionType}"] entry`);
+  if (!missingContentTargets.length) console.log('  OK — every known net-new content type has a target configured.');
+
   // Author/org avatar aspect-ratio check (avatar-aspect-check.js) — catches
   // the zunkireelabs-web incident shape (a wide wordmark logo declared as
   // rendering inside a circular object-cover avatar frame, which crops it
@@ -358,7 +408,7 @@ export async function auditSite(siteId) {
     }
   }
 
-  const clean = noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
+  const clean = credentialsOk && noFileMapping.length === 0 && missingFiles.length === 0 && markersFatal.length === 0
     && nginxMarkerOk !== false && analyticsInstallGap === null && renderCapabilityGaps.length === 0
     && avatarAspectFatal.length === 0
     && ACTION_TYPES.every((t) => noMarkers[t].length === 0);

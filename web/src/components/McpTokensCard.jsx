@@ -193,7 +193,7 @@ export default function McpTokensCard() {
         </div>
       )}
 
-      <Drawer isOpen={drawerOpen} onClose={closeDrawer} title="Create API Token" subtitle="Issue a scoped token for an AI client." icon={KeyRound}>
+      <Drawer isOpen={drawerOpen} onClose={closeDrawer} title="Create API Token" subtitle="Issue a scoped token for an AI client." icon={KeyRound} maxWidth="max-w-lg">
         <div className="flex items-start gap-2 bg-indigo-50/60 border border-indigo-100 rounded-xl px-3.5 py-3 mb-5 text-[11px] font-semibold text-indigo-900 leading-relaxed">
           <Info size={14} className="shrink-0 mt-0.5" />
           <span>

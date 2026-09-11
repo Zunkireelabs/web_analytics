@@ -16,7 +16,7 @@ import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
-import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
+import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
@@ -333,7 +333,7 @@ async function previewLiveRedirectFix(site, draft) {
 // applied, so a reviewer never has to reason about a half-renamed page.
 const SVG_PAINT_DEF_TAGS = new Set(['lineargradient', 'radialgradient', 'clippath', 'mask']);
 
-async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
+export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   const page = draft.content?.page;
   const filePath = resolveFile(site, page);
   if (!filePath) {
@@ -352,6 +352,17 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   }
 
   const unsafe = [];
+  // Entries where the live file now has exactly ONE occurrence of an id that
+  // was drafted as a duplicate (2+) — not an ambiguous "file changed since
+  // scanned" case like every other mismatch below: one occurrence means
+  // there is no duplicate left to rename, full stop. Kept separate from
+  // `unsafe` so a plan that's ENTIRELY made of these (see below) is reported
+  // as already fixed rather than as a defect needing a human to re-verify
+  // something that's already true. Real incident, site 1 (2026-09-09 to
+  // 2026-09-11): id="service-icon-gradient" repeated this identically for
+  // days because another draft (or a direct edit) had already deduplicated
+  // it, and this function had no way to say so.
+  const alreadyResolved = [];
   const edits = [];
   const changedRegions = [];
   for (const entry of entries) {
@@ -380,7 +391,11 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
     // exactly, or the live file no longer matches what was scanned.
     const scopes = findIdScopesInOrder(file.content, entry.id);
     if (!scopes || scopes.length !== occurrences.length) {
-      unsafe.push(`id="${entry.id}" now has ${scopes ? scopes.length : 'a different number of'} occurrence(s) in <svg> blocks in ${filePath}, not the ${occurrences.length} this plan was drafted from — the file has changed since it was scanned.`);
+      if (classifyScopeCountMismatch(scopes, occurrences.length) === 'resolved') {
+        alreadyResolved.push(`id="${entry.id}" now has only 1 occurrence in ${filePath} (was ${occurrences.length}) — already deduplicated.`);
+      } else {
+        unsafe.push(`id="${entry.id}" now has ${scopes ? scopes.length : 'a different number of'} occurrence(s) in <svg> blocks in ${filePath}, not the ${occurrences.length} this plan was drafted from — the file has changed since it was scanned.`);
+      }
       continue;
     }
 
@@ -394,6 +409,9 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
 
   if (unsafe.length) {
     return { ok: false, reason: 'not-provably-safe', error: `Can't safely auto-apply this duplicate-id fix: ${unsafe.join(' ')} Apply the fix plan by hand instead.` };
+  }
+  if (!edits.length && alreadyResolved.length) {
+    return { ok: false, reason: 'already-resolved', error: `Nothing left to apply: ${alreadyResolved.join(' ')}` };
   }
   if (!edits.length) {
     return { ok: false, reason: 'draft-not-ready', error: 'This draft has no renameable occurrences.' };
@@ -438,7 +456,22 @@ const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case file-cont
 // One readable sentence summarizing every attempt across both layers, for
 // the single `error` string surfaced to a human — full per-attempt detail
 // still lives in `attempted` for anyone (UI, logs, MCP) that wants it.
-function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
+//
+// `coverageIncomplete` distinguishes two very different kinds of "not
+// found" that used to produce the identical sentence (and so classified
+// identically — see LINK_TARGET_UNRESOLVABLE_FRAGMENT in
+// lib/attempt-classification.js): before the repo-local search fallback
+// read the whole repo as one tarball (2026-09-08), "no candidates" genuinely
+// meant "not found in the small bounded sample we could afford to check",
+// so telling a human to add a url_file_map entry for a shared header/footer
+// was the right guess. Coverage is now complete by construction whenever
+// `!coverageIncomplete` — so when the search ALSO found zero candidate
+// files at all, that is no longer a coverage gap, it is a confirmed fact:
+// this href is not hardcoded in any real candidate file in the repo. A
+// url_file_map entry cannot fix that; the finding itself is stale (the
+// href was removed since detection, or it renders from something other
+// than static template/markup text) and needs a fresh crawl, not a mapping.
+function summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete) {
   const sourceAttempts = attempted.filter((a) => a.matchedVia === 'source-page');
   const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
   const noAnchor = sourceAttempts.length - noMapping;
@@ -454,13 +487,20 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const globalSummary = globalAttempts.length
     ? `; also checked the site-wide link config file, ${globalAttempts[0].reason === 'file-not-found' ? 'which could not be read' : 'no match'}`
     : '';
+  const confirmedAbsent = !coverageIncomplete && !searchError && searchAttempts.length === 0;
   const searchSummary = searchError
     ? `repository-local search fallback failed: ${searchError.error}`
     : searchAttempts.length
       ? `also checked ${searchAttempts.length} repository-local search candidate(s), none matched`
-      : 'repository-local search fallback found no candidates';
+      : confirmedAbsent
+        ? 'a full repository search (not a bounded sample) found this href hardcoded nowhere in it'
+        : 'repository-local search fallback found no candidates';
 
-  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary}${globalSummary} — ${searchSummary}.`;
+  const trailer = confirmedAbsent
+    ? ' This link is confirmed absent from every real candidate file in the repo — the finding is likely stale rather than missing a mapping.'
+    : '';
+
+  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary}${globalSummary} — ${searchSummary}.${trailer}`;
 }
 
 // The id to match within a linkDataSources dataFile is the page URL's own
@@ -751,8 +791,8 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
       ? 'no-file-mapping'
       : coverageIncomplete ? 'search-coverage-incomplete' : 'no-match',
     error: coverageIncomplete
-      ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
-      : summarizeBrokenLinkAttempts(sourcePages, href, attempted),
+      ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
+      : summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete),
     attempted,
   };
 }

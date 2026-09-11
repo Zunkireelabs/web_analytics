@@ -54,6 +54,40 @@ test('a missing url_file_map entry waits on a human, and stops retrying', () => 
   assert.equal(isAutoRetryable(retryPolicy), false);
 });
 
+test('a broken link genuinely absent from the whole repo is stale, not a mapping gap', () => {
+  // Real message shape produced by backend.js's computeBrokenLinkFixMerge
+  // once repo-local search covers the whole repo (2026-09-08): a human
+  // cannot fix this by adding a url_file_map entry, because full-coverage
+  // search already proved there is nothing left to map to. Verified live
+  // against site 1 (2026-09-11) — a pankey.org citation link on a dental
+  // blog post that no longer exists anywhere in the repo.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://pankey.org/the-era-of-the-ai-virtual-assistants-in-dentistry/" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link); also checked the site-wide link config file, no match — a full repository search (not a bounded sample) found this href hardcoded nowhere in it. This link is confirmed absent from every real candidate file in the repo — the finding is likely stale rather than missing a mapping.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.ALREADY_RESOLVED);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('a broken link with real search candidates that just don’t match still waits on a human', () => {
+  // The narrower fragment above must not swallow this case: repo-local
+  // search DID find files containing the string, stripLink just couldn't
+  // apply cleanly — genuinely still a "the right file is unreachable" gap.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: No file could be found or safely stripped for href="https://github.com/zunkiree" across 1 known source page(s) (0 have no url_file_map entry; 1 mapped file(s) don\'t contain this link) — also checked 4 repository-local search candidate(s), none matched.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+});
+
+test('a fine-grained PAT unable to use the merge-branch endpoint waits on a human, not the item', () => {
+  // Real message, site 1, 2026-09-11 — 5 identical occurrences in one run,
+  // all against different GEO content with nothing wrong with any of it.
+  const { retryPolicy } = classifyAbandonReason(
+    'Auto-ship failed: mergeBranchFromBase failed (403): {"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/branches/branches#merge-a-branch","status":"403"}',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
 test('missing markers wait on a human too', () => {
   // 10 + 9 live rows (Facebook Pixel and GA4).
   const { retryPolicy } = classifyAbandonReason(
