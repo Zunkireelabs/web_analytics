@@ -32,6 +32,7 @@ import { withJobLock, jobKeyFor } from './lib/job-lock.js';
 import { interceptWithLearnedRepairs } from './agents/lib/learned-repair.js';
 
 import { syncAnalystInsightsToActionCenter, syncGrowthOpportunitiesToActionCenter, refreshPendingKeywordGapObservations, qualifyAndShipContentGaps } from './agents/lib/analyst-seo-mapping.js';
+import { runKeywordDemandIfDue } from './agents/lib/keyword-demand.js';
 import { runAnalystFusion } from './agents/lib/analyst-fusion.js';
 import { sweepAnalystOutcomes } from './agents/lib/analyst-outcome.js';
 import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js';
@@ -479,6 +480,24 @@ export async function runCompetitorCheckIfDueForAllSites() {
       results.push(await runCompetitorCheckIfDue(site));
     } catch (err) {
       console.error(`[job] competitor check failed for site ${site.id} "${site.name}":`, err.message);
+    }
+  }
+  return results;
+}
+
+// Real DataForSEO keyword-demand ingest — same "checked weekly, real work
+// only once a month" shape as runCompetitorCheckIfDue above, for the
+// search-volume-backed keyword_gaps rows the weekly keyword-gap ship cycle
+// (runKeywordGapShipCycleForAllSites) then works through across the rest of
+// the month. See server/agents/lib/keyword-demand.js.
+export async function runKeywordDemandCheckIfDueForAllSites() {
+  const sites = await listConnectedSites();
+  const results = [];
+  for (const site of sites) {
+    try {
+      results.push(await runKeywordDemandIfDue(site));
+    } catch (err) {
+      console.error(`[job] keyword demand check failed for site ${site.id} "${site.name}":`, err.message);
     }
   }
   return results;
