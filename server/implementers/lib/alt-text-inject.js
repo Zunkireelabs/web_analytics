@@ -28,6 +28,24 @@ function lastPathSegment(pageUrl) {
   return segments.length ? segments[segments.length - 1] : null;
 }
 
+// The filename "stem" a build pipeline's own image hashing leaves alone —
+// everything up to (not including) the extension and any trailing
+// content-hash segment. "/assets/images/data-systems-hero.webp" and the
+// rendered "/assets/data-systems-hero-ByIjgOS7.webp" both reduce to
+// "data-systems-hero": different directory, different hash, same real
+// asset. Deliberately loose (a substring check, not exact-match) since
+// exactly how a given build tool hashes/relocates an asset isn't something
+// this app can know per-site — loose-but-present beats exact-but-absent
+// for a SAFETY check, where the failure mode of "too strict" is a false
+// refusal (annoying, always safe) and the failure mode of "too loose" is
+// writing wrong content (the thing this check exists to prevent), so any
+// genuine doubt should still refuse.
+function assetStem(pathOrUrl) {
+  if (!pathOrUrl) return null;
+  const base = String(pathOrUrl).split('/').pop() || '';
+  return base.replace(/\.[a-z0-9]+$/i, '').replace(/-[A-Za-z0-9]{6,}$/, '');
+}
+
 // Layer 1.5 (see computeAltTextMerge): writes `alt` into a shared data
 // file's `altField` for this page's entry, when the image itself is
 // rendered by a shared layout from a data-driven `src` — see
@@ -37,7 +55,21 @@ function lastPathSegment(pageUrl) {
 // build-time-hashed output filename has no literal correspondence to the
 // source data's own value to match against), refuses rather than guesses
 // whenever the shape isn't exactly what's configured.
-export function applyAltTextDataSourceEdit(content, page, alt, source) {
+//
+// `item` is the full drafted alt-text item ({ alt, src, originalTag }), not
+// just the alt string — needed for the cross-check below. Real incident,
+// site 1 (2026-09-11): draft #1608 was generated for the web-development
+// page but its item's own `src`/`alt` both plainly described the
+// data-systems hero image (an upstream pairing bug in the alt-text
+// finder/generator, not in this function) — id-keyed lookup alone would
+// have written data-systems' caption onto web-development's entry with no
+// error at all. `source.srcField` (the entry's own known-correct image
+// field, e.g. "heroImage") lets this layer catch that class of mismatch
+// BEFORE writing: if the entry's own configured image and the drafted
+// item's image don't share a recognizable filename stem, this is not "the
+// page's own hero image" no matter how confidently the draft was worded,
+// and refuses rather than trust content-shaped text.
+export function applyAltTextDataSourceEdit(content, page, item, source) {
   const id = lastPathSegment(page);
   if (!id) return { ok: false, reason: 'no-file-mapping', error: `Could not derive an id from "${page}".` };
 
@@ -47,6 +79,20 @@ export function applyAltTextDataSourceEdit(content, page, alt, source) {
   const entryRange = findObjectFieldRange(content, rootBounds, id, format);
   if (!entryRange) return { ok: false, reason: 'no-match', error: `No "${id}" entry found in ${source.dataFile}.` };
 
+  if (source.srcField) {
+    const srcRange = findScalarFieldRange(content, entryRange, source.srcField, format);
+    const entrySrc = srcRange ? content.slice(srcRange.valueStart + 1, srcRange.valueEnd - 1) : null;
+    const entryStem = assetStem(entrySrc);
+    const itemStem = assetStem(item.src);
+    if (!entryStem || !itemStem || entryStem !== itemStem) {
+      return {
+        ok: false, reason: 'not-provably-safe',
+        error: `"${id}"'s own "${source.srcField}" in ${source.dataFile} is "${entrySrc || '(not set)'}", which doesn't match the drafted image "${item.src}" — this looks like it was detected for a different page. Refusing to write a caption that may describe the wrong image; verify by hand or regenerate the draft.`,
+      };
+    }
+  }
+
+  const alt = item.alt;
   const altField = source.altField;
   const existing = findScalarFieldRange(content, entryRange, altField, format);
   if (existing) {
@@ -122,7 +168,7 @@ export async function computeAltTextMerge(site, draft, beforeRef = baseBranch(si
     for (const source of resolveAltTextDataSources(site, page)) {
       const sourceFile = await getFileContent(site, source.dataFile, beforeRef);
       if (!sourceFile || detectConflictMarkers(sourceFile.content)) continue;
-      const result = applyAltTextDataSourceEdit(sourceFile.content, page, items[0].alt, source);
+      const result = applyAltTextDataSourceEdit(sourceFile.content, page, items[0], source);
       if (result.ok) {
         return { ok: true, filePath: source.dataFile, newContent: result.newContent, oldContent: sourceFile.content };
       }
