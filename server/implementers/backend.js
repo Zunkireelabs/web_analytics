@@ -16,7 +16,7 @@ import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
 import { detectConflictMarkers } from './lib/conflict-marker-check.js';
 import { safeMessage } from '../lib/errors.js';
-import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, applyScopeRenames } from './lib/duplicate-id-inject.js';
+import { hasDangerousReference, hasExternalReferences, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames } from './lib/duplicate-id-inject.js';
 import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepair } from './lib/schema-repair-inject.js';
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
@@ -333,7 +333,7 @@ async function previewLiveRedirectFix(site, draft) {
 // applied, so a reviewer never has to reason about a half-renamed page.
 const SVG_PAINT_DEF_TAGS = new Set(['lineargradient', 'radialgradient', 'clippath', 'mask']);
 
-async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
+export async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   const page = draft.content?.page;
   const filePath = resolveFile(site, page);
   if (!filePath) {
@@ -352,6 +352,17 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
   }
 
   const unsafe = [];
+  // Entries where the live file now has exactly ONE occurrence of an id that
+  // was drafted as a duplicate (2+) — not an ambiguous "file changed since
+  // scanned" case like every other mismatch below: one occurrence means
+  // there is no duplicate left to rename, full stop. Kept separate from
+  // `unsafe` so a plan that's ENTIRELY made of these (see below) is reported
+  // as already fixed rather than as a defect needing a human to re-verify
+  // something that's already true. Real incident, site 1 (2026-09-09 to
+  // 2026-09-11): id="service-icon-gradient" repeated this identically for
+  // days because another draft (or a direct edit) had already deduplicated
+  // it, and this function had no way to say so.
+  const alreadyResolved = [];
   const edits = [];
   const changedRegions = [];
   for (const entry of entries) {
@@ -380,7 +391,11 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
     // exactly, or the live file no longer matches what was scanned.
     const scopes = findIdScopesInOrder(file.content, entry.id);
     if (!scopes || scopes.length !== occurrences.length) {
-      unsafe.push(`id="${entry.id}" now has ${scopes ? scopes.length : 'a different number of'} occurrence(s) in <svg> blocks in ${filePath}, not the ${occurrences.length} this plan was drafted from — the file has changed since it was scanned.`);
+      if (classifyScopeCountMismatch(scopes, occurrences.length) === 'resolved') {
+        alreadyResolved.push(`id="${entry.id}" now has only 1 occurrence in ${filePath} (was ${occurrences.length}) — already deduplicated.`);
+      } else {
+        unsafe.push(`id="${entry.id}" now has ${scopes ? scopes.length : 'a different number of'} occurrence(s) in <svg> blocks in ${filePath}, not the ${occurrences.length} this plan was drafted from — the file has changed since it was scanned.`);
+      }
       continue;
     }
 
@@ -394,6 +409,9 @@ async function computeDuplicateIdFixMerge(site, draft, beforeRef) {
 
   if (unsafe.length) {
     return { ok: false, reason: 'not-provably-safe', error: `Can't safely auto-apply this duplicate-id fix: ${unsafe.join(' ')} Apply the fix plan by hand instead.` };
+  }
+  if (!edits.length && alreadyResolved.length) {
+    return { ok: false, reason: 'already-resolved', error: `Nothing left to apply: ${alreadyResolved.join(' ')}` };
   }
   if (!edits.length) {
     return { ok: false, reason: 'draft-not-ready', error: 'This draft has no renameable occurrences.' };

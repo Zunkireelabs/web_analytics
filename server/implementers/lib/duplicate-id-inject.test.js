@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasDangerousReference, findIdScopesInOrder, applyScopeRenames } from './duplicate-id-inject.js';
+import { hasDangerousReference, findIdScopesInOrder, classifyScopeCountMismatch, applyScopeRenames } from './duplicate-id-inject.js';
 
 const twoIdenticalIcons = `
 <div class="icon-wrap">
@@ -10,6 +10,35 @@ const twoIdenticalIcons = `
   <svg viewBox="0 0 24 24"><linearGradient id="aiGradient" x1="3" y1="2" x2="21" y2="22"><stop offset="0%" stop-color="#4285F4"></stop></linearGradient><path fill="url(#aiGradient)" d="M1 1h1v1z"/></svg>
 </div>
 `;
+
+describe('classifyScopeCountMismatch', () => {
+  test('1 live occurrence, down from a drafted duplicate, is resolved', () => {
+    // Real incident, site 1 (2026-09-09 to 2026-09-11): a fix plan drafted
+    // against 5 occurrences of id="service-icon-gradient" kept failing
+    // "not provably safe" for days after another draft had already
+    // deduplicated it down to 1 — the only occurrence a duplicate-id fix
+    // could ever leave once it succeeds.
+    assert.equal(classifyScopeCountMismatch([{ start: 0, end: 1 }], 5), 'resolved');
+  });
+
+  test('1 live occurrence is only resolved when the plan was drafted against MORE than 1', () => {
+    // A plan can't have been drafted for a genuine duplicate at all if it
+    // only ever recorded 1 occurrence — this shouldn't be reachable in
+    // practice (draft generation requires 2+ to call it a duplicate), but
+    // the function must not call a same-count non-mismatch "resolved".
+    assert.equal(classifyScopeCountMismatch([{ start: 0, end: 1 }], 1), 'changed');
+  });
+
+  test('any other live count stays "changed", genuinely ambiguous', () => {
+    assert.equal(classifyScopeCountMismatch([{ start: 0, end: 1 }, { start: 2, end: 3 }, { start: 4, end: 5 }], 5), 'changed');
+  });
+
+  test('null scopes (id not found at all) is "changed", never "resolved"', () => {
+    // Zero occurrences isn't proof the duplicate was fixed — the id could
+    // have been renamed or removed entirely, which is a different claim.
+    assert.equal(classifyScopeCountMismatch(null, 5), 'changed');
+  });
+});
 
 describe('hasDangerousReference', () => {
   test('false for a plain url(#id) paint reference', () => {

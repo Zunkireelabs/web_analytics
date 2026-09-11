@@ -232,7 +232,7 @@ const RULES = [
     // nothing left to publish in schema-only mode." (25 live rows.) Another
     // draft won the race and fixed the underlying issue. Retrying cannot
     // succeed and should not: there is nothing left to do.
-    match: (r) => /already has an? .*schema/i.test(r) || /nothing left to publish/i.test(r),
+    match: (r) => /already has an? .*schema/i.test(r) || /nothing left to publish/i.test(r) || /nothing left to apply/i.test(r),
     failureClass: null,
     policy: RETRY_POLICY.ALREADY_RESOLVED,
     summary: 'Another change already fixed this — there is nothing left to apply.',
