@@ -4,7 +4,7 @@ import { getSiteById, getSearchPerformanceRange } from '../store/read.js';
 import { listConnectedSites } from '../job.js';
 import { resolveFile, resolveMarkers, resolveAdapter, resolveSiteRootFile, resolveAuthorAvatars } from '../implementers/lib/url-file-map.js';
 import { parseSvgDimensions, classifyAvatarAspectGap } from '../implementers/lib/avatar-aspect-check.js';
-import { hasMarker, classifyMarkerGap } from '../implementers/lib/marker-merge.js';
+import { hasMarker, classifyMarkerGap, isHeadScopedField } from '../implementers/lib/marker-merge.js';
 import { hasHashMarker } from '../implementers/lib/hash-marker-merge.js';
 import { detectInsertionPoint, detectHeadRegion } from '../implementers/lib/structural-detect.js';
 import { resolveCapability, extensionOf } from '../implementers/lib/rendering-gate.js';
@@ -175,6 +175,33 @@ async function verifyLiveOpenGraphBatch(entries) {
   return results;
 }
 
+// A "fatal-no-head-region" verdict for a HEAD-scoped field (canonical,
+// openGraph, any analytics-install provider) on a shared-layout SSG file
+// with no literal <head> is CORRECT — a human placing a one-time marker
+// there is this codebase's own intended workflow (§2 of the
+// action-center-onboarding skill), same as the literal-<head> case. What
+// actually costs time is finding WHERE in that file the real head region
+// lives, when it isn't a bare <head> tag — e.g. Chayce's `headExtra: |`
+// front-matter block-literal, which base.njk injects straight into its own
+// real <head> at build time (confirmed 2026-09-11). This is a read-only
+// HINT for that investigation step, not a new auto-insertion mechanism —
+// deliberately heuristic (a plain regex, not real YAML parsing) since
+// nothing here writes anything; a wrong guess only wastes a human's next
+// look, never corrupts a file the way a wrong auto-splice would.
+function findHeadCandidateFrontMatterFields(fileContent) {
+  const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(fileContent);
+  if (!fmMatch) return [];
+  const fm = fmMatch[1];
+  const candidates = [];
+  const blockFieldRe = /^(\w+):\s*\|\s*\r?\n([\s\S]*?)(?=\r?\n\w+:|\r?\n?$)/gm;
+  let m;
+  while ((m = blockFieldRe.exec(fm))) {
+    const [, key, body] = m;
+    if (/<link\b|<style\b|<script\b|<meta\b/i.test(body)) candidates.push(key);
+  }
+  return candidates;
+}
+
 // Exported so connect-repo.js can run this same check automatically right
 // after url_file_map is set, instead of relying on the operator to remember
 // a separate `npm run audit-url-file-map` step (the exact class of gap this
@@ -326,8 +353,18 @@ export async function auditSite(siteId) {
   }
 
   console.log(`\n-- MARKERS MISSING, FATAL (need a one-time human-placed anchor before any draft for this field can apply) (${markersFatal.length}) --`);
+  const headCandidateCache = new Map(); // filePath -> field names, computed once per file
   for (const { page, actionType, filePath, markerField, markerName, gap } of markersFatal) {
-    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName}, reason: ${gap})`);
+    let hint = '';
+    if (gap === 'fatal-no-head-region' && isHeadScopedField(markerField)) {
+      if (!headCandidateCache.has(filePath)) {
+        const cached = fileCache.get(filePath);
+        headCandidateCache.set(filePath, cached && cached !== 'error' ? findHeadCandidateFrontMatterFields(cached.content) : []);
+      }
+      const candidates = headCandidateCache.get(filePath);
+      if (candidates.length) hint = ` — possible head region: front-matter field(s) "${candidates.join('", "')}" (verify then place the SEOAI:HEAD marker inside, see onboarding skill §2/§7)`;
+    }
+    console.log(`  [${actionType}:${markerField}] ${page} -> ${filePath} (expected SEOAI:${markerName}, reason: ${gap})${hint}`);
   }
 
   console.log(`\n-- ADAPTER-ROUTED, not deep-checked here (${adapterRouted.length}) --`);
