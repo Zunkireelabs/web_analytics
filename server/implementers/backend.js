@@ -438,7 +438,22 @@ const CODE_SEARCH_MAX_CANDIDATES = 5; // small N — bounds worst-case file-cont
 // One readable sentence summarizing every attempt across both layers, for
 // the single `error` string surfaced to a human — full per-attempt detail
 // still lives in `attempted` for anyone (UI, logs, MCP) that wants it.
-function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
+//
+// `coverageIncomplete` distinguishes two very different kinds of "not
+// found" that used to produce the identical sentence (and so classified
+// identically — see LINK_TARGET_UNRESOLVABLE_FRAGMENT in
+// lib/attempt-classification.js): before the repo-local search fallback
+// read the whole repo as one tarball (2026-09-08), "no candidates" genuinely
+// meant "not found in the small bounded sample we could afford to check",
+// so telling a human to add a url_file_map entry for a shared header/footer
+// was the right guess. Coverage is now complete by construction whenever
+// `!coverageIncomplete` — so when the search ALSO found zero candidate
+// files at all, that is no longer a coverage gap, it is a confirmed fact:
+// this href is not hardcoded in any real candidate file in the repo. A
+// url_file_map entry cannot fix that; the finding itself is stale (the
+// href was removed since detection, or it renders from something other
+// than static template/markup text) and needs a fresh crawl, not a mapping.
+function summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete) {
   const sourceAttempts = attempted.filter((a) => a.matchedVia === 'source-page');
   const noMapping = sourceAttempts.filter((a) => a.reason === 'no-file-mapping').length;
   const noAnchor = sourceAttempts.length - noMapping;
@@ -454,13 +469,20 @@ function summarizeBrokenLinkAttempts(sourcePages, href, attempted) {
   const globalSummary = globalAttempts.length
     ? `; also checked the site-wide link config file, ${globalAttempts[0].reason === 'file-not-found' ? 'which could not be read' : 'no match'}`
     : '';
+  const confirmedAbsent = !coverageIncomplete && !searchError && searchAttempts.length === 0;
   const searchSummary = searchError
     ? `repository-local search fallback failed: ${searchError.error}`
     : searchAttempts.length
       ? `also checked ${searchAttempts.length} repository-local search candidate(s), none matched`
-      : 'repository-local search fallback found no candidates';
+      : confirmedAbsent
+        ? 'a full repository search (not a bounded sample) found this href hardcoded nowhere in it'
+        : 'repository-local search fallback found no candidates';
 
-  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary}${globalSummary} — ${searchSummary}.`;
+  const trailer = confirmedAbsent
+    ? ' This link is confirmed absent from every real candidate file in the repo — the finding is likely stale rather than missing a mapping.'
+    : '';
+
+  return `No file could be found or safely stripped for href="${href}" across ${sourceSummary}${dataSourceSummary}${globalSummary} — ${searchSummary}.${trailer}`;
 }
 
 // The id to match within a linkDataSources dataFile is the page URL's own
@@ -751,8 +773,8 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
       ? 'no-file-mapping'
       : coverageIncomplete ? 'search-coverage-incomplete' : 'no-match',
     error: coverageIncomplete
-      ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
-      : summarizeBrokenLinkAttempts(sourcePages, href, attempted),
+      ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
+      : summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete),
     attempted,
   };
 }

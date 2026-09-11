@@ -34,6 +34,18 @@ export const UNVERIFIED_PLACEHOLDER_FRAGMENT = 'unverified placeholder field';
 // local search. Nothing about the item changes between attempts.
 export const LINK_TARGET_UNRESOLVABLE_FRAGMENT = 'No file could be found or safely stripped for href';
 
+// A strictly narrower case of the fragment above, added once the repo-local
+// search fallback started reading the whole repo as one tarball
+// (server/implementers/lib/repo-local-search.js, 2026-09-08) instead of a
+// bounded sample: when that full-coverage search ALSO finds zero candidate
+// files containing the href, "add a url_file_map entry" (the summary
+// LINK_TARGET_UNRESOLVABLE_FRAGMENT gives a human) can no longer be the
+// right advice — a mapping cannot surface a string that provably isn't
+// hardcoded anywhere in the repo. Must be matched BEFORE the fragment above
+// wherever both are checked, since this is always a substring of a message
+// that also contains it.
+export const LINK_CONFIRMED_ABSENT_FRAGMENT = 'confirmed absent from every real candidate file in the repo';
+
 // The human design-review sign-off gate this fragment came from was removed
 // entirely by commit 8a32037 ("Remove the human design-review gate; automate
 // it at ship time instead") — no code path produces this string any more.

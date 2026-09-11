@@ -28,6 +28,7 @@ import {
   UNVERIFIED_PLACEHOLDER_FRAGMENT,
   DESIGN_NOT_REVIEWED_FRAGMENT,
   LINK_TARGET_UNRESOLVABLE_FRAGMENT,
+  LINK_CONFIRMED_ABSENT_FRAGMENT,
 } from './draft-failure-phrases.js';
 
 // What the pipeline should DO. Kept separate from FAILURE_CLASS because
@@ -269,6 +270,31 @@ const RULES = [
     summary: 'This repository has more real candidate files than the bounded local search can scan in one pass — needs a url_file_map entry or manual confirmation.',
   },
   {
+    // Ordered BEFORE the generic LINK_TARGET_UNRESOLVABLE_FRAGMENT rule below
+    // — that rule's message is always a superset of this one's, so it would
+    // otherwise win first and give the wrong advice. Since the repo-local
+    // search fallback started reading the whole repo as one tarball
+    // (2026-09-08), a "no candidates found" result is no longer a bounded
+    // sample coming up empty — it's a completed, full-coverage search. When
+    // NOTHING page-specific, no configured data source, and no site-wide
+    // config file matched either, "add a url_file_map entry" is not just
+    // unhelpful here, it's provably wrong: there is nowhere left to map to.
+    // Verified live against site 1 (2026-09-11): every "shared header/footer"
+    // case this generic rule used to catch (twitter/github/linkedin social
+    // links, product doc links, app subdomain logins) now resolves via the
+    // site-wide JSON config or a configured data source instead of ever
+    // reaching this branch — what's left reaching it is a finding whose href
+    // is not hardcoded anywhere in the repo at all, i.e. stale (already fixed
+    // on the live site, or never a static link to begin with). Treated as
+    // ALREADY_RESOLVED so it stops parking as a human-blocked card telling
+    // someone to add a mapping that cannot possibly help, and instead closes
+    // so a fresh crawl can re-raise it if it's still genuinely broken.
+    match: (r) => r.includes(LINK_CONFIRMED_ABSENT_FRAGMENT),
+    failureClass: null,
+    policy: RETRY_POLICY.ALREADY_RESOLVED,
+    summary: 'This link is not hardcoded anywhere in the repository — the finding is likely stale rather than missing a mapping.',
+  },
+  {
     // Ordered AFTER the credential and bounded-search rules above so their
     // more specific diagnoses still win on the link-strip messages that carry
     // them; this catches the plain "…none matched." variant, which otherwise
@@ -278,6 +304,12 @@ const RULES = [
     // that misclassification let 75 findings produce 296 drafts — ship-pacing
     // grants MAX_FAILED_ATTEMPTS per recovery cycle, so an ITEM_DEFECT that
     // can never converge re-drafts on a schedule instead of blocking once.
+    //
+    // Only reaches here when the fully-searched case above did NOT match —
+    // i.e. repo-local search actually found candidate files containing the
+    // string (stripLink just couldn't apply cleanly to any of them), which
+    // is still a real "the file holding it isn't the one we can safely edit"
+    // situation, unlike the confirmed-absent case.
     match: (r) => r.includes(LINK_TARGET_UNRESOLVABLE_FRAGMENT),
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
