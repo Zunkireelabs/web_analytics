@@ -25,6 +25,37 @@ test('aggregates issues across all three checkers', async () => {
   assert.ok(ids.includes('schema-missing-context'));
 });
 
+test('landing-page: an ungrounded claim fails the gate with a repairable correction', async () => {
+  const content = {
+    headline: 'Grow Your Business',
+    sections: [{ heading: 'Why Us', body: 'We have served 500+ clients and are the industry-leading provider.' }],
+    groundingContext: 'This business offers AI development services in Kathmandu.',
+  };
+  const result = await runQualityGate(content, 'landing-page');
+  assert.equal(result.clean, false);
+  const claimIssues = result.issues.filter((i) => i.patternId === 'ungrounded-claim');
+  assert.equal(claimIssues.length, 2, 'both the scale claim and the superlative should be flagged');
+  assert.ok(claimIssues.every((i) => typeof i.correction === 'string' && i.correction.length > 0), 'every issue must carry a correction so the repair loop can act on it');
+});
+
+test('landing-page: claims backed by the real groundingContext pass cleanly', async () => {
+  const content = {
+    headline: 'Grow Your Business',
+    sections: [{ heading: 'Why Us', body: 'We have served 500 clients since 2018.' }],
+    groundingContext: 'Real data: this business has served 500 clients since 2018.',
+  };
+  const result = await runQualityGate(content, 'landing-page');
+  assert.equal(result.clean, true);
+});
+
+test('the claim-grounding check is scoped to landing-page only — an unrelated generator with the same text is unaffected', async () => {
+  const content = {
+    sections: [{ heading: 'Why Us', body: 'We have served 500+ clients and are the industry-leading provider of real, grounded prose that is long enough to avoid other guards.' }],
+  };
+  const result = await runQualityGate(content, 'qa-content');
+  assert.equal(result.issues.some((i) => i.patternId === 'ungrounded-claim'), false);
+});
+
 test('blog-outline is no longer exempt from the gate', async () => {
   const content = { sections: [{ heading: 'Section 1', body: '[Insert real content here]' }] };
   const result = await runQualityGate(content, 'blog-outline');
