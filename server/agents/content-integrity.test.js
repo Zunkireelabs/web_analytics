@@ -171,6 +171,29 @@ describe('findTopicallyMismatchedFaq', () => {
     assert.equal(result.length, 0);
   });
 
+  // Self-consistency: two independent passes, only the intersection is kept.
+  // This is the actual reliability improvement over a single ask — a page
+  // flagged by chance on only one of the two passes is exactly the kind of
+  // one-off inconsistent judgment this is meant to filter out before it
+  // ever reaches a human as a finding.
+  test('a page flagged by only ONE of two independent passes is not reported (self-consistency)', async () => {
+    const reachable = [pageWithTitle('https://example.com/careers', 'Careers | Acme', ['What is Acme Search?', 'How does pricing work?'])];
+    let call = 0;
+    // First pass flags it, second pass (a genuinely independent ask) does not.
+    const askLLM = async () => { call++; return call === 1 ? '["https://example.com/careers"]' : '[]'; };
+    const result = await findTopicallyMismatchedFaq(reachable, askLLM);
+    assert.equal(call, 2, 'both passes must actually run');
+    assert.equal(result.length, 0);
+  });
+
+  test('a page flagged by BOTH independent passes is reported', async () => {
+    const reachable = [pageWithTitle('https://example.com/careers', 'Careers | Acme', ['What is Acme Search?', 'How does pricing work?'])];
+    const askLLM = async () => '["https://example.com/careers"]';
+    const result = await findTopicallyMismatchedFaq(reachable, askLLM);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].page, 'https://example.com/careers');
+  });
+
   test('run() surfaces a faq-topic-mismatch finding end to end, manual-only (no recommendedAction)', async () => {
     const pages = ['https://example.com/careers'];
     const pageCache = async () => ({

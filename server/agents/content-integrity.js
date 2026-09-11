@@ -117,29 +117,56 @@ export function findInconsistentFaqQuestions(reachable) {
 // page that was never checked. Always manual-only (no recommendedAction):
 // fixing this means writing REAL page-relevant content, which this app
 // never fabricates, same rule every other content gap here follows.
+const FAQ_TOPIC_SYSTEM_PROMPT = 'You check whether a page\'s visible FAQ questions actually relate to that page\'s own topic '
+  + '(given by its <title>). Given a JSON array of {page, title, questions}, return ONLY a JSON array of the '
+  + '"page" values (exact strings copied from the input, nothing else) whose FAQ questions are clearly about a '
+  + 'DIFFERENT topic than the page\'s own title — e.g. product-feature FAQs on a careers/about/contact page. A '
+  + 'page whose FAQ is even a loose, reasonable match to its title must NOT be included. If none are mismatched, '
+  + 'return [].';
+
+// One independent LLM pass — page values are validated against `candidates`
+// so a hallucinated URL can never produce a flag for a page that was never
+// checked. Never throws: a failure or malformed response is an empty set,
+// not a crash, same fail-closed posture as the rest of this file.
+async function singleFaqTopicPass(candidates, askLLM) {
+  let raw;
+  try {
+    raw = await askLLM(FAQ_TOPIC_SYSTEM_PROMPT, JSON.stringify(candidates), { maxTokens: 300 });
+  } catch (err) {
+    console.warn('[agents] content-integrity FAQ-relevance check failed:', err.message);
+    return new Set();
+  }
+  let flagged;
+  try { flagged = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || '[]'); } catch { return new Set(); }
+  if (!Array.isArray(flagged)) return new Set();
+  const validPages = new Set(candidates.map((c) => c.page));
+  return new Set(flagged.filter((p) => validPages.has(p)));
+}
+
+// A single LLM pass on a "does this look wrong" judgment call is exactly
+// the kind of question that varies run to run — this endpoint has no
+// explicit temperature pinned to 0, so two independent asks of the same
+// input are genuinely two independent samples, not wasted duplicate work.
+// Self-consistency (ask twice, keep only the intersection) is a real,
+// established way to raise precision on a judgment call that has no
+// deterministic ground truth to check against — it can't make either
+// individual pass smarter, but it does mean a one-off inconsistent flag
+// (the model agreeing with itself by chance, not because the page is
+// actually wrong) gets filtered out before it ever reaches a human as a
+// finding. This finding carries no recommendedAction (manual-only, see
+// run() below), so the cost of a false positive is a human's wasted look
+// — worth trading some recall for.
 export async function findTopicallyMismatchedFaq(reachable, askLLM = callLLM) {
   const candidates = reachable
     .filter((r) => (r.analysis.faqVisibleItems || []).length >= 2)
     .map((r) => ({ page: r.page, title: r.analysis.title || '', questions: (r.analysis.faqVisibleItems || []).slice(0, 6).map((i) => i.question) }));
   if (!candidates.length) return [];
 
-  const system = 'You check whether a page\'s visible FAQ questions actually relate to that page\'s own topic '
-    + '(given by its <title>). Given a JSON array of {page, title, questions}, return ONLY a JSON array of the '
-    + '"page" values (exact strings copied from the input, nothing else) whose FAQ questions are clearly about a '
-    + 'DIFFERENT topic than the page\'s own title — e.g. product-feature FAQs on a careers/about/contact page. A '
-    + 'page whose FAQ is even a loose, reasonable match to its title must NOT be included. If none are mismatched, '
-    + 'return [].';
-  let raw;
-  try {
-    raw = await askLLM(system, JSON.stringify(candidates), { maxTokens: 300 });
-  } catch (err) {
-    console.warn('[agents] content-integrity FAQ-relevance check failed:', err.message);
-    return [];
-  }
-  let flagged;
-  try { flagged = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || '[]'); } catch { return []; }
-  if (!Array.isArray(flagged)) return [];
-  return candidates.filter((c) => flagged.includes(c.page));
+  const [first, second] = await Promise.all([
+    singleFaqTopicPass(candidates, askLLM),
+    singleFaqTopicPass(candidates, askLLM),
+  ]);
+  return candidates.filter((c) => first.has(c.page) && second.has(c.page));
 }
 
 export async function run({ siteId, start, end, pageCache, params }) {
