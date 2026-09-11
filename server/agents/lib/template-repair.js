@@ -26,6 +26,33 @@ import { recordAuditEvent } from '../../store/admin/audit-log.js';
 // links the same CSS bundle. Fetching per key would multiply that by five for
 // no new information.
 
+// A verified template's stamp used to mean "verified, permanently" — the
+// loop below only ever re-checked templates with NO stamp at all
+// (isTemplateVerified's 'unverified' reason), skipping every already-
+// verified one forever after. verifyTemplateAgainstLiveSite's structural
+// check (checkTemplateStructuralMatch, added 2026-09-10 for exactly this
+// class of incident) DOES catch a component whose real DOM shape changed
+// even though its classes still resolve — but only the day it's captured,
+// never again, since a passing template is never handed back to it. A real
+// client redesign between then and now could change a component's shape
+// with its old class names still live in the new CSS (real, not
+// hypothetical — utility classes get reused across unrelated components
+// constantly) and nothing here would ever notice.
+//
+// Re-checking EVERY verified template on EVERY daily run would be needless
+// network load against every client's live site for no new information most
+// days — so this re-verifies on a cadence instead, same 7-day cycle the
+// design-profile rescan (queueDesignProfileRescanForAllSites, cron.js)
+// already uses for the same "is our captured snapshot still real" question.
+const REVERIFY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+function needsReverification(actionType, template) {
+  const verdict = isTemplateVerified(actionType, template);
+  if (verdict.reason === 'unverified') return true;
+  if (!verdict.ok) return false; // 'missing'/'invalid-placeholders' — not this function's job to fix
+  return Date.now() - new Date(verdict.verifiedAt).getTime() > REVERIFY_AFTER_MS;
+}
+
 // The CSS a site links is the same on every page, so the first fetch answers
 // for all five templates. Scoped per call rather than module-level: a
 // long-lived cache would happily verify against a stylesheet that shipped
@@ -60,7 +87,7 @@ export async function repairSiteTemplates(siteId, {
   // template at all" and "this site's faq template is already verified" are
   // different facts, and collapsing them makes the summary unreadable — a site
   // with one verified template out of five would report skipped:5 either way.
-  const counts = { verified: 0, stale: 0, bodySlotIsLabel: 0, unreachable: 0, skipped: 0, absent: 0 };
+  const counts = { verified: 0, stale: 0, bodySlotIsLabel: 0, structuralMismatch: 0, unreachable: 0, skipped: 0, absent: 0, invalidated: 0 };
 
   // One shared fetch cache across every key checked in this pass.
   const cache = makeSharedPageCache();
@@ -76,10 +103,8 @@ export async function repairSiteTemplates(siteId, {
   for (const [actionType, componentKey] of Object.entries(COMPONENT_TEMPLATE_KEY)) {
     const template = templates[componentKey];
     if (!template?.wrapper) { counts.absent++; continue; }
-    // Only the unstamped case. An already-verified template is left alone
-    // (that is what the stamp means), and a structurally invalid one is a real
-    // derivation problem, not something a freshness check can fix.
-    if (isTemplateVerified(actionType, template).reason !== 'unverified') { counts.skipped++; continue; }
+    const wasVerified = isTemplateVerified(actionType, template).ok;
+    if (!needsReverification(actionType, template)) { counts.skipped++; continue; }
 
     const result = await verifyFn(actionType, template, { pageUrl, fetchPage: pageFetcher, fetchStylesheet: sheetFetcher })
       .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
@@ -88,7 +113,26 @@ export async function repairSiteTemplates(siteId, {
       repaired = { ...(repaired || templates), [componentKey]: result.stamped };
       counts.verified++;
       log.log(`[template-repair] site ${siteId}: ${componentKey} verified against live CSS (${result.checkedClasses?.length ?? 0} classes) — unblocking its recommendations.`);
-    } else if (result.reason === 'stale') {
+      continue;
+    }
+
+    // A real defect (not a network blip): 'stale', 'body-slot-is-label', and
+    // 'structural-mismatch' (checkTemplateStructuralMatch, 2026-09-10 —
+    // catches a component whose real DOM shape changed even though its old
+    // classes are still live) all mean the check SUCCEEDED and found the
+    // template no longer matches the real site. A previously-verified
+    // template failing its periodic re-check must have its stamp cleared —
+    // otherwise isTemplateVerified keeps trusting it and backend.js's real
+    // per-draft gate (checkTemplateFreshness alone, no structural check —
+    // see that function's own comment for why) has no way to know the
+    // deeper check already disproved it.
+    const isRealDefect = result.reason === 'stale' || result.reason === 'body-slot-is-label' || result.reason === 'structural-mismatch';
+    if (isRealDefect && wasVerified) {
+      repaired = { ...(repaired || templates), [componentKey]: { ...template, verifiedAt: null, verifiedBy: null, verifiedRef: null } };
+      counts.invalidated++;
+    }
+
+    if (result.reason === 'stale') {
       counts.stale++;
       log.warn(`[template-repair] site ${siteId}: ${componentKey} claims class(es) the live site no longer ships (${(result.missingClasses || []).join(', ')}) — leaving it unverified for the Design Agent to re-derive.`);
     } else if (result.reason === 'body-slot-is-label') {
@@ -100,6 +144,12 @@ export async function repairSiteTemplates(siteId, {
       // from a timeout, and silent — this branch logged nothing at all.
       counts.bodySlotIsLabel++;
       log.warn(`[template-repair] site ${siteId}: ${componentKey} styles its body slot as a label — ${result.error} Leaving it unverified; the site's design profile needs re-deriving.`);
+    } else if (result.reason === 'structural-mismatch') {
+      // Same "not unreachable" reasoning as body-slot-is-label above — this
+      // used to fall into the generic else branch and get silently counted
+      // as a timeout. It's the opposite: a real, confirmed shape mismatch.
+      counts.structuralMismatch++;
+      log.warn(`[template-repair] site ${siteId}: ${componentKey}'s captured shape no longer matches the live site (${result.error}) — leaving it unverified for the Design Agent to re-derive.`);
     } else {
       counts.unreachable++;
     }
@@ -121,7 +171,7 @@ export async function repairSiteTemplates(siteId, {
       targetId: String(site.id),
       tenantSiteId: site.id,
       tenantName: site.name,
-      metadata: { verified: counts.verified, stale: counts.stale, bodySlotIsLabel: counts.bodySlotIsLabel, pageUrl },
+      metadata: { verified: counts.verified, stale: counts.stale, bodySlotIsLabel: counts.bodySlotIsLabel, structuralMismatch: counts.structuralMismatch, invalidated: counts.invalidated, pageUrl },
       success: true,
     }).catch(() => {});
   }
