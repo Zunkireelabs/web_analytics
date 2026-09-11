@@ -221,32 +221,54 @@ directly in the real repo:
    Skip if this site's headers aren't managed through this app.
 
 **Body-content anchors (`qaContent`/`expandedContent`) no longer need a
-manual step.** They still auto-insert at end-of-file on plain `.md`/`.mdx`
-(EOF genuinely is the end of the rendered article there — unchanged). On a
-component-based template (`.jsx`/`.tsx`/`.astro`/`.njk`/`.html`/`.vue`/...),
-where EOF is outside the rendered tree, `server/implementers/lib/
-structural-detect.js` now parses the file for real (a JSX AST for React/
-Next.js, a located DOM for Astro/HTML-shaped templates) to find the actual
-`<main>`/`<article>` content container, and `server/implementers/lib/
-marker-bootstrap.js` opens a small PR adding the marker there — never a
-silent direct commit, since a structural match is real evidence, not proof
-of correct intent on someone else's production repo. This happens two ways:
+manual step, and there is no separate bootstrap PR for them anymore.** They
+still auto-insert at end-of-file on plain `.md`/`.mdx` (EOF genuinely is the
+end of the rendered article there — unchanged). On a component-based
+template (`.jsx`/`.tsx`/`.astro`/`.njk`/`.html`/`.vue`/...), where EOF is
+outside the rendered tree, `server/implementers/lib/structural-detect.js`
+parses the file for real (a JSX AST for React/Next.js, a located DOM for
+Astro/HTML-shaped templates) to find the actual `<main>`/`<article>` content
+container, and `server/implementers/lib/insertion-engine.js`'s
+`resolveInsertion` — wired directly into `backend.js`'s `computeMarkerMerge`
+— self-heals the marker **inline, in the very first real recommendation's
+own daily batch PR**. The older separate-PR mechanism
+(`marker-bootstrap.js`) was removed once this made it fully redundant: there
+was no case left where "run this ahead of time and open a PR" succeeded
+somewhere "just let the first real recommendation handle it" wouldn't have
+anyway.
 
-- **Lazily**, the first time a real recommendation needs that marker and
-  it's missing — `backend.js`'s `computeMarkerMerge` already tries this
-  before falling back to today's manual-placement error.
-- **Proactively**, for a whole site at once:
-  ```
-  npm run bootstrap-structural-markers -- --site-id <id>
-  ```
-  Run this once right after §1/§3 are configured (new client) or any time
-  on an existing site to catch newly-added pages. Merge whatever PR(s) it
-  opens — after that, `qa-content`/`expand-content` recommendations for
-  those pages apply automatically, no manual marker-editing step, ever.
-  A page whose file has no confident `<main>`/`<article>` container (or
-  multiple ambiguous JSX-returning components in one file) still falls back
-  to the honest manual-placement message — detection refuses rather than
-  guesses on those, same discipline as everywhere else in this app.
+`server/scripts/bootstrap-structural-markers.js` still exists but is now a
+**read-only diagnostic**, not a PR-opening tool:
+
+```
+npm run bootstrap-structural-markers -- --site-id <id>
+```
+
+Run this once right after §1/§3 are configured (new client), or any time on
+an existing site, to (1) warm the Strategy Registry across every real page
+so the first live recommendation for each page/action-type is an instant,
+pre-validated cache hit instead of a cold detection, and (2) report which
+pages/templates have no detectable insertion point at all — a genuinely
+undetectable structure means the shared analyzer needs a new detector, not
+that any individual page needs a hand-placed marker (this app's own
+"Repository Learning Rule"). Nothing here needs a PR merged before
+`qa-content`/`expand-content` recommendations start applying automatically —
+they already do, the first time each page is drafted.
+
+A page whose file has no confident `<main>`/`<article>` container (or
+multiple ambiguous JSX-returning components in one file) still falls back to
+the honest manual-placement message — detection refuses rather than guesses
+on those, same discipline as everywhere else in this app.
+
+The same "self-heal a missing structural container inline, then let the real
+generator run" shape now also covers the data-array-content adapter's own
+nested `services.<id>` containers (a location×service page's real content
+file, not an HTML template) — see `server/agents/lib/location-service-gap.js`
+and `computeLocationServiceBootstrapChange` in
+`server/implementers/adapters/data-array-content.js`. A missing
+`services.<id>` entry is only ever auto-created once real evidence (verified
+search demand, a tenant-declared expansion location, an already-real service
+offering elsewhere in the same file) justifies it — never guessed.
 
 Run `npm run audit-url-file-map -- --site-id <id>` after this step — its
 "MARKERS MISSING, FATAL" and "NGINX SECURITY-HEADERS MARKER" sections
