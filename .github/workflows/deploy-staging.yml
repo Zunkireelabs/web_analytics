@@ -117,6 +117,11 @@ jobs:
             # actually reads (server/github/app-auth.js).
             GITHUB_APP_ID=${{ secrets.GH_APP_ID }}
             GITHUB_APP_PRIVATE_KEY_B64=${{ secrets.GH_APP_PRIVATE_KEY_B64 }}
+            # Chayceproperties (site #8864) has its own distinct App
+            # installation (4894335), not the shared default — fails closed
+            # (no fallback to the shared App/PAT) if this isn't set, per
+            # credentials.js's no-cross-tenant-leakage design.
+            GITHUB_APP_PRIVATE_KEY_B64_CHAYCE=${{ secrets.GH_APP_PRIVATE_KEY_B64_CHAYCE }}
 
             # ── Sanity CMS write credentials (per-site, opt-in) ──────────────
             # Named per-site (SANITY_WRITE_TOKEN_<SITE>), never shared — a
