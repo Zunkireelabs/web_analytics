@@ -1128,6 +1128,22 @@ export const DESIGN_CONTEXT_GENERATOR_IDS = new Set([
   'blog-outline', 'landing-page', 'cookie-policy', 'privacy-policy', 'terms-of-service',
 ]);
 
+// Generators verified to never emit rendered markup/classes at all — only
+// meta values, JSON-LD, a config file, or (blog-image) a frontmatter image
+// field. design-integrity-guard.js's findDesignIntegrityIssues reports on
+// whether a generator's output "would render using" a mismatched class, a
+// claim that is simply false for any of these, so they're excluded rather
+// than included: unlike DESIGN_CONTEXT_GENERATOR_IDS above (an allowlist for
+// prose grounding, additive and harmless to under-include), this is a
+// deny-list — a generator belongs here only when its own implementer file
+// confirms it produces no visible styling, so a new generator defaults to
+// GETTING the check rather than silently skipping it.
+export const NO_MARKUP_GENERATOR_IDS = new Set([
+  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'security-headers',
+  'html-lang', 'viewport', 'open-graph', 'llms-txt', 'analytics-install',
+  'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'geo-audit', 'blog-image',
+]);
+
 // The shared design-intelligence layer's RETRIEVE half — mirrors
 // agent-memory.js's withAgentMemory exactly (same signature shape, same
 // "append a grounding block to the system prompt, fail open on any error"

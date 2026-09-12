@@ -45,9 +45,19 @@ describe('design-integrity-guard', () => {
     assert.equal(issues.length, 0);
   });
 
-  test('generatorId outside DESIGN_CONTEXT_GENERATOR_IDS: no-op (e.g. a purely technical generator)', async () => {
+  test('generatorId in NO_MARKUP_GENERATOR_IDS: no-op (e.g. a purely technical generator)', async () => {
     const { issues } = await findDesignIntegrityIssues('meta-title', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
     assert.equal(issues.length, 0);
+  });
+
+  // Previously excluded (outside the old DESIGN_CONTEXT_GENERATOR_IDS
+  // allowlist) even though its output includes real markup (a projected
+  // <table>, a full new page's sections) — now checked by default since it's
+  // not in NO_MARKUP_GENERATOR_IDS.
+  test('a previously-excluded markup-touching generator now gets checked', async () => {
+    const { issues } = await findDesignIntegrityIssues('content-integrity-repair', 1, { fetchSite: async () => siteWithProfile(EYEBROW_AS_BODY_PROFILE) });
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].patternId, 'design-role-mismatch');
   });
 
   test('a consistent profile reports no issues', async () => {
