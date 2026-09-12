@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { isShippable, hourInTimezone, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './ship-window.js';
+import { isShippable, hourInTimezone, isShipCatchupOwed, checkShipStall, siteDailyTarget, SHIP_STALL_RATIO, SHIP_HOUR_LOCAL, SHIP_CATCHUP_END_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './ship-window.js';
 import { rateLimitKey } from '../github/client.js';
 import { jobKeyFor } from './job-lock.js';
 
@@ -98,6 +98,65 @@ describe('isShipCatchupOwed', () => {
   // would call the day's work "not owed yet" for six hours after it was.
   test('defaults the ship hour to 07:00, matching the daily run', () => {
     assert.equal(SHIP_HOUR_LOCAL, 7);
+  });
+});
+
+describe('siteDailyTarget', () => {
+  test('uses the explicit per-site override when set', () => {
+    assert.equal(siteDailyTarget(withRepo), 30);
+  });
+
+  test('defaults to 60 when unset, matching isShipCatchupOwed\'s own default', () => {
+    assert.equal(siteDailyTarget({ ...withRepo, auto_remediation_daily_limit: undefined }), 60);
+  });
+});
+
+// The Chayceproperties incident (2026-09-12) this exists for: a missing
+// GitHub App secret made every draft abandon with "GitHub App is not
+// configured," and the site shipped 9 against an expected ~60-80 for a full
+// day before anyone noticed, because nothing compared the two.
+describe('checkShipStall', () => {
+  const chayce = { id: 8864, name: 'Chayceproperties', auto_remediation_daily_limit: 60 };
+
+  test('flags a site that shipped far below its target', () => {
+    const event = checkShipStall({ site: chayce, shipped: 9, now: new Date('2026-09-12T00:00:00Z') });
+    assert.ok(event);
+    assert.equal(event.type, 'ship-stall');
+    assert.equal(event.severity, 'high');
+    assert.match(event.title, /Chayceproperties/);
+    assert.match(event.title, /9/);
+    assert.match(event.title, /60/);
+    assert.match(event.body, /2026-09-12/);
+  });
+
+  test('treats exactly 25% of target as healthy, one below it as stalled', () => {
+    // 0.25 * 60 = 15 exactly — "far below" means strictly under the ratio,
+    // so hitting the ratio precisely is not itself a stall.
+    assert.equal(checkShipStall({ site: chayce, shipped: 15 }), null);
+    assert.ok(checkShipStall({ site: chayce, shipped: 14 }));
+  });
+
+  test('does not flag a healthy day, even one that shipped less than the full target', () => {
+    assert.equal(checkShipStall({ site: chayce, shipped: 45 }), null);
+  });
+
+  test('flags a total no-op day even though nothing was "attempted" — this is not gated on attempted count', () => {
+    const event = checkShipStall({ site: chayce, shipped: 0 });
+    assert.ok(event);
+  });
+
+  test('never flags a paused tenant (daily limit 0)', () => {
+    assert.equal(checkShipStall({ site: { ...chayce, auto_remediation_daily_limit: 0 }, shipped: 0 }), null);
+  });
+
+  test('uses the default target of 60 when the site has no override', () => {
+    const noLimit = { ...chayce, auto_remediation_daily_limit: undefined };
+    assert.ok(checkShipStall({ site: noLimit, shipped: 10 }));
+    assert.equal(checkShipStall({ site: noLimit, shipped: 20 }), null);
+  });
+
+  test('SHIP_STALL_RATIO is 0.25', () => {
+    assert.equal(SHIP_STALL_RATIO, 0.25);
   });
 });
 

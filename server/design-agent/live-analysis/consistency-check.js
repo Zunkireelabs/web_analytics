@@ -27,6 +27,8 @@
 // currently-unactionable-but-real signal in this app, e.g.
 // technical-seo.js's Core Web Vitals findings).
 
+import { resolveHeadingClasses } from './heading-context.js';
+
 function classTokens(...classStrings) {
   const set = new Set();
   for (const s of classStrings) {
@@ -103,7 +105,6 @@ export function compareSectionsToProfile(profile, segmentedPages, { responsive =
   );
   const breakpointPrefixes = (profile?.responsive?.breakpoints || []).filter((b) => typeof b === 'string' && b);
   const tableConvention = profile?.components?.table?.wrapper ? classTokens(profile.components.table.wrapper) : null;
-  const headingConvention = profile?.typography?.heading?.item ? classTokens(profile.typography.heading.item) : null;
   const bodyConvention = profile?.typography?.body ? classTokens(profile.typography.body) : null;
 
   for (const page of segmentedPages || []) {
@@ -152,10 +153,27 @@ export function compareSectionsToProfile(profile, segmentedPages, { responsive =
       // classes share nothing with the site's own real heading/body
       // convention. Checked independently for heading and body since a
       // section can legitimately get one right and the other wrong.
+      //
+      // A heading's expected classes are resolved per (tag, section.role) —
+      // resolveHeadingClasses (heading-context.js) — rather than one flat
+      // profile.typography.heading.item, so an h1 belonging to this section
+      // (a page whose title lives outside a dedicated hero section, e.g. a
+      // legal page) is compared against this site's own real
+      // hero-vs-standard evidence instead of the h3-level "item heading"
+      // convention that field was actually meant for. Hero sections
+      // themselves are never checked here (PROSE_LIKE_ROLES excludes
+      // 'hero') — a hero is expected to look different from body prose.
       if (PROSE_LIKE_ROLES.has(section.role)) {
         for (const item of section.textHierarchy || []) {
-          const convention = item.role === 'heading' || item.role === 'subheading' ? headingConvention
-            : item.role === 'body' ? bodyConvention : null;
+          let conventionClasses = null;
+          let convention = null;
+          if (item.role === 'heading' || item.role === 'subheading') {
+            conventionClasses = resolveHeadingClasses(profile, { tag: item.tag, sectionRole: section.role });
+            convention = conventionClasses ? classTokens(conventionClasses) : null;
+          } else if (item.role === 'body') {
+            conventionClasses = profile.typography.body || null;
+            convention = bodyConvention;
+          }
           if (!convention || !convention.size) continue;
           const itemTokens = classTokens(item.classes);
           if (itemTokens.size && !overlaps(itemTokens, convention)) {
@@ -166,7 +184,7 @@ export function compareSectionsToProfile(profile, segmentedPages, { responsive =
               // finding above.
               evidence: {
                 textRole: item.role, sectionClasses: item.classes,
-                siteConvention: item.role === 'body' ? profile.typography.body : profile.typography.heading.item,
+                siteConvention: conventionClasses,
                 outerHtml: item.outerHtml || '',
               },
             });

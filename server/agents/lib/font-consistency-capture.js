@@ -11,6 +11,7 @@
 // font-consistency-repair needs to tell a genuine CSS-class inconsistency
 // (not safely auto-fixable) apart from a one-element inline override (is).
 import { launchBrowser, discoverPages } from '../../design-agent/live-analysis/capture.js';
+import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
 
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
@@ -42,7 +43,13 @@ function extractStyleSamplesInPage(maxParagraphs) {
 export async function captureFontSamplePage(browserPage, url) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const { headings, paragraphs } = await browserPage.evaluate(extractStyleSamplesInPage, MAX_PARAGRAPHS_PER_PAGE);
-  return { url, headings, paragraphs };
+  // classifyPageType is a pure URL-shape heuristic (design-agent/live-analysis/
+  // schema.js) — the same one the Design Agent's own capture already tags
+  // every page with. Threading it through here is what lets
+  // findFontSizeOutliers judge a template against ITS OWN majority instead of
+  // one flat sitewide majority (see that file) — this site's own real page
+  // shape, never a value carried over from another tenant.
+  return { url, pageType: classifyPageType(url), headings, paragraphs };
 }
 
 // Orchestrates the whole-site capture for one agent run: discover a

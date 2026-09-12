@@ -17,7 +17,7 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
   "styling": "tailwind" | "css-modules" | "plain-css" | "unknown",
   "framework": string | null,
   "typography": {
-    "heading": { "section": string|null, "item": string|null },
+    "heading": { "section": string|null, "item": string|null, "page": { "hero": string|null, "standard": string|null } },
     "body": string|null,
     "link": string|null
   },
@@ -203,7 +203,16 @@ export function headingSamplesByLevel(segmentedPages) {
 // h2 is the authority for a section heading and h3 for a repeating item
 // heading (an FAQ question), falling back to h2 when a site has no h3. A level
 // with no samples leaves the model's pick alone: no evidence is not a defect.
-export function correctHeadingTypography(chosen = {}, byLevel) {
+//
+// `pageHeadingSamples` (headingPageSamplesByContext below) splits real <h1>
+// samples by whether their own section is a hero — this site's own real
+// evidence, per context, never a rule imported from another site. A site
+// that genuinely runs a bigger h1 in a hero than on an interior page gets
+// BOTH values recorded (heading.page.hero / heading.page.standard) instead
+// of being forced into one flat number, which is what let a real per-
+// template design decision get misread as drift. Either slot with no
+// samples is left null — no evidence is not a defect here either.
+export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSamples = { hero: [], standard: [] }) {
   const out = { ...chosen };
   const corrected = [];
 
@@ -219,7 +228,39 @@ export function correctHeadingTypography(chosen = {}, byLevel) {
     if (best !== chosen.item) { out.item = best; corrected.push('item'); }
   }
 
+  const page = { ...(chosen.page || {}) };
+  if (pageHeadingSamples.hero?.length) {
+    const best = pickCentralClass(pageHeadingSamples.hero);
+    if (best !== page.hero) { page.hero = best; corrected.push('page.hero'); }
+  }
+  if (pageHeadingSamples.standard?.length) {
+    const best = pickCentralClass(pageHeadingSamples.standard);
+    if (best !== page.standard) { page.standard = best; corrected.push('page.standard'); }
+  }
+  out.page = page;
+
   return { heading: out, corrected };
+}
+
+// Real <h1> samples, split by whether their own section is a hero — the only
+// per-site signal that reliably tells a hero title apart from an interior
+// page's title (a section.role, already produced by segment.js, not a guess
+// made here). Excludes site chrome and label-styled text, same as
+// headingSamplesByLevel.
+export function headingPageSamplesByContext(segmentedPages) {
+  const hero = [];
+  const standard = [];
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        if (item.tag !== 'h1' || !item.classes) continue;
+        if (isLabelStyle(item.style)) continue;
+        (section.role === 'hero' ? hero : standard).push(item);
+      }
+    }
+  }
+  return { hero, standard };
 }
 
 function normalizeClasses(classes) {
@@ -266,12 +307,14 @@ export async function extractDesignProfile(segmentedPages, {
   }
 
   const { heading, corrected: headingsCorrected } = correctHeadingTypography(
-    typography.heading || {}, headingSamplesByLevel(segmentedPages),
+    typography.heading || {}, headingSamplesByLevel(segmentedPages), headingPageSamplesByContext(segmentedPages),
   );
+  const HEADING_SLOT_LABEL = { section: 'h2', item: 'h3', 'page.hero': 'h1 (hero section)', 'page.standard': 'h1 (non-hero)' };
   for (const slot of headingsCorrected) {
+    const value = slot.startsWith('page.') ? heading.page[slot.split('.')[1]] : heading[slot];
     console.warn(
       `[design-agent] site ${siteId}: typography.heading.${slot} was not the class this site uses on its `
-      + `${slot === 'section' ? 'h2' : 'h3'} elements — corrected to "${heading[slot]}".`,
+      + `${HEADING_SLOT_LABEL[slot] || slot} elements — corrected to "${value}".`,
     );
   }
 

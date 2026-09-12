@@ -1,5 +1,5 @@
 import { getSiteById } from '../../store/read.js';
-import { getDesignProfile, verifyProfileRoles, DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
+import { getDesignProfile, verifyProfileRoles, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Wires implementers/lib/design-drift.js's verifyProfileRoles — already
 // written, already tested, never called from production code before this —
@@ -55,12 +55,14 @@ export function designIntegrityEnforced() {
 /**
  * @returns {{issues: Array<{path, patternId, snippet, detail, blocking}>}}
  * Same shape every sibling guard returns to runQualityGate. siteId/
- * generatorId are required — with either missing (a generator with no site
- * context, or one outside DESIGN_CONTEXT_GENERATOR_IDS, the same visible-
- * content set withDesignContext already scopes to), this is a no-op.
+ * generatorId are required — with either missing, or generatorId one of
+ * design-drift.js's NO_MARKUP_GENERATOR_IDS (verified to never emit rendered
+ * markup/classes at all), this is a no-op: runs for every OTHER generator by
+ * default, not just an opt-in subset, since any generator that can touch
+ * markup can in principle introduce a design-role mismatch.
  */
 export async function findDesignIntegrityIssues(generatorId, siteId, { fetchSite = getSiteById, enforce = designIntegrityEnforced() } = {}) {
-  if (!generatorId || !siteId || !DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId)) return { issues: [] };
+  if (!generatorId || !siteId || NO_MARKUP_GENERATOR_IDS.has(generatorId)) return { issues: [] };
 
   let site;
   try {

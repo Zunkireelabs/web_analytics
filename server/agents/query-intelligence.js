@@ -1,5 +1,6 @@
 import { getGscBreakdownRange, getTopMovers, getCannibalizedQueries, getSiteById } from '../store/read.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { pickCannibalizationWinner } from './lib/cannibalization-decision.js';
 import { priorPeriod } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 
@@ -54,36 +55,36 @@ export async function run({ siteId, start, end }) {
 
   // Real cannibalization: 2+ of the site's OWN pages both genuinely rank
   // for the same real query, splitting clicks/signal instead of one page
-  // owning it — see store/read.js's getCannibalizedQueries. No draft
-  // generator fits this (deciding which page should "own" a query is a
-  // real editorial/business call, not something safe to auto-draft), so
-  // recommendedAction stays honestly null, same as the droppers above.
+  // owning it — see store/read.js's getCannibalizedQueries.
+  //
+  // pickCannibalizationWinner (lib/cannibalization-decision.js) decides the
+  // owner from the SAME real evidence already computed below (clicks,
+  // impressions, position, URL-slug relevance) — a real, auditable,
+  // evidence-based decision, not a human blocker for a call the data can
+  // already answer. One finding per LOSING page (matching this codebase's
+  // "one finding, one draftable action" convention elsewhere, e.g.
+  // technical-seo's per-page findings), each recommending internal-links
+  // with mustLinkTo pinned to the decided winner — reinforces the winner's
+  // ranking signal without touching or damaging the losing page's own
+  // content, the smallest safe change that resolves the competition.
   const cannibalPriorities = priorityByRank(cannibalized);
-  const cannibalFindings = cannibalized.map((c, i) => {
+  const cannibalFindings = cannibalized.flatMap((c, i) => {
     const totalClicks = c.pages.reduce((s, p) => s + Number(p.clicks), 0);
     const pageList = c.pages.map((p) => `${p.page} (pos ${p.avg_position}, ${p.clicks} clicks)`).join(' vs. ');
-    return makeFinding({
-      id: `query-intelligence:cannibalization:${c.query}`,
-      evidence: {
-        query: c.query,
-        pages: c.pages.map((p) => ({ page: p.page, clicks: Number(p.clicks), impressions: Number(p.impressions), avgPosition: Number(p.avg_position) })),
-      },
-      whyItMatters: `${c.pages.length} pages both rank for "${c.query}" — ${pageList} — splitting clicks and ranking signal instead of one page owning it.`,
+    const evidencePages = c.pages.map((p) => ({ page: p.page, clicks: Number(p.clicks), impressions: Number(p.impressions), avgPosition: Number(p.avg_position) }));
+    const { winner, losers, scoring } = pickCannibalizationWinner(c.query, evidencePages);
+    return losers.map((loserPage) => makeFinding({
+      id: `query-intelligence:cannibalization:${c.query}:${loserPage}`,
+      evidence: { query: c.query, pages: evidencePages, winner, scoring },
+      whyItMatters: `${c.pages.length} pages both rank for "${c.query}" — ${pageList} — splitting clicks and ranking signal instead of one page owning it. Real GSC evidence (clicks, position, URL relevance — see scoring) favors ${winner} as the owner.`,
       priority: cannibalPriorities[i],
-      recommendedAction: null,
-      // Deciding which page should own a query is editorial — it depends on
-      // what the business wants that query to sell, which no signal here
-      // carries. But two of this site's own pages competing for one query is
-      // a confirmed defect, so it becomes a visible read-only row rather
-      // than being dropped the way it was until 2026-09-09.
-      reportOnly: {
-        kind: 'query-cannibalization',
-        label: `${c.pages.length} pages compete for "${c.query}"`,
-        page: c.pages[0]?.page || '',
-        whyBlocked: `These pages all rank for "${c.query}", so they split the clicks and ranking signal that one page could hold on its own. Fixing it means deciding which page should own this search — a call that depends on which page you actually want people to land on, so it is not safe to make automatically.`,
+      recommendedAction: {
+        label: `Strengthen internal linking to the page that should own "${c.query}"`,
+        generatorId: 'internal-links',
+        params: { page: loserPage, mustLinkTo: winner },
       },
       expectedImpact: { label: impactFromPriority(cannibalPriorities[i]), basis: 'computed', value: totalClicks },
-    });
+    }));
   });
 
   const findings = [...dropperFindings, ...cannibalFindings];

@@ -116,3 +116,58 @@ describe('duplicate-content finding ids', () => {
     assert.equal(result.facts.findings[0].recommendedAction, null);
   });
 });
+
+// Regression coverage for a real false positive found in production
+// (zunkireelabs.com, 2026-09-12): query-string tracking variants
+// (/resources/?type=X) already emitted a self-resolving canonical tag to the
+// bare URL via the shared Eleventy template, so the duplicate-content agent
+// was flagging (and blocking for a human "pick a winner" decision) a group
+// the site had already resolved for search engines itself.
+describe('duplicate-content — groups already resolved via an existing canonical tag', () => {
+  test('no finding at all when every member already canonicalizes to one page in the group', async () => {
+    const cache = async (page) => ({
+      ok: true,
+      analysis: {
+        wordCount: 900,
+        bodyText: DUPLICATE_BODY,
+        hasCanonical: true,
+        canonicalUrl: 'https://example.com/resources/',
+      },
+    });
+    const result = await run({
+      siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache: cache,
+      params: { pages: ['https://example.com/resources/?type=a', 'https://example.com/resources/?type=b'] },
+    });
+    assert.equal(result.facts.findings.length, 0);
+  });
+
+  test('still flags the group when canonical tags disagree on the target', async () => {
+    const cache = async (page) => ({
+      ok: true,
+      analysis: {
+        wordCount: 900,
+        bodyText: DUPLICATE_BODY,
+        hasCanonical: true,
+        // Each page canonicalizes to itself — no consensus target.
+        canonicalUrl: page,
+      },
+    });
+    const result = await run({
+      siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache: cache,
+      params: { pages: ['https://example.com/resources/?type=a', 'https://example.com/resources/?type=b'] },
+    });
+    assert.equal(result.facts.findings.length, 1);
+  });
+
+  test('still flags the group when no member has a canonical tag at all', async () => {
+    const cache = async () => ({
+      ok: true,
+      analysis: { wordCount: 900, bodyText: DUPLICATE_BODY, hasCanonical: false, canonicalUrl: null },
+    });
+    const result = await run({
+      siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache: cache,
+      params: { pages: ['https://example.com/resources/?type=a', 'https://example.com/resources/?type=b'] },
+    });
+    assert.equal(result.facts.findings.length, 1);
+  });
+});

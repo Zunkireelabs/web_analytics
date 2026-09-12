@@ -11,7 +11,7 @@ import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
 import { checkStructureConformance } from './structure-conformance.js';
-import { DESIGN_CONTEXT_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
+import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
 // Only landing-page has an "offering"/CTA/capability-match concept to
 // evaluate at all — every other generator (meta-title, schema, faq's Q&A
@@ -107,6 +107,14 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
   const needsLegalFactCheck = LEGAL_FACT_CHECKED_GENERATOR_IDS.has(generatorId);
   const needsClaimGroundingCheck = CLAIM_GROUNDED_GENERATOR_IDS.has(generatorId);
   const needsDesignConsistencyCheck = DESIGN_CONTEXT_GENERATOR_IDS.has(generatorId);
+  // findDesignIntegrityIssues checks the SITE's stored design profile for a
+  // typography-role mismatch, not the draft's own content, so it runs for
+  // every generator that can emit rendered markup/classes — a deny-list
+  // (design-drift.js's NO_MARKUP_GENERATOR_IDS), not the narrower
+  // DESIGN_CONTEXT_GENERATOR_IDS allowlist above: a generator like
+  // content-integrity-repair or missing-page-create still touches real
+  // markup even though it's outside that prose-grounding allowlist.
+  const needsDesignIntegrityCheck = !NO_MARKUP_GENERATOR_IDS.has(generatorId);
   const issues = [
     ...(isNonLlmContent ? [] : findScaffoldingIssues(content, generatorId)),
     ...(isNonLlmContent ? [] : findDuplicateParagraphs(content)),
@@ -135,11 +143,10 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // a post with no competitor links at all. Mentions and comparisons stay
     // allowed; domination does not. See competitor-prominence.js.
     ...(await findCompetitorProminenceIssues(content, siteId)).issues,
-    // Same DESIGN_CONTEXT_GENERATOR_IDS scope as withDesignContext (design-
-    // drift.js) — a generator with no design surface has nothing for this to
-    // check. See design-integrity-guard.js for the log-only -> enforce
-    // rollout this implements (DESIGN_INTEGRITY_ENFORCE).
-    ...(needsDesignConsistencyCheck
+    // Runs for every generator NOT in NO_MARKUP_GENERATOR_IDS — see
+    // needsDesignIntegrityCheck above. See design-integrity-guard.js for the
+    // log-only -> enforce rollout this implements (DESIGN_INTEGRITY_ENFORCE).
+    ...(needsDesignIntegrityCheck
       ? (await findDesignIntegrityIssues(generatorId, siteId,
         enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity })).issues
       : []),
