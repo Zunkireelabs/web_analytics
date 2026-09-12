@@ -23,6 +23,7 @@ import { computeHealthScore } from './agents/lib/health-score.js';
 import { RECOMMENDATION_AGENT_IDS } from './agents/lib/insights.js';
 import { detectNotificationEvents } from './notifications/detect.js';
 import { deliverToAllChannels } from './notifications/channels/index.js';
+import { hasRecentNotification } from './store/notifications.js';
 import { buildRecommendations } from './agents/lib/recommendations.js';
 import { repairSiteTemplates } from './agents/lib/template-repair.js';
 import { syncFromGrounded, refreshBlockedRecommendations } from './agents/lib/recommendation-coordinator.js';
@@ -39,7 +40,7 @@ import { checkFaqOnboardingCoverage } from './agents/lib/faq-onboarding-check.js
 import { getImplementedFindingIds, countDraftsBySourceToday, countDraftsBySourceTodayAllSites } from './store/drafts.js';
 import { countShippedFileEditsTodayAllSites } from './store/shipping-queue.js';
 import { AUTONOMOUS_DRAFT_SOURCES } from './lib/autonomous-quota.js';
-import { isShippable, isShipCatchupOwed, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
+import { isShippable, isShipCatchupOwed, checkShipStall, SHIP_HOUR_LOCAL, SHIP_LOCK_JOB_NAME, GITHUB_CREDENTIAL_LOCK_JOB_NAME } from './lib/ship-window.js';
 import { rateLimitKey } from './github/client.js';
 import { runDueImpactMeasurements } from './agents/lib/fix-impact.js';
 
@@ -1279,6 +1280,29 @@ async function shipSiteWithLocks(site, globalRemaining) {
   return { ran: true, result: siteResult };
 }
 
+// Runs after every ship attempt (scheduled run and catch-up guard alike),
+// right where result.shipped is known. detectNotificationEvents can't do this
+// itself — it runs earlier in the daily chain (runDailyJobForSite), before
+// runAutoRemediationForAllSites ships anything — so this stays inline here
+// rather than forcing a bad fit into that function. Same cooldown pattern
+// (hasRecentNotification) as every other notification type in detect.js:
+// once per site per day is enough, so a re-check by the catch-up guard an
+// hour later doesn't refire the same alert.
+// `shipped` must be the site's TOTAL for the day, not just one call's
+// increment — the catch-up guard's own ship is normally a small top-up on
+// top of whatever the morning run already shipped, and comparing that
+// increment alone against the full daily target would misfire on a perfectly
+// healthy day.
+const SHIP_STALL_COOLDOWN_DAYS = 1;
+async function alertIfShipStalled(site, shipped) {
+  const stallEvent = checkShipStall({ site, shipped });
+  if (!stallEvent) return;
+  const alreadyNotified = await hasRecentNotification(site.id, stallEvent.type, SHIP_STALL_COOLDOWN_DAYS);
+  if (alreadyNotified) return;
+  await deliverToAllChannels(site.id, [stallEvent])
+    .catch((err) => console.error(`[job] ship-stall alert delivery failed for site ${site.id}:`, err.message));
+}
+
 export async function runAutoRemediationForAllSites() {
   const sites = (await listSites()).filter(isShippable);
   const results = [];
@@ -1310,6 +1334,7 @@ export async function runAutoRemediationForAllSites() {
       if (result.attempted || result.shipped) {
         console.log(`[job] auto-remediation site ${site.id} "${site.name}": attempted ${result.attempted}, shipped ${result.shipped}, failed ${result.failed}${result.stoppedReason ? ` (stopped: ${result.stoppedReason})` : ''}`);
       }
+      await alertIfShipStalled(site, result.shipped || 0);
       results.push({ siteId: site.id, ...result });
     } catch (err) {
       console.error(`[job] auto-remediation failed for site ${site.id} "${site.name}":`, err.message);
@@ -1357,6 +1382,7 @@ export async function runAutoRemediationCatchupForAllSites(tz) {
       if (!ran) continue; // this site, or its GitHub credential, is already shipping right now
       globalRemaining -= result.shipped || 0;
       if (result.shipped) console.log(`[job] auto-remediation catch-up: site ${site.id} shipped ${result.shipped} after a missed ${SHIP_HOUR_LOCAL}:00 run`);
+      await alertIfShipStalled(site, alreadyShippedToday + (result.shipped || 0));
     } catch (err) {
       console.error(`[job] auto-remediation catch-up failed for site ${site.id} "${site.name}":`, err.message);
     }
