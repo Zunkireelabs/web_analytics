@@ -1212,6 +1212,29 @@ export async function persistDesignProfile(site, rawProfile, {
   return { ok: true, profile, projected: result?.saved || {}, rejected: result?.rejected || [] };
 }
 
+// The cheap sibling of persistDesignProfile above: the weekly rescan's fresh
+// capture matched the stored baseline (compareSectionsToProfile found no
+// meaningful drift in live-analysis-handler.js), so there is nothing new to
+// derive and nothing to re-project — only `lastCheckedAt` moves, so the next
+// operator looking at the stored profile can tell the check actually ran
+// this week rather than the profile being stale/abandoned. Deliberately does
+// NOT call stampDesignProfile (that stamps derivedAt/derivedBy/derivedRef,
+// which would misrepresent a skip as a fresh derivation) and does NOT
+// re-project component templates (projectAllComponentTemplates over an
+// unchanged profile can only ever reproduce what's already saved).
+export async function refreshDesignProfileCheckedAt(site, storedProfile, {
+  at = new Date(),
+  saveConfig = updateSiteRepoConfig,
+} = {}) {
+  const profile = { ...storedProfile, lastCheckedAt: at.toISOString() };
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: { ...site.url_file_map?.siteRoot, designProfile: profile },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap });
+  return { ok: true, profile };
+}
+
 export async function persistDerivedComponentTemplates(site, componentTemplates, {
   jobId = null,
   saveConfig = updateSiteRepoConfig,

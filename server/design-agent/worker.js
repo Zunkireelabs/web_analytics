@@ -4,7 +4,7 @@ import { createNativeCapabilityRepairHandler } from './native-repair-handler.js'
 import { safeMessage } from '../lib/errors.js';
 import { classifyFailure, shouldRetry } from '../lib/failure-classification.js';
 import { getSiteById } from '../store/read.js';
-import { persistDerivedComponentTemplates, persistDesignProfile } from '../implementers/lib/design-drift.js';
+import { persistDerivedComponentTemplates, persistDesignProfile, refreshDesignProfileCheckedAt } from '../implementers/lib/design-drift.js';
 import { persistConsistencyFindings } from '../agents/lib/design-consistency.js';
 import { isDesignAgentQuietHours } from '../lib/design-agent-window.js';
 
@@ -100,6 +100,7 @@ export async function processOneJob({
   getSiteByIdFn = getSiteById,
   persistTemplates = persistDerivedComponentTemplates,
   persistProfile = persistDesignProfile,
+  refreshProfileCheckedAt = refreshDesignProfileCheckedAt,
   persistConsistency = persistConsistencyFindings,
   maxAttempts = 3,
   sleep = defaultSleep,
@@ -139,9 +140,17 @@ export async function processOneJob({
     if (job.params?.mode === 'design-profile' && outcome?.designProfile) {
       const site = await getSiteByIdFn(job.site_id);
       if (!site) throw new Error(`site ${job.site_id} no longer exists — cannot save the derived design profile`);
-      const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
-      if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
-      await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
+      // The fresh capture matched the stored profile (no meaningful drift) —
+      // the handler already skipped the LLM resynthesis, so this only bumps
+      // lastCheckedAt, never re-projects templates from an unchanged profile.
+      if (outcome.skippedProfileDerivation) {
+        await refreshProfileCheckedAt(site, outcome.designProfile);
+        await appendJobLog(job.id, 'No structural drift vs. the stored design profile — skipped LLM re-derivation, refreshed lastCheckedAt.');
+      } else {
+        const saved = await persistProfile(site, outcome.designProfile, { jobId: job.id });
+        if (!saved.ok) throw new Error(`Design Agent returned an unusable design profile — ${saved.reason}`);
+        await appendJobLog(job.id, `Derived design profile; projected ${Object.keys(saved.projected).length} component template(s).`);
+      }
     }
 
     if (job.params?.mode === 'component-templates' && outcome?.componentTemplates) {
