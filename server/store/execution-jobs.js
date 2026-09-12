@@ -91,7 +91,7 @@ export async function getDesignAgentJobById(jobId) {
 
 export async function getLatestDesignAgentJob(siteId, actionType) {
   const { rows } = await query(
-    `SELECT id, status, finished_at, logs FROM execution_jobs
+    `SELECT id, status, created_at, finished_at, logs FROM execution_jobs
      WHERE site_id = $1 AND kind = 'design_generate'
        AND jsonb_exists(params->'componentKeys', $2)
      ORDER BY id DESC LIMIT 1`,

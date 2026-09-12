@@ -48,6 +48,18 @@ mock.module(resolve('../db.js'), {
   },
 });
 
+// Every fixture site here has no design profile at all and this file isn't
+// exercising the onboarding gate (that's onboarding-readiness.test.js's own
+// job) — without this, the mocked db.js above would make
+// isOnboardingAnalysisPending's default see "no job row" on every call and
+// report pending, blocking every test in this file that doesn't explicitly
+// override `onboardingAnalysisPending` (repairTemplateCapabilitiesForSite's
+// own dedicated onboarding-pending tests below pass their own value and are
+// unaffected by this).
+mock.module(resolve('../implementers/lib/onboarding-readiness.js'), {
+  namedExports: { isOnboardingAnalysisPending: async () => false },
+});
+
 mock.module(resolve('../store/read.js'), {
   namedExports: { getSiteById: async () => site },
 });
