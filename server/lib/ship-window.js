@@ -106,8 +106,46 @@ export function hourInTimezone(timezone, now = new Date()) {
 // same batch branch/PR.
 export function isShipCatchupOwed({ site, alreadyShippedToday, fallbackTimezone = 'UTC', now = new Date() }) {
   if (!isShippable(site)) return false;
-  const dailyLimit = site.auto_remediation_daily_limit ?? 60;
+  const dailyLimit = siteDailyTarget(site);
   if (alreadyShippedToday >= dailyLimit) return false;
   const hour = hourInTimezone(site.timezone || fallbackTimezone, now);
   return hour >= SHIP_HOUR_LOCAL && hour < SHIP_CATCHUP_END_HOUR_LOCAL;
+}
+
+// The one place "how many was this site supposed to ship today" is resolved
+// for both the catch-up guard above and the stall check below — an explicit
+// per-site override when set, else the same 60 auto-remediation itself
+// defaults to (laneBudgets' NORMAL_TARGET is 80 across both lanes combined,
+// but this file only ever measures the auto-remediation source specifically,
+// matching what isShipCatchupOwed already compared against before this was
+// pulled out into its own function).
+export function siteDailyTarget(site) {
+  return site.auto_remediation_daily_limit ?? 60;
+}
+
+// A day this far under its own target is not "a slow day," it is a day
+// something broke silently — the 2026-09-12 incident this exists for
+// (Chayceproperties shipping 9 instead of ~60-80 because a missing GitHub
+// App secret made every draft abandon with "GitHub App is not configured")
+// went unnoticed for a full day because nothing compared the day's real
+// output to what it should have been. Deliberately NOT gated on
+// `attempted > 0` — a total no-op day for a site that should have plenty of
+// eligible work is itself the failure mode, not a reason to stay quiet.
+export const SHIP_STALL_RATIO = 0.25;
+
+// Pure — no DB, no cooldown — so it's testable on its own. The caller (job.js)
+// is responsible for the cooldown check (once-per-site-per-day, matching the
+// hasRecentNotification pattern every other notification event already uses)
+// and for actually delivering the event via deliverToAllChannels.
+export function checkShipStall({ site, shipped, now = new Date() }) {
+  const target = siteDailyTarget(site);
+  if (target <= 0) return null; // paused tenant — a stall check is meaningless
+  if (shipped >= SHIP_STALL_RATIO * target) return null;
+  const today = now.toISOString().slice(0, 10);
+  return {
+    type: 'ship-stall', severity: 'high',
+    title: `${site.name}: shipped only ${shipped} of an expected ~${target} fixes today`,
+    body: `On ${today}, ${site.name}'s autonomous Action Center shipped ${shipped} fix${shipped === 1 ? '' : 'es'} against a daily target of ${target} — well below what's expected. Check for a silent shipping failure (e.g. a missing or expired credential) before assuming this was just a quiet day.`,
+    findingIds: [],
+  };
 }

@@ -10,6 +10,12 @@
 // is a plain async function that loads the site's real live pages in a
 // headless browser and asks the model to classify/synthesize what it sees,
 // one bounded call, no sandbox to crash.
+//
+// design-profile mode always pays for the Playwright capture (it's the only
+// way to see whether the live site changed) but only pays for the LLM
+// resynthesis when that fresh capture shows real drift from the stored
+// profile — outcome.skippedProfileDerivation tells worker.js to persist
+// only a refreshed lastCheckedAt instead of a full re-derivation.
 import { captureSite } from './live-analysis/capture.js';
 import { segmentSite } from './live-analysis/segment.js';
 import { extractDesignProfile } from './live-analysis/profile-extract.js';
@@ -69,6 +75,31 @@ export function createLiveDesignAnalysisHandler({
         ...detectResponsiveIssues(capture.responsive),
       ];
       return { jobId: job.id, consistencyFindings: findings, pagesScanned: segmented.length };
+    }
+
+    // design-profile mode: before paying for the expensive LLM re-derivation,
+    // check whether the fresh capture actually shows any meaningful drift
+    // from the site's currently-stored profile. A brand-new site (no stored
+    // profile yet) has nothing to compare against and always gets the full
+    // derivation. This reuses compareSectionsToProfile — the exact same
+    // "does this section still look like the rest of the site" primitive
+    // consistency-scan mode already runs, just pointed at the fresh capture
+    // instead of a routed-findings list — so the weekly Playwright visit
+    // still happens every week (that's the only way to detect drift at
+    // all), but the LLM call only fires when it found something real.
+    if (job.params?.mode === 'design-profile') {
+      const site = await getSiteByIdFn(job.site_id);
+      const storedProfile = site?.url_file_map?.siteRoot?.designProfile;
+      if (storedProfile) {
+        const drift = compareSectionsToProfile(storedProfile, segmented, { responsive: capture.responsive });
+        if (!drift.length) {
+          console.log(`[design-agent] site ${job.site_id}: design-profile rescan found no structural drift vs. the stored profile — skipping LLM re-derivation, refreshing lastCheckedAt only.`);
+          return { jobId: job.id, designProfile: storedProfile, skippedProfileDerivation: true };
+        }
+        console.log(`[design-agent] site ${job.site_id}: design-profile rescan found ${drift.length} drift finding(s) (${[...new Set(drift.map((f) => f.id))].join(', ')}) — running full LLM re-derivation.`);
+      } else {
+        console.log(`[design-agent] site ${job.site_id}: no stored design profile yet — running full LLM derivation.`);
+      }
     }
 
     const profile = await extractProfileFn(segmented, {

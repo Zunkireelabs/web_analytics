@@ -15,6 +15,15 @@
 // patterns) generators can draw on for content/voice grounding
 // (server/implementers/lib/marker-merge.js, newpage-render.js), on top of
 // the flat design-system vocabulary the projectors already consume.
+//
+// `lastCheckedAt` (ISO string, live-analysis-handler.js /
+// design-drift.js's refreshDesignProfileCheckedAt) is separate from
+// `derivedAt` (design-profile.js's stampDesignProfile): `derivedAt` only
+// moves when the profile's CONTENT was actually re-derived from an LLM
+// call; `lastCheckedAt` moves every time the weekly rescan's fresh capture
+// was compared against this profile and found no meaningful drift, so a
+// profile can show it was verified current far more recently than it was
+// last (re)derived.
 export const DESIGN_PROFILE_VERSION = 2;
 
 export const PAGE_TYPES = Object.freeze([
