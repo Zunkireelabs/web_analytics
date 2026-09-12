@@ -7,9 +7,11 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 // Three agents that detected real, confirmed defects and surfaced none of
 // them: every finding had a null recommendedAction and no reportOnly, which
-// is the exact shape buildRecommendations discards. Each now declares whether
-// its finding is a defect a human must own (reportOnly) or context to read
-// (still nothing) — the distinction, not blanket surfacing, is the fix.
+// is the exact shape buildRecommendations discards. Each now declares
+// whether its finding is a defect a human must own (reportOnly), context to
+// read (still nothing), or — query-intelligence's cannibalization case,
+// since 2026-09-12 — a real evidence-based fix once the data itself answers
+// the question that used to be a human blocker.
 
 let deviceRows;
 let deltaRows;
@@ -74,7 +76,15 @@ describe('device-intelligence surfaces a real CTR deficit', () => {
 });
 
 describe('query-intelligence surfaces cannibalization', () => {
-  test('two of the site\'s own pages competing for one query becomes a visible row', async () => {
+  // Updated 2026-09-12: "which page should own a query" used to be treated
+  // as an unanswerable human question (reportOnly, recommendedAction: null)
+  // even though the agent already has the real GSC evidence — clicks,
+  // impressions, position — that answers it. pickCannibalizationWinner now
+  // makes that decision from that same evidence, and the losing page gets a
+  // real, draftable internal-links recommendation instead of a dead end.
+  // See server/agents/lib/cannibalization-decision.test.js for the scoring
+  // itself; this covers the wiring end-to-end.
+  test('two of the site\'s own pages competing for one query becomes a real, draftable recommendation for the losing page', async () => {
     cannibalized = [{
       query: 'wedding venues',
       pages: [
@@ -87,12 +97,13 @@ describe('query-intelligence surfaces cannibalization', () => {
     const finding = (result.facts?.findings || []).find((f) => f.id.startsWith('query-intelligence:cannibalization:'));
 
     assert.ok(finding, 'expected a cannibalization finding');
-    assert.equal(finding.reportOnly.kind, 'query-cannibalization');
-    // Anchored to a real member page so the row's (page, kind) dedup key is
-    // stable across runs.
-    assert.equal(finding.reportOnly.page, 'https://example.com/a');
-    // Which page should own a query depends on what the business wants it to
-    // sell — no signal here carries that.
-    assert.equal(finding.recommendedAction, null);
+    assert.equal(finding.reportOnly, null);
+    // /a has real, dominant clicks/impressions/position — the decided owner.
+    assert.equal(finding.evidence.winner, 'https://example.com/a');
+    // The finding targets the LOSING page with a real action reinforcing the
+    // winner — never the winner itself, and never left as a dead end.
+    assert.equal(finding.recommendedAction.generatorId, 'internal-links');
+    assert.equal(finding.recommendedAction.params.page, 'https://example.com/b');
+    assert.equal(finding.recommendedAction.params.mustLinkTo, 'https://example.com/a');
   });
 });

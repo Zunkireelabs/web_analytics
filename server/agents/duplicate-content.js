@@ -82,8 +82,47 @@ export async function run({ siteId, start, end, pageCache, params }) {
     .filter(([, pages]) => pages.size >= 2)
     .map(([hash, pages]) => ({ hash, pages: [...pages] }));
 
+  // A duplicate-content group is not a live problem if every member already
+  // carries a <link rel="canonical"> pointing at ONE consistent target —
+  // search engines already know which URL to index, so flagging it (or
+  // blocking it for a human "which URL should win" decision) would ask a
+  // question the site has already answered itself. The target does not have
+  // to be a member of this byte-hash group itself (a group can legitimately
+  // form from only the parameterized variants, with the bare canonical page
+  // outside today's hash-matched set) — group membership here is about
+  // detection coverage, not about where the true canonical lives. Confirmed
+  // real on zunkireelabs.com 2026-09-12: /resources/?type=X and
+  // /contact/?source=X query-string variants all already emit a
+  // self-resolving canonical to the bare URL via the shared Eleventy
+  // template — the common case for tracking-parameter variants, not a
+  // hypothetical. Reuses this run's own fetches (analysisByPage) where
+  // available; a group member outside today's rotation batch gets one extra
+  // live fetch, since canonical resolution isn't derivable from the stored
+  // content_hash alone.
+  const analysisByPage = new Map(fetched.filter((f) => f.result.ok).map((f) => [f.page, f.result.analysis]));
+  async function groupAlreadyCanonicalized(pages) {
+    const targets = new Set();
+    for (const page of pages) {
+      let analysis = analysisByPage.get(page);
+      if (!analysis) {
+        const result = await fetchPage(page);
+        if (!result.ok) return false; // can't confirm resolution without a live read — leave it open
+        analysis = result.analysis;
+        analysisByPage.set(page, analysis);
+      }
+      if (!analysis.hasCanonical || !analysis.canonicalUrl) return false; // nothing decided yet
+      targets.add(analysis.canonicalUrl.replace(/\/$/, ''));
+    }
+    return targets.size === 1; // every member agrees on one real target
+  }
+  const unresolvedGroups = [];
+  for (const group of duplicateGroups) {
+    if (await groupAlreadyCanonicalized(group.pages)) continue;
+    unresolvedGroups.push(group);
+  }
+
   const sumImpressions = (pages) => pages.reduce((s, p) => s + (impressionsByPage.get(p) || 0), 0);
-  const rankedGroups = [...duplicateGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
+  const rankedGroups = [...unresolvedGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const priorities = priorityByRank(rankedGroups);
   const findings = rankedGroups.map((g, i) => {
     return makeFinding({

@@ -325,6 +325,26 @@ describe('contentGapsFor — Keyword consistency gap', () => {
   });
 });
 
+// Regression coverage for a real false positive found in production
+// (zunkireelabs.com, 2026-09-12): a nav link written as the full path plus a
+// same-page anchor ("/services/#ai") — not a bare "#ai" — was being crawled
+// and stored as its own page. Every fragment variant then fetches identical
+// HTML, which duplicate-content.js reads as N pages sharing one content
+// hash: a detector artifact, not a real duplicate-content editorial call.
+describe('analyzePage — internalLinks fragment stripping', () => {
+  test('a same-page anchor written as a full path is normalized to the fragment-free URL', () => {
+    const html = '<html><body><a href="/services/#ai">AI</a><a href="/services/#data">Data</a></body></html>';
+    const { internalLinks } = analyzePage(html, 'https://example.com/services/');
+    assert.deepEqual(internalLinks, ['https://example.com/services/', 'https://example.com/services/']);
+  });
+
+  test('a bare same-page anchor ("#ai") is still excluded entirely, not just stripped', () => {
+    const html = '<html><body><a href="#ai">AI</a></body></html>';
+    const { internalLinks } = analyzePage(html, 'https://example.com/services/');
+    assert.deepEqual(internalLinks, []);
+  });
+});
+
 describe('analyzePage — isRootPage', () => {
   const html = '<html><body><p>Hello world.</p></body></html>';
 

@@ -446,6 +446,18 @@ export function analyzePage(html, pageUrl) {
       let resolved;
       try { resolved = new URL(href, pageUrl); } catch { return false; }
       if (resolved.hostname !== host) return false;
+      // A #fragment is never a distinct resource — the server ignores it, so
+      // a same-page in-page-anchor link written as the full path
+      // ("/services/#ai") rather than a bare "#ai" (already filtered above)
+      // was being crawled and stored as its own page_inventory row. Every
+      // fragment variant of one URL then fetches identical HTML, which
+      // duplicate-content.js reads as N pages sharing one content hash — a
+      // detector artifact, not a real editorial "pick a canonical URL"
+      // decision. Stripping here is the single choke point: it fixes the
+      // crawl frontier (site-discovery.js's BFS), page_inventory, and
+      // duplicate-content detection all at once, since all three consume
+      // this same internalLinks list.
+      resolved.hash = '';
       internalLinks.push(resolved.href);
       internalLinkAnchors.push({ href: resolved.href, text: $(el).text().replace(/\s+/g, ' ').trim() });
       return true;
