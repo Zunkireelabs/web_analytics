@@ -501,6 +501,46 @@ jobs:
             echo "Data Analyst nightly pipeline scheduled (22:00 UTC daily, ahead of the 01:30 UTC morning run):"
             crontab -l | grep run_nightly_pipeline
 
+            # ── Common Crawl referring-domains ETL (monthly) ─────────────────
+            # server/scripts/refresh-commoncrawl-graph.js populates the
+            # Referring Domains card (server/routes/commoncrawl-backlinks.js) —
+            # deliberately independent of DataForSEO, so getting a DataForSEO
+            # account does not fill this in; only this ETL does. It downloads
+            # one Common Crawl domain-level Web Graph release (tens of GB,
+            # billions of rows), so it runs on the VPS's own disk via the
+            # already-deployed container (which already has this run's
+            # DATABASE_URL/STAGING_DATABASE_URL in its env), never on an
+            # ephemeral GitHub-hosted runner. Common Crawl ships a new release
+            # roughly monthly, so 1st-of-month is enough to stay current.
+            # Scheduled at 03:00 UTC to land clear of both the 22:00 UTC
+            # analyst pipeline above and the 01:30 UTC daily growth run
+            # (server/cron.js) — this is a read-heavy, long-running import,
+            # not something that should race either.
+            echo "Installing Common Crawl referring-domains ETL cron..."
+            CC_CMD="cd $DIR && docker compose -f docker-compose.dev.yml exec -T analytics npm run refresh-commoncrawl-graph >> /var/log/commoncrawl-refresh.log 2>&1"
+            ((crontab -l 2>/dev/null || true) | (grep -v -e 'refresh-commoncrawl-graph' || true); echo "0 3 1 * * $CC_CMD") | crontab -
+            echo "Common Crawl referring-domains ETL scheduled (03:00 UTC on the 1st of each month):"
+            crontab -l | grep refresh-commoncrawl-graph
+
+            # One-time immediate kickoff so Referring Domains doesn't sit
+            # empty until the 1st of next month. Guarded by a marker file so
+            # a later redeploy never re-triggers this multi-hour job — only
+            # the monthly cron above runs it again after this. Detached with
+            # nohup/disown so it survives this SSH session ending; the
+            # workflow does not wait on it (the download alone can run for
+            # hours), it just gets the first import moving in the background.
+            MARKER="/home/zunkireelabs/devprojects/analytics-app-stage/.commoncrawl-graph-first-run-done"
+            if [ ! -f "$MARKER" ]; then
+              echo "Kicking off one-time initial Common Crawl ETL run in the background..."
+              cd "$DIR"
+              nohup docker compose -f docker-compose.dev.yml exec -T analytics npm run refresh-commoncrawl-graph >> /var/log/commoncrawl-refresh.log 2>&1 &
+              disown
+              touch "$MARKER"
+              echo "Started — check progress with: tail -f /var/log/commoncrawl-refresh.log"
+            else
+              echo "Initial Common Crawl ETL run already done previously; relying on the monthly cron from here."
+            fi
+
       - name: Verify Health
         run: |
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_DOMAIN }}")
