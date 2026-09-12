@@ -23,19 +23,32 @@ import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js
 // regressions ship in a single deploy, and a monthly agent that fails looks
 // exactly like a monthly agent that isn't due.
 //
-// Only ONE outlier shape has a safe automatic fix: an element whose
-// font-size differs because IT SPECIFICALLY carries an inline
-// style="font-size:...} override (a one-element, exact-match-or-refuse
-// patch — see generators/content-integrity-repair.js's 'font-size-override'
-// fixType). An outlier caused by a different/wrong CSS class, or by the
-// shared class's own stylesheet rule being wrong on one page, has no safe
-// single-element fix — changing a shared class's rule affects every OTHER
-// element using that class too, a much bigger blast radius than this app
-// auto-applies unattended anywhere else. Those stay visible, manual-only.
+// Outliers are checked against their OWN page-type/template's real majority
+// first, falling back to the sitewide majority only when that template has
+// too few sampled pages of its own to have an opinion (see
+// findFontSizeOutliers) — so a site that legitimately runs a bigger heading
+// on its landing-style templates than on interior pages never gets flagged
+// for that, on any site, without any per-tenant configuration.
+//
+// Two outlier shapes have a safe automatic fix:
+//   - an element whose font-size differs because IT SPECIFICALLY carries an
+//     inline style="font-size:...} override (a one-element, exact-match-or-
+//     refuse patch — generators/content-integrity-repair.js's
+//     'font-size-override' fixType);
+//   - an element whose classes differ from the resolved bucket's own real,
+//     already-observed convention (findFontSizeOutliers' `siteConvention`) —
+//     routed through the same 'typography-drift' fixType design-consistency.js
+//     already uses: an exact-match-or-refuse class swap against a value this
+//     SAME site was seen using elsewhere, never invented and never borrowed
+//     from another tenant.
+// Anything else — the shared class's own stylesheet rule differing on just
+// one page, or a bucket with no resolvable convention — has no safe single-
+// element fix (changing a shared class's rule affects every OTHER element
+// using it too) and stays visible, manual-only.
 export const meta = {
   id: 'font-consistency',
   name: 'Font Consistency Agent',
-  description: 'Checks whether headings and body text render at the same real (computed) font-size across a sample of the site\'s own live pages, using a real headless-browser capture — flags genuine outliers and auto-fixes the ones caused by a one-element inline font-size override.',
+  description: 'Checks whether headings and body text render at the same real (computed) font-size across a sample of the site\'s own live pages, comparing each page-type/template against its own real majority first — flags genuine outliers and auto-fixes the ones caused by a one-element inline font-size override or a resolvable CSS-class drift.',
   category: 'content',
   version: 1,
   dataSources: [
@@ -120,13 +133,19 @@ export async function run({
 
   const outliers = findFontSizeOutliers(pages);
   const safeOutlier = outliers.find((o) => hasInlineFontSizeOverride(o.sample.outerHtml));
+  // A class-driven outlier is only auto-fixable when findFontSizeOutliers
+  // could resolve a real, already-observed convention for its own bucket
+  // (see that file's siteConvention field) — this site's own evidence,
+  // never a value carried over from another tenant or another finding.
+  const classOutlier = !safeOutlier ? outliers.find((o) => o.siteConvention) : null;
+  const fixableOutlier = safeOutlier || classOutlier;
 
   const finding = outliers.length ? makeFinding({
     id: 'font-consistency:size-outlier',
     evidence: {
       affectedCount: outliers.length,
       checkedPages: pages.length,
-      samples: outliers.slice(0, 5).map((o) => ({ group: o.group, page: o.url, expected: o.expectedFontSize, actual: o.actualFontSize })),
+      samples: outliers.slice(0, 5).map((o) => ({ group: o.group, pageType: o.pageType, page: o.url, expected: o.expectedFontSize, actual: o.actualFontSize })),
     },
     whyItMatters: `${outliers.length} element(s) (heading or body text) render at a different real font-size than the same element type on the rest of this site's checked pages — a visitor moving between pages sees inconsistent typography.`,
     priority: outliers.length >= 3 ? 'high' : 'medium',
@@ -134,6 +153,18 @@ export async function run({
       label: 'Remove inline font-size override',
       generatorId: 'content-integrity-repair',
       params: { page: safeOutlier.url, fixType: 'font-size-override', outerHtml: safeOutlier.sample.outerHtml },
+      effort: effortForGenerator('content-integrity-repair'),
+    } : classOutlier ? {
+      label: 'Match this element\'s size to this site\'s own template convention',
+      generatorId: 'content-integrity-repair',
+      params: {
+        page: classOutlier.url,
+        fixType: 'typography-drift',
+        sectionClasses: classOutlier.sample.classes,
+        siteConvention: classOutlier.siteConvention,
+        outerHtml: classOutlier.sample.outerHtml,
+        textRole: classOutlier.group === 'p' ? 'body' : 'heading',
+      },
       effort: effortForGenerator('content-integrity-repair'),
     } : null,
     // No safe automatic fix, but a real, measured defect — so it goes to the
@@ -147,11 +178,11 @@ export async function run({
     // row somewhere real to point, and it is the page a human should open
     // first. The dedup key is (page, kind), so a second genuinely different
     // page's outlier gets its own row instead of overwriting this one.
-    reportOnly: safeOutlier ? null : {
+    reportOnly: fixableOutlier ? null : {
       kind: 'font-size-inconsistency',
       label: 'Text renders at an inconsistent size',
       page: outliers[0].url,
-      whyBlocked: 'This font-size comes from a shared CSS class, not from a per-element override, so there is no single-element fix — changing the class would move every other element on the site that uses it too. Someone needs to decide which size is the correct one.',
+      whyBlocked: 'This font-size comes from a shared CSS class with no resolvable single-element replacement (either this template has too few sampled pages of its own to have a confirmed convention, or the class is already correct and a stylesheet rule is the real cause) — changing it blind could move every other element on the site that shares the class. Someone needs to decide which size is the correct one.',
     },
     expectedImpact: { label: outliers.length >= 3 ? 'High' : 'Medium', basis: 'computed', value: outliers.length },
   }) : null;

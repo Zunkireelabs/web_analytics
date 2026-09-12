@@ -123,7 +123,7 @@ describe('compareSectionsToProfile — typography drift', () => {
       sections: [section({
         role: 'content',
         textHierarchy: [
-          { role: 'heading', text: 'x', tag: 'h2', style: null, classes: 'text-xl font-semibold' }, // matches
+          { role: 'heading', text: 'x', tag: 'h2', style: null, classes: 'text-3xl font-bold' }, // matches heading.section
           { role: 'body', text: 'y', tag: 'p', style: null, classes: 'totally-different' }, // does not
         ],
       })],
@@ -135,6 +135,51 @@ describe('compareSectionsToProfile — typography drift', () => {
   });
 });
 
+describe('compareSectionsToProfile — h1 resolved per hero/standard context', () => {
+  const PROFILE_WITH_PAGE_CONTEXT = {
+    ...BASE_PROFILE,
+    typography: {
+      ...BASE_PROFILE.typography,
+      heading: { ...BASE_PROFILE.typography.heading, page: { hero: 'text-6xl font-black', standard: 'text-4xl font-bold' } },
+    },
+  };
+
+  test('an h1 outside a hero section is checked against the site\'s own standard (non-hero) page-title convention', () => {
+    const p = page({
+      sections: [section({
+        role: 'content',
+        textHierarchy: [{ role: 'heading', text: 'Privacy Policy', tag: 'h1', style: null, classes: 'text-4xl font-bold' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_CONTEXT, [p]);
+    assert.equal(findings.filter((f) => f.id === 'typography-drift').length, 0);
+  });
+
+  test('an h1 outside a hero section rendered at the hero size (not the standard size) is flagged, not treated as correct', () => {
+    const p = page({
+      sections: [section({
+        role: 'content',
+        textHierarchy: [{ role: 'heading', text: 'Privacy Policy', tag: 'h1', style: null, classes: 'text-6xl font-black' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_CONTEXT, [p]);
+    const drift = findings.find((f) => f.id === 'typography-drift');
+    assert.ok(drift);
+    assert.equal(drift.evidence.siteConvention, 'text-4xl font-bold');
+  });
+
+  test('with no page-context evidence at all, an h1 outside a hero falls back to the flat item/section convention (pre-existing profile shape)', () => {
+    const p = page({
+      sections: [section({
+        role: 'content',
+        textHierarchy: [{ role: 'heading', text: 'x', tag: 'h1', style: null, classes: 'text-xl font-semibold' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(BASE_PROFILE, [p]);
+    assert.equal(findings.filter((f) => f.id === 'typography-drift').length, 0);
+  });
+});
+
 describe('compareSectionsToProfile — a fully-consistent site produces zero findings', () => {
   test('nothing is flagged when every real section matches the site\'s own real conventions', () => {
     const p = page({
@@ -143,7 +188,7 @@ describe('compareSectionsToProfile — a fully-consistent site produces zero fin
         role: 'content',
         classes: 'md:px-8',
         textHierarchy: [
-          { role: 'heading', text: 'Privacy', tag: 'h2', style: null, classes: 'text-xl font-semibold' },
+          { role: 'heading', text: 'Privacy', tag: 'h2', style: null, classes: 'text-3xl font-bold' },
           { role: 'body', text: 'We collect...', tag: 'p', style: null, classes: 'text-gray-600 leading-relaxed' },
         ],
       })],

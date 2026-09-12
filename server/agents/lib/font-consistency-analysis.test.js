@@ -31,11 +31,11 @@ describe('buildFontSizeOverrideRemoved', () => {
   });
 });
 
-function page(url, headings = [], paragraphs = []) {
-  return { url, headings, paragraphs };
+function page(url, headings = [], paragraphs = [], pageType = null) {
+  return { url, pageType, headings, paragraphs };
 }
-function h(tag, fontSize, outerHtml, inlineStyle = null) {
-  return { tag, fontSize, outerHtml, inlineStyle, classes: '', text: '' };
+function h(tag, fontSize, outerHtml, inlineStyle = null, classes = '') {
+  return { tag, fontSize, outerHtml, inlineStyle, classes, text: '' };
 }
 
 describe('findFontSizeOutliers', () => {
@@ -82,5 +82,57 @@ describe('findFontSizeOutliers', () => {
 
   test('empty input -> empty result', () => {
     assert.deepEqual(findFontSizeOutliers([]), []);
+  });
+
+  test('a template with its own confirmed majority is not flagged against a different sitewide majority', () => {
+    // Three landing-style pages consistently at 60px, three other pages
+    // consistently at 48px — a real, confirmed per-template design decision
+    // on this site, not a defect. Neither bucket should be flagged.
+    const pages = [
+      page('https://example.com/', [h('h1', '60px', '<h1>Home</h1>')], [], 'homepage'),
+      page('https://example.com/landing-a', [h('h1', '60px', '<h1>A</h1>')], [], 'landing'),
+      page('https://example.com/landing-b', [h('h1', '60px', '<h1>B</h1>')], [], 'landing'),
+      page('https://example.com/blog', [h('h1', '48px', '<h1>Blog</h1>')], [], 'blog-listing'),
+      page('https://example.com/faq', [h('h1', '48px', '<h1>FAQ</h1>')], [], 'faq'),
+      page('https://example.com/terms', [h('h1', '48px', '<h1>Terms</h1>')], [], 'legal'),
+    ];
+    assert.deepEqual(findFontSizeOutliers(pages), []);
+  });
+
+  test('a page type with too few sampled pages falls back to the sitewide majority', () => {
+    const pages = [
+      page('https://example.com/a', [h('h1', '32px', '<h1>A</h1>')], [], 'other'),
+      page('https://example.com/b', [h('h1', '32px', '<h1>B</h1>')], [], 'other'),
+      page('https://example.com/c', [h('h1', '32px', '<h1>C</h1>')], [], 'other'),
+      // Only one 'landing' page — not enough evidence for its own bucket, so
+      // it is judged against the sitewide majority above and flagged.
+      page('https://example.com/lp', [h('h1', '18px', '<h1 style="font-size: 18px;">LP</h1>')], [], 'landing'),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.equal(outliers[0].url, 'https://example.com/lp');
+    assert.equal(outliers[0].scope, 'site');
+  });
+
+  test('a class-driven outlier carries a resolvable siteConvention when the bucket has one', () => {
+    const pages = [
+      page('https://example.com/a', [h('h1', '32px', '<h1 class="text-h1">A</h1>', null, 'text-h1')]),
+      page('https://example.com/b', [h('h1', '32px', '<h1 class="text-h1">B</h1>', null, 'text-h1')]),
+      page('https://example.com/c', [h('h1', '18px', '<h1 class="hero-sm">C</h1>', null, 'hero-sm')]),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.equal(outliers[0].siteConvention, 'text-h1');
+  });
+
+  test('siteConvention is null when the outlier already carries the resolved convention (not a class problem)', () => {
+    const pages = [
+      page('https://example.com/a', [h('h1', '32px', '<h1 class="text-h1">A</h1>', null, 'text-h1')]),
+      page('https://example.com/b', [h('h1', '32px', '<h1 class="text-h1">B</h1>', null, 'text-h1')]),
+      page('https://example.com/c', [h('h1', '18px', '<h1 class="text-h1">C</h1>', null, 'text-h1')]),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.equal(outliers[0].siteConvention, null);
   });
 });

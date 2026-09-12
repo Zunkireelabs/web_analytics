@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, correctLinkTypography } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -178,8 +178,42 @@ describe('correctHeadingTypography', () => {
   test('chrome headings are excluded, and no evidence leaves the pick alone', () => {
     const pages = [page([h('h2', 'footer-heading')], 'footer')];
     const { heading, corrected } = correctHeadingTypography({ section: 'kept', item: 'kept-too' }, headingSamplesByLevel(pages));
-    assert.deepEqual(heading, { section: 'kept', item: 'kept-too' });
+    assert.deepEqual(heading, { section: 'kept', item: 'kept-too', page: {} });
     assert.deepEqual(corrected, []);
+  });
+
+  // The real gap this whole feature closes: a site can legitimately run a
+  // bigger <h1> in its hero than on an interior page (this platform's first
+  // client does — 60px on landing-style templates, 48px elsewhere), and that
+  // is a real per-template decision, not drift. headingPageSamplesByContext
+  // splits real <h1> samples by whether their OWN section is a hero so both
+  // values get recorded, on any site, from that site's own real evidence.
+  test('hero and standard h1 samples are recorded separately, from real section.role evidence', () => {
+    const heroH1 = 'text-6xl font-black';
+    const standardH1 = 'text-4xl font-bold';
+    const pages = [
+      { sections: [{ role: 'hero', textHierarchy: [h('h1', heroH1, '60px')] }] },
+      { sections: [{ role: 'content', textHierarchy: [h('h1', standardH1, '48px')] }] },
+      { sections: [{ role: 'content', textHierarchy: [h('h1', standardH1, '48px')] }] },
+    ];
+    const byContext = headingPageSamplesByContext(pages);
+    assert.equal(byContext.hero.length, 1);
+    assert.equal(byContext.hero[0].classes, heroH1);
+    assert.equal(byContext.standard.length, 2);
+    assert.ok(byContext.standard.every((s) => s.classes === standardH1));
+
+    const { heading, corrected } = correctHeadingTypography({}, new Map(), byContext);
+    assert.equal(heading.page.hero, heroH1);
+    assert.equal(heading.page.standard, standardH1);
+    assert.deepEqual(corrected.sort(), ['page.hero', 'page.standard']);
+  });
+
+  test('an h1 with no hero-section evidence leaves heading.page.hero alone (no evidence is not a defect)', () => {
+    const pages = [page([h('h1', 'text-4xl font-bold', '48px')])];
+    const { heading, corrected } = correctHeadingTypography({}, new Map(), headingPageSamplesByContext(pages));
+    assert.equal(heading.page.hero, undefined);
+    assert.equal(heading.page.standard, 'text-4xl font-bold');
+    assert.deepEqual(corrected, ['page.standard']);
   });
 });
 

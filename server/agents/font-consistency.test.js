@@ -10,8 +10,8 @@ mock.module(resolve('../llm.js'), { namedExports: { callLLM: async () => 'stubbe
 
 const { run, meta } = await import('./font-consistency.js');
 
-function h(tag, fontSize, outerHtml) {
-  return { tag, fontSize, outerHtml, inlineStyle: null, classes: '', text: '' };
+function h(tag, fontSize, outerHtml, classes = '') {
+  return { tag, fontSize, outerHtml, inlineStyle: null, classes, text: '' };
 }
 
 describe('font-consistency agent', () => {
@@ -79,11 +79,31 @@ describe('font-consistency agent', () => {
     assert.equal(finding.recommendedAction.params.page, 'https://example.com/c');
   });
 
-  test('flags an outlier but attaches no recommendedAction when it has no inline override (a CSS-class difference)', async () => {
+  test('flags a CSS-class outlier and routes it through typography-drift when a real site convention is resolvable', async () => {
     const pages = [
-      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1>A</h1>')], paragraphs: [] },
-      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1>B</h1>')], paragraphs: [] },
-      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 class="hero-sm">C</h1>')], paragraphs: [] },
+      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1 class="text-h1">A</h1>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1 class="text-h1">B</h1>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 class="hero-sm">C</h1>', 'hero-sm')], paragraphs: [] },
+    ];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => pages,
+    });
+    assert.equal(result.facts.findings.length, 1);
+    const finding = result.facts.findings[0];
+    assert.ok(finding.recommendedAction);
+    assert.equal(finding.recommendedAction.generatorId, 'content-integrity-repair');
+    assert.equal(finding.recommendedAction.params.fixType, 'typography-drift');
+    assert.equal(finding.recommendedAction.params.siteConvention, 'text-h1');
+    assert.equal(finding.recommendedAction.params.page, 'https://example.com/c');
+  });
+
+  test('flags an outlier but attaches no recommendedAction when its class already matches the resolved convention', async () => {
+    const pages = [
+      { url: 'https://example.com/a', headings: [h('h1', '32px', '<h1 class="text-h1">A</h1>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h1', '32px', '<h1 class="text-h1">B</h1>', 'text-h1')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h1', '18px', '<h1 class="text-h1">C</h1>', 'text-h1')], paragraphs: [] },
     ];
     const result = await run({
       siteId: 1,
@@ -92,5 +112,23 @@ describe('font-consistency agent', () => {
     });
     assert.equal(result.facts.findings.length, 1);
     assert.equal(result.facts.findings[0].recommendedAction, null);
+  });
+
+  test('a landing-style template with its own confirmed h1 size is not flagged against a different interior-page majority', async () => {
+    const pages = [
+      { url: 'https://example.com/', pageType: 'homepage', headings: [h('h1', '60px', '<h1>Home</h1>')], paragraphs: [] },
+      { url: 'https://example.com/landing-a', pageType: 'landing', headings: [h('h1', '60px', '<h1>A</h1>')], paragraphs: [] },
+      { url: 'https://example.com/landing-b', pageType: 'landing', headings: [h('h1', '60px', '<h1>B</h1>')], paragraphs: [] },
+      { url: 'https://example.com/blog', pageType: 'blog-listing', headings: [h('h1', '48px', '<h1>Blog</h1>')], paragraphs: [] },
+      { url: 'https://example.com/faq', pageType: 'faq', headings: [h('h1', '48px', '<h1>FAQ</h1>')], paragraphs: [] },
+      { url: 'https://example.com/terms', pageType: 'legal', headings: [h('h1', '48px', '<h1>Terms</h1>')], paragraphs: [] },
+    ];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => pages,
+    });
+    assert.equal(result.status, 'ok');
+    assert.equal(result.facts.findings.length, 0);
   });
 });
