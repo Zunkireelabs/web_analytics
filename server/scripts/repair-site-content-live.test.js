@@ -8,12 +8,18 @@ const FAQ_TEMPLATE = {
   row: '<div class="py-5"><button @click="activeIndex = {{INDEX}}">{{QUESTION}}</button><div x-show="activeIndex === {{INDEX}}"><p class="pt-4">{{ANSWER}}</p></div></div>',
 };
 
+const EXPAND_TEMPLATE = { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' };
+const DESIGN_PROFILE = {
+  typography: { body: 'text-lg text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+  components: { list: { wrapper: 'space-y-2 my-4', item: 'flex items-start gap-2' } },
+};
+
 const SITE = {
   id: 1, name: 'Zunkiree Labs', repo_owner: 'Zunkireelabs', repo_name: 'zunkireelabs-web',
   visible_faq_cap: 5,
   url_file_map: {
     newContentTargets: { 'blog-outline': { dir: 'src/blog', extension: '.md' } },
-    siteRoot: { componentTemplates: { faq: FAQ_TEMPLATE, qaContent: FAQ_TEMPLATE } },
+    siteRoot: { componentTemplates: { faq: FAQ_TEMPLATE, qaContent: FAQ_TEMPLATE, expandContent: EXPAND_TEMPLATE }, designProfile: DESIGN_PROFILE },
   },
 };
 
@@ -147,6 +153,34 @@ describe('repairSiteContentLive', () => {
     assert.ok(report.changedFiles.length > 0);
     assert.equal(queueRows.length, 0);
     assert.equal(report.prCreated, null);
+  });
+
+  // The wiring this session's prose fix needed: repairSiteContentLive is the
+  // cron-scheduled caller (job.js's morning chain) — the fix only reaches a
+  // real site's already-shipped content if THIS function threads
+  // designProfile through to repairSiteMarkerStyling, not just the CLI
+  // entrypoint's own manual --repo invocation.
+  test('an already-shipped EXPANDEDCONTENT block with bare prose gets the site\'s real classes via the same cron-scheduled path', async () => {
+    repoFiles = ['src/blog/post.md'];
+    fileContents = {
+      'src/blog/post.md': [
+        '---\ntitle: "Post"\n---',
+        '# Post',
+        '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+        '<h2>Why It Matters</h2>',
+        '<p>See <a href="https://example.com/docs">our docs</a> for more.</p>',
+        '<ul><li>First point</li></ul>',
+        '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+      ].join('\n'),
+    };
+
+    const report = await repairSiteContentLive(1);
+
+    assert.deepEqual(report.changedFiles, ['src/blog/post.md']);
+    const edit = queueRows[0].params.edits.find((f) => f.path === 'src/blog/post.md');
+    assert.match(edit.content, /<p class="text-lg text-gray-600 leading-relaxed">/);
+    assert.match(edit.content, /<a href="https:\/\/example\.com\/docs" class="text-zunkiree-600 hover:underline">/);
+    assert.match(edit.content, /<ul class="space-y-2 my-4">/);
   });
 
   test('only files that actually changed are queued, not everything fetched', async () => {

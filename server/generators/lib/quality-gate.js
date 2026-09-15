@@ -10,6 +10,7 @@ import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
+import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
 import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
@@ -157,6 +158,19 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     // them by regenerating with that feedback rather than refusing the
     // draft — see design-repair-feedback.js.
     ...(site ? checkStructureConformance(content, generatorId, site).issues : []),
+    // Renders the draft through the same buildMergeValues() call apply-time
+    // splicing uses and flags any resulting block tag with no class at all
+    // on a site that has real typography evidence — see rendered-markup-
+    // guard.js. Gated on `site` for the same reason checkStructureConformance
+    // is: it needs the site's real componentTemplates/designProfile, not
+    // just siteId, and a caller with no site simply skips it, same as before.
+    ...(site ? findBareMarkupIssues(
+      generatorId, content, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile,
+    ).issues : []),
+    // The other rendering path (whole-new-page generation) — see that
+    // function's own comment for why it's a separate call rather than one
+    // shared with findBareMarkupIssues above.
+    ...(site ? findBareNewPageMarkupIssues(generatorId, content, site).issues : []),
   ];
   // An issue with `blocking: false` (design-integrity-guard.js's log-only
   // mode) is deliberately still visible in `issues` — it just doesn't fail

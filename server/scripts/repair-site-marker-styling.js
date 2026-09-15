@@ -32,7 +32,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
-import { fillTemplate, renderFromTemplate, escapeHtml } from '../implementers/lib/marker-merge.js';
+import { fillTemplate, renderFromTemplate, escapeHtml, proseStyleFor } from '../implementers/lib/marker-merge.js';
 
 // Marker name -> how to parse its content back out, and how to re-render it.
 // Parsers return null when the region is not in a shape they recognise, which
@@ -40,7 +40,7 @@ import { fillTemplate, renderFromTemplate, escapeHtml } from '../implementers/li
 // site's own componentTemplates, rather than a module-level constant, so this
 // module can be called for many sites in one process (job.js/cron.js) without
 // one site's templates leaking into another's repair.
-function buildHandlers(templates) {
+function buildHandlers(templates, proseStyle = {}) {
   return {
   FAQ: {
     template: templates.faq,
@@ -108,8 +108,8 @@ function buildHandlers(templates) {
       return items.length ? items : null;
     },
     render: (items, tpl) => renderSlots(items, tpl, (it) => ({
-      HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseTables(it.body), tpl.row, 'BODY'),
-    }), (it) => blockSafeRow(tpl.row, normaliseTables(it.body), 'BODY')),
+      HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseProse(normaliseTables(it.body), proseStyle), tpl.row, 'BODY'),
+    }), (it) => blockSafeRow(tpl.row, normaliseProse(normaliseTables(it.body), proseStyle), 'BODY')),
   },
   };
 }
@@ -276,6 +276,27 @@ function normaliseTables(html) {
   return $.html();
 }
 
+// The retroactive half of the 2026-09-15 expand-content prose fix
+// (marker-merge.js's proseStyleFor/markdownToHtml, generators/lib/
+// rendered-markup-guard.js's regression check): every expand-content block
+// already SHIPPED before that fix spliced its body as bare, unstyled
+// <p>/<ul>/<li>/<a> — same "flat" defect normaliseTables above already
+// retroactively fixes for tables, just never extended to prose. Only ADDS a
+// class to a tag that has none; a paragraph/list/link that already carries
+// a real class (e.g. from a captured template's own row wrapper, or a
+// prior run of this repair) is left completely alone, so this is safe to
+// run repeatedly and never overwrites a real, intentional class with a
+// generic one.
+function normaliseProse(html, proseStyle) {
+  if (!proseStyle?.bodyClass && !proseStyle?.linkClass && !proseStyle?.listWrapperClass && !proseStyle?.listItemClass) return html;
+  const $ = cheerio.load(html, null, false);
+  if (proseStyle.bodyClass) $('p').not('[class]').addClass(proseStyle.bodyClass);
+  if (proseStyle.listWrapperClass) $('ul').not('[class]').addClass(proseStyle.listWrapperClass);
+  if (proseStyle.listItemClass) $('li').not('[class]').addClass(proseStyle.listItemClass);
+  if (proseStyle.linkClass) $('a[href^="http"]').not('[class]').addClass(proseStyle.linkClass);
+  return $.html();
+}
+
 async function repairDataFile(file, handlers, write) {
   const text = await readFile(file, 'utf8');
   if (!DATA_FIELD.test(text)) return 0;
@@ -311,11 +332,15 @@ async function repairDataFile(file, handlers, write) {
 /**
  * @param {string} repoDir a real directory containing the repo's `src/`
  * @param {object} templates site.url_file_map.siteRoot.componentTemplates
- * @param {{write?: boolean}} [opts]
+ * @param {{write?: boolean, designProfile?: object}} [opts] designProfile
+ *   (site.url_file_map.siteRoot.designProfile) grounds normaliseProse's
+ *   retroactive body/link/list class injection — omitted, EXPANDEDCONTENT
+ *   bodies keep whatever prose classing they already shipped with, same as
+ *   before this parameter existed.
  * @returns {{changedFiles: number, changedRegions: number, dataFields: number, skipped: number}}
  */
-export async function repairSiteMarkerStyling(repoDir, templates, { write = false } = {}) {
-  const handlers = buildHandlers(templates);
+export async function repairSiteMarkerStyling(repoDir, templates, { write = false, designProfile = null } = {}) {
+  const handlers = buildHandlers(templates, proseStyleFor(designProfile));
   const files = walk(path.join(repoDir, 'src'));
   let changedFiles = 0;
   let changedRegions = 0;
@@ -396,12 +421,13 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
 
   const { rows } = await query('select url_file_map from sites where id = $1', [siteId]);
   const templates = rows[0]?.url_file_map?.siteRoot?.componentTemplates;
+  const designProfile = rows[0]?.url_file_map?.siteRoot?.designProfile;
   if (!templates) {
     console.error(`Site ${siteId} has no componentTemplates. Run repair-design-profile-roles.js first.`);
     process.exit(1);
   }
 
-  const result = await repairSiteMarkerStyling(repo, templates, { write });
+  const result = await repairSiteMarkerStyling(repo, templates, { write, designProfile });
   console.log(`\n${result.changedFiles} file(s), ${result.changedRegions} region(s) re-rendered; `
     + `${result.dataFields} data field(s) re-rendered; ${result.skipped} region(s) skipped as unrecognised.`);
   console.log(write ? 'Written.' : 'Dry run — re-run with --write to apply.');

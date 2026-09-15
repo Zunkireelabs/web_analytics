@@ -1,4 +1,5 @@
 import { getSiteById } from '../store/read.js';
+import { getFileContent, defaultBranchName } from '../github/client.js';
 import { listPageInventory, listOrphanedPages } from '../store/page-inventory.js';
 import { discoverSitemapEntries } from '../agents/lib/site-discovery.js';
 
@@ -27,6 +28,23 @@ export const meta = {
 
 function escapeXml(str) {
   return String(str).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+}
+
+// This generator is only meant to write a hand-maintained, fully static
+// sitemap.xml (see server/implementers/types.js's "Sitemap regeneration"
+// comment) — never a template source (Eleventy/Nunjucks/Liquid/Handlebars/
+// EJS, ...) that a static-site build renders into sitemap.xml itself. A
+// straight overwrite of a templated source with the rendered-XML body this
+// generator builds silently deletes the front matter (e.g. Eleventy's
+// `permalink: /sitemap.xml`) and the loop that keeps it current — exactly
+// what happened to zunkireelabs-web's src/sitemap.njk (Action Center drafts
+// #180/#1095), which took the site's live /sitemap.xml offline (404) until
+// the front matter was restored by hand.
+const TEMPLATE_SOURCE_PATTERN = /^---\r?\n|\{%[-\s]|\{\{[-\s]|<%[-=]?/;
+
+// Exported for tests.
+export function looksLikeTemplateSource(raw) {
+  return TEMPLATE_SOURCE_PATTERN.test(raw.slice(0, 2000));
 }
 
 // Exported for tests. `addedLastmod` is the one real, non-fabricated fact
@@ -62,6 +80,18 @@ export async function generate({ siteId, params }) {
     throw Object.assign(new Error(
       'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before a sitemap draft can be generated for this site.'
     ), { status: 400 });
+  }
+
+  const ref = defaultBranchName(site);
+  const file = await getFileContent(site, sitemapPath, ref);
+  const raw = typeof file === 'string' ? file : file?.content;
+  if (raw && looksLikeTemplateSource(raw)) {
+    throw Object.assign(new Error(
+      `${sitemapPath} is a template source (front matter or templating syntax found), not a static sitemap.xml — ` +
+      'this generator only overwrites a hand-maintained static file. The site\'s own build already regenerates ' +
+      'its sitemap from this template, so url_file_map.siteRoot.sitemap should not be set for it at all — unset ' +
+      'it via `npm run connect-repo` rather than generating a draft here.'
+    ), { status: 400, userFacing: true });
   }
 
   const [existingEntries, inventory, orphanedPages] = await Promise.all([

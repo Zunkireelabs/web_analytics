@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSitemapXml, meta } from './sitemap.js';
+import { buildSitemapXml, looksLikeTemplateSource, meta } from './sitemap.js';
 
 // Only exercises buildSitemapXml (pure, no DB/HTTP) — generate()'s
 // url_file_map.siteRoot.sitemap resolution and its no-mapping 400 both
@@ -71,5 +71,23 @@ describe('sitemap generator — buildSitemapXml', () => {
 
   test('meta.id matches the generatorId agents wire into recommendedAction', () => {
     assert.equal(meta.id, 'sitemap');
+  });
+});
+
+describe('sitemap generator — looksLikeTemplateSource', () => {
+  test('flags Eleventy front matter (the zunkireelabs-web src/sitemap.njk shape)', () => {
+    assert.equal(looksLikeTemplateSource('---\npermalink: /sitemap.xml\n---\n<?xml version="1.0"?>'), true);
+  });
+
+  test('flags a Nunjucks/Liquid loop even without front matter', () => {
+    assert.equal(looksLikeTemplateSource('<?xml version="1.0"?>\n{%- for page in collections.all %}\n{{ page.url }}'), true);
+  });
+
+  test('flags an EJS tag', () => {
+    assert.equal(looksLikeTemplateSource('<?xml version="1.0"?>\n<%= url %>'), true);
+  });
+
+  test('does not flag a plain static sitemap.xml', () => {
+    assert.equal(looksLikeTemplateSource('<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>/a/</loc></url></urlset>'), false);
   });
 });

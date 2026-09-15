@@ -86,9 +86,8 @@ describe('query-param-duplicates agent', () => {
       assert.equal(finding.reportOnly.kind, 'query-param-duplicate');
     });
 
-    test('MEDIUM escalates to HIGH when query sets overlap substantially and one variant has strictly more clicks', async () => {
+    test('MEDIUM escalates to HIGH when query sets overlap substantially and one variant has strictly more clicks (no bare URL in the group)', async () => {
       inventory = [
-        { page: 'https://example.com/resources/', orphaned: false },
         { page: 'https://example.com/resources/?type=ebook', orphaned: false },
         { page: 'https://example.com/resources/?type=case-study', orphaned: false },
       ];
@@ -102,6 +101,28 @@ describe('query-param-duplicates agent', () => {
       const finding = result.facts.findings[0];
       assert.equal(finding.evidence.confidence, 'high');
       assert.equal(finding.evidence.winner, 'https://example.com/resources/?type=ebook');
+      assert.equal(result.facts.autoConsolidated, 1);
+    });
+
+    test('a query-free URL in the group always wins, even when a query variant earns all the real traffic', async () => {
+      // Regression test for a real incident: chayceproperties.com's own
+      // homepage "/" got canonicalized onto "/?h=8020347041280" — a legacy
+      // tracking-hash URL from a prior site on this domain — purely because
+      // that variant happened to have the only recorded GSC impressions.
+      // A bare URL must always win over a query-string variant regardless
+      // of traffic; traffic-based decisions only apply when NO bare URL
+      // exists in the group.
+      inventory = [
+        { page: 'https://chayceproperties.com/', orphaned: false },
+        { page: 'https://chayceproperties.com/?h=8020347041280', orphaned: false },
+        { page: 'https://chayceproperties.com/?h=11159752051280', orphaned: false },
+      ];
+      perfRowsByPage.set('https://chayceproperties.com/?h=8020347041280', { clicks: 0, impressions: 16 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://chayceproperties.com/');
+      assert.equal(finding.recommendedAction.params.canonicalTarget, 'https://chayceproperties.com/');
       assert.equal(result.facts.autoConsolidated, 1);
     });
 

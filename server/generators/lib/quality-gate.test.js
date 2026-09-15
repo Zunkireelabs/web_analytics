@@ -139,3 +139,31 @@ test('geo-audit is exempt from LLM-misbehavior checks — repeated static findin
   assert.equal(result.clean, true);
   assert.deepEqual(result.issues, []);
 });
+
+// findBareMarkupIssues (rendered-markup-guard.js) renders the draft through
+// the real marker-merge.js buildMergeValues() and flags a resulting block
+// tag with no class at all, on a site with real typography evidence to
+// check against — see that guard's own tests for the mechanism. This just
+// confirms the wiring: `site` present -> it runs and can fail the gate;
+// `site` absent -> it's silently skipped, same convention as
+// checkStructureConformance.
+test('a bare heading from a configured template fails the gate when a site (with a real design profile) is given', async () => {
+  const site = {
+    url_file_map: {
+      siteRoot: {
+        componentTemplates: { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2><div>{{BODY}}</div>' } },
+        designProfile: { typography: { body: 'text-lg text-gray-600', heading: { section: 'text-2xl font-bold' } } },
+      },
+    },
+  };
+  const content = { sections: [{ heading: 'H', body: 'Body text.' }] };
+  const result = await runQualityGate(content, 'expand-content', null, { site });
+  assert.equal(result.clean, false);
+  assert.ok(result.issues.some((i) => i.patternId === 'bare-unstyled-markup'));
+});
+
+test('the same content passes when no site is given — the check is skipped, not falsely clean-by-assumption', async () => {
+  const content = { sections: [{ heading: 'H', body: 'Body text.' }] };
+  const result = await runQualityGate(content, 'expand-content');
+  assert.ok(!result.issues.some((i) => i.patternId === 'bare-unstyled-markup'));
+});

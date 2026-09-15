@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -237,5 +237,58 @@ describe('correctLinkTypography', () => {
     const { link, corrected } = correctLinkTypography(TEXT_LINK, { button: { primary: BUTTON, secondary: TEXT_LINK } });
     assert.equal(link, TEXT_LINK);
     assert.equal(corrected, false);
+  });
+});
+
+// The real defect this closes: the model's pageTypePatterns summary regularly
+// returned a 'subheading' entry with only prose styleNotes and no classes (or
+// an unobserved one), so marker-merge.js's groundedInlineHeadingClass — the
+// only consumer of this field — could never find a real class to restyle a
+// stripped inline-page heading with, and shipped a bare unstyled <h2> on
+// every blog/article page an expand-content/faq section landed on.
+describe('correctPageTypeTextHierarchy', () => {
+  const REAL_SUBHEADING = 'text-xl font-semibold text-slate-800';
+  const subheadingItem = (classes) => ({ role: 'subheading', tag: 'h2', classes, style: { fontSize: '20px', textTransform: 'none', letterSpacing: 'normal' } });
+  const segPage = (pageType, items) => ({ pageType, sections: [{ role: 'content', textHierarchy: items }] });
+
+  test('an unobserved (hallucinated) subheading class is replaced with the real one for that page type', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-4xl font-black', styleNotes: 'Bold section titles.' }] },
+    };
+    const segmentedPages = [
+      segPage('blog-article', [subheadingItem(REAL_SUBHEADING)]),
+      segPage('blog-article', [subheadingItem(REAL_SUBHEADING)]),
+    ];
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, segmentedPages);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, REAL_SUBHEADING);
+    assert.deepEqual(corrected, ['blog-article']);
+  });
+
+  test('a genuinely observed subheading class is left alone', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: REAL_SUBHEADING, styleNotes: 'ok' }] },
+    };
+    const segmentedPages = [segPage('blog-article', [subheadingItem(REAL_SUBHEADING)])];
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, segmentedPages);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, REAL_SUBHEADING);
+    assert.deepEqual(corrected, []);
+  });
+
+  test('no real evidence for that page type leaves classes null — never invented', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-4xl font-black', styleNotes: 'Bold section titles.' }] },
+    };
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, []);
+    assert.equal(pageTypePatterns['blog-article'].textHierarchy[0].classes, null);
+    assert.deepEqual(corrected, []);
+  });
+
+  test('non-subheading roles (heading, body, link) are left untouched', () => {
+    const patterns = {
+      'blog-article': { textHierarchy: [{ role: 'heading', styleNotes: 'Direct.' }, { role: 'body', styleNotes: 'Dense.' }] },
+    };
+    const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, []);
+    assert.deepEqual(pageTypePatterns['blog-article'].textHierarchy, patterns['blog-article'].textHierarchy);
+    assert.deepEqual(corrected, []);
   });
 });

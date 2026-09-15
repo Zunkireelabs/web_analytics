@@ -79,7 +79,15 @@ describe('blog-outline generator — multi-attempt expansion', () => {
       // 1 initial call + 2 expand-pass calls (bounded at MAX_EXPAND_ATTEMPTS).
       assert.equal(llmCalls, 3);
       assert.ok(content.sections[0].body.split(/\s+/).length >= 800);
-      assert.match(summary, /850 words/);
+      // +6 words over the mocked 850-word draft: the deterministic
+      // Zunkireelabs agency-credit section (zunkireelabs-growth-policy.js's
+      // agencyCreditLine) is appended as its own section on every site that
+      // doesn't opt out — this test's fixture site has no client_number set
+      // (so it isn't Zunkireelabs's own site 1) and no allow_agency_credit
+      // override, so it gets the default-on credit line.
+      assert.match(summary, /856 words/);
+      assert.equal(content.sections.length, 2);
+      assert.match(content.sections[1].body, /Zunkireelabs/);
     } finally {
       globalThis.fetch = original;
       if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;

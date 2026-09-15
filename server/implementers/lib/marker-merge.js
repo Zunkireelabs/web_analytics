@@ -1,4 +1,4 @@
-import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx } from '../../design-agent/lib/design-profile.js';
+import { projectComponentTemplate, projectExpandContentCard, pageUsesCardSections, cx, projectTable } from '../../design-agent/lib/design-profile.js';
 import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
 // Marker-based splice — the only merge strategy this codebase uses for
 // editing an EXISTING page's real template file, because it never requires
@@ -688,14 +688,25 @@ function isInlineContentPage(pageUrl) {
 // this site already uses for an in-page subheading on THIS page type, not a
 // guess. Only 'subheading' counts — 'heading' is the page's own H1/top-level
 // anchor, never the right role for an inserted FAQ question or similar.
-// Returns null (never invents a class) when the site has no such evidence,
-// which is the common case — most sites have no pageTypePatterns at all yet.
+// Falls back to null (never invents a class) only when the site has NEITHER
+// piece of real evidence — no page-type-specific subheading class AND no
+// site-wide section-heading class. That floor matters because
+// pageTypePatterns[type].textHierarchy is a page-TYPE-specific summary a
+// site only has once the Design Agent has actually seen a page of that
+// type; a site mid-rollout (freshly onboarded, or a page type the weekly
+// rescan hasn't covered yet) can easily have neither. Rather than stripping
+// straight to an unstyled tag in that gap, typography.heading.section is
+// used instead — the site's own real h2/section-heading class, already
+// cross-checked against live evidence by correctHeadingTypography
+// (profile-extract.js), just not specific to this exact page type. Still
+// 100% grounded in something this site's own pages actually use, never a
+// guess, same discipline as every other slot here.
 function groundedInlineHeadingClass(designProfile, pageUrl) {
   const pageType = typeof pageUrl === 'string' ? classifyPageType(pageUrl) : null;
   const hierarchy = pageType && designProfile?.pageTypePatterns?.[pageType]?.textHierarchy;
-  if (!Array.isArray(hierarchy)) return null;
-  const entry = hierarchy.find((h) => h?.role === 'subheading' && h.classes);
-  return entry ? entry.classes : null;
+  const entry = Array.isArray(hierarchy) && hierarchy.find((h) => h?.role === 'subheading' && h.classes);
+  if (entry) return entry.classes;
+  return designProfile?.typography?.heading?.section || null;
 }
 
 function stripClassesMatching(html, predicate) {
@@ -837,9 +848,9 @@ const DEFAULT_EXPAND_TEMPLATE = {
 // prompt no longer asks for placeholder citation links, but this is the
 // last line of defense against ever publishing a dead anchor to a live
 // site.
-function markdownInline(text) {
+function markdownInline(text, linkClass) {
   return text
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, label, href) => `<a href="${href}"${attrIf(linkClass)}>${label}</a>`)
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
@@ -888,9 +899,9 @@ function markdownTable(lines, startIndex, style = {}) {
     rows.push(splitTableRow(lines[i]));
     i++;
   }
-  const th = header.map((c) => `<th${attrIf(style.th)}>${markdownInline(c)}</th>`).join('');
-  const body = rows.map((r) => `<tr>${r.map((c, idx) => (
-    `<td${attrIf(idx === 0 ? (style.tdFirst || style.td) : style.td)}>${markdownInline(c)}</td>`
+  const th = header.map((c) => `<th${attrIf(style.th)}>${markdownInline(c, style.linkClass)}</th>`).join('');
+  const body = rows.map((r) => `<tr${attrIf(style.tr)}>${r.map((c, idx) => (
+    `<td${attrIf(idx === 0 ? (style.tdFirst || style.td) : style.td)}>${markdownInline(c, style.linkClass)}</td>`
   )).join('')}</tr>`).join('');
   const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
     + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
@@ -932,7 +943,16 @@ function reflowCollapsedTableRows(line) {
 // verbatim instead of being escaped and reparsed as prose.
 const HTML_BLOCK_RE = /^\s*<(table|div|section|ul|ol)\b/i;
 
-function markdownToHtml(text, tableStyle = {}) {
+// `style` carries both this platform's table classes (table/th/tr/td/
+// wrapper — see tableStyleFor below) and its real paragraph/list/link
+// typography (bodyClass/linkClass/listWrapperClass/listItemClass — see
+// proseStyleFor). Applying the site's OWN typography here, not just a
+// wrapper around the whole block, is what markdown-prose-render.js's own
+// comment identifies as the actual fix for "generated text looks flat next
+// to the real ones" — that module already does this for whole-new-page
+// bodies; this brings the same real classes to expand-content/faq prose,
+// the one rendering path that was still shipping bare <p>/<ul>.
+function markdownToHtml(text, style = {}) {
   if (HTML_BLOCK_RE.test(text)) return text.trim();
   const escaped = escapeHtml(text);
   const parts = [];
@@ -940,13 +960,13 @@ function markdownToHtml(text, tableStyle = {}) {
   let textLines = [];
   const flushText = () => {
     if (textLines.length) {
-      parts.push(`<p>${textLines.map((line) => markdownInline(line)).join('\n')}</p>`);
+      parts.push(`<p${attrIf(style.bodyClass)}>${textLines.map((line) => markdownInline(line, style.linkClass)).join('\n')}</p>`);
       textLines = [];
     }
   };
   const flushList = () => {
     if (listItems.length) {
-      parts.push(`<ul>${listItems.map((item) => `<li>${markdownInline(item)}</li>`).join('')}</ul>`);
+      parts.push(`<ul${attrIf(style.listWrapperClass)}>${listItems.map((item) => `<li${attrIf(style.listItemClass)}>${markdownInline(item, style.linkClass)}</li>`).join('')}</ul>`);
       listItems = [];
     }
   };
@@ -960,7 +980,7 @@ function markdownToHtml(text, tableStyle = {}) {
     if (TABLE_ROW_RE.test(line) && TABLE_SEPARATOR_RE.test(lines[i + 1] || '')) {
       flushText();
       flushList();
-      const { html, nextIndex } = markdownTable(lines, i, tableStyle);
+      const { html, nextIndex } = markdownTable(lines, i, style);
       parts.push(html);
       i = nextIndex - 1; // for-loop's own i++ advances past the last consumed row
     } else if (bullet) {
@@ -999,14 +1019,17 @@ function toTitleCase(key) {
 // field name. Returns '' (not a stray empty <table>) for anything
 // malformed, so a caller can always safely concatenate this after body
 // prose.
-// `style` is the site's own table convention, stored per tenant as
-// componentTemplates.table (a class map, captured from a real table in the
-// tenant's repo — see scripts/capture-component-template.js). Without it this
-// emitted a bare <table> with no classes at all, which on a Tailwind site
-// means no borders, no padding, no header contrast: a generated comparison
-// table was visibly not part of the page it sat on. Every slot falls back to
-// '' so a site with no captured table renders exactly the bare markup it did
-// before, rather than borrowing another tenant's look.
+// `style` is the site's own table convention. Best case, it's a real
+// captured tenant table (componentTemplates.table, a class map captured from
+// a real table in the tenant's repo — see scripts/capture-component-
+// template.js). When no site has ever captured one — the common case, since
+// nothing prompts a table capture the way faq/expand-content are captured on
+// first use — tableStyleFor falls back to design-profile.js's projectTable(),
+// the site's own real typography/color tokens composed into a table, the
+// same grounded fallback markdown-table-render.js's buildTableHtml already
+// gives every OTHER generated table on this platform. Only a site with
+// NEITHER a captured table nor any usable typography/color evidence at all
+// gets the bare '' fallback every slot below still has.
 function attrIf(cls) {
   return cls ? ` class="${cls}"` : '';
 }
@@ -1016,7 +1039,7 @@ function renderComparisonTable(table, style = {}) {
   const columns = Object.keys(table[0]);
   if (!columns.length) return '';
   const th = columns.map((c) => `<th${attrIf(style.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
-  const body = table.map((row) => `<tr>${columns.map((c, i) => (
+  const body = table.map((row) => `<tr${attrIf(style.tr)}>${columns.map((c, i) => (
     // The first column is the row label on every comparison table this renders,
     // and the site's own tables give it more weight than the values beside it.
     `<td${attrIf(i === 0 ? (style.tdFirst || style.td) : style.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
@@ -1054,9 +1077,9 @@ function blockSafeRow(rowTemplate, body, slot) {
   return rowTemplate.replace(re, (m, attrs, inner) => `<div${attrs || ''}>${inner}</div>`);
 }
 
-export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, tableStyle = {}) {
+export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, style = {}) {
   const rows = sections.map((s) => {
-    const body = markdownToHtml(s.body, tableStyle) + renderComparisonTable(s.table, tableStyle);
+    const body = markdownToHtml(s.body, style) + renderComparisonTable(s.table, style);
     return fillTemplate(blockSafeRow(template.row, body, 'BODY'), {
       HEADING: escapeHtml(s.heading), BODY: body,
     });
@@ -1095,6 +1118,53 @@ export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE,
 // site's. A projection is the site's own typography, spacing and component
 // conventions. DEFAULT_* now only applies to a site with no design knowledge
 // at all.
+// Adapts design-profile.js's projectTable() output shape ({tableClass,
+// headerCellClass, rowClass, cellClass}) onto the flat {table, th, tr, td,
+// wrapper} shape markdownTable/renderComparisonTable consume — the exact
+// same real, grounded classes markdown-table-render.js's buildTableHtml
+// already uses for every OTHER generated table on this platform (content-
+// integrity-repair, whole-new-page bodies), just mapped onto this renderer's
+// field names instead of leaving expand-content as a second table pipeline
+// with no grounding of its own. No real per-tenant wrapper evidence exists
+// for a PROJECTED table (only a captured componentTemplates.table has one),
+// so buildTableHtml's own structural default — a horizontal-scroll wrapper —
+// applies here too; that is a layout safety net, not a style choice.
+function projectedTableStyle(designProfile) {
+  const projected = projectTable(designProfile);
+  if (!projected) return null;
+  return {
+    table: projected.tableClass, th: projected.headerCellClass, td: projected.cellClass, tr: projected.rowClass,
+    wrapper: 'overflow-x-auto',
+  };
+}
+
+// A real captured tenant table (componentTemplates.table) always wins when
+// present; a projection from the site's own typography/color tokens is the
+// grounded fallback — same "configured || projected || bare" precedence
+// every other component template here already follows (see templateFor) —
+// so a site with no captured table markup no longer ships one with zero
+// classes at all.
+function tableStyleFor(componentTemplates, designProfile) {
+  return componentTemplates.table || projectedTableStyle(designProfile) || {};
+}
+
+// The site's own real paragraph/list/link typography — the same source
+// markdown-prose-render.js's projectMarkdownProseInBody already applies to
+// whole-new-page bodies. Wired in here too so expand-content/faq prose
+// doesn't stay the one rendering path still shipping bare, unstyled <p>/
+// <ul> — see that module's own comment on why a wrapper alone never fixes
+// this ("the wrapper is not what styles a heading").
+export function proseStyleFor(designProfile) {
+  const typography = designProfile?.typography;
+  if (!typography) return {};
+  return {
+    bodyClass: typography.body || null,
+    linkClass: typography.link || null,
+    listWrapperClass: designProfile?.components?.list?.wrapper || null,
+    listItemClass: designProfile?.components?.list?.item || null,
+  };
+}
+
 export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
@@ -1239,7 +1309,7 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
         expandedContent: renderExpandedHtml(
           content.sections,
           expandContentTemplate(),
-          componentTemplates.table || {},
+          { ...tableStyleFor(componentTemplates, designProfile), ...proseStyleFor(designProfile) },
         ),
       },
     };

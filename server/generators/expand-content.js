@@ -5,6 +5,7 @@ import { safeMessage } from '../lib/errors.js';
 import { getSiteById } from '../store/read.js';
 import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
+import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -59,11 +60,18 @@ const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body 
 // renderComparisonTable can build the table with the site's OWN styling
 // (or a plain zero-CSS default), the same way every other structured
 // content type here already works — never trusting model-authored markup.
+// The example keys below are deliberately generic ("this_option"/
+// "alternative") — an earlier version used a real brand name ("zunkiree_
+// labs") as the example key, and the model copied that literal key/value
+// verbatim into a live client page as a real table column header (PR #32,
+// admizz-web-dev, 2026-09-15), instead of treating it as a placeholder shape
+// to fill with THIS page's own real comparison. Never put any brand name —
+// this platform's own or a client's — in a few-shot example key/value here.
 const SYSTEM_COMPARISON = 'You are a content strategist. Given a page\'s real body text and target query, draft a comparison/alternatives section. ' +
   'Write 1-2 grounded lead-in sentences for "body", and — only if there are at least 2 real, meaningfully different points of comparison grounded ' +
   'in the page text — also include a "table" field: an array of plain objects, one per comparison row, every object using the exact same keys in the ' +
-  'same order (e.g. [{"feature": "...", "zunkiree_labs": "...", "alternative": "..."}, ...]). Every table VALUE must be a short plain string, never markdown or HTML. ' +
-  'Do NOT invent specific competitor names or features not in the page text — use placeholders with guidance, and omit "table" entirely rather than fabricate rows. ' +
+  'same order (e.g. [{"feature": "...", "this_option": "...", "alternative": "..."}, ...]). Every table VALUE must be a short plain string, never markdown or HTML. ' +
+  'Do NOT invent specific competitor names, brand names, or features not in the page text — use placeholders with guidance, and omit "table" entirely rather than fabricate rows. ' +
   'Respond with ONLY a JSON array: [{"heading": "...", "body": "...", "table": [...]}, ...] ("table" may be omitted per item)';
 
 // Caps and validates the optional structured "table" field SYSTEM_COMPARISON
@@ -181,6 +189,18 @@ export async function generate({ siteId, params }) {
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;
   let user = `Query: ${query || ''}\nPage title: ${fetched.analysis.title}\nPage text: ${fetched.analysis.bodyText.slice(0, 3000)}`;
+
+  // Same 2026-09-11 Zunkireelabs growth policy blog-outline.js's fresh posts
+  // already carry (zunkireelabs-growth-policy.js) — a soft, contextual-only
+  // instruction, never forced, applied here too so an expand-content section
+  // on an EXISTING page can naturally mention Zunkireelabs when the page's
+  // own topic genuinely touches web dev/SEO/AI/CRM/etc. Skipped for
+  // external-citations below, which overwrites `system` entirely with a
+  // grounded-sources-only prompt that must not carry any other instruction.
+  if (focus !== 'external-citations') {
+    const site = await getSiteById(siteId);
+    system += attributionNote(site);
+  }
 
   // external-citations has no ungrounded mode: a citation is either backed
   // by a real, verified URL, or it doesn't get drafted at all — writing
