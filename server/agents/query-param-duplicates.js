@@ -79,7 +79,21 @@ export async function run({ siteId }) {
     const pages = [...pagesSet].sort();
     const queryVariants = pages.filter(hasQuery);
     const traffic = pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
-    const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
+
+    // A query-string-free URL among the candidates is always the correct
+    // canonical target, full stop — never decided by traffic. rel=canonical
+    // exists to point a messy/parameterized address at its clean master
+    // copy; picking a query-variant winner just because it happened to earn
+    // more historical clicks (an old shared link, a tracking hash from a
+    // prior site on this domain, ...) points canonicalization backwards,
+    // which is exactly the bug this comment is here to prevent from being
+    // reintroduced (real incident: chayceproperties.com's own homepage "/"
+    // was canonicalized onto "/?h=8020347041280" because that legacy
+    // tracking-hash variant had the only recorded impressions).
+    const bare = pages.find((p) => !hasQuery(p));
+    const decision = bare
+      ? { confidence: 'high', winner: trafficByPage.get(bare) || { page: bare, clicks: 0, impressions: 0 }, withTraffic: traffic.filter((t) => t.clicks > 0 || t.impressions > 0), queryOverlap: null, preferredBare: true }
+      : await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
 
     if (decision.winner) {
       const losers = pages.filter((p) => p !== decision.winner.page);
@@ -100,8 +114,10 @@ export async function run({ siteId }) {
       // HIGH-confidence winner.
       findings.push(makeFinding({
         id: `query-param-duplicates:key:${key}`,
-        evidence: { basePath: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },
-        whyItMatters: decision.queryOverlap?.overlapping
+        evidence: { basePath: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap, preferredBare: decision.preferredBare || false },
+        whyItMatters: decision.preferredBare
+          ? `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} is the clean, parameter-free address and is always the correct canonical target regardless of which variant currently earns more clicks. Confident enough to consolidate automatically.`
+          : decision.queryOverlap?.overlapping
           ? `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than every other variant, and their real search queries overlap substantially, confirming shared search intent. Confident enough to consolidate automatically.`
           : `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other ${losers.length} variant(s) have none. Confident enough to consolidate automatically.`,
         priority: 'medium',
