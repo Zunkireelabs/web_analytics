@@ -618,33 +618,37 @@ export function startCron() {
     console.log(`[cron] weekly design-consistency scan scheduled "${consistencyScan}" (${tz})`);
   }
 
-  // Weekly content-gap recommendation refresh — the content-gap counterpart
+  // Daily content-gap recommendation refresh — the content-gap counterpart
   // to the daily blocked-recommendation refresh above. A blog-outline/
   // landing-page/comparison-page/gap-based-faq recommendation is created
   // once, at the moment a human (or the MCP tool) approves that keyword gap
   // (analyst-seo-mapping.js's createActionCenterRecommendationForGap) —
   // that agent never re-runs as part of the daily grounded detection pass,
-  // so nothing else ever revisits its block state afterward. Deliberately
-  // separate from, and slower than, the daily pass: content doesn't change
-  // config often enough to justify checking it every morning, and this is
-  // also explicitly NOT automatic content generation/drafting — it only
-  // re-validates and clears/updates blocked_reason on rows that already
-  // exist, the same "investigate the live gate state, never guess" contract
-  // refreshBlockedRecommendations uses everywhere else.
-  const contentGapRefresh = process.env.CONTENT_GAP_REFRESH_CRON_SCHEDULE || '0 5 * * 1'; // 05:00 every Monday
+  // so nothing else ever revisits its block state afterward. Used to run
+  // weekly (Monday only) on the theory that content-gap config doesn't
+  // change often enough to check every morning, but in practice that let
+  // resolved blockers (e.g. a url_file_map/newContentTargets fix shipped
+  // mid-week) sit shown as "Blocked" in Action Center for up to 6 days
+  // after the fix landed — moved to the same daily cadence as
+  // refreshBlockedRecommendations above so a fix is reflected the next
+  // morning. Still explicitly NOT automatic content generation/drafting —
+  // it only re-validates and clears/updates blocked_reason on rows that
+  // already exist, the same "investigate the live gate state, never guess"
+  // contract refreshBlockedRecommendations uses everywhere else.
+  const contentGapRefresh = process.env.CONTENT_GAP_REFRESH_CRON_SCHEDULE || '0 5 * * *'; // 05:00 every day
   if (!cron.validate(contentGapRefresh)) {
-    console.error(`[cron] invalid CONTENT_GAP_REFRESH_CRON_SCHEDULE "${contentGapRefresh}" — weekly content-gap refresh NOT scheduled.`);
+    console.error(`[cron] invalid CONTENT_GAP_REFRESH_CRON_SCHEDULE "${contentGapRefresh}" — content-gap refresh NOT scheduled.`);
   } else {
     cron.schedule(contentGapRefresh, async () => {
       try {
         const results = await refreshContentGapRecommendationsForAllSites();
         const updated = results.reduce((n, r) => n + (r.updated || 0), 0);
-        console.log(`[cron] weekly content-gap refresh finished — ${updated} recommendation(s) updated across ${results.length} site(s)`);
+        console.log(`[cron] content-gap refresh finished — ${updated} recommendation(s) updated across ${results.length} site(s)`);
       } catch (err) {
-        console.error('[cron] weekly content-gap refresh error:', err.message);
+        console.error('[cron] content-gap refresh error:', err.message);
       }
     }, { timezone: tz });
-    console.log(`[cron] weekly content-gap refresh scheduled "${contentGapRefresh}" (${tz})`);
+    console.log(`[cron] content-gap refresh scheduled "${contentGapRefresh}" (${tz})`);
   }
 
   // Stale audit-run reaper — independent safety net alongside the same
