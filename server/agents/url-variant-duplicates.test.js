@@ -5,9 +5,15 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let site;
 let inventory;
+let perfRowsByPage; // page -> {clicks, impressions} — absent means zero real traffic
 
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSiteById: async () => site },
+  namedExports: {
+    getSiteById: async () => site,
+    getSearchPerformanceForPages: async (siteId, start, end, pages) => (
+      pages.filter((p) => perfRowsByPage.has(p)).map((p) => ({ dim_value: p, ...perfRowsByPage.get(p) }))
+    ),
+  },
 });
 mock.module(resolve('../store/page-inventory.js'), {
   namedExports: { listPageInventory: async () => inventory },
@@ -16,8 +22,9 @@ mock.module(resolve('../store/page-inventory.js'), {
 const { run } = await import('./url-variant-duplicates.js');
 
 beforeEach(() => {
-  site = { id: 1 };
+  site = { id: 1, timezone: 'UTC' };
   inventory = [];
+  perfRowsByPage = new Map();
 });
 
 describe('url-variant-duplicates agent', () => {
@@ -73,13 +80,64 @@ describe('url-variant-duplicates agent', () => {
     assert.deepEqual(result.facts.findings, []);
   });
 
-  test('recommendedAction is always null — which variant is canonical is a human decision', async () => {
-    inventory = [
-      { page: 'https://example.com/about', orphaned: false },
-      { page: 'https://example.com/about/', orphaned: false },
-    ];
-    const result = await run({ siteId: 1 });
-    assert.equal(result.facts.findings[0].recommendedAction, null);
-    assert.equal(result.facts.findings[0].reportOnly.kind, 'url-variant-duplicate');
+  describe('confidence-gated evidence', () => {
+    test('HIGH confidence: exactly one variant has all the real traffic, the other none -> auto-drafts a canonical consolidation', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 40, impressions: 300 });
+      // https://example.com/about has NO row at all -> zero real traffic
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/about/');
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
+      assert.deepEqual(finding.recommendedAction.params, { page: 'https://example.com/about', canonicalTarget: 'https://example.com/about/' });
+      assert.equal(finding.reportOnly, null);
+      assert.equal(result.facts.autoConsolidated, 1);
+    });
+
+    test('MEDIUM confidence: two variants both show real traffic -> stays reportOnly, never guesses a winner from a bigger share', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 90, impressions: 900 });
+      perfRowsByPage.set('https://example.com/about', { clicks: 1, impressions: 5 }); // small but real and nonzero
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'medium');
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.kind, 'url-variant-duplicate');
+    });
+
+    test('LOW confidence: no real traffic evidence for any variant -> stays reportOnly', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'low');
+      assert.equal(finding.recommendedAction, null);
+    });
+
+    test('a group with 3+ variants and only one bearing traffic still auto-consolidates every loser onto the same winner', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/About/', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 10, impressions: 100 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.recommendedAction.params.canonicalTarget, 'https://example.com/about/');
+      // Only ONE loser goes in this finding's recommendedAction (one
+      // recommendation = one drafted PR target) — the other loser is still
+      // named in evidence.variants for a human/future run to see.
+      assert.notEqual(finding.recommendedAction.params.page, 'https://example.com/about/');
+    });
   });
 });
