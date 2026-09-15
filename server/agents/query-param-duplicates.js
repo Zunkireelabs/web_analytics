@@ -83,6 +83,21 @@ export async function run({ siteId }) {
 
     if (decision.winner) {
       const losers = pages.filter((p) => p !== decision.winner.page);
+      // ALWAYS 'canonical', NEVER a redirect or a query-string-stripping
+      // generator — and never change this to param-strip/redirect without
+      // re-reading this comment. A query parameter grouped into the same
+      // baseKey here can be pure tracking noise OR genuine functional state
+      // this platform has no way to tell apart from URL shape alone (real
+      // case: Chayce's /get-started/index.html?package=... — the parameter
+      // pre-selects a package in the wizard and is read into the CRM
+      // submission payload; stripping or redirecting it away would silently
+      // break package selection for every real visitor who lands via a
+      // package link). A <link rel="canonical"> only changes what search
+      // engines index as the authoritative URL — it never touches real
+      // navigation, so it's the one remediation that's safe regardless of
+      // whether the parameter turns out to be functional or not. Do not
+      // "upgrade" this to a redirect/rewrite generator even for a
+      // HIGH-confidence winner.
       findings.push(makeFinding({
         id: `query-param-duplicates:key:${key}`,
         evidence: { basePath: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },

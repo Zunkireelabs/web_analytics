@@ -95,6 +95,16 @@ export async function run({ siteId }) {
         // same as every other safe-tier fix on this platform — autonomy
         // here means zero manual investigation to REACH that PR, not a
         // bypass of the merge step itself.
+        //
+        // ALWAYS 'canonical', NEVER a redirect or path-rewrite generator —
+        // this detector groups by hostname+path shape, which can legitimately
+        // include a functional path variant (a query-string-driven wizard
+        // step, a package-selection landing URL) that this platform has no
+        // way to distinguish from a pure duplicate by URL shape alone. A
+        // canonical tag only changes what search engines index as
+        // authoritative; it never touches real navigation, so it stays safe
+        // even when the "loser" URL is functionally different for a real
+        // visitor. Do not route a HIGH-confidence winner here to a redirect.
         recommendedAction: {
           label: `Canonicalize duplicate variant → ${decision.winner.page}`,
           generatorId: 'canonical',
