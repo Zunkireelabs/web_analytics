@@ -20,25 +20,31 @@ describe('resolveSiteLocations', () => {
     ]);
   });
 
-  test('an explicit target_market_codes list takes priority over target_scope, of any length', () => {
+  test('an explicit target_markets list takes priority over target_scope, of any length', () => {
     const site = {
       target_scope: 'hybrid', // would otherwise mean [country_code, global default]
       country_code: 2524,
       language_code: 'en',
-      target_market_codes: [2840, 2826, 2356, 2036, 2124, 2524],
+      target_markets: [
+        { locationCode: 2840, languageCode: 'en' },
+        { locationCode: 2276, languageCode: 'de' },
+        { locationCode: 2528, languageCode: 'nl' },
+      ],
     };
     assert.deepEqual(resolveSiteLocations(site), [
       { locationCode: 2840, languageCode: 'en' },
-      { locationCode: 2826, languageCode: 'en' },
-      { locationCode: 2356, languageCode: 'en' },
-      { locationCode: 2036, languageCode: 'en' },
-      { locationCode: 2124, languageCode: 'en' },
-      { locationCode: 2524, languageCode: 'en' },
+      { locationCode: 2276, languageCode: 'de' },
+      { locationCode: 2528, languageCode: 'nl' },
     ]);
   });
 
-  test('an empty target_market_codes array is ignored, falling back to target_scope', () => {
-    const site = { target_scope: 'local', country_code: 2826, language_code: 'en', target_market_codes: [] };
+  test('a target_markets entry with no languageCode falls back to the global default language', () => {
+    const site = { target_markets: [{ locationCode: 2276 }] };
+    assert.deepEqual(resolveSiteLocations(site), [{ locationCode: 2276, languageCode: 'en' }]);
+  });
+
+  test('an empty target_markets array is ignored, falling back to target_scope', () => {
+    const site = { target_scope: 'local', country_code: 2826, language_code: 'en', target_markets: [] };
     assert.deepEqual(resolveSiteLocations(site), [{ locationCode: 2826, languageCode: 'en' }]);
   });
 });
