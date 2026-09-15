@@ -62,6 +62,7 @@ const REPORT_ONLY_KINDS = new Set([
   'device-ctr-deficit', 'competitor-outranking', 'competitor-backlink-gap',
   'font-size-inconsistency', 'keyword-cluster-gap', 'templated-duplicate-family',
   'url-variant-duplicate', 'sitemap-index-conflict', 'redirect-chain', 'query-param-duplicate',
+  'soft-404',
 ]);
 
 // The real key for a recommendation row — (siteId, page, generatorId) isn't

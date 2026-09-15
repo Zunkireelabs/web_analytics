@@ -58,6 +58,18 @@ describe('soft-404 agent', () => {
     assert.equal(result.facts.findings[0].recommendedAction, null);
   });
 
+  test('an unconfirmed-stack finding still declares reportOnly — never silently dropped by buildRecommendations', async () => {
+    site.tech_stack = null;
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings[0].reportOnly.kind, 'soft-404');
+  });
+
+  test('a known-static-generator finding (auto-fixable) carries no reportOnly — it\'s draftable, not evidence-only', async () => {
+    site.tech_stack = 'eleventy';
+    const result = await run({ siteId: 1 });
+    assert.equal(result.facts.findings[0].reportOnly, null);
+  });
+
   test('withholds the auto-fix for a real SPA framework — the same fallback pattern is intentional there', async () => {
     site.tech_stack = 'react-spa';
     const result = await run({ siteId: 1 });

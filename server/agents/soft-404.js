@@ -100,6 +100,20 @@ export async function run({ siteId }) {
       params: {},
       effort: effortForGenerator('soft-404-nginx'),
     } : null,
+    // A confirmed, live defect (this run just observed it) with no
+    // recommendedAction AND no reportOnly is silently dropped by
+    // buildRecommendations (server/agents/lib/recommendations.js) — it
+    // falls into evidenceOnlyFindings and never reaches Action Center at
+    // all. That's the exact bug this codebase already fixed once for
+    // sitemap.js/duplicate-content.js ("a real defect sat invisible
+    // because nothing declared it as one"); this finding was recreating it
+    // for every site whose tech_stack isn't a recognized static generator.
+    reportOnly: isKnownStaticGenerator ? null : {
+      kind: 'soft-404',
+      label: 'Server returns 200 for a nonexistent URL',
+      page: probeUrl,
+      whyBlocked: `This site's tech_stack (${site.tech_stack || 'not set'}) isn't a recognized static-site generator, so the fix can't be auto-drafted — a real client-side-routed SPA can legitimately use this exact fallback pattern on purpose. A person needs to confirm whether this is a genuine misconfiguration before it's safe to patch.`,
+    },
     expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: 0 },
   });
 
