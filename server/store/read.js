@@ -591,3 +591,29 @@ export async function getMonthlyTotals(siteId, year, month) {
   );
   return rows[0];
 }
+
+// Staleness cache for metrics.js's /ai-compare and /ai-compare-range — lets
+// the route skip a fresh callLLM when the underlying totals for the same
+// (site, compareType, paramsKey) haven't changed since the last generation.
+// See migration 160.
+export async function getAiCompareCache(siteId, compareType, paramsKey) {
+  const { rows } = await query(
+    `SELECT data_signature, plan, generated_at
+       FROM ai_compare_cache
+      WHERE site_id = $1 AND compare_type = $2 AND params_key = $3`,
+    [siteId, compareType, paramsKey]
+  );
+  return rows[0] || null;
+}
+
+export async function saveAiCompareCache(siteId, compareType, paramsKey, dataSignature, plan) {
+  const { rows } = await query(
+    `INSERT INTO ai_compare_cache (site_id, compare_type, params_key, data_signature, plan)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (site_id, compare_type, params_key)
+     DO UPDATE SET data_signature = EXCLUDED.data_signature, plan = EXCLUDED.plan, generated_at = now()
+     RETURNING data_signature, plan, generated_at`,
+    [siteId, compareType, paramsKey, JSON.stringify(dataSignature), plan]
+  );
+  return rows[0];
+}
