@@ -80,6 +80,12 @@ export async function repairSiteContentLive(siteId, { dryRun = false } = {}) {
 
   const templates = site.url_file_map?.siteRoot?.componentTemplates;
   if (!templates) { report.skipped = 'no-component-templates'; return report; }
+  // Grounds repairSiteMarkerStyling's normaliseProse pass (2026-09-15): the
+  // site's real typography.body/link/list classes, retroactively added to
+  // any already-shipped expand-content body that's still bare <p>/<ul>/<a>.
+  // Optional by that function's own contract — a site with no designProfile
+  // yet just keeps today's exact behavior (table/heading repair only).
+  const designProfile = site.url_file_map?.siteRoot?.designProfile;
 
   const ref = baseBranch(site);
   const { files: repoFiles } = await getRepoTree(site, ref);
@@ -103,7 +109,7 @@ export async function repairSiteContentLive(siteId, { dryRun = false } = {}) {
     if (site.visible_faq_cap != null) {
       await enforceVisibleFaqCap(tempDir, site.visible_faq_cap, templates.faq?.wrapper, { write: true });
     }
-    await repairSiteMarkerStyling(tempDir, templates, { write: true });
+    await repairSiteMarkerStyling(tempDir, templates, { write: true, designProfile });
 
     const blogDir = site.url_file_map?.newContentTargets?.['blog-outline']?.dir;
     if (blogDir) {
