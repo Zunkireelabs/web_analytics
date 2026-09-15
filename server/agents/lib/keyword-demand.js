@@ -19,7 +19,7 @@
 import { resolveOwnDomain } from './site-domain.js';
 import { analyzePageUrl } from './page-content.js';
 import { callLLMForJson } from '../../llm.js';
-import { configured as dataForSeoKeywordsConfigured, fetchKeywordIdeas } from '../../ingest/dataforseo-keywords.js';
+import { configured as dataForSeoKeywordsConfigured, fetchKeywordIdeas, fetchSearchVolume } from '../../ingest/dataforseo-keywords.js';
 import { saveKeywordGaps } from '../../store/data-analyst.js';
 import { getLatestKeywordDemandRunDates, saveKeywordDemandRun } from '../../store/keyword-demand.js';
 import { previousWeek, previousMonth, monthBounds } from '../../util/dates.js';
@@ -35,7 +35,7 @@ const DIFFICULTY_TO_PRIORITY = { low: 'high', medium: 'medium', high: 'low' }; /
 // real search volume for it, then re-sort (fetchKeywordIdeas already
 // returns each location's own results sorted desc by volume; merging two
 // already-sorted lists needs its own re-sort, not a naive concat).
-async function fetchIdeasAcrossLocations(seedTerms, locations) {
+export async function fetchIdeasAcrossLocations(seedTerms, locations) {
   const byKeyword = new Map();
   for (const location of locations) {
     // One location's failure (DataForSEO Labs' keyword_ideas product
@@ -51,8 +51,19 @@ async function fetchIdeasAcrossLocations(seedTerms, locations) {
     try {
       ideas = await fetchKeywordIdeas(seedTerms, location);
     } catch (err) {
-      console.warn(`[keyword-demand] location ${location.locationCode} failed: ${err.message}`);
-      continue;
+      console.warn(`[keyword-demand] location ${location.locationCode} failed on keyword_ideas: ${err.message}`);
+      // Second, narrower chance before giving up on this location entirely —
+      // a different DataForSEO product (Google Ads' own Search Volume data,
+      // see fetchSearchVolume's own comment for why coverage can differ from
+      // Labs' keyword_ideas). Real volume for the exact seed terms only,
+      // never expanded into new suggestions, but still real data for a
+      // location Labs can't serve at all (e.g. Nepal).
+      try {
+        ideas = await fetchSearchVolume(seedTerms, location);
+      } catch (fallbackErr) {
+        console.warn(`[keyword-demand] location ${location.locationCode} also failed on search_volume: ${fallbackErr.message}`);
+        continue;
+      }
     }
     for (const idea of ideas) {
       const existing = byKeyword.get(idea.keyword);
