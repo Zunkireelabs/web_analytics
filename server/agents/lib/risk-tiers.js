@@ -29,6 +29,15 @@
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
+  // Safe to auto-ship: technical-seo.js only ever recommends this generator
+  // when robotsTxtFound is false (a real, verified absence — never when a
+  // file already exists, so this can never clobber real content), and its
+  // only other input (disallowPatterns) is deterministic pattern-matching
+  // over real GSC data (index-bloat.js's foreign-platform-extension and
+  // spam-numeric-param checks) — never LLM-guessed. Worst case on a false
+  // positive is one extra narrow Disallow line; the file always still opens
+  // with Allow: /.
+  'robots-bootstrap',
   'open-graph', 'expand-content', 'refresh-content', 'qa-content',
   // Deterministic from the page's real URL path, no LLM — same shape as
   // canonical.js, which is already in this set for the same reason.
