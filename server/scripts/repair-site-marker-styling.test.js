@@ -92,3 +92,72 @@ describe('repairSiteMarkerStyling — FAQ on a blog (.md) post gets the same bar
     }
   });
 });
+
+// The retroactive half of the 2026-09-15 expand-content prose fix: every
+// EXPANDEDCONTENT block shipped before marker-merge.js's proseStyleFor
+// existed has a bare, unstyled <p>/<ul>/<li>/<a> body — normaliseTables
+// above already retroactively fixes tables the same way; normaliseProse
+// extends that to prose, gated on a real designProfile being passed in.
+describe('repairSiteMarkerStyling — retroactively grounds EXPANDEDCONTENT prose (normaliseProse)', () => {
+  const TEMPLATES_WITH_EXPAND = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+  const REAL_PROFILE = {
+    typography: { body: 'text-lg text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+    components: { list: { wrapper: 'space-y-2 my-4', item: 'flex items-start gap-2' } },
+  };
+  const bareRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+    '<h2>Why It Matters</h2>',
+    '<p>See <a href="https://example.com/docs">our docs</a> for more.</p>',
+    '<ul><li>First point</li><li>Second point</li></ul>',
+    '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  test('with a real design profile, a bare shipped body gets the site\'s real classes added', async () => {
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${bareRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true, designProfile: REAL_PROFILE });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      assert.match(out, /<p class="text-lg text-gray-600 leading-relaxed">/);
+      assert.match(out, /<a href="https:\/\/example\.com\/docs" class="text-zunkiree-600 hover:underline">/);
+      assert.match(out, /<ul class="space-y-2 my-4">/);
+      assert.match(out, /<li class="flex items-start gap-2">First point<\/li>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('with no design profile given, the body is left exactly as bare as it already was — no behavior change', async () => {
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${bareRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true });
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      // Rewritten (blockSafeRow/whitespace normalization still applies), but
+      // no class attributes are introduced onto p/ul/li/a.
+      assert.doesNotMatch(out, /<p class=/);
+      assert.doesNotMatch(out, /<ul class=/);
+      assert.doesNotMatch(out, /<a[^>]+class=/);
+      assert.ok(result.changedRegions >= 0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a tag that already carries a real class is never overwritten by the generic one', async () => {
+    const alreadyClassedRegion = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+      '<h2>Why It Matters</h2>',
+      '<p class="custom-existing-class">Already styled by a prior run or a hand-captured template.</p>',
+      '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await writeRepo({ 'blog/post.md': `# Post\n\n${alreadyClassedRegion}\n` });
+    try {
+      await repairSiteMarkerStyling(dir, TEMPLATES_WITH_EXPAND, { write: true, designProfile: REAL_PROFILE });
+      const out = await readFile(path.join(dir, 'src', 'blog', 'post.md'), 'utf8');
+      assert.match(out, /<p class="custom-existing-class">/);
+      assert.doesNotMatch(out, /text-lg text-gray-600/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

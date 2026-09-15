@@ -1154,7 +1154,7 @@ function tableStyleFor(componentTemplates, designProfile) {
 // doesn't stay the one rendering path still shipping bare, unstyled <p>/
 // <ul> — see that module's own comment on why a wrapper alone never fixes
 // this ("the wrapper is not what styles a heading").
-function proseStyleFor(designProfile) {
+export function proseStyleFor(designProfile) {
   const typography = designProfile?.typography;
   if (!typography) return {};
   return {
