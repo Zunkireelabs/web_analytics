@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 
+let site;
 let candidateBatch;
 let impressionsByPage;
 let redirectResultByPage; // page -> {hops, error, chain, finalStatus}
 let markedChecked;
 
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSearchPerformanceForPages: async () => [] },
+  namedExports: {
+    getSiteById: async () => site,
+    getSearchPerformanceForPages: async () => [],
+  },
 });
 mock.module(resolve('./lib/candidate-pages.js'), {
   namedExports: {
@@ -26,6 +30,7 @@ mock.module(resolve('./lib/technical-seo-analysis.js'), {
 const { run } = await import('./redirect-chain.js');
 
 beforeEach(() => {
+  site = { id: 1, url_file_map: {} };
   candidateBatch = [];
   impressionsByPage = new Map();
   redirectResultByPage = new Map();
@@ -46,7 +51,7 @@ describe('redirect-chain agent', () => {
     assert.deepEqual(result.facts.findings, []);
   });
 
-  test('flags a page whose own URL takes 2+ hops to resolve', async () => {
+  test('flags a page whose own URL takes 2+ hops to resolve, but stays reportOnly with no tracked nginx config', async () => {
     candidateBatch = ['https://example.com/old/'];
     impressionsByPage.set('https://example.com/old/', 50);
     redirectResultByPage.set('https://example.com/old/', {
@@ -90,5 +95,31 @@ describe('redirect-chain agent', () => {
     candidateBatch = ['https://example.com/a/'];
     await run({ siteId: 1, start: '2026-01-01', end: '2026-01-07' });
     assert.deepEqual(markedChecked, ['https://example.com/a/']);
+  });
+
+  describe('with a tracked nginx config', () => {
+    beforeEach(() => {
+      site = { id: 1, url_file_map: { siteRoot: { nginxConfig: 'nginx/static.conf' } } };
+    });
+
+    test('offers an auto-fix attempt via redirect-chain-nginx, with the observed hop/final target as params', async () => {
+      candidateBatch = ['https://example.com/old/'];
+      redirectResultByPage.set('https://example.com/old/', {
+        hops: 2, error: null, finalStatus: 200,
+        chain: [
+          { url: 'https://example.com/old/', status: 301 },
+          { url: 'https://example.com/mid/', status: 301 },
+          { url: 'https://example.com/new/', status: 200 },
+        ],
+      });
+      const result = await run({ siteId: 1, start: '2026-01-01', end: '2026-01-07' });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction.generatorId, 'redirect-chain-nginx');
+      assert.deepEqual(finding.recommendedAction.params, {
+        page: 'https://example.com/old/', currentHopTarget: 'https://example.com/mid/', finalTarget: 'https://example.com/new/',
+      });
+      assert.equal(finding.reportOnly, null);
+      assert.equal(result.facts.autoFixAttempted, 1);
+    });
   });
 });

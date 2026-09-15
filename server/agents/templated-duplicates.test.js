@@ -6,9 +6,15 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let site;
 let inventory;
 let contentTypeByPage; // page -> contentType string, or a function(page) => contentType
+let perfRowsByPage; // page -> {clicks, impressions}
 
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSiteById: async () => site },
+  namedExports: {
+    getSiteById: async () => site,
+    getSearchPerformanceForPages: async (siteId, start, end, pages) => (
+      pages.filter((p) => perfRowsByPage.has(p)).map((p) => ({ dim_value: p, ...perfRowsByPage.get(p) }))
+    ),
+  },
 });
 mock.module(resolve('../store/page-inventory.js'), {
   namedExports: { listPageInventory: async () => inventory },
@@ -28,15 +34,18 @@ mock.module(resolve('../llm.js'), {
 const { run } = await import('./templated-duplicates.js');
 
 const LOCATION_PATTERN = { match: '^/locations/([^/]+)/([^/]+)/?$' };
+const OLD_ENOUGH = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString(); // well past the 90-day evidence window
+const TOO_NEW = new Date().toISOString();
 
-function pagesFor(pattern, count, base = 'https://example.com') {
-  return Array.from({ length: count }, (_, i) => ({ page: `${base}/locations/city${i}/service${i}/`, orphaned: false }));
+function pagesFor(pattern, count, { base = 'https://example.com', firstSeenAt = OLD_ENOUGH } = {}) {
+  return Array.from({ length: count }, (_, i) => ({ page: `${base}/locations/city${i}/service${i}/`, orphaned: false, first_seen_at: firstSeenAt }));
 }
 
 beforeEach(() => {
-  site = { id: 1, url_file_map: { patterns: [LOCATION_PATTERN] } };
+  site = { id: 1, timezone: 'UTC', url_file_map: { patterns: [LOCATION_PATTERN] } };
   inventory = [];
   contentTypeByPage = 'service';
+  perfRowsByPage = new Map();
 });
 
 describe('templated-duplicates agent', () => {
@@ -53,12 +62,13 @@ describe('templated-duplicates agent', () => {
     assert.deepEqual(result.facts.findings, []);
   });
 
-  test('flags a large templated family that classifies consistently as a non-excluded content type', async () => {
+  test('flags a large templated family with no traffic evidence as reportOnly (low confidence)', async () => {
     inventory = pagesFor(LOCATION_PATTERN, 10);
     contentTypeByPage = 'service';
     const result = await run({ siteId: 1 });
     assert.equal(result.facts.findings.length, 1);
     assert.equal(result.facts.findings[0].evidence.pageCount, 10);
+    assert.equal(result.facts.findings[0].evidence.confidence, 'low');
     assert.equal(result.facts.findings[0].reportOnly.kind, 'templated-duplicate-family');
     assert.equal(result.facts.findings[0].recommendedAction, null);
   });
@@ -82,5 +92,41 @@ describe('templated-duplicates agent', () => {
     inventory = pagesFor(LOCATION_PATTERN, 10).map((r, i) => (i < 5 ? { ...r, orphaned: true } : r));
     const result = await run({ siteId: 1 });
     assert.deepEqual(result.facts.findings, []); // only 5 live pages left, below MIN_GROUP_SIZE
+  });
+
+  describe('confidence-gated evidence', () => {
+    test('HIGH confidence: exactly one old-enough member earns all the real traffic, every other old-enough member earns none -> auto-consolidates', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 8);
+      perfRowsByPage.set(inventory[0].page, { clicks: 15, impressions: 200 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, inventory[0].page);
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
+      assert.equal(finding.recommendedAction.params.canonicalTarget, inventory[0].page);
+      assert.notEqual(finding.recommendedAction.params.page, inventory[0].page);
+      assert.equal(result.facts.autoConsolidated, 1);
+    });
+
+    test('MEDIUM confidence: two members earn real traffic independently -> stays reportOnly, never guesses a winner', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 8);
+      perfRowsByPage.set(inventory[0].page, { clicks: 15, impressions: 200 });
+      perfRowsByPage.set(inventory[1].page, { clicks: 3, impressions: 40 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'medium');
+      assert.equal(finding.recommendedAction, null);
+    });
+
+    test('a family mostly too young for evidence never auto-consolidates, even if the few eligible members look clean', async () => {
+      const old = pagesFor(LOCATION_PATTERN, 2, { firstSeenAt: OLD_ENOUGH });
+      const young = pagesFor(LOCATION_PATTERN, 6, { firstSeenAt: TOO_NEW }).map((r, i) => ({ ...r, page: `https://example.com/locations/newcity${i}/newservice${i}/` }));
+      inventory = [...old, ...young];
+      perfRowsByPage.set(old[0].page, { clicks: 10, impressions: 100 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.notEqual(finding.evidence.confidence, 'high');
+      assert.equal(finding.recommendedAction, null);
+    });
   });
 });

@@ -1159,6 +1159,7 @@ const GENERATOR_EFFORT = {
   'content-integrity-repair': 'Low',
   'blog-image': 'Low',
   'soft-404-nginx': 'Low',
+  'redirect-chain-nginx': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 

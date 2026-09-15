@@ -1,35 +1,28 @@
 import { getSiteById } from '../store/read.js';
-import { discoverSitemapEntries } from './lib/site-discovery.js';
+import { discoverSitemapEntries, parseRobotsDisallowRules, originForSite } from './lib/site-discovery.js';
+import { fetchTextIfExists, effortForGenerator } from './lib/page-content.js';
 import { getTechnicalSeoSignalsForPages } from '../store/technical-seo-checks.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
 
 export const meta = {
   id: 'sitemap-conflict',
   name: 'Sitemap/Index-Signal Conflict Detector',
-  description: 'Cross-references this site\'s own sitemap against Google\'s real per-page index inspection (technical_seo_checks.index_status) and flags a listed URL that is itself blocked by robots.txt, blocked by a noindex directive, or not Google\'s chosen canonical — a sitemap should only ever list real, indexable, canonical URLs, and disagreeing with Google\'s own signal is exactly the kind of inconsistency that produces mass "duplicate"/"excluded" Search Console reports.',
+  description: 'Cross-references this site\'s own sitemap against Google\'s real per-page index inspection (technical_seo_checks.index_status) and flags a listed URL that is itself blocked by robots.txt, blocked by a noindex directive, or not Google\'s chosen canonical. Auto-resolves the two cases where the evidence unambiguously identifies which real signal is wrong: a robots.txt Disallow rule that the site\'s own sitemap contradicts (same safe Allow-override primitive as technical-seo.js\'s robots-blocked check), and a page with no self-asserted canonical where Google has already, authoritatively, picked a different one (draft a canonical agreeing with Google\'s own verdict).',
   category: 'technical',
   version: 1,
 };
 
-// Deliberately stays reportOnly. The robots.txt-blocked sub-case has real
-// overlap with an ALREADY-autonomous existing check — technical-seo.js's
-// 'technical-seo:site:robots-blocked' finding already auto-drafts a
-// robots-fix Allow-override for any real GSC-top-traffic page a local
-// robots.txt parse finds disallowed (a different, narrower evidence source
-// than this agent's Google-Inspection-API signal, but the same fix
-// primitive), so duplicating that auto-fix here — from a signal this agent
-// can't fully reconcile with robots-fix's own blockedPattern computation
-// without re-fetching and re-parsing robots.txt itself — would risk two
-// independent "safe" drafts racing each other on the same file. The
-// non-canonical sub-case has no safe primitive at all: nothing removes or
-// edits an existing sitemap entry (server/generators/sitemap.js is
-// deliberately additive-only), so there is no reversible action to auto-
-// apply even at full confidence.
-//
 // Google's real per-page verdict, already collected by technical-seo.js's
-// existing rotation (server/ingest/gsc-technical.js's inspectUrl) — this
-// check is purely a read of already-collected signals, no new fetch/API
-// call of its own, so it costs nothing extra to run daily.
+// existing rotation (server/ingest/gsc-technical.js's inspectUrl) — reading
+// it here costs nothing extra; the one new live call this agent makes is
+// the robots.txt fetch below, needed to compute a draftable blockedPattern
+// (mirrors technical-seo.js's own robots-blocked finding exactly, just
+// triggered by a different evidence source: Google's own Inspection API
+// verdict for a SITEMAP-listed URL, rather than a local robots.txt parse
+// against GSC-top-traffic candidate pages — the two checks' recommendations
+// for the same (page, 'robots-fix') safely MERGE into one recommendation
+// row via the coordinator's existing findOpenRecommendation/
+// mergeIntoRecommendation dedup, they never race or double-draft).
 const BLOCKING_ROBOTS_STATES = new Set(['DISALLOWED']);
 const BLOCKING_INDEXING_STATES = new Set(['BLOCKED_BY_META_TAG', 'BLOCKED_BY_HTTP_HEADER', 'BLOCKED_BY_ROBOTS_TXT']);
 
@@ -69,6 +62,10 @@ export async function run({ siteId }) {
     };
   }
 
+  const origin = originForSite(site);
+  const robotsFetch = origin ? await fetchTextIfExists(`${origin}/robots.txt`) : { ok: false };
+  const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
+
   const byPage = new Map(signals.map((s) => [s.page, s]));
   const findings = [];
 
@@ -84,17 +81,36 @@ export async function run({ siteId }) {
     const blockedByRobots = BLOCKING_ROBOTS_STATES.has(idx.robotsTxtState);
     const blockedByIndexing = BLOCKING_INDEXING_STATES.has(idx.indexingState);
     if (blockedByRobots || blockedByIndexing) {
+      let path;
+      try { path = new URL(loc).pathname; } catch { path = null; }
+      // Only the robots.txt sub-case has a known, already-safe fix
+      // primitive (robots-fix.js's narrow Allow-override). A block reported
+      // as BLOCKED_BY_META_TAG/HTTP_HEADER means the exclusion lives in the
+      // page's own HTML/response headers, which this platform has no
+      // generic "remove a noindex directive" primitive for yet — genuinely
+      // case (A): the correct fix isn't derivable from this signal alone,
+      // since a human placed that noindex deliberately as often as not.
+      const blockedPattern = blockedByRobots && path ? robots.matchingDisallow(path) : null;
+      const canAutoFix = blockedByRobots && path && blockedPattern;
+
       findings.push(makeFinding({
         id: `sitemap-conflict:blocked:${loc}`,
-        evidence: { page: loc, robotsTxtState: idx.robotsTxtState, indexingState: idx.indexingState },
-        whyItMatters: `${loc} is listed in the sitemap — an explicit "please index this" signal — but Google's own inspection reports it as ${blockedByRobots ? 'disallowed by robots.txt' : idx.indexingState} — the sitemap and the site's own indexing rules disagree.`,
+        evidence: { page: loc, robotsTxtState: idx.robotsTxtState, indexingState: idx.indexingState, blockedPattern },
+        whyItMatters: `${loc} is listed in the sitemap — an explicit "please index this" signal — but Google's own inspection reports it as ${blockedByRobots ? `disallowed by robots.txt (rule: "${blockedPattern || 'unknown'}")` : idx.indexingState} — the sitemap and the site's own indexing rules disagree.${canAutoFix ? ' A narrow Allow-override resolves this without widening access to anything else the Disallow rule covers.' : ''}`,
         priority: 'high',
-        recommendedAction: null,
-        reportOnly: {
+        recommendedAction: canAutoFix ? {
+          label: `Un-block ${path} in robots.txt`,
+          generatorId: 'robots-fix',
+          params: { pagePath: path, blockedPattern },
+          effort: effortForGenerator('robots-fix'),
+        } : null,
+        reportOnly: canAutoFix ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a blocked/excluded URL',
           page: loc,
-          whyBlocked: 'Fixing this means deciding which signal is wrong — the sitemap listing, or the robots/noindex block — which needs a person who knows whether this page is meant to be public.',
+          whyBlocked: blockedByRobots
+            ? 'Google reports this blocked by robots.txt, but the current robots.txt could not confirm which specific rule — it may have changed since Google\'s last crawl, or the block is enforced elsewhere (a CDN/proxy rule this platform can\'t see).'
+            : 'This is blocked by a noindex meta tag or HTTP header, not robots.txt — deciding whether to remove it needs a person, since a human may have placed it deliberately.',
         },
         expectedImpact: { label: impactFromPriority('high'), basis: 'computed', value: s.last_impressions || 0 },
       }));
@@ -103,24 +119,44 @@ export async function run({ siteId }) {
 
     const googleCanonical = idx.googleCanonical;
     if (googleCanonical && normalizePath(loc) !== normalizePath(googleCanonical)) {
+      // High confidence only when the page has asserted NO canonical of its
+      // own (has_canonical === false) — Google's own algorithmic pick is
+      // then the best available evidence for what this page's canonical
+      // SHOULD say, and agreeing with it is a safe, narrow fix (reuses
+      // canonical.js's existing evidence-gated canonicalTarget path, same
+      // as url-variant-duplicates.js/query-param-duplicates.js). When the
+      // page ALREADY has its own canonical that Google is simply
+      // overriding, a human already made a call here Google disagrees
+      // with — genuinely case (A), not guessable which one is actually
+      // right.
+      const hasOwnCanonical = s.has_canonical === true;
       findings.push(makeFinding({
         id: `sitemap-conflict:non-canonical:${loc}`,
-        evidence: { page: loc, googleCanonical },
-        whyItMatters: `${loc} is listed in the sitemap, but Google has chosen a DIFFERENT URL (${googleCanonical}) as this content's real canonical — the sitemap is pointing crawl/index budget at a page Google has already decided isn't the authoritative one.`,
+        evidence: { page: loc, googleCanonical, hasOwnCanonical },
+        whyItMatters: `${loc} is listed in the sitemap, but Google has chosen a DIFFERENT URL (${googleCanonical}) as this content's real canonical — the sitemap is pointing crawl/index budget at a page Google has already decided isn't the authoritative one.${!hasOwnCanonical ? ' The page asserts no canonical of its own, so agreeing with Google\'s own verdict is safe to draft automatically.' : ''}`,
         priority: 'medium',
-        recommendedAction: null,
-        reportOnly: {
+        recommendedAction: !hasOwnCanonical ? {
+          label: `Canonical → ${googleCanonical} (agreeing with Google's own verdict)`,
+          generatorId: 'canonical',
+          params: { page: loc, canonicalTarget: googleCanonical },
+          effort: effortForGenerator('canonical'),
+        } : null,
+        reportOnly: !hasOwnCanonical ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a non-canonical URL',
           page: loc,
-          whyBlocked: 'Whether the sitemap URL or Google\'s chosen canonical is the intended one is a real technical/editorial decision, not guessable from this signal alone.',
+          whyBlocked: 'This page already asserts its own canonical, which Google is overriding — a human already made a call here that needs review, not an automatic reversal.',
         },
         expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: s.last_impressions || 0 },
       }));
     }
   }
 
-  const facts = { sitemapUrlCount: locs.length, checkedUrlCount: signals.filter((s) => s.index_status).length, findings };
+  const facts = {
+    sitemapUrlCount: locs.length, checkedUrlCount: signals.filter((s) => s.index_status).length,
+    autoFixable: findings.filter((f) => f.recommendedAction).length,
+    findings,
+  };
   return {
     meta, status: 'ok', facts,
     narrative: findings.length ? `${findings.length} sitemap URL(s) conflict with Google's own index/canonical signal for them.` : null,

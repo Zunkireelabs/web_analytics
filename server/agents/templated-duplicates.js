@@ -1,29 +1,17 @@
-import { getSiteById } from '../store/read.js';
+import { getSiteById, getSearchPerformanceForPages } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
-import { makeFinding, impactFromPriority } from './lib/findings.js';
+import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
+import { daysAgoInTz } from '../util/dates.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
   id: 'templated-duplicates',
   name: 'Templated Near-Duplicate Page Family Detector',
-  description: 'Groups a site\'s own real pages by which url_file_map.patterns entry generated them, and flags a large templated family (e.g. a location × service combination section) as a likely near-duplicate/thin-content risk — a class of Search Console "duplicate" report a per-page canonical-tag check can never catch, since every page in the family can have a perfectly valid self-referential canonical and still get clustered as a duplicate by Google.',
+  description: 'Groups a site\'s own real pages by which url_file_map.patterns entry generated them, and flags a large templated family (e.g. a location × service combination section) as a likely near-duplicate/thin-content risk. Confidence-gated: 90 days of real GSC traffic per family member, restricted to members old enough to have had a fair chance to rank, decides whether exactly one member is the real, earning page and every other member has genuinely earned nothing — if so, the losers get the SAME evidence-gated canonical-consolidation url-variant-duplicates.js/query-param-duplicates.js/sitemap-conflict.js already use, pointing them at the one member Google actually sends traffic to.',
   category: 'seo',
   version: 1,
 };
-
-// Deliberately stays reportOnly, even under the confidence-gated-autonomy
-// model url-variant-duplicates.js/query-param-duplicates.js now use for
-// their own duplicate groups — not because evidence can't establish a
-// confident answer here, but because there is no existing SAFE, reversible
-// fix PRIMITIVE this platform can apply once a confident answer is reached.
-// Consolidating/redirecting a page family member needs a "this page should
-// noindex" or "merge page A into page B" action, and no generator for
-// either exists yet (unlike url-variant-duplicates' canonical-consolidation,
-// which reuses the already-safe, already-shipped canonical generator).
-// Building that primitive — and proving it as safe as canonical.js's own
-// exact-match-or-refuse discipline — is real, separate future work, not
-// something to bolt onto detection as an afterthought.
 
 // Real, found live 2026-09-15 on site 1: a `/locations/<city>/<service>/`
 // pattern generating 36 near-identical pages (differing only by city/service
@@ -47,6 +35,17 @@ const EXCLUDED_CONTENT_TYPES = new Set(['blog', 'product']);
 // every page, since getOrClassifyPageContentType is cached per (site, page)
 // but still costs a real LLM call the first time it sees a page.
 const SAMPLE_SIZE = 6;
+
+// Same 90-day rationale as url-variant-duplicates.js: long enough that a
+// genuine zero is real evidence, not a quiet week.
+const EVIDENCE_LOOKBACK_DAYS = 90;
+
+// A member younger than the lookback window hasn't had a fair chance to
+// earn traffic yet — "zero clicks in its first two weeks" is not evidence
+// it's a redundant doorway page, it's evidence it's new. Excluded from
+// BOTH sides of the winner/loser decision (never the winner just for being
+// old, never a "confirmed zero" loser while still too young to judge).
+const MIN_AGE_DAYS_FOR_EVIDENCE = EVIDENCE_LOOKBACK_DAYS;
 
 function normalizePath(pageUrl) {
   try { return new URL(pageUrl).pathname; } catch { return String(pageUrl); }
@@ -81,17 +80,17 @@ export async function run({ siteId }) {
   const inventory = await listPageInventory(siteId, { limit: 2000 });
   const live = inventory.filter((r) => !r.orphaned);
 
-  const groups = new Map(); // pattern.match -> { pattern, pages: [] }
+  const groups = new Map(); // pattern.match -> { pattern, rows: [] }
   for (const row of live) {
     const path = normalizePath(row.page);
     const hit = compiled.find(({ re }) => re.test(path));
     if (!hit) continue;
     const key = hit.pattern.match;
-    if (!groups.has(key)) groups.set(key, { pattern: hit.pattern, pages: [] });
-    groups.get(key).pages.push(row.page);
+    if (!groups.has(key)) groups.set(key, { pattern: hit.pattern, rows: [] });
+    groups.get(key).rows.push(row);
   }
 
-  const candidateGroups = [...groups.values()].filter((g) => g.pages.length >= MIN_GROUP_SIZE);
+  const candidateGroups = [...groups.values()].filter((g) => g.rows.length >= MIN_GROUP_SIZE);
   if (!candidateGroups.length) {
     return {
       meta, status: 'ok',
@@ -100,9 +99,14 @@ export async function run({ siteId }) {
     };
   }
 
+  const evidenceEnd = daysAgoInTz(site.timezone || 'UTC', 0);
+  const evidenceStart = daysAgoInTz(site.timezone || 'UTC', EVIDENCE_LOOKBACK_DAYS);
+  const ageThreshold = new Date(daysAgoInTz(site.timezone || 'UTC', MIN_AGE_DAYS_FOR_EVIDENCE));
+
   const findings = [];
   for (const group of candidateGroups) {
-    const sample = group.pages.slice(0, SAMPLE_SIZE);
+    const pages = group.rows.map((r) => r.page);
+    const sample = pages.slice(0, SAMPLE_SIZE);
     const classifications = await Promise.all(
       sample.map((p) => getOrClassifyPageContentType(siteId, p).catch(() => null))
     );
@@ -116,29 +120,80 @@ export async function run({ siteId }) {
     if (!types.every((t) => t === dominant)) continue;
     if (EXCLUDED_CONTENT_TYPES.has(dominant)) continue;
 
-    const priority = group.pages.length >= MIN_GROUP_SIZE * 2 ? 'high' : 'medium';
+    const priority = pages.length >= MIN_GROUP_SIZE * 2 ? 'high' : 'medium';
+
+    const perfRows = await getSearchPerformanceForPages(siteId, evidenceStart, evidenceEnd, pages);
+    const perfByPage = new Map(perfRows.map((r) => [r.dim_value, { clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0 }]));
+    const evidenceEligible = group.rows.filter((r) => r.first_seen_at && new Date(r.first_seen_at) <= ageThreshold);
+    const traffic = evidenceEligible.map((r) => ({ page: r.page, ...(perfByPage.get(r.page) || { clicks: 0, impressions: 0 }) }));
+    const withTraffic = traffic.filter((t) => t.clicks > 0 || t.impressions > 0);
+    // Only act when EVERY eligible member has a verdict (not just a
+    // majority) — a group where most members are still too young to judge
+    // has too little evidence-eligible population to trust a single
+    // winner, even if the few eligible ones look clean.
+    const winner = evidenceEligible.length >= MIN_GROUP_SIZE && withTraffic.length === 1 ? withTraffic[0] : null;
+
+    if (winner) {
+      const losers = evidenceEligible.map((r) => r.page).filter((p) => p !== winner.page);
+      findings.push(makeFinding({
+        id: `templated-duplicates:pattern:${group.pattern.match}`,
+        evidence: {
+          pattern: group.pattern.match, pageCount: pages.length, contentType: dominant,
+          evidenceEligibleCount: evidenceEligible.length, traffic, winner: winner.page, confidence: 'high',
+        },
+        whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern, all classified as ${dominant} content — ${winner.page} has all ${winner.clicks} real click(s)/${winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days among the ${evidenceEligible.length} members old enough to judge, and every other eligible member has earned genuinely nothing. Confident enough to consolidate automatically.`,
+        priority,
+        // One recommendation per losing page (each is its own file/PR
+        // target), same shape as url-variant-duplicates.js — the
+        // coordinator's own dedup means re-running this doesn't re-draft an
+        // already-open recommendation for the same (page, 'canonical').
+        recommendedAction: {
+          label: `Canonicalize templated duplicate → ${winner.page}`,
+          generatorId: 'canonical',
+          params: { page: losers[0], canonicalTarget: winner.page },
+          effort: effortFromDifficulty(1),
+        },
+        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: winner.clicks },
+      }));
+      continue;
+    }
+
     findings.push(makeFinding({
       id: `templated-duplicates:pattern:${group.pattern.match}`,
-      evidence: { pattern: group.pattern.match, pageCount: group.pages.length, samplePages: [...group.pages].sort().slice(0, 5), contentType: dominant },
-      whyItMatters: `${group.pages.length} pages under the "${group.pattern.match}" URL pattern were classified as the same content type (${dominant}) — a templated family this large commonly reads to Google as near-duplicate/thin content even when every page has its own valid canonical tag, since a canonical only asserts a page is the authority for itself, not that its content is meaningfully distinct from its siblings.`,
+      evidence: {
+        pattern: group.pattern.match, pageCount: pages.length, contentType: dominant,
+        samplePages: [...pages].sort().slice(0, 5),
+        evidenceEligibleCount: evidenceEligible.length, traffic,
+        confidence: withTraffic.length > 1 ? 'medium' : 'low',
+      },
+      whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern were classified as the same content type (${dominant}) — a templated family this large commonly reads to Google as near-duplicate/thin content even when every page has its own valid canonical tag.${withTraffic.length > 1 ? ` ${withTraffic.length} members earn real traffic independently, so there's no single winner to consolidate onto.` : evidenceEligible.length < MIN_GROUP_SIZE ? ' Most members are too new for 90 days of traffic evidence to mean anything yet.' : ' No member earns real traffic yet, so there\'s no winner to point the rest at.'}`,
       priority,
       // Differentiating each page with genuinely unique content, or
       // consolidating/pruning the weaker combinations, changes which pages
       // keep independent rankings — that's an editorial/content-strategy
-      // call, not a safe automatic transform, same reasoning as duplicate-
-      // content.js's byte-identical groups.
+      // call whenever the evidence itself doesn't establish one clear
+      // winner, same reasoning as duplicate-content.js's byte-identical
+      // groups.
       recommendedAction: null,
       reportOnly: {
         kind: 'templated-duplicate-family',
-        label: `${group.pages.length} templated pages may read as near-duplicate content`,
-        page: [...group.pages].sort()[0],
-        whyBlocked: 'Deciding whether to add genuinely unique content to each page, or consolidate/prune the weaker combinations, changes which pages keep independent search rankings — that\'s an editorial decision, not something safe to automate.',
+        label: `${pages.length} templated pages may read as near-duplicate content`,
+        page: [...pages].sort()[0],
+        whyBlocked: withTraffic.length > 1
+          ? 'More than one member earns real search traffic — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning real clicks.'
+          : evidenceEligible.length < MIN_GROUP_SIZE
+            ? 'Most of this family is too new for 90 days of traffic evidence to be meaningful — revisit once more members have had a fair chance to rank.'
+            : 'No member of this family earns real traffic yet, so there\'s no evidenced winner to consolidate the rest onto — needs a person to decide whether to add unique content or prune the family.',
       },
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: 0 },
     }));
   }
 
-  const facts = { patternsConfigured: compiled.length, groupsFound: groups.size, findings };
+  const facts = {
+    patternsConfigured: compiled.length, groupsFound: groups.size,
+    autoConsolidated: findings.filter((f) => f.recommendedAction).length,
+    findings,
+  };
 
   const system = 'You are a technical SEO specialist writing for a non-technical site owner. Given real templated ' +
     'page families found on this site (a URL pattern generating many pages of the same content type), write 2-3 ' +

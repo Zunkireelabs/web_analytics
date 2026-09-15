@@ -29,6 +29,15 @@
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
+  // Safe to auto-ship: technical-seo.js only ever recommends this generator
+  // when robotsTxtFound is false (a real, verified absence — never when a
+  // file already exists, so this can never clobber real content), and its
+  // only other input (disallowPatterns) is deterministic pattern-matching
+  // over real GSC data (index-bloat.js's foreign-platform-extension and
+  // spam-numeric-param checks) — never LLM-guessed. Worst case on a false
+  // positive is one extra narrow Disallow line; the file always still opens
+  // with Allow: /.
+  'robots-bootstrap',
   'open-graph', 'expand-content', 'refresh-content', 'qa-content',
   // Deterministic from the page's real URL path, no LLM — same shape as
   // canonical.js, which is already in this set for the same reason.
@@ -184,6 +193,13 @@ const SAFE_GENERATOR_IDS = new Set([
   // guessing, so a failed match already leaves the recommendation open for a
   // human instead of force-applying a misread config.
   'soft-404-nginx',
+  // Same exact-match-or-refuse shape as soft-404-nginx just above, one
+  // level more conservative still: implementers/lib/redirect-chain-nginx-
+  // inject.js additionally refuses if the live rule's CURRENT target has
+  // drifted from what the real redirect walk (agents/redirect-chain.js)
+  // observed — never trusts a stale hop, never guesses which of two
+  // matching rules is "the" real one.
+  'redirect-chain-nginx',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated
