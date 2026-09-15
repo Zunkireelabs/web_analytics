@@ -22,6 +22,18 @@ export function resolveSiteLocations(site) {
     ? { locationCode: Number(site.country_code), languageCode: site.language_code || DEFAULT_LANGUAGE_CODE }
     : null;
 
+  // An explicit multi-market list (migration 162) takes priority over
+  // target_scope entirely — for a business that genuinely serves several
+  // real markets at once (e.g. Zunkiree Labs itself: Nepal-based, but
+  // serving clients in the US/UK/India/Australia/Canada too), neither
+  // 'hybrid' (home market + one shared default) nor 'global' (one shared
+  // default alone) can express that; this can name exactly the real markets
+  // that matter, of any length.
+  if (Array.isArray(site?.target_market_codes) && site.target_market_codes.length) {
+    const language = site.language_code || DEFAULT_LANGUAGE_CODE;
+    return site.target_market_codes.map((code) => ({ locationCode: Number(code), languageCode: language }));
+  }
+
   switch (site?.target_scope) {
     case 'local': return ownLocation ? [ownLocation] : [globalLocation];
     case 'hybrid': return ownLocation ? [ownLocation, globalLocation] : [globalLocation];
