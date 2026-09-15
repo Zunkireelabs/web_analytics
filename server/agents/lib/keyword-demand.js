@@ -38,7 +38,22 @@ const DIFFICULTY_TO_PRIORITY = { low: 'high', medium: 'medium', high: 'low' }; /
 async function fetchIdeasAcrossLocations(seedTerms, locations) {
   const byKeyword = new Map();
   for (const location of locations) {
-    const ideas = await fetchKeywordIdeas(seedTerms, location);
+    // One location's failure (DataForSEO Labs' keyword_ideas product
+    // supports a narrower set of markets than its SERP product — a site's
+    // own home market, valid everywhere else in this codebase, can still
+    // come back "Invalid Field: 'location_code'" here) must never abort the
+    // whole batch: a hybrid-scope site (home market + a real global
+    // market, e.g. this site itself or Admizz — migration 159) would
+    // otherwise lose its OTHER, perfectly valid location's real data too,
+    // for every monthly run, forever — exactly what was happening before
+    // this fix.
+    let ideas;
+    try {
+      ideas = await fetchKeywordIdeas(seedTerms, location);
+    } catch (err) {
+      console.warn(`[keyword-demand] location ${location.locationCode} failed: ${err.message}`);
+      continue;
+    }
     for (const idea of ideas) {
       const existing = byKeyword.get(idea.keyword);
       if (!existing || (idea.searchVolume || 0) > (existing.searchVolume || 0)) {
