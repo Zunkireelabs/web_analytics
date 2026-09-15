@@ -3,6 +3,7 @@ import { discoverSitemapEntries, parseRobotsDisallowRules, originForSite } from 
 import { fetchTextIfExists, effortForGenerator } from './lib/page-content.js';
 import { getTechnicalSeoSignalsForPages } from '../store/technical-seo-checks.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
+import { BLOCKING_ROBOTS_STATES, BLOCKING_INDEXING_STATES } from './lib/index-status.js';
 
 export const meta = {
   id: 'sitemap-conflict',
@@ -23,8 +24,6 @@ export const meta = {
 // for the same (page, 'robots-fix') safely MERGE into one recommendation
 // row via the coordinator's existing findOpenRecommendation/
 // mergeIntoRecommendation dedup, they never race or double-draft).
-const BLOCKING_ROBOTS_STATES = new Set(['DISALLOWED']);
-const BLOCKING_INDEXING_STATES = new Set(['BLOCKED_BY_META_TAG', 'BLOCKED_BY_HTTP_HEADER', 'BLOCKED_BY_ROBOTS_TXT']);
 
 function normalizePath(pageUrl) {
   try {
@@ -65,6 +64,11 @@ export async function run({ siteId }) {
   const origin = originForSite(site);
   const robotsFetch = origin ? await fetchTextIfExists(`${origin}/robots.txt`) : { ok: false };
   const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
+  // Gates the sitemap-removal fallback below — same config this platform
+  // already requires before it'll touch a sitemap file at all (sitemap.js's
+  // own gate). Without it, removal has nowhere safe to write, so both
+  // fallback branches stay reportOnly exactly as before.
+  const sitemapConfigured = Boolean(site?.url_file_map?.siteRoot?.sitemap);
 
   const byPage = new Map(signals.map((s) => [s.page, s]));
   const findings = [];
@@ -91,26 +95,36 @@ export async function run({ siteId }) {
       // case (A): the correct fix isn't derivable from this signal alone,
       // since a human placed that noindex deliberately as often as not.
       const blockedPattern = blockedByRobots && path ? robots.matchingDisallow(path) : null;
-      const canAutoFix = blockedByRobots && path && blockedPattern;
+      const canUnblock = blockedByRobots && path && blockedPattern;
+      // Fallback when the block itself can't be safely undone: align the
+      // sitemap with Google's own already-confirmed current state instead
+      // of trying to fix the exclusion. Never touches the noindex/robots
+      // signal — see generators/sitemap-removal.js's own comment for why
+      // this is safe (self-correcting via sitemap.js's existing "URL
+      // missing from sitemap" detection if the underlying signal changes).
+      const canRemoveFromSitemap = !canUnblock && sitemapConfigured;
 
       findings.push(makeFinding({
         id: `sitemap-conflict:blocked:${loc}`,
         evidence: { page: loc, robotsTxtState: idx.robotsTxtState, indexingState: idx.indexingState, blockedPattern },
-        whyItMatters: `${loc} is listed in the sitemap — an explicit "please index this" signal — but Google's own inspection reports it as ${blockedByRobots ? `disallowed by robots.txt (rule: "${blockedPattern || 'unknown'}")` : idx.indexingState} — the sitemap and the site's own indexing rules disagree.${canAutoFix ? ' A narrow Allow-override resolves this without widening access to anything else the Disallow rule covers.' : ''}`,
+        whyItMatters: `${loc} is listed in the sitemap — an explicit "please index this" signal — but Google's own inspection reports it as ${blockedByRobots ? `disallowed by robots.txt (rule: "${blockedPattern || 'unknown'}")` : idx.indexingState} — the sitemap and the site's own indexing rules disagree.${canUnblock ? ' A narrow Allow-override resolves this without widening access to anything else the Disallow rule covers.' : canRemoveFromSitemap ? ' The block itself can\'t be safely undone automatically, so this instead removes the URL from the sitemap to agree with Google\'s confirmed current state — self-correcting: sitemap.js re-adds it automatically the moment the block is lifted.' : ''}`,
         priority: 'high',
-        recommendedAction: canAutoFix ? {
+        recommendedAction: canUnblock ? {
           label: `Un-block ${path} in robots.txt`,
           generatorId: 'robots-fix',
           params: { pagePath: path, blockedPattern },
           effort: effortForGenerator('robots-fix'),
+        } : canRemoveFromSitemap ? {
+          label: `Remove ${loc} from sitemap`,
+          generatorId: 'sitemap-removal',
+          params: { page: loc, removeUrls: [loc] },
+          effort: effortForGenerator('sitemap-removal'),
         } : null,
-        reportOnly: canAutoFix ? null : {
+        reportOnly: (canUnblock || canRemoveFromSitemap) ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a blocked/excluded URL',
           page: loc,
-          whyBlocked: blockedByRobots
-            ? 'Google reports this blocked by robots.txt, but the current robots.txt could not confirm which specific rule — it may have changed since Google\'s last crawl, or the block is enforced elsewhere (a CDN/proxy rule this platform can\'t see).'
-            : 'This is blocked by a noindex meta tag or HTTP header, not robots.txt — deciding whether to remove it needs a person, since a human may have placed it deliberately.',
+          whyBlocked: 'This site has no tracked sitemap file to safely edit (url_file_map.siteRoot.sitemap not configured), so neither the block nor the sitemap listing can be auto-resolved — needs a person to fix directly.',
         },
         expectedImpact: { label: impactFromPriority('high'), basis: 'computed', value: s.last_impressions || 0 },
       }));
@@ -130,22 +144,33 @@ export async function run({ siteId }) {
       // with — genuinely case (A), not guessable which one is actually
       // right.
       const hasOwnCanonical = s.has_canonical === true;
+      // Fallback for the same reason as the blocked branch above: when the
+      // page already asserts its own conflicting canonical, agreeing with
+      // Google isn't safe (a human decision already exists) — but removing
+      // the sitemap's OWN listing of a page it isn't authoritative for is
+      // still safe and self-correcting.
+      const canRemoveFromSitemap = hasOwnCanonical && sitemapConfigured;
       findings.push(makeFinding({
         id: `sitemap-conflict:non-canonical:${loc}`,
         evidence: { page: loc, googleCanonical, hasOwnCanonical },
-        whyItMatters: `${loc} is listed in the sitemap, but Google has chosen a DIFFERENT URL (${googleCanonical}) as this content's real canonical — the sitemap is pointing crawl/index budget at a page Google has already decided isn't the authoritative one.${!hasOwnCanonical ? ' The page asserts no canonical of its own, so agreeing with Google\'s own verdict is safe to draft automatically.' : ''}`,
+        whyItMatters: `${loc} is listed in the sitemap, but Google has chosen a DIFFERENT URL (${googleCanonical}) as this content's real canonical — the sitemap is pointing crawl/index budget at a page Google has already decided isn't the authoritative one.${!hasOwnCanonical ? ' The page asserts no canonical of its own, so agreeing with Google\'s own verdict is safe to draft automatically.' : canRemoveFromSitemap ? ' The page already asserts its own conflicting canonical, so this instead removes it from the sitemap rather than overriding that existing decision — self-correcting: sitemap.js re-adds it automatically if that ever changes.' : ''}`,
         priority: 'medium',
         recommendedAction: !hasOwnCanonical ? {
           label: `Canonical → ${googleCanonical} (agreeing with Google's own verdict)`,
           generatorId: 'canonical',
           params: { page: loc, canonicalTarget: googleCanonical },
           effort: effortForGenerator('canonical'),
+        } : canRemoveFromSitemap ? {
+          label: `Remove ${loc} from sitemap`,
+          generatorId: 'sitemap-removal',
+          params: { page: loc, removeUrls: [loc] },
+          effort: effortForGenerator('sitemap-removal'),
         } : null,
-        reportOnly: !hasOwnCanonical ? null : {
+        reportOnly: (!hasOwnCanonical || canRemoveFromSitemap) ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a non-canonical URL',
           page: loc,
-          whyBlocked: 'This page already asserts its own canonical, which Google is overriding — a human already made a call here that needs review, not an automatic reversal.',
+          whyBlocked: 'This site has no tracked sitemap file to safely edit (url_file_map.siteRoot.sitemap not configured) — needs a person to fix directly.',
         },
         expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: s.last_impressions || 0 },
       }));

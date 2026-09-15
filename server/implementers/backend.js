@@ -7,6 +7,7 @@ import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/inserti
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
 import { patchSoftNotFoundFallback } from './lib/soft-404-inject.js';
 import { patchRedirectChain } from './lib/redirect-chain-nginx-inject.js';
+import { removeUrlsFromSitemap } from './lib/sitemap-removal-inject.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
@@ -30,7 +31,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -90,6 +91,48 @@ async function pushSitemapBranch(site, draft, batchInfo) {
     return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before this can be applied.' };
   }
   return pushDraftBranch(site, draft, [{ path, content: draft.content.sitemapXml }], batchInfo);
+}
+
+// The removal counterpart to pushSitemapBranch above — unlike that one
+// (whose sitemapXml is already the complete new body, computed additively
+// by generators/sitemap.js at draft time), this has to re-fetch the LIVE
+// sitemap here and remove the exact matching <url> block(s) fresh, since
+// the whole point is reacting to whatever the sitemap currently says, not
+// whatever it said when the draft was first generated. All-or-nothing
+// (implementers/lib/sitemap-removal-inject.js): any requested URL that's no
+// longer found as an exact entry refuses the WHOLE draft rather than
+// silently removing only some of it.
+async function computeSitemapRemovalMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'sitemap');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const removed = removeUrlsFromSitemap(file.content, draft.content.removeUrls);
+  if (!removed.ok) return removed;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: removed.newContent,
+    changedRegions: [{ field: 'removedUrls', before: draft.content.removeUrls.join(', '), after: '(removed)' }],
+  };
+}
+
+async function pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeSitemapRemovalMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveSitemapRemoval(site, draft) {
+  const path = resolveSiteRootFile(site, 'sitemap');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'removedUrls', content: file.content }] };
 }
 
 // Real, hash-comment-marker splice for the nginx security-headers block —
@@ -1227,6 +1270,7 @@ export async function apply(site, draft, opts = {}) {
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
   if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
+  if (draft.action_type === 'sitemap-removal') return pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return pushSoft404NginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef);
@@ -1282,6 +1326,7 @@ export async function preview(site, draft, opts = {}) {
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'sitemapXml', content: file?.content || '' }] };
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
+    if (draft.action_type === 'sitemap-removal') return previewLiveSitemapRemoval(site, draft);
     if (draft.action_type === 'soft-404-nginx') return previewLiveSoft404Nginx(site, draft);
     if (draft.action_type === 'redirect-chain-nginx') return previewLiveRedirectChainNginx(site, draft);
     if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
@@ -1321,6 +1366,7 @@ export async function preview(site, draft, opts = {}) {
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.sitemapXml };
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (draft.action_type === 'sitemap-removal') return computeSitemapRemovalMerge(site, draft, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return computeSoft404NginxMerge(site, draft, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return computeRedirectChainNginxMerge(site, draft, beforeRef);
   if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);

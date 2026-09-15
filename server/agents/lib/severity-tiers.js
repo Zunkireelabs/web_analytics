@@ -62,6 +62,7 @@ const TIER_BY_GENERATOR = {
   // 404 — a sitewide indexing distortion, same tier as sitemap/robots-fix.
   'soft-404-nginx': SEVERITY_TIER.CRITICAL_TECHNICAL,
   'redirect-chain-nginx': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  'sitemap-removal': SEVERITY_TIER.CRITICAL_TECHNICAL,
 
   // ── 2. High-impact on-page ──────────────────────────────────────────────
   'meta-title': SEVERITY_TIER.ON_PAGE,

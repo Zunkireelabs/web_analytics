@@ -137,6 +137,59 @@ describe('sitemap-conflict agent', () => {
     assert.equal(finding.reportOnly.kind, 'sitemap-index-conflict');
   });
 
+  test('robots-blocked with no confirmable local pattern, but sitemap IS tracked -> falls back to sitemap-removal', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'src/sitemap.njk' } } };
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'DISALLOWED', indexingState: 'INDEXING_ALLOWED', googleCanonical: null },
+    });
+    robotsTxtText = 'User-agent: *\nDisallow: /somewhere-else/'; // doesn't confirm /a/
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'sitemap-removal');
+    assert.deepEqual(finding.recommendedAction.params, { page: 'https://example.com/a/', removeUrls: ['https://example.com/a/'] });
+    assert.equal(finding.reportOnly, null);
+  });
+
+  test('noindex meta tag block, sitemap IS tracked -> falls back to sitemap-removal instead of touching the noindex tag', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'src/sitemap.njk' } } };
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'ALLOWED', indexingState: 'BLOCKED_BY_META_TAG', googleCanonical: null },
+    });
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'sitemap-removal');
+  });
+
+  test('robots-blocked with no confirmable pattern AND no tracked sitemap -> stays reportOnly (nothing safe to do)', async () => {
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'DISALLOWED', indexingState: 'INDEXING_ALLOWED', googleCanonical: null },
+    });
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction, null);
+    assert.equal(finding.reportOnly.kind, 'sitemap-index-conflict');
+  });
+
+  test('non-canonical + own conflicting canonical, sitemap IS tracked -> falls back to sitemap-removal', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'src/sitemap.njk' } } };
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'ALLOWED', indexingState: 'INDEXING_ALLOWED', googleCanonical: 'https://example.com/canonical-a/' },
+      has_canonical: true,
+    });
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'sitemap-removal');
+    assert.equal(finding.reportOnly, null);
+  });
+
   test('no finding when robots/indexing are fine and the google canonical matches the URL itself', async () => {
     sitemapEntries = [{ loc: 'https://example.com/a/' }];
     signalsByPage.set('https://example.com/a/', {

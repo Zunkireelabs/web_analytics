@@ -200,6 +200,19 @@ const SAFE_GENERATOR_IDS = new Set([
   // observed — never trusts a stale hop, never guesses which of two
   // matching rules is "the" real one.
   'redirect-chain-nginx',
+  // All-or-nothing exact-match-or-refuse (implementers/lib/sitemap-removal-
+  // inject.js): every requested URL must still be found as an exact
+  // <url><loc>...</loc></url> entry in the LIVE sitemap at apply time, or
+  // none are removed. Never touches the underlying robots.txt/noindex/
+  // canonical signal — only ever removes THIS platform's own sitemap
+  // listing to agree with Google's already-confirmed current state, which
+  // is why it's safe even though the source of that state (a human's
+  // noindex decision, a robots rule) is never itself verified as
+  // "correct": worst case, a real page's sitemap entry disappears
+  // temporarily, and sitemap.js's own existing "URL missing from sitemap"
+  // detection re-adds it automatically the moment the underlying signal
+  // changes — no separate undo mechanism needed.
+  'sitemap-removal',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated
