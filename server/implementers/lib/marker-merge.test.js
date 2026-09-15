@@ -360,6 +360,64 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
   });
 
+  // The real defect this closes: even with NO configured componentTemplates
+  // at all, a site with a real design profile still has real typography
+  // evidence. Previously that evidence was only ever applied to the row's
+  // HEADING (via expandContentTemplate's projection) — body prose, links and
+  // lists stayed bare <p>/<a>/<ul> regardless, which is the actual "generated
+  // text looks flat" symptom markdown-prose-render.js's own comment names.
+  test('expand-content applies the site\'s real body/link/list typography from the design profile, even with no captured template', () => {
+    const designProfile = {
+      typography: { body: 'text-lg text-gray-600 leading-relaxed', link: 'text-zunkiree-600 hover:underline' },
+      components: { list: { wrapper: 'space-y-2 my-4', item: 'flex items-start gap-2' } },
+    };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'See [our docs](https://example.com/docs) for more.\n\n- First point\n- Second point' }],
+    }, 'visible', {}, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<p class="text-lg text-gray-600 leading-relaxed">/);
+    assert.match(result.values.expandedContent, /<a href="https:\/\/example\.com\/docs" class="text-zunkiree-600 hover:underline">/);
+    assert.match(result.values.expandedContent, /<ul class="space-y-2 my-4">/);
+    assert.match(result.values.expandedContent, /<li class="flex items-start gap-2">First point<\/li>/);
+  });
+
+  test('expand-content with no design profile at all still renders plain tags — never invents typography', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'H1', body: 'Plain body text.' }],
+    }, 'visible', {}, null);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<p>Plain body text\.<\/p>/);
+  });
+
+  // Same gap, table side: no captured componentTemplates.table (the common
+  // case — nothing ever prompts a first-use table capture the way faq/
+  // expand-content get one) used to ship a completely bare <table>. A
+  // design profile's real components.table/typography/color evidence — the
+  // same evidence markdown-table-render.js's buildTableHtml already uses for
+  // every OTHER generated table on this platform — now grounds this one too.
+  test('expand-content projects a real table style from the design profile when no table has been captured', () => {
+    const designProfile = { components: { table: { wrapper: 'w-full border-collapse acme-table', headerCell: 'acme-th', row: 'acme-row', cell: 'acme-td' } } };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Comparison', body: 'Here:\n\n| Feature | Ours | Theirs |\n| --- | --- | --- |\n| Speed | Fast | Slow |' }],
+    }, 'visible', {}, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="w-full border-collapse acme-table">/);
+    assert.match(result.values.expandedContent, /<th class="acme-th">Feature<\/th>/);
+    assert.match(result.values.expandedContent, /<tr class="acme-row"><td class="acme-td">Speed<\/td>/);
+    assert.match(result.values.expandedContent, /<div class="overflow-x-auto">/, 'a projected table still gets the structural scroll-safety wrapper, even with no captured wrapper class');
+  });
+
+  test('a real captured componentTemplates.table still wins over a design-profile projection', () => {
+    const componentTemplates = { table: { table: 'captured-table', th: 'captured-th', td: 'captured-td', wrapper: 'captured-wrapper' } };
+    const designProfile = { components: { table: { wrapper: 'projected-table', headerCell: 'projected-th', cell: 'projected-td' } } };
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Comparison', body: '| Feature | Ours |\n| --- | --- |\n| Speed | Fast |' }],
+    }, 'visible', componentTemplates, designProfile);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="captured-table">/);
+    assert.doesNotMatch(result.values.expandedContent, /projected-table/);
+  });
+
   test('expand-content uses the site\'s own configured template when given one, not the fallback', () => {
     const componentTemplates = {
       expandContent: {
