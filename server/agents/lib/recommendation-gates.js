@@ -1,5 +1,6 @@
 import { isPageMapped, resolveAdapter, resolveFile, resolveNewContentTarget } from '../../implementers/lib/url-file-map.js';
 import { hasExistingFaqSchema, INSPECTABLE_ACTION_TYPES } from '../../implementers/lib/render-inspector.js';
+import { templateRendersItemsField } from '../../implementers/lib/faq-render-mode.js';
 import { componentTemplateVerification, componentTemplateActionTypeFor, getDesignProfile } from '../../implementers/lib/design-drift.js';
 import { projectComponentTemplate } from '../../design-agent/lib/design-profile.js';
 import { getDesignAgentStatus } from '../../implementers/lib/design-agent-status.js';
@@ -521,6 +522,43 @@ export function createRecommendationGates(siteId, initialSite, deps = {}) {
           };
         }
         return { drop: 'adapter-data-not-ready', blockedReason: null };
+      }
+
+      // A pagination/data-array 'faq' route (e.g. /compare/*) has no
+      // per-page template file — its adapter's dataFile just holds the
+      // content, not the render mechanism. Before this can ever safely
+      // resolve visible-vs-schema-only (faq-render-mode.js's
+      // resolveFaqRenderMode), the SHARED layout that actually renders every
+      // entry has to genuinely loop over the adapter's own itemsField —
+      // otherwise a shipped draft would be written but permanently invisible
+      // on the live page. Checked here, not only at draft/apply time, so
+      // this stays a normal, auto-re-evaluated blocked_reason (the exact
+      // same daily refresh pass every other gate here uses) rather than a
+      // human-facing "render-mode-uncertain" stop: this isn't ambiguous or
+      // unsafe, it's a real, named dependency (a specific template change)
+      // that either exists or doesn't, and clears itself the moment that
+      // template change ships — no human judgment involved either way.
+      if (generatorId === 'faq' && adapterConfig?.id === 'data-array-content'
+        && adapterConfig?.itemsField && !resolveFile(site, page)) {
+        if (!adapterConfig.templateFile) {
+          return {
+            drop: null,
+            blockedReason: `No "templateFile" is configured on this route's faq adapter, so there's no way to confirm the shared layout renders "${adapterConfig.itemsField}" before drafting. Add one via 'npm run connect-repo' before this can ship.`,
+          };
+        }
+        const template = await cachedFetchFile(site, adapterConfig.templateFile, baseBranch(site));
+        if (!template) {
+          return {
+            drop: null,
+            blockedReason: `${adapterConfig.templateFile} does not exist on this site's default branch — cannot confirm it renders "${adapterConfig.itemsField}".`,
+          };
+        }
+        if (!templateRendersItemsField(template.content, adapterConfig.itemsField)) {
+          return {
+            drop: null,
+            blockedReason: `Waiting on a template capability: ${adapterConfig.templateFile} does not yet render "${adapterConfig.itemsField}" — a drafted FAQ would be written but invisible on the live page until that template change ships. This will clear automatically once it does, no human decision needed.`,
+          };
+        }
       }
     }
 

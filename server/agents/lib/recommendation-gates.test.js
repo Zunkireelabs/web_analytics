@@ -218,6 +218,103 @@ describe('createRecommendationGates — location-service-bootstrap (SAFE_RECOVER
   });
 });
 
+// The /compare/* FAQ shape: a pagination/data-array route with no per-page
+// template file at all, so nothing else here can ever verify the shared
+// layout genuinely renders the adapter's itemsField before a draft ships.
+// This is deliberately never a 'drop' (the recommendation stays open) and
+// never routed to a human — a real, named, auto-re-evaluated dependency
+// that clears itself once the template ships, same daily-refresh mechanism
+// every other blocked_reason here already uses.
+describe('createRecommendationGates — faq template-capability gate (pagination/data-array routes)', () => {
+  const compareSite = {
+    id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main',
+    url_file_map: {
+      patterns: [{
+        match: '^/compare/([^/]+)/?$',
+        adapters: { faq: { id: 'data-array-content', dataFile: 'src/_data/comparisons.js', itemsField: 'faqs', templateFile: 'src/_includes/layouts/comparison.njk' } },
+      }],
+    },
+  };
+  const page = 'https://acme.com/compare/a-vs-b/';
+
+  // The data-array entry itself DOES exist (isDataReady must pass) so these
+  // tests exercise the NEW templateFile check specifically, not the
+  // pre-existing adapter-data-not-ready gate above it.
+  const comparisonEntryContent = 'export default [{ id: "a-vs-b", title: "A vs B" }];';
+
+  test('blocked, not dropped, when the shared layout does not yet render the field — waiting, not asking a human', async () => {
+    const gates = createRecommendationGates(1, compareSite, {
+      ...neutralDeps(),
+      fetchFile: async (site, path) => {
+        if (path === 'src/_includes/layouts/comparison.njk') return { content: '<h2>FAQ</h2>' };
+        if (path === 'src/_data/comparisons.js') return { content: comparisonEntryContent };
+        return null;
+      },
+    });
+
+    const result = await gates.evaluate('faq', { page });
+
+    assert.equal(result.drop, null);
+    assert.match(result.blockedReason, /waiting on a template capability/i);
+    assert.match(result.blockedReason, /comparison\.njk/);
+  });
+
+  test('clears automatically once the template genuinely renders the field — no code change needed to unblock, only fresh repo state', async () => {
+    const gates = createRecommendationGates(1, compareSite, {
+      ...neutralDeps(),
+      fetchFile: async (site, path) => {
+        if (path === 'src/_includes/layouts/comparison.njk') return { content: '{% for faq in comp.faqs %}{{ faq.question }}{% endfor %}' };
+        if (path === 'src/_data/comparisons.js') return { content: comparisonEntryContent };
+        return null;
+      },
+    });
+
+    const result = await gates.evaluate('faq', { page });
+
+    assert.doesNotMatch(result.blockedReason || '', /template capability/i);
+  });
+
+  test('blocked with a specific reason when no templateFile is configured at all', async () => {
+    const noTemplateFileSite = {
+      ...compareSite,
+      url_file_map: {
+        patterns: [{
+          match: '^/compare/([^/]+)/?$',
+          adapters: { faq: { id: 'data-array-content', dataFile: 'src/_data/comparisons.js', itemsField: 'faqs' } },
+        }],
+      },
+    };
+    const gates = createRecommendationGates(1, noTemplateFileSite, {
+      ...neutralDeps(),
+      fetchFile: async (site, path) => (path === 'src/_data/comparisons.js' ? { content: comparisonEntryContent } : null),
+    });
+
+    const result = await gates.evaluate('faq', { page });
+
+    assert.equal(result.drop, null);
+    assert.match(result.blockedReason, /No "templateFile" is configured/);
+  });
+
+  test('does not run this check for a normal, per-page-mapped faq route', async () => {
+    const normalSite = {
+      id: 1, repo_owner: 'acme', repo_name: 'site', repo_default_branch: 'main',
+      url_file_map: { pages: { '/about/': { file: 'src/pages/about.njk' } } },
+    };
+    let fetchCalls = 0;
+    const gates = createRecommendationGates(1, normalSite, {
+      ...neutralDeps(),
+      fetchFile: async () => { fetchCalls++; return { content: '<p>about page</p>' }; },
+    });
+
+    await gates.evaluate('faq', { page: 'https://acme.com/about/' });
+
+    // The normal per-page file gate (line ~475) fetches the page's own file
+    // once — the new templateFile check must never fire on top of that for
+    // a route that resolveFile already resolves.
+    assert.equal(fetchCalls, 1);
+  });
+});
+
 // The Action Center's own real complaint (2026-08-24): componentTemplateVerification/
 // contentWrapperAvailability are deliberately synchronous/in-memory-only (see
 // design-drift.js's own "safe on the hot path" comment — they're also read
