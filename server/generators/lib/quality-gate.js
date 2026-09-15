@@ -10,7 +10,7 @@ import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
-import { findBareMarkupIssues } from './rendered-markup-guard.js';
+import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
 import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
 
@@ -167,6 +167,10 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
     ...(site ? findBareMarkupIssues(
       generatorId, content, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile,
     ).issues : []),
+    // The other rendering path (whole-new-page generation) — see that
+    // function's own comment for why it's a separate call rather than one
+    // shared with findBareMarkupIssues above.
+    ...(site ? findBareNewPageMarkupIssues(generatorId, content, site).issues : []),
   ];
   // An issue with `blocking: false` (design-integrity-guard.js's log-only
   // mode) is deliberately still visible in `issues` — it just doesn't fail

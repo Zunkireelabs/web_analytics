@@ -1,4 +1,8 @@
 import { buildMergeValues } from '../../implementers/lib/marker-merge.js';
+import {
+  renderLandingPageBody, renderBlogOutlineBody, renderDirectAnswerBody,
+  renderTranslationBody, renderCompliancePageBody, renderMissingPageBody,
+} from '../../implementers/lib/newpage-render.js';
 
 // The systemic safety net for the "flat/unstyled generated content" bug
 // class fixed 2026-09-15 (a stripped inline-page heading with nothing
@@ -63,5 +67,85 @@ export function findBareMarkupIssues(actionType, content, componentTemplates, de
       });
     }
   }
+  return { issues };
+}
+
+// Same idea, the OTHER rendering path: whole-new-page generation
+// (newpage-render.js), which produces a markdown-with-inline-HTML body via
+// wrapInSiteProse -> projectMarkdownTablesInBody/projectMarkdownProseInBody
+// rather than marker-merge.js's splice. That grounding already existed
+// before this session (it's what markdown-table-render.js/markdown-prose-
+// render.js are FOR) — this is the same safety-net idea as
+// findBareMarkupIssues above, applied here too, so a regression in THIS
+// path also fails the gate instead of requiring another manual find.
+//
+// blog-outline's TSX variant (renderBlogOutlineBodyTsx) is deliberately not
+// covered: it emits a JSX/TSX source file, not markdown-with-inline-HTML —
+// styling is the responsibility of a human-written GeneratedBlogPost
+// component in the client's own repo, not this pipeline, so a bare-tag scan
+// has nothing meaningful to check there.
+const NEW_PAGE_RENDERERS = {
+  'landing-page': renderLandingPageBody,
+  'blog-outline': renderBlogOutlineBody,
+  'direct-answer': renderDirectAnswerBody,
+  translation: renderTranslationBody,
+  'cookie-policy': (content, site) => renderCompliancePageBody(content, {}, site),
+  'privacy-policy': (content, site) => renderCompliancePageBody(content, {}, site),
+  'terms-of-service': (content, site) => renderCompliancePageBody(content, {}, site),
+  'missing-page-create': renderMissingPageBody,
+};
+
+// A raw, unconverted ATX heading ("## Heading") surviving into the rendered
+// body when the site has a real section/item heading class — the markdown
+// equivalent of a bare <h*>: it hasn't become an HTML tag YET (that's
+// Eleventy's own build step, not this code), but with no class applied here
+// it will build as a bare one. Lines already turned into inline
+// `<h2 class="...">` HTML by projectMarkdownProseInBody don't match this
+// (they start with `<`, not `#`), so this only fires on the specific
+// regression it exists to catch: grounding that should have run but didn't.
+const ATX_HEADING_RE = /^#{1,6}\s+\S/m;
+
+export function findBareNewPageMarkupIssues(actionType, content, site) {
+  const renderer = NEW_PAGE_RENDERERS[actionType];
+  if (!renderer || !content) return { issues: [] };
+  const designProfile = site?.url_file_map?.siteRoot?.designProfile;
+  if (!designProfile?.typography?.body) return { issues: [] };
+
+  let body;
+  try {
+    body = renderer(content, site);
+  } catch {
+    return { issues: [] }; // a render failure is this generator's own concern, not this check's
+  }
+  if (typeof body !== 'string') return { issues: [] };
+
+  const issues = [];
+  const seenTags = new Set();
+  for (const match of body.matchAll(BARE_TAG_RE)) {
+    const tag = match[1].toLowerCase();
+    if (seenTags.has(tag)) continue;
+    seenTags.add(tag);
+    issues.push({
+      path: 'body',
+      patternId: 'bare-unstyled-markup',
+      snippet: match[0].slice(0, 120),
+      detail: `This site has real typography evidence, but this new page's rendered <${tag}> carries no class at all.`,
+      blocking: true,
+    });
+  }
+
+  const headingClass = designProfile.typography?.heading?.section || designProfile.typography?.heading?.item;
+  const headingMatch = ATX_HEADING_RE.exec(body);
+  if (headingClass && headingMatch) {
+    issues.push({
+      path: 'body',
+      patternId: 'ungrounded-heading-markdown',
+      snippet: headingMatch[0].slice(0, 120),
+      detail: 'This site has a real section-heading class, but a raw "#" markdown heading survived into the '
+        + 'rendered body — it will build as a bare, unstyled heading instead of using the site\'s own typography.',
+      blocking: true,
+    });
+  }
+
   return { issues };
 }

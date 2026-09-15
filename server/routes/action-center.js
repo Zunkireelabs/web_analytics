@@ -807,6 +807,17 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     throw httpError(404, 'Draft not found, or not submitted for approval');
   }
 
+  // Fetched here (moved up from further below, where a second, redundant
+  // getSiteById used to run) specifically so the Quality Gate call right
+  // after this has a real `site` to pass — without it, checkStructureConformance
+  // and rendered-markup-guard.js's bare-markup checks silently skip
+  // themselves (both are gated on `site` being present, not just siteId),
+  // so a hand-edited draft that reintroduced flat/unstyled markup between
+  // generation and approval could pass this gate uncaught. Same site object
+  // is reused below for the actual apply/PR step — no second fetch.
+  const site = await getSiteById(siteId);
+  if (!site) throw httpError(404, 'Site not found');
+
   // Quality Gate stage 2 — re-validated here, not just at generation time,
   // because a draft can be hand-edited (DraftModal.jsx) between generateDraft
   // and this approval step; a human editing scaffolding/a duplicate
@@ -814,7 +825,7 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
   // never reach a real PR. No regeneration possible here (a human already
   // wrote this content) — just refuse approval with the specific issues so
   // they know what to fix.
-  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId);
+  const gateResult = await runQualityGate(draft.content, draft.action_type, siteId, { site });
   // Approval Gate (routes/lib/approval-gate.js): recorded whether it passes
   // or fails, so Action Center can show "quality gate: ok" as real evidence,
   // not just silence-means-fine — see that module's comment for the
@@ -884,8 +895,6 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }).catch((err) => console.error(`[action-center] failed to record override for memory ${m.id}:`, err.message))));
   }
 
-  const site = await getSiteById(siteId);
-  if (!site) throw httpError(404, 'Site not found');
   let resolved = null;
   if (site.repo_owner && site.repo_name) {
     resolved = await resolveImplementerForApply(site, draft, renderMode);
