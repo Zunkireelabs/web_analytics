@@ -1,6 +1,7 @@
 import { getSiteById } from '../store/read.js';
 import { makeFinding, impactFromPriority } from './lib/findings.js';
 import { effortForGenerator, isPrivateOrLocalHost } from './lib/page-content.js';
+import { safeMessage } from '../lib/errors.js';
 
 export const meta = {
   id: 'soft-404',
@@ -69,9 +70,10 @@ export async function run({ siteId }) {
     });
     status = res.status;
   } catch (err) {
+    const { message } = safeMessage(`soft-404.run:${site.id}`, err, 'this site could not be probed right now');
     return {
       meta, status: 'insufficient-data', facts: null, narrative: null,
-      message: `Could not reach ${probeUrl}: ${err.message}`,
+      message,
       generatedAt: new Date().toISOString(),
     };
   } finally {
