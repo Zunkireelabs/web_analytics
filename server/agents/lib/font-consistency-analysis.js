@@ -30,6 +30,59 @@ export function buildFontSizeOverrideRemoved(outerHtml) {
   return outerHtml.slice(0, m.index) + replacementAttr + outerHtml.slice(m.index + m[0].length);
 }
 
+// Finds the CSS declaration governing an element styled via an ancestor
+// wrapper class rather than a class of its own — e.g. Chayce's
+// `.hiw-hero h1{...font-size:clamp(40px,6vw,74px);...}`, where the h1 itself
+// carries no class at all, so the existing class-swap fix (swapAnchorClass
+// above) can never apply. Requires the selector to occur EXACTLY ONCE in the
+// given HTML and to declare a font-size — never guesses at a location, same
+// discipline as buildFontSizeOverrideRemoved above. `html` is the page's own
+// real rendered output (or, at apply time, its real template source) — on
+// this class of static-site template, an inline <style> block is embedded
+// directly in the page and its CSS text has no template syntax inside it, so
+// the two are byte-identical for this exact declaration.
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function scopedRuleRegex(ancestorClass, tag) {
+  return new RegExp(`\\.${escapeRegExp(ancestorClass)}\\s+${escapeRegExp(tag)}\\s*\\{[^}]*\\}`, 'g');
+}
+
+export function extractScopedFontSizeDeclaration(html, ancestorClass, tag) {
+  if (!html || !ancestorClass || !tag) return null;
+  const matches = [...html.matchAll(scopedRuleRegex(ancestorClass, tag))];
+  if (matches.length !== 1) return null; // not found, or not uniquely identifiable — refuse rather than guess
+  const declarationText = matches[0][0];
+  const fsMatch = declarationText.match(/font-size\s*:\s*([^;}]+)/i);
+  if (!fsMatch) return null;
+  return { declarationText, value: fsMatch[1].trim() };
+}
+
+// A plain length this platform can confidently swap for another plain
+// length (e.g. "48px") — never a fluid/dynamic expression (clamp()/calc()/
+// vw/vh/%/var()), where "the correct value" can't be read off a single
+// getComputedStyle snapshot without inventing new responsive bounds nobody
+// has evidenced. Those stay unfixable by design, not merely undetected.
+export function isFlatLength(value) {
+  return /^-?[\d.]+(px|pt)$/i.test((value || '').trim());
+}
+
+// Builds the {anchorHtml, replacement} pair for a scoped, ancestor-selector
+// font-size fix: same declaration text, only the font-size value swapped for
+// `expectedFontSize` (the site's own real, already-observed convention —
+// never invented). Returns null (refuse, never guess) when the declaration
+// can't be uniquely located, is already at the target value (would be a
+// no-op patch), or is a fluid/dynamic expression this platform won't
+// silently flatten.
+export function buildScopedFontSizeFix(html, ancestorClass, tag, expectedFontSize) {
+  const found = extractScopedFontSizeDeclaration(html, ancestorClass, tag);
+  if (!found) return null;
+  if (!isFlatLength(found.value) || found.value === expectedFontSize) return null;
+  const idx = found.declarationText.indexOf(found.value, found.declarationText.indexOf('font-size'));
+  if (idx < 0) return null;
+  const replacement = found.declarationText.slice(0, idx) + expectedFontSize + found.declarationText.slice(idx + found.value.length);
+  return { anchorHtml: found.declarationText, replacement };
+}
+
 const MIN_DISTINCT_PAGES = 3;
 const MIN_MODE_SHARE = 0.6;
 
@@ -79,6 +132,20 @@ function modeClassesForFontSize(entries, targetFontSize) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
+// Whether `targetEntry`'s ancestor wrapper class is not shared by ANY other
+// page's entry in this same run's real captured evidence for this element
+// group — bounded to what was actually captured, never a guess about pages
+// that weren't sampled. A name reused across pages (Chayce's own
+// ".page-hero", independently duplicated into 8 separate templates) means a
+// fix keyed on it could land on more than the one intended page, so this
+// only ever returns true for a wrapper class genuinely unique in the
+// evidence gathered.
+function ancestorClassIsPageUnique(entries, targetEntry) {
+  const cls = targetEntry.sample.ancestorClass;
+  if (!cls) return false;
+  return !entries.some((e) => e.url !== targetEntry.url && e.sample.ancestorClass === cls);
+}
+
 // Groups real captured samples (from font-consistency-capture.js) by real
 // role — one group per heading level (h1/h2/h3/h4), one group for body
 // paragraphs — then, WITHIN each role, checks a sample against its own
@@ -121,6 +188,30 @@ export function findFontSizeOutliers(pages) {
       for (const e of typeEntries) {
         if (e.sample.fontSize !== expected) {
           const siteConvention = modeClassesForFontSize(poolEntries, expected);
+          const resolvedConvention = siteConvention && !sameClassTokens(e.sample.classes, siteConvention) ? siteConvention : null;
+          // The scoped-selector fix only ever applies where the class-swap
+          // fix genuinely cannot: the element itself carries no class at all
+          // (styled purely via an ancestor wrapper + tag selector), so there
+          // is nothing for modeClassesForFontSize/swapAnchorClass to act on.
+          // Only offered when this run's own evidence already proves BOTH
+          // that the ancestor wrapper class is unique to this one page, AND
+          // that the real authored declaration (captured alongside the
+          // computed value — see font-consistency-capture.js) is a plain
+          // length, not a fluid/responsive expression (clamp()/vw/calc()) —
+          // flattening one of those would require inventing new responsive
+          // bounds nobody has evidenced, so it stays genuinely unfixable,
+          // not merely undetected.
+          const pageScoped = !resolvedConvention && !e.sample.classes && e.sample.ancestorClass
+            && ancestorClassIsPageUnique(entries, e);
+          const rawDeclaration = e.sample.rawFontSizeDeclaration;
+          const scopedSelector = pageScoped && rawDeclaration && isFlatLength(rawDeclaration)
+            ? { ancestorClass: e.sample.ancestorClass, tag: group }
+            : null;
+          // Surfaced even when NOT fixable, so the reportOnly reason can
+          // name the real, specific cause (a page-scoped fluid expression)
+          // instead of the generic "shared CSS, ask a human" text this used
+          // to give regardless of the actual reason.
+          const scopedButFluid = pageScoped && rawDeclaration && !isFlatLength(rawDeclaration) ? rawDeclaration : null;
           outliers.push({
             group,
             pageType: pageType === '__unknown__' ? null : pageType,
@@ -132,7 +223,9 @@ export function findFontSizeOutliers(pages) {
             // resolved convention (or there's nothing to compare) — a
             // class-swap fix would be a no-op, so this stays unfixable by
             // class, same as before.
-            siteConvention: siteConvention && !sameClassTokens(e.sample.classes, siteConvention) ? siteConvention : null,
+            siteConvention: resolvedConvention,
+            scopedSelector,
+            scopedButFluid,
             sample: e.sample,
           });
         }

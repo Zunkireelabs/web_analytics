@@ -1,5 +1,5 @@
-import { analyzePageUrl } from '../agents/lib/page-content.js';
-import { buildFontSizeOverrideRemoved } from '../agents/lib/font-consistency-analysis.js';
+import { analyzePageUrl, fetchHtml } from '../agents/lib/page-content.js';
+import { buildFontSizeOverrideRemoved, buildScopedFontSizeFix } from '../agents/lib/font-consistency-analysis.js';
 import { getSiteById } from '../store/read.js';
 import { projectTable } from '../design-agent/lib/design-profile.js';
 import { buildTableHtml, escapeHtml } from './lib/markdown-table-render.js';
@@ -129,6 +129,40 @@ export async function generate({ siteId, params }) {
       summary: fixType === 'table-style-drift'
         ? `Match this table's styling to the site's own design convention on ${page}`
         : `Match this section's typography to the site's own design convention on ${page}`,
+    };
+  }
+
+  // typography-drift-scoped: the outlier element carries NO class of its own
+  // (styled purely via an ancestor wrapper + tag selector, e.g. Chayce's
+  // ".hiw-hero h1") — font-consistency.js's own live-capture evidence already
+  // confirmed that exact ancestor class is not used by ANY other sampled
+  // page in the same run, so a declaration scoped to ".{ancestorClass}
+  // {tag}" can only ever affect this one page's own heading, never a shared
+  // component. Distinct from 'typography-drift' above (which swaps a CLASS
+  // value on the element itself): there is no class to swap here, so the fix
+  // instead targets the real CSS declaration text embedded directly on the
+  // page. Re-fetches and re-derives the fix from scratch (never trusts a
+  // value computed at detection time) — the same "may have changed since
+  // detection" refusal buildScopedFontSizeFix itself gives when the
+  // declaration is no longer uniquely findable, already correct, or has
+  // become a fluid expression this platform won't flatten.
+  if (fixType === 'typography-drift-scoped') {
+    const { ancestorClass, tag, expectedFontSize } = params;
+    if (!ancestorClass || !tag || !expectedFontSize) {
+      throw Object.assign(new Error('ancestorClass, tag, and expectedFontSize are all required for fixType "typography-drift-scoped"'), { status: 400 });
+    }
+    const fetched = await fetchHtml(page);
+    if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400 });
+    const fix = buildScopedFontSizeFix(fetched.html, ancestorClass, tag, expectedFontSize);
+    if (!fix) {
+      throw Object.assign(
+        new Error(`Could not find exactly one plain-length font-size declaration for ".${ancestorClass} ${tag}" on this page — it may have changed since detection, stopped being unique, or become a responsive expression.`),
+        { status: 400, userFacing: true },
+      );
+    }
+    return {
+      content: { page, fixType, anchorHtml: fix.anchorHtml, replacement: fix.replacement },
+      summary: `Correct this page's own heading size to match ${expectedFontSize} on ${page}`,
     };
   }
 

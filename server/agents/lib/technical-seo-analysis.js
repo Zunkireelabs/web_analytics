@@ -156,7 +156,11 @@ async function followRedirects(startUrl, maxHops = MAX_REDIRECT_HOPS, headers = 
 // sites that are answering honestly.
 const RETRY_STATUSES = new Set([403, 429, 503]);
 
-async function followRedirectsWithRetry(startUrl, maxHops = MAX_REDIRECT_HOPS) {
+// Exported for reuse by agents/redirect-chain.js — that agent walks a
+// site's own real pages (not links discovered on a page), but needs the
+// exact same manual-redirect-plus-per-hop-SSRF-guard walk, and the same
+// bot-protection-aware retry, rather than a second copy of this logic.
+export async function followRedirectsWithRetry(startUrl, maxHops = MAX_REDIRECT_HOPS) {
   const first = await followRedirects(startUrl, maxHops);
   if (!first.error && !RETRY_STATUSES.has(first.finalStatus)) return first;
   return followRedirects(startUrl, maxHops, BROWSER_RETRY_UA_HEADER, RETRY_TIMEOUT_MS);

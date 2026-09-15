@@ -5,6 +5,9 @@ import { searchRepoLocalForStrings } from './lib/repo-local-search.js';
 import { buildMergeValues, spliceMarkers, getMarkerContent, ANALYTICS_PROVIDER_FIELDS } from './lib/marker-merge.js';
 import { resolveInsertion, buildUnresolvedInsertionFailure } from './lib/insertion-engine.js';
 import { spliceHashBlock, validateNginxBraces, getHashMarkerContent } from './lib/hash-marker-merge.js';
+import { patchSoftNotFoundFallback } from './lib/soft-404-inject.js';
+import { patchRedirectChain } from './lib/redirect-chain-nginx-inject.js';
+import { removeUrlsFromSitemap } from './lib/sitemap-removal-inject.js';
 import { injectHtmlLang, getHtmlTag } from './lib/html-lang-inject.js';
 import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
@@ -28,7 +31,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -90,6 +93,48 @@ async function pushSitemapBranch(site, draft, batchInfo) {
   return pushDraftBranch(site, draft, [{ path, content: draft.content.sitemapXml }], batchInfo);
 }
 
+// The removal counterpart to pushSitemapBranch above — unlike that one
+// (whose sitemapXml is already the complete new body, computed additively
+// by generators/sitemap.js at draft time), this has to re-fetch the LIVE
+// sitemap here and remove the exact matching <url> block(s) fresh, since
+// the whole point is reacting to whatever the sitemap currently says, not
+// whatever it said when the draft was first generated. All-or-nothing
+// (implementers/lib/sitemap-removal-inject.js): any requested URL that's no
+// longer found as an exact entry refuses the WHOLE draft rather than
+// silently removing only some of it.
+async function computeSitemapRemovalMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'sitemap');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const removed = removeUrlsFromSitemap(file.content, draft.content.removeUrls);
+  if (!removed.ok) return removed;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: removed.newContent,
+    changedRegions: [{ field: 'removedUrls', before: draft.content.removeUrls.join(', '), after: '(removed)' }],
+  };
+}
+
+async function pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeSitemapRemovalMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveSitemapRemoval(site, draft) {
+  const path = resolveSiteRootFile(site, 'sitemap');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.sitemap is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'removedUrls', content: file.content }] };
+}
+
 // Real, hash-comment-marker splice for the nginx security-headers block —
 // nginx doesn't understand `<!-- -->`, so this can't reuse marker-merge.js's
 // BLOCK convention. No auto-insert of a missing marker (see
@@ -135,6 +180,108 @@ async function previewLiveSecurityHeaders(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
   }
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', content }] };
+}
+
+// Not marker-based (no human ever places a marker for this — it's a single
+// existing line, not a region to insert into) — an exact-text splice that
+// refuses rather than guesses if the live file doesn't contain precisely the
+// line this fix knows how to rewrite (see lib/soft-404-inject.js). Same
+// brace-balance guardrail as the marker-based nginx merge above, for the
+// same reason (no real `nginx -t` available here).
+async function computeSoft404NginxMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const patched = patchSoftNotFoundFallback(file.content);
+  if (!patched.ok) return patched;
+  const validated = validateNginxBraces(patched.newContent);
+  if (!validated.ok) return validated;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: patched.newContent,
+    changedRegions: [{ field: 'tryFiles', before: patched.before, after: patched.after }],
+  };
+}
+
+async function pushSoft404NginxBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeSoft404NginxMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveSoft404Nginx(site, draft) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'tryFiles', content: file.content }] };
+}
+
+// Same exact-match-or-refuse, no-marker splice as soft-404-nginx above, one
+// level more conservative: it also refuses if the live rule's CURRENT
+// target has drifted from what the real redirect walk observed
+// (draft.content.currentHopTarget) — a config change since detection means
+// this isn't confidently the same rule any more, not just "not found."
+async function computeRedirectChainNginxMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+
+  let sourcePath;
+  try { sourcePath = new URL(draft.content.page).pathname; } catch { return { ok: false, reason: 'invalid-page', error: `"${draft.content.page}" is not a valid URL.` }; }
+
+  const patched = patchRedirectChain(file.content, sourcePath, draft.content.currentHopTarget, draft.content.finalTarget);
+  if (!patched.ok) return patched;
+  const validated = validateNginxBraces(patched.newContent);
+  if (!validated.ok) return validated;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: patched.newContent,
+    changedRegions: [{ field: 'redirectTarget', before: patched.before, after: patched.after }],
+  };
+}
+
+async function pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeRedirectChainNginxMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveRedirectChainNginx(site, draft) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'redirectTarget', content: file.content }] };
+}
+
+// robots-bootstrap is site-level like llms-txt/sitemap, and
+// draft.content.robotsTxt is already the complete new file body
+// (server/generators/robots-bootstrap.js) — a straight file write, zero
+// content transformation, same shape as pushSitemapBranch. Deliberately NOT
+// a hash-marker splice like robots-fix.js below: this generator's whole job
+// is creating the file for a site that has none, so there is nothing
+// existing to splice into (an existing file is robots-fix.js's job, not
+// this one's — technical-seo.js only ever recommends robots-bootstrap when
+// robotsTxtFound is false, so this never risks overwriting a real file).
+async function pushRobotsBootstrapBranch(site, draft, batchInfo) {
+  const path = resolveSiteRootFile(site, 'robotsTxt');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  return pushDraftBranch(site, draft, [{ path, content: draft.content.robotsTxt }], batchInfo);
 }
 
 // Real, hash-comment-marker splice for a robots.txt Allow-override — third
@@ -1123,8 +1270,12 @@ export async function apply(site, draft, opts = {}) {
   const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
   if (draft.action_type === 'llms-txt') return pushLlmsTxtBranch(site, draft, batchInfo);
   if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
+  if (draft.action_type === 'sitemap-removal') return pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'soft-404-nginx') return pushSoft404NginxBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'redirect-chain-nginx') return pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'robots-bootstrap') return pushRobotsBootstrapBranch(site, draft, batchInfo);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
@@ -1175,7 +1326,16 @@ export async function preview(site, draft, opts = {}) {
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'sitemapXml', content: file?.content || '' }] };
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
+    if (draft.action_type === 'sitemap-removal') return previewLiveSitemapRemoval(site, draft);
+    if (draft.action_type === 'soft-404-nginx') return previewLiveSoft404Nginx(site, draft);
+    if (draft.action_type === 'redirect-chain-nginx') return previewLiveRedirectChainNginx(site, draft);
     if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
+    if (draft.action_type === 'robots-bootstrap') {
+      const path = resolveSiteRootFile(site, 'robotsTxt');
+      if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
+      const file = await getFileContent(site, path, baseBranch(site));
+      return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'robotsTxt', content: file?.content || '' }] };
+    }
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
@@ -1206,7 +1366,16 @@ export async function preview(site, draft, opts = {}) {
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.sitemapXml };
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (draft.action_type === 'sitemap-removal') return computeSitemapRemovalMerge(site, draft, beforeRef);
+  if (draft.action_type === 'soft-404-nginx') return computeSoft404NginxMerge(site, draft, beforeRef);
+  if (draft.action_type === 'redirect-chain-nginx') return computeRedirectChainNginxMerge(site, draft, beforeRef);
   if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'robots-bootstrap') {
+    const path = resolveSiteRootFile(site, 'robotsTxt');
+    if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
+    const file = await getFileContent(site, path, beforeRef);
+    return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.robotsTxt };
+  }
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);

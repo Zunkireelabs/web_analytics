@@ -36,7 +36,7 @@ import auditLogRouter from './routes/audit-log.js';
 import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
 import { startCron } from './cron.js';
-import { runStartupCatchup } from './job.js';
+import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './job.js';
 import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
 import { startFullSiteAudit } from './agents/lib/bulk-audit.js';
 import { pool } from './db.js';
@@ -213,6 +213,11 @@ httpServer.listen(port, () => {
   if (process.env.DISABLE_CRON !== 'true') startCron();
   // Catch up on anything missed while the machine was off/asleep (non-blocking).
   runStartupCatchup();
+  // Independent of the DISABLE_CATCHUP-gated call above (staging sets that
+  // flag permanently) — re-evaluates blocked_reason on every restart so a
+  // config fix that just deployed clears the same moment it goes live
+  // instead of waiting for tomorrow's cron. See job.js's own comment.
+  reconcileBlockedRecommendationsOnStartup();
   // Reap any audit_runs left stuck 'running' by a previous process that
   // died/restarted mid-audit (non-blocking). An onboarding-triggered audit
   // reaped this way gets auto-retried (capped) so a deploy landing mid-crawl

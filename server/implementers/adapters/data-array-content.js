@@ -9,6 +9,8 @@ import {
   findScalarFieldRange, spliceScalarField, insertNewScalarField, findObjectFieldRange, spliceObjectField, insertNewObjectField,
 } from './lib/js-data-splice.js';
 import { openPrWithSnapshot, rollbackFromSnapshot } from './lib/data-file-writer.js';
+import { buildEdit as buildContentIntegrityEdit } from '../lib/content-integrity-inject.js';
+import { applyExactMatchPatches, describePatchFailure } from '../lib/exact-match-patch.js';
 
 // Generic, config-driven writer for "array of objects, one per URL"
 // content files (Eleventy pagination data, a plain JSON collection,
@@ -392,6 +394,64 @@ async function computeLocationServiceBootstrapChange(site, draft, fetchFile, bef
   };
 }
 
+// content-integrity-repair's own generator (generators/content-integrity-repair.js)
+// already produces a uniform {anchor, replacement} edit for all seven fix
+// shapes (malformed-table/raw-text-table/duplicate-faq/font-size-override/
+// table-style-drift/typography-drift's anchorHtml+replacement, and
+// faq-schema-mismatch's originalRaw+jsonLd) via buildContentIntegrityEdit —
+// the SAME function implementers/lib/content-integrity-inject.js uses for a
+// normal single-file page. The only thing this adapter adds is WHERE that
+// edit gets applied: a pagination-generated page (/locations/*, /compare/*)
+// has no per-page template file — content-integrity-inject.js's resolveFile
+// call fails closed there ('no-file-mapping'), which is exactly the
+// "Configure a data-array-content adapter for this route, or fix it by
+// hand" dead end this closes. Anchor uniqueness is checked ONLY within the
+// matched entry's own byte range (never the whole data file), so identical
+// markup shared by a templated sibling entry (the same broken-table shape
+// repeated across many locations, say) can never read as ambiguous, and a
+// patch can never land on the wrong entry.
+async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, config) {
+  const page = draft.content?.page || draft.input?.page;
+  const edit = buildContentIntegrityEdit(draft.content || {});
+  if (!edit) return { ok: false, reason: 'draft-not-ready', error: `Unknown fix type "${draft.content?.fixType}" on this draft.` };
+
+  const idField = config.idField || 'id';
+  const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
+  if (!id || (config.nestedField && !nestedId)) return { ok: false, reason: 'no-file-mapping', error: `Could not derive ${config.nestedField ? 'a location + service id pair' : 'an id'} from "${page || '(no page)'}".` };
+
+  const file = await fetchFile(site, config.dataFile, beforeRef);
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${config.dataFile} does not exist on branch "${beforeRef}".` };
+
+  const format = config.format || 'js-export-array';
+  let objRange = findObjectRange(file.content, idField, id, format);
+  if (!objRange) {
+    return { ok: false, reason: 'no-insertion-marker', error: `Could not find one unambiguous entry for ${idField} "${id}" in ${config.dataFile}.` };
+  }
+  if (config.nestedField) {
+    objRange = resolveNestedObjectRange(file.content, objRange, config, nestedId);
+    if (!objRange) {
+      return { ok: false, reason: 'no-insertion-marker', error: `"${id}" has no "${config.nestedField}.${nestedId}" entry in ${config.dataFile} — this page has no unique content for that section yet.` };
+    }
+  }
+
+  const objectContent = file.content.slice(objRange.start, objRange.end);
+  const patched = applyExactMatchPatches(objectContent, [edit]);
+  if (!patched.ok) {
+    return { ok: false, reason: 'source-anchor-not-found', error: describePatchFailure(config.dataFile, patched) };
+  }
+  const newContent = file.content.slice(0, objRange.start) + patched.content + file.content.slice(objRange.end);
+
+  const check = assertValidContent(newContent, format);
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${config.dataFile}'s syntax (${check.error}) — refused to apply.` };
+  }
+
+  return {
+    ok: true, filePath: config.dataFile, oldContent: file.content, newContent,
+    changedRegions: [{ field: draft.content?.fixType || 'content-integrity-repair', before: objectContent, after: patched.content }],
+  };
+}
+
 // `fetchFile` defaults to the real getFileContent — overridable only so
 // tests can supply fixture content without a mocking library.
 export async function computeChange(site, draft, fetchFile = getFileContent, beforeRef = baseBranch(site), analyzePage = analyzePageUrl) {
@@ -400,6 +460,10 @@ export async function computeChange(site, draft, fetchFile = getFileContent, bef
     return computeLocationServiceBootstrapChange(site, draft, fetchFile, beforeRef);
   }
   const config = resolveAdapter(site, page, draft.action_type);
+  if (draft.action_type === 'content-integrity-repair') {
+    if (!config?.dataFile) return { ok: false, reason: 'no-file-mapping', error: `No data-array-content adapter config (dataFile) found for "${page || '(no page)'}".` };
+    return computeContentIntegrityChange(site, draft, fetchFile, beforeRef, config);
+  }
   if (config?.schemaField) return computeSchemaFieldChange(site, draft, fetchFile, beforeRef, config, analyzePage);
   if (config?.fields) return computeScalarFieldChange(site, draft, fetchFile, beforeRef, config);
   const flatArray = config?.shape === 'flat-array';

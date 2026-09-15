@@ -29,6 +29,15 @@
 const SAFE_GENERATOR_IDS = new Set([
   'meta-title', 'faq', 'schema', 'llms-txt', 'internal-links', 'sitemap',
   'robots-fix', 'security-headers', 'html-lang', 'canonical', 'viewport',
+  // Safe to auto-ship: technical-seo.js only ever recommends this generator
+  // when robotsTxtFound is false (a real, verified absence — never when a
+  // file already exists, so this can never clobber real content), and its
+  // only other input (disallowPatterns) is deterministic pattern-matching
+  // over real GSC data (index-bloat.js's foreign-platform-extension and
+  // spam-numeric-param checks) — never LLM-guessed. Worst case on a false
+  // positive is one extra narrow Disallow line; the file always still opens
+  // with Allow: /.
+  'robots-bootstrap',
   'open-graph', 'expand-content', 'refresh-content', 'qa-content',
   // Deterministic from the page's real URL path, no LLM — same shape as
   // canonical.js, which is already in this set for the same reason.
@@ -176,6 +185,34 @@ const SAFE_GENERATOR_IDS = new Set([
   // the daily run ships whatever is genuinely open, rather than inventing a
   // topic every morning.
   'blog-outline',
+  // Same exact-match-or-refuse shape as schema-repair/content-integrity-repair
+  // above: the actual file patch (implementers/lib/soft-404-inject.js) only
+  // ever applies when the exact known-vulnerable `try_files ... /index.html;`
+  // line is still present byte-for-byte, with no existing error_page 404 and
+  // no ambiguous second occurrence — anything else refuses rather than
+  // guessing, so a failed match already leaves the recommendation open for a
+  // human instead of force-applying a misread config.
+  'soft-404-nginx',
+  // Same exact-match-or-refuse shape as soft-404-nginx just above, one
+  // level more conservative still: implementers/lib/redirect-chain-nginx-
+  // inject.js additionally refuses if the live rule's CURRENT target has
+  // drifted from what the real redirect walk (agents/redirect-chain.js)
+  // observed — never trusts a stale hop, never guesses which of two
+  // matching rules is "the" real one.
+  'redirect-chain-nginx',
+  // All-or-nothing exact-match-or-refuse (implementers/lib/sitemap-removal-
+  // inject.js): every requested URL must still be found as an exact
+  // <url><loc>...</loc></url> entry in the LIVE sitemap at apply time, or
+  // none are removed. Never touches the underlying robots.txt/noindex/
+  // canonical signal — only ever removes THIS platform's own sitemap
+  // listing to agree with Google's already-confirmed current state, which
+  // is why it's safe even though the source of that state (a human's
+  // noindex decision, a robots rule) is never itself verified as
+  // "correct": worst case, a real page's sitemap entry disappears
+  // temporarily, and sitemap.js's own existing "URL missing from sitemap"
+  // detection re-adds it automatically the moment the underlying signal
+  // changes — no separate undo mechanism needed.
+  'sitemap-removal',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated

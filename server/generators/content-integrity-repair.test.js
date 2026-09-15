@@ -395,6 +395,51 @@ describe('content-integrity-repair — table-style-drift / typography-drift (des
   });
 });
 
+describe('content-integrity-repair — typography-drift-scoped (page-scoped ancestor selector)', () => {
+  test('swaps only the font-size value inside the exact CSS declaration, re-fetching and re-deriving the fix', async () => {
+    const html = '<html><head><style>.hiw-hero h1{color:#fff;font-size:74px;line-height:1.04}</style></head><body></body></html>';
+    const restore = stubFetchHtml(html);
+    try {
+      const { content, summary } = await generate({
+        params: { page: 'https://example.com/how-it-works', fixType: 'typography-drift-scoped', ancestorClass: 'hiw-hero', tag: 'h1', expectedFontSize: '48px' },
+      });
+      assert.equal(content.fixType, 'typography-drift-scoped');
+      assert.equal(content.anchorHtml, '.hiw-hero h1{color:#fff;font-size:74px;line-height:1.04}');
+      assert.equal(content.replacement, '.hiw-hero h1{color:#fff;font-size:48px;line-height:1.04}');
+      assert.match(summary, /48px/);
+    } finally { restore(); }
+  });
+
+  test('requires ancestorClass, tag, and expectedFontSize', async () => {
+    await assert.rejects(
+      () => generate({ params: { page: 'https://example.com/x', fixType: 'typography-drift-scoped' } }),
+      /ancestorClass, tag, and expectedFontSize/i,
+    );
+  });
+
+  test('refuses when the page has since become fluid/responsive — never flattens it', async () => {
+    const html = '<style>.hiw-hero h1{font-size:clamp(40px,6vw,74px)}</style>';
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/x', fixType: 'typography-drift-scoped', ancestorClass: 'hiw-hero', tag: 'h1', expectedFontSize: '48px' } }),
+        /could not find exactly one plain-length/i,
+      );
+    } finally { restore(); }
+  });
+
+  test('refuses when the selector no longer matches uniquely — the page changed since detection', async () => {
+    const html = '<style>.other h1{font-size:20px}</style>';
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/x', fixType: 'typography-drift-scoped', ancestorClass: 'hiw-hero', tag: 'h1', expectedFontSize: '48px' } }),
+        /could not find exactly one plain-length/i,
+      );
+    } finally { restore(); }
+  });
+});
+
 describe('content-integrity-repair — duplicate-faq', () => {
   test('removes the later of two containers whose questions substantially overlap', async () => {
     const html = `<html><body>${GROUNDING}

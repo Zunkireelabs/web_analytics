@@ -55,6 +55,48 @@ const MAX_EXPAND_ATTEMPTS = 3;
 // and size as qa-content.js's/direct-answer.js's own bodyText slice.
 const GROUNDING_EXCERPT_CHARS = 3000;
 
+const SANITY_CDN_HOST = 'apicdn.sanity.io';
+const SANITY_DEFAULT_API_VERSION = '2026-02-10';
+
+// Real category list a locally-generated post may tag itself with — never
+// an invented one. Read-only, via Sanity's public CDN (no token: this reads
+// the site's own already-published taxonomy, not a write) — config-driven
+// per newContentTargets['blog-outline'].categoriesSource ({projectId,
+// dataset, apiVersion?}) so no tenant's Sanity project id is ever hardcoded
+// here; a site with no categoriesSource configured (every non-Sanity-
+// migrated tenant) simply gets none offered. Best-effort: a failed or
+// unconfigured lookup means no categories are offered, never a hard failure
+// for the whole post — matches this file's existing posture for the
+// homepage-grounding fetch and image search above.
+async function fetchRealCategories(site) {
+  const source = site?.url_file_map?.newContentTargets?.['blog-outline']?.categoriesSource;
+  if (!source?.projectId || !source?.dataset) return [];
+  try {
+    const query = '*[_type=="category"]{title,"slug":slug.current}';
+    const url = `https://${source.projectId}.${SANITY_CDN_HOST}/v${source.apiVersion || SANITY_DEFAULT_API_VERSION}/data/query/${source.dataset}` +
+      `?query=${encodeURIComponent(query)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return (Array.isArray(json?.result) ? json.result : [])
+      .filter((c) => c && typeof c.title === 'string' && typeof c.slug === 'string');
+  } catch {
+    return [];
+  }
+}
+
+// Strips any inline Markdown link [text](url) whose url is NOT in the real
+// candidate set back to plain text (the label survives, the brackets/parens
+// don't) — the same "never trust a model-produced URL, only a real one we
+// already have" rule this generator's suggestedInternalLinks filter already
+// applies, extended to links embedded directly in body prose. An invented
+// or malformed link becomes inert plain text rather than a broken/wrong
+// link on the live page.
+const INLINE_LINK = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+function sanitizeInlineLinks(body, candidateSet) {
+  return body.replace(INLINE_LINK, (match, label, url) => (candidateSet.has(url) ? match : label));
+}
+
 function defaultRange() {
   const end = new Date().toISOString().slice(0, 10);
   const start = new Date(Date.now() - DEFAULT_WINDOW_DAYS * 86400000).toISOString().slice(0, 10);
@@ -105,6 +147,7 @@ export async function generate({ siteId, params }) {
     getSeoPolicy(siteId),
     getSiteProfile(siteId),
   ]);
+  const realCategories = await fetchRealCategories(site);
   const domain = knownDomain(site);
   const otherPages = filterOwnDomainPages(otherPagesRaw, ownDomains(site));
   const candidates = otherPages.map((p) => p.dim_value);
@@ -152,11 +195,22 @@ export async function generate({ siteId, params }) {
       : 'Treat it as a creative draft, not a fact-check about this specific business. ') +
     `This must be a finished article a reader could publish as-is: at least ${MIN_TOTAL_WORDS} words total across ` +
     'all sections, each section a real paragraph (or several) of substantive prose — never headings with bullet ' +
-    'notes, placeholder text, or "write about X here" instructions in place of the actual writing. If internal-link ' +
-    'candidate URLs are given, you may suggest linking to them where topically relevant (choosing ONLY from that ' +
-    'list — never invent a URL). Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
+    'notes, placeholder text, or "write about X here" instructions in place of the actual writing. Section body text ' +
+    'may use light Markdown where it genuinely helps readability — **bold** for real emphasis, and a "- item" or ' +
+    '"1. item" list ONLY for content that is actually a list in real prose (steps, a feature comparison, required ' +
+    'documents) — never as a substitute for writing full paragraphs, and never a list of vague notes standing in ' +
+    'for prose. If internal-link candidate URLs are given, you may link to them inline as [anchor text](URL) where ' +
+    'topically relevant, choosing the URL ONLY from that list — never invent one; an invented URL is stripped back ' +
+    'to plain text before publishing, so there is nothing to gain from guessing. ' +
+    (realCategories.length
+      ? `This site's real content categories are: ${realCategories.map((c) => c.title).join(', ')}. If 1-3 of ` +
+        'these genuinely fit this post\'s topic, list their exact titles in "categories" — choosing ONLY from that ' +
+        'list, never inventing one; an empty array if none fit. '
+      : '') +
+    'Respond with ONLY a JSON object: {"title": "...", "metaDescription": "...", ' +
     '"sections": [{"heading": "...", "body": "..."}], "suggestedFaqTopics": ["...", "..."], ' +
-    '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]}';
+    '"suggestedInternalLinks": [{"anchorText": "...", "targetUrl": "..."}]' +
+    (realCategories.length ? ', "categories": ["..."]' : '') + '}';
   // DESIGN CONTEXT REACHES GENERATION HERE, same as landing-page.js — this
   // site's own real, canonical (or live-observed) blog-article structure
   // guides section shape/count for a post about a topic the site has never
@@ -182,6 +236,17 @@ export async function generate({ siteId, params }) {
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])
     .filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
 
+  // Validated against the real list fetched above, never trusted verbatim —
+  // a model returning a title close-but-not-exact to a real category (typo,
+  // paraphrase, invented) is dropped rather than guessed into the nearest
+  // match. Capped at 3, same bound given in the prompt.
+  const realCategoryByTitle = new Map(realCategories.map((c) => [c.title.toLowerCase(), c]));
+  const categories = (Array.isArray(parsed.categories) ? parsed.categories : [])
+    .map((t) => (typeof t === 'string' ? realCategoryByTitle.get(t.toLowerCase().trim()) : null))
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((c) => ({ slug: c.slug, title: c.title }));
+
   let sections = (Array.isArray(parsed.sections) ? parsed.sections : [])
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string');
 
@@ -198,6 +263,7 @@ export async function generate({ siteId, params }) {
       { status: 502, userFacing: true },
     );
   }
+  sections = sections.map((s) => ({ ...s, body: sanitizeInlineLinks(s.body, candidateSet) }));
 
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
@@ -225,6 +291,7 @@ export async function generate({ siteId, params }) {
     sections,
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    categories,
     ...(featuredImage ? { featuredImage } : {}),
     // The real supporting text this draft was grounded in — same
     // convention as landing-page.js's content.groundingContext, for

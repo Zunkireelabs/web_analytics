@@ -8,7 +8,6 @@ import { todayInTz } from '../../util/dates.js';
 import { validateRenderingBatch } from './rendering-gate.js';
 import { actionScopeFor } from './action-scope.js';
 import { findMarkerCorruption } from './marker-merge.js';
-import { getUnresolvedPriorBatchBranch } from '../../store/drafts.js';
 
 // Every draft branch forks from — and every "current content" read (diff
 // preview, live-view, existence check) diffs against — the site's own
@@ -67,64 +66,18 @@ function persistedFailure(context, err, fallback) {
 // which is what lets beginBatchPush reuse an existing branch rather than
 // forking a new one.
 //
-// NOTE: naming a new day's branch is no longer the same thing as being
-// ALLOWED to start committing to it — see checkBatchSequencing below, which
-// every caller that might begin a fresh day's batch (auto-remediation.js's
-// autoRemediateSafeRecommendations) must consult first.
+// A site's previous day's batch PR being unmerged never blocks this: each
+// calendar day gets its own name here, so it forks/reuses its own branch
+// independently of yesterday's review status. The real risk that once
+// motivated a day-level block — two days' batches independently touching
+// the same file and colliding once the delayed PR merges (confirmed live:
+// site 1, 2026-09-08, PR #86/#87) — is instead handled at file granularity
+// by auto-remediation.js's pendingDraftFilePaths check (store/drafts.js's
+// getPendingDraftFilePaths) before a draft is ever generated, plus this
+// function's own sync-corruption check below as a second line of defense.
 export function batchBranchName(site, date = new Date()) {
   const day = todayInTz(site.timezone || 'UTC', date);
   return `action-center/batch-${site.id}-${day}`;
-}
-
-// SEQUENCING GUARANTEE: a site must never start committing a NEW day's batch
-// while the PREVIOUS day's batch PR/branch is still unresolved.
-//
-// Before this, a new calendar day always forked a fresh branch off `main`
-// regardless of whether yesterday's PR had merged — deliberately, so one
-// slow human review never blocked new work piling up forever. That tradeoff
-// had a real, confirmed cost: two independently-growing batch branches can
-// both fork from the same stale `main` and both touch the same shared file
-// (a layout template, a `_data/*` array) without either one ever seeing a
-// git conflict — GitHub's merge check only ever compares ONE batch branch
-// against `main` at a time, never against a SIBLING batch branch it hasn't
-// merged into yet. The collision only surfaces later, the moment the
-// delayed PR finally merges and the newer branch's next same-day sync pulls
-// in content it never accounted for. Confirmed live: site 1, 2026-09-08 —
-// `action-center/batch-1-2026-09-07`'s PR (#86) merged at 09:26 the next
-// morning; `action-center/batch-1-2026-09-08` had already been committing
-// against the OLD `main` since 04:07, and the eventual merge produced a
-// duplicated key a human had to fix by hand on PR #87.
-//
-// This closes that gap the other direction: hold today's batch back until
-// yesterday's is actually resolved, rather than letting two batches race.
-// Deliberately still per-site (this function's caller passes one `site` at a
-// time) and answered purely from the `drafts` table (see
-// getUnresolvedPriorBatchBranch's own comment for why no GitHub call is
-// needed) — a site with a slow reviewer waits on itself only; every other
-// site, and every other tenant's GitHub credential, is unaffected.
-//
-// Returns `{ blocked: false }` when today's batch is clear to start (no
-// prior branch found, OR it resolved since the last check), or
-// `{ blocked: true, todayBranchName, priorBranch, priorPrUrl }` when it
-// should hold. This makes no DB writes and opens no branch itself — it only
-// answers the question; auto-remediation.js's early-exit (mirroring its
-// existing onboarding-analysis-pending gate) is what actually skips the run,
-// so a blocked day generates nothing, ships nothing, and abandons nothing:
-// the exact same eligible recommendations are simply reconsidered on the
-// next scheduled pass (the site's own hourly ship catch-up, or tomorrow's
-// run), which is what makes this self-retrying without any new cron or
-// timer of its own.
-export async function checkBatchSequencing(site, date = new Date()) {
-  const todayBranchName = batchBranchName(site, date);
-  const prior = await getUnresolvedPriorBatchBranch(site.id, todayBranchName);
-  if (!prior) return { blocked: false, todayBranchName };
-  return {
-    blocked: true,
-    todayBranchName,
-    priorBranch: prior.branch_name,
-    priorPrUrl: prior.pr_url || null,
-    priorStatus: prior.status,
-  };
 }
 
 // Detects whether today's batch branch already has commits (i.e. this is

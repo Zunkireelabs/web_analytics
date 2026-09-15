@@ -1,9 +1,34 @@
 import { getFileContent } from '../../github/client.js';
-import { resolveFile } from './url-file-map.js';
+import { resolveFile, resolveAdapter } from './url-file-map.js';
 import { baseBranch } from './github-ops.js';
 import { inspectRenderMode, hasVisibleFaqSignal } from './render-inspector.js';
 import { hasImplementedVisibleFaqForPage, distinctVisibleFaqDraftPages } from '../../store/drafts.js';
 import { analyzePageUrl } from '../../agents/lib/page-content.js';
+
+// A pagination/data-array route (e.g. /compare/*) has no per-page template
+// file of its own — every entry is rendered by ONE shared layout, driven by
+// data. Before a FAQ draft can ever be trusted to actually appear on the
+// live page, something has to confirm that shared layout genuinely loops
+// over the adapter's own itemsField (e.g. "{% for faq in comp.faqs %}") —
+// NOT merely that the adapter is configured to WRITE that field (resolveAdapter/
+// isPageMapped already confirm that much) and NOT by scanning for FAQ-shaped
+// markup the way render-inspector.js's scanVisibleFaqSignals does for a
+// normal single-representation file: a shared layout's own literal source
+// (including its "@type":"FAQPage" schema block, written directly in the
+// template) is present unconditionally regardless of whether any given
+// entry's real data currently has FAQs — scanning it with that logic would
+// misread every entry as "already has one," visible-content or not. This is
+// a narrower, unambiguous question instead: can this template render
+// `itemsField` AT ALL, independent of any one entry's current data state.
+const NUNJUCKS_LOOP_RE_TEMPLATE = (field) => new RegExp(`\\{%-?\\s*for\\s+\\w+\\s+in\\s+[\\w.]*\\b${field}\\b\\s*-?%\\}`, 'i');
+const JSX_MAP_NEAR_FIELD_RE_TEMPLATE = (field) => new RegExp(`\\b${field}\\b[\\s\\S]{0,40}?\\.map\\(`, 'i');
+
+export function templateRendersItemsField(templateSource, itemsField) {
+  if (!templateSource || !itemsField) return false;
+  const escaped = itemsField.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return NUNJUCKS_LOOP_RE_TEMPLATE(escaped).test(templateSource)
+    || JSX_MAP_NEAR_FIELD_RE_TEMPLATE(escaped).test(templateSource);
+}
 
 // The sitewide visible-FAQ cap must reflect the CURRENT live/repository
 // state, not a permanent historical record of pages this tool once pushed a
@@ -44,7 +69,12 @@ export async function countCurrentlyVisibleFaqPages(site, { fetchFile = getFileC
 // ahead of any file inspection, since it's stronger evidence than a content
 // scan and the two mechanisms' output isn't visible to each other any other
 // way (see that function's own comment).
-export async function decideFaqRenderMode(site, page, fileContent, actionType = 'faq', { readLivePage = analyzePageUrl } = {}) {
+// Shared by decideFaqRenderMode and decideFaqRenderModeForDataDrivenPage
+// below — the two strongest, most universal signals, checked identically
+// regardless of which mechanism ends up deciding the rest. Returns the
+// decision when conclusive, or null when inconclusive (no existing FAQ found
+// this way) so each caller can fall through to its own remaining evidence.
+async function checkCrossMechanismAndLiveFaq(site, page, { readLivePage = analyzePageUrl } = {}) {
   if (await hasImplementedVisibleFaqForPage(site.id, page)) {
     return {
       mode: 'schema-only', confidence: 95,
@@ -69,8 +99,8 @@ export async function decideFaqRenderMode(site, page, fileContent, actionType = 
   // whatever mechanism, including a hand-built FAQ this tool never touched.
   //
   // Best-effort by design: a failed/blocked fetch falls through to the
-  // existing repo-based logic rather than blocking a legitimate draft. It can
-  // only ever move the decision toward schema-only, never toward visible.
+  // caller's own remaining logic rather than blocking a legitimate draft. It
+  // can only ever move the decision toward schema-only, never toward visible.
   try {
     const live = await readLivePage(page);
     // Same >=2 bar as render-inspector/page-content use for "a real
@@ -83,10 +113,44 @@ export async function decideFaqRenderMode(site, page, fileContent, actionType = 
         source: 'live-page',
       };
     }
-  } catch { /* fall through to the repo-based decision below */ }
+  } catch { /* fall through */ }
+  return null;
+}
 
+export async function decideFaqRenderMode(site, page, fileContent, actionType = 'faq', { readLivePage = analyzePageUrl } = {}) {
+  const early = await checkCrossMechanismAndLiveFaq(site, page, { readLivePage });
+  if (early) return early;
   const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
   return inspectRenderMode(fileContent, actionType, { visibleFaqCount, visibleFaqCap: site.visible_faq_cap });
+}
+
+// For a pagination/data-array page with no per-page template file to scan
+// (see templateRendersItemsField above for why the shared layout's own raw
+// source can't be scanned the way inspectRenderMode scans a normal file).
+// Once the render-inspector.js gate (recommendation-gates.js) has already
+// confirmed the shared layout genuinely renders this field, the remaining
+// decision — visible vs. schema-only — reduces cleanly to real,
+// entry-specific evidence: does this SPECIFIC page already show one
+// (checkCrossMechanismAndLiveFaq), and is the sitewide cap still open. No
+// structural scan is needed or meaningful here: with no prior draft, the
+// live page (checked above) is already definitive.
+export async function decideFaqRenderModeForDataDrivenPage(site, page, { readLivePage = analyzePageUrl } = {}) {
+  const early = await checkCrossMechanismAndLiveFaq(site, page, { readLivePage });
+  if (early) return early;
+  const visibleFaqCount = await countCurrentlyVisibleFaqPages(site);
+  const cap = site.visible_faq_cap ?? Infinity;
+  if (visibleFaqCount >= cap) {
+    return {
+      mode: 'schema-only', confidence: 90,
+      reason: `Sitewide visible-FAQ limit reached (${visibleFaqCount}/${site.visible_faq_cap}) — publishing structured data only to keep visible FAQs selective.`,
+      source: 'cap',
+    };
+  }
+  return {
+    mode: 'visible', confidence: 90,
+    reason: 'No existing visible FAQ detected on this page, and the sitewide visible-FAQ cap is not exhausted — safe to add a visible FAQ block.',
+    source: 'deterministic',
+  };
 }
 
 // Full version for a caller that doesn't have the page's template file
@@ -100,6 +164,15 @@ export async function resolveFaqRenderMode(site, draft, { fetchFile = getFileCon
   const page = draft.content?.page || draft.input?.page;
   const filePath = resolveFile(site, page);
   if (!filePath) {
+    // A pagination/data-array route (e.g. /compare/*) has no per-page file —
+    // recommendation-gates.js has already confirmed (before this draft could
+    // even exist) that the adapter's own templateFile genuinely renders
+    // itemsField, so the remaining decision is real, entry-specific evidence
+    // only (see decideFaqRenderModeForDataDrivenPage's own comment).
+    const adapterConfig = resolveAdapter(site, page, 'faq');
+    if (adapterConfig?.id === 'data-array-content' && adapterConfig?.itemsField) {
+      return decideFaqRenderModeForDataDrivenPage(site, page);
+    }
     // No real template configured for this page at all — there's nothing to
     // scan for an organic pre-existing FAQ. Honest uncertainty (the same
     // confidence-0 "ask a human" outcome as a genuine infra failure below)

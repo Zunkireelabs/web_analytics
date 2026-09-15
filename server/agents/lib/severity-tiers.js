@@ -58,6 +58,11 @@ const TIER_BY_GENERATOR = {
   'schema-repair': SEVERITY_TIER.CRITICAL_TECHNICAL, // malformed structured data actively misleads
   'content-integrity-repair': SEVERITY_TIER.CRITICAL_TECHNICAL, // template/rendering leakage
   'security-headers': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  // Every unmatched URL indexing as duplicate homepage content instead of
+  // 404 — a sitewide indexing distortion, same tier as sitemap/robots-fix.
+  'soft-404-nginx': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  'redirect-chain-nginx': SEVERITY_TIER.CRITICAL_TECHNICAL,
+  'sitemap-removal': SEVERITY_TIER.CRITICAL_TECHNICAL,
 
   // ── 2. High-impact on-page ──────────────────────────────────────────────
   'meta-title': SEVERITY_TIER.ON_PAGE,

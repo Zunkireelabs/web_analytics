@@ -12,13 +12,25 @@ import { discoverFromSitemaps, parseRobotsDisallowRules, originForSite } from '.
 import { hostnameOf } from './lib/site-domain.js';
 import { configured as pagespeedConfigured } from '../ingest/pagespeed.js';
 import { callLLM } from '../llm.js';
+import { getGscBreakdownRange } from '../store/read.js';
+import { detectSpamUrlPatterns, detectForeignScriptQueries } from './lib/index-bloat.js';
 
 export const meta = {
   id: 'technical-seo',
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 5,
+  version: 6,
+  // v6 adds two real, previously-uncovered checks: a missing robots.txt
+  // (now draftable via the new robots-bootstrap generator, unlike
+  // robots-fix.js which needs an existing file to splice into) and legacy
+  // index spam — real GSC pages/queries pattern-matched against a set of
+  // off-platform signatures (foreign-platform file extensions, spam-farm
+  // numeric query params, a query script inconsistent with the site's own
+  // declared language) that almost certainly belong to a prior owner of the
+  // domain, not this site. Found by hand on chayceproperties.com (1.5M+
+  // indexed URLs from a legacy ASP.NET storefront this Eleventy site never
+  // had) — see server/agents/lib/index-bloat.js.
   // v5 adds two more page-weight checks off the same per-page fetch already
   // done for the technical audit: excessive inline style="" attributes and
   // raw HTML document size over 100KB. Both informational — same reasoning
@@ -570,11 +582,66 @@ export async function run({ siteId, start, end, pageCache, params }) {
   });
   const robotsBlockedFindings = robotsBlockedFinding ? [robotsBlockedFinding] : [];
 
+  // Real GSC pages/queries that almost certainly belong to a PRIOR owner of
+  // this domain, not this site — see index-bloat.js's header comment for the
+  // chayceproperties.com case this was built from (1.5M+ indexed URLs from a
+  // legacy ASP.NET storefront + an unrelated Arabic top query, on a site
+  // that has never been anything but an English Eleventy site). Pulls the
+  // site's own top pages/queries directly (not limited to this run's ~20-page
+  // rotation batch, which is chosen for content-quality checks and would
+  // rarely include zero-real-content spam URLs), so this needs no extra
+  // fetch beyond two already-ingested Search Analytics reads.
+  const [spamPageRows, queryRows] = await Promise.all([
+    getGscBreakdownRange(siteId, start, end, 'page', 200),
+    getGscBreakdownRange(siteId, start, end, 'query', 100),
+  ]);
+  const spamPatterns = detectSpamUrlPatterns(spamPageRows);
+  const foreignQueries = detectForeignScriptQueries(queryRows, site.language_code);
+  const disallowPatterns = spamPatterns.map((p) => p.pattern);
+
+  // No robots.txt at all — previously just recorded in facts.robotsTxtFound
+  // and never turned into an actionable finding. robots-bootstrap.js (unlike
+  // robots-fix.js, which needs an existing file to splice into) drafts a
+  // brand-new baseline file, folding in any real spam patterns found above
+  // so this is one draft, not two competing full-file-overwrite drafts.
+  const robotsMissingFindings = (!robotsFetch.ok) ? [makeFinding({
+    id: 'technical-seo:site:robots-txt-missing',
+    evidence: { hostname: siteHostname, disallowPatterns },
+    whyItMatters: `${siteHostname || 'This site'} has no robots.txt — search engines default to crawling everything, with no way to steer them away from paths that shouldn't be indexed.`,
+    priority: 'medium',
+    recommendedAction: { label: 'Create robots.txt', generatorId: 'robots-bootstrap', params: { disallowPatterns }, effort: effortForGenerator('robots-bootstrap') },
+    expectedImpact: { label: 'Medium', basis: 'estimate', value: null },
+  })] : [];
+
+  // Reported even when robots.txt already exists (still real, still worth a
+  // human's attention) — but no recommendedAction in that case: safely
+  // ADDING Disallow rules to an arbitrary existing robots.txt (rather than
+  // writing a brand-new one, robots-bootstrap.js's only job) has no safe
+  // automated path yet, same "real fact, no safe auto-fix" discipline as
+  // compression/CWV/HTTPS above. When robots.txt is missing, this finding
+  // still reports the fact but leaves the actual draft to the
+  // robots-txt-missing finding above rather than emitting a second,
+  // competing robots-bootstrap draft for the same file.
+  const legacySpamFindings = (spamPatterns.length || foreignQueries.length) ? [makeFinding({
+    id: 'technical-seo:site:legacy-index-spam',
+    evidence: { spamPatterns, foreignQueries: foreignQueries.slice(0, 5) },
+    whyItMatters: spamPatterns.length
+      ? `Google is indexing ${spamPatterns.length} URL pattern(s) on this domain (e.g. ${spamPatterns[0].samplePages[0]}) that don't match anything this site actually serves — almost always crawl history left over from a prior owner of this domain, wasting crawl budget and inflating the "not indexed" count in Search Console.`
+      : `A top real query for this site (in a script unrelated to its actual content) suggests this domain carries indexed content from a prior owner, unrelated to what this site serves now.`,
+    priority: 'high',
+    // Never a robots-bootstrap action here even when robots.txt is missing —
+    // the robots-txt-missing finding above already carries that exact draft
+    // (with these same disallowPatterns folded in) so the two findings never
+    // race to draft two competing full-file writes to the same path.
+    recommendedAction: null,
+    expectedImpact: { label: 'High', basis: 'estimate', value: spamPatterns.reduce((s, p) => s + p.impressions, 0) || null },
+  })] : [];
+
   const findings = [
     ...deindexedFindings, ...cwvFindings, ...duplicateFindings, ...canonicalFindings,
     ...schemaFindings, ...brokenFindings, ...citationFindings, ...chainFindings, ...sitemapFindings, ...orphanedFindings,
     ...crossDomainSitemapFindings, ...robotsBlockedFindings, ...compressionFindings, ...httpsFindings,
-    ...inlineStylesFindings, ...largeHtmlFindings,
+    ...inlineStylesFindings, ...largeHtmlFindings, ...robotsMissingFindings, ...legacySpamFindings,
   ];
 
   const facts = {
@@ -598,6 +665,8 @@ export async function run({ siteId, start, end, pageCache, params }) {
     crossDomainSitemapUrlCount: crossDomainUrls.length,
     robotsTxtFound: robotsFetch.ok,
     robotsBlockedTopPageCount: robotsBlockedCandidates.length,
+    legacyIndexSpamPatternCount: spamPatterns.length,
+    foreignScriptQueryCount: foreignQueries.length,
     httpsEnabled: httpsStatus.httpsEnabled,
     httpRedirectsToHttps: httpsStatus.httpRedirectsToHttps,
     findings,

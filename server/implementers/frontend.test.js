@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES } from './frontend.js';
+import { resolveTargetAndBody, FRONTEND_ACTION_TYPES, COMPLIANCE_ACTION_TYPES, computeGeneratedPostsManifestUpdate } from './frontend.js';
 
 describe('resolveTargetAndBody — generation-time-prepared fast path', () => {
   test('a draft with rendered_body/target_file_path already set is returned verbatim, no recomputation', async () => {
@@ -147,6 +147,65 @@ describe('resolveTargetAndBody — layout comes from the repo, not from config',
     assert.match(result.body, /permalink: "\/about\/"/);
     assert.equal(counts.tree, undefined, 'no directory sampling for an overwrite');
     assert.equal(counts.reads, 1, 'only the page being overwritten');
+  });
+});
+
+describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts manifest', () => {
+  const site = { url_file_map: { newContentTargets: { 'blog-outline': { manifestFile: 'src/data/generated-posts.json' } } } };
+  const entry = { slug: 'my-new-post', title: 'My New Post', excerpt: 'x', imageUrl: null, imageAlt: null, publishedAt: '2026-09-15T00:00:00.000Z', href: '/blogs/my-new-post' };
+
+  test('unconfigured site (no manifestFile) -> null, nothing to do', async () => {
+    const result = await computeGeneratedPostsManifestUpdate({ url_file_map: {} }, entry, async () => null, 'main');
+    assert.equal(result, null);
+  });
+
+  test('manifest file does not exist yet -> creates it with just this entry', async () => {
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    assert.equal(result.ok, true);
+    assert.equal(result.filePath, 'src/data/generated-posts.json');
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].slug, 'my-new-post');
+    assert.equal(parsed[0]._aiManaged, true);
+  });
+
+  test('appends to an existing manifest, hand-authored entries preserved untouched', async () => {
+    const existing = JSON.stringify([
+      { slug: 'hand-authored-post', title: 'Hand Authored' },
+      { slug: 'older-generated-post', title: 'Older', _aiManaged: true },
+    ]);
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: existing }), 'main');
+    assert.equal(result.ok, true);
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 3);
+    assert.ok(parsed.some((p) => p.slug === 'hand-authored-post' && !p._aiManaged));
+    assert.ok(parsed.some((p) => p.slug === 'older-generated-post'));
+    assert.ok(parsed.some((p) => p.slug === 'my-new-post'));
+  });
+
+  test('re-applying the SAME post (same slug) updates in place rather than duplicating', async () => {
+    const existing = JSON.stringify([{ ...entry, title: 'Stale Title', _aiManaged: true }]);
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: existing }), 'main');
+    assert.equal(result.ok, true);
+    const parsed = JSON.parse(result.newContent);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].title, 'My New Post');
+  });
+
+  test('malformed existing manifest -> honest invalid-edit, never guesses', async () => {
+    const result = await computeGeneratedPostsManifestUpdate(site, entry, async () => ({ content: '{ not an array' }), 'main');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid-edit');
+  });
+
+  test('a fresh parse of the written content succeeds — the write is valid JSON', async () => {
+    const first = await computeGeneratedPostsManifestUpdate(site, entry, async () => null, 'main');
+    const second = await computeGeneratedPostsManifestUpdate(
+      site, { ...entry, slug: 'second-post', title: 'Second Post' },
+      async () => ({ content: first.newContent }), 'main',
+    );
+    assert.equal(second.ok, true);
+    assert.equal(JSON.parse(second.newContent).length, 2);
   });
 });
 

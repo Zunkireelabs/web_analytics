@@ -13,6 +13,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 
 let keywordGaps;
 let contentClusters;
+let queryPageMetrics;
 
 mock.module(resolve('../store/data-analyst.js'), {
   namedExports: {
@@ -24,6 +25,16 @@ mock.module(resolve('../store/data-analyst.js'), {
 });
 mock.module(resolve('../store/agent-runs.js'), {
   namedExports: { getLatestAgentRuns: async () => [] },
+});
+mock.module(resolve('../store/read.js'), {
+  namedExports: {
+    getSiteById: async () => ({ id: 1, timezone: 'UTC' }),
+    getQueryPageMetrics: async () => queryPageMetrics,
+    // Unused by this module directly, but lib/duplicate-evidence.js (which
+    // keyword-narrative.js now imports evidenceWindow from) imports it from
+    // the same module — module mocking replaces the whole export set.
+    getSearchPerformanceForPages: async () => [],
+  },
 });
 mock.module(resolve('../job.js'), {
   namedExports: { listConnectedSites: async () => [] },
@@ -46,6 +57,7 @@ describe('keyword-narrative produces actionable gaps', () => {
   test('a keyword gap routes to the blog-outline generator with real context', async () => {
     keywordGaps = [{ topic: 'destination weddings', reason: 'competitors rank for it', priority: 'high' }];
     contentClusters = [];
+    queryPageMetrics = [];
 
     const findings = await findingsFor();
     const gap = findings.find((f) => f.id.startsWith('keyword-narrative:gap:'));
@@ -61,6 +73,7 @@ describe('keyword-narrative produces actionable gaps', () => {
   test('a gap with no stored reason still produces a usable context', async () => {
     keywordGaps = [{ topic: 'venue pricing', reason: null, priority: 'medium' }];
     contentClusters = [];
+    queryPageMetrics = [];
 
     const findings = await findingsFor();
     const gap = findings.find((f) => f.id.startsWith('keyword-narrative:gap:'));
@@ -68,19 +81,79 @@ describe('keyword-narrative produces actionable gaps', () => {
     assert.equal(gap.recommendedAction.generatorId, 'blog-outline');
     assert.ok(gap.recommendedAction.params.context.length > 0);
   });
+});
 
-  test('a poorly-ranking cluster stays human-owned but visible', async () => {
+describe('keyword-cluster-gap — page-aware routing, no editorial dead end', () => {
+  test('no real Search Console data yet -> honest insufficient-evidence reportOnly, never guesses', async () => {
     keywordGaps = [];
-    contentClusters = [{ name: 'pricing', type: 'topic', gap_score: 90, avg_position: 34.2, avg_impressions: 500 }];
+    contentClusters = [{
+      cluster_name: 'pricing', cluster_type: 'topic', gap_score: 90, avg_position: 34.2, avg_impressions: 500,
+      keywords_json: [{ keyword: 'venue pricing' }],
+    }];
+    queryPageMetrics = [];
 
     const findings = await findingsFor();
     const cluster = findings.find((f) => f.id.startsWith('keyword-narrative:cluster:'));
 
-    // Drafting a net-new post here would compete with the site's own existing
-    // pages on that topic — the fix is strengthening them, which is a call a
-    // person makes.
     assert.equal(cluster.recommendedAction, null);
     assert.equal(cluster.reportOnly.kind, 'keyword-cluster-gap');
-    assert.match(cluster.reportOnly.whyBlocked, /strengthening the existing pages/);
+    assert.match(cluster.reportOnly.whyBlocked, /insufficient|no real Search Console/i);
+  });
+
+  test('zero pages match the cluster\'s own keywords -> genuinely missing topic -> blog-outline', async () => {
+    keywordGaps = [];
+    contentClusters = [{
+      cluster_name: 'pricing', cluster_type: 'topic', gap_score: 90, avg_position: null, avg_impressions: 500,
+      keywords_json: [{ keyword: 'venue pricing' }],
+    }];
+    // Real site-wide GSC data exists, but none of it is for this cluster's
+    // own keyword — so this really is an uncovered topic, not thin data.
+    queryPageMetrics = [{ query: 'unrelated other query', page: '/other/', clicks: 5, impressions: 50, avgPosition: 8 }];
+
+    const findings = await findingsFor();
+    const cluster = findings.find((f) => f.id.startsWith('keyword-narrative:cluster:'));
+
+    assert.equal(cluster.recommendedAction.generatorId, 'blog-outline');
+    assert.equal(cluster.recommendedAction.params.topic, 'pricing');
+    assert.equal(cluster.reportOnly, undefined);
+  });
+
+  test('exactly one real page already owns the cluster\'s traffic -> expand-content on that page', async () => {
+    keywordGaps = [];
+    contentClusters = [{
+      cluster_name: 'pricing', cluster_type: 'topic', gap_score: 90, avg_position: 34.2, avg_impressions: 500,
+      keywords_json: [{ keyword: 'venue pricing' }, { keyword: 'wedding venue cost' }],
+    }];
+    queryPageMetrics = [
+      { query: 'venue pricing', page: '/pricing/', clicks: 3, impressions: 200, avgPosition: 22 },
+      { query: 'wedding venue cost', page: '/pricing/', clicks: 1, impressions: 150, avgPosition: 30 },
+    ];
+
+    const findings = await findingsFor();
+    const cluster = findings.find((f) => f.id.startsWith('keyword-narrative:cluster:pricing'));
+
+    assert.equal(cluster.recommendedAction.generatorId, 'expand-content');
+    assert.equal(cluster.recommendedAction.params.page, '/pricing/');
+  });
+
+  test('2+ real pages independently compete for the cluster\'s keywords -> evidence-scored winner -> internal-links on the loser(s)', async () => {
+    keywordGaps = [];
+    contentClusters = [{
+      cluster_name: 'pricing', cluster_type: 'topic', gap_score: 90, avg_position: 12, avg_impressions: 500,
+      keywords_json: [{ keyword: 'venue pricing' }],
+    }];
+    queryPageMetrics = [
+      { query: 'venue pricing', page: '/pricing/', clicks: 40, impressions: 300, avgPosition: 5 },
+      { query: 'venue pricing', page: '/venues/pricing-guide/', clicks: 5, impressions: 100, avgPosition: 15 },
+    ];
+
+    const findings = await findingsFor();
+    const clusterFindings = findings.filter((f) => f.id.startsWith('keyword-narrative:cluster:pricing'));
+
+    assert.equal(clusterFindings.length, 1); // one finding per loser page
+    const finding = clusterFindings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'internal-links');
+    assert.equal(finding.recommendedAction.params.mustLinkTo, '/pricing/'); // stronger real evidence wins
+    assert.equal(finding.recommendedAction.params.page, '/venues/pricing-guide/');
   });
 });

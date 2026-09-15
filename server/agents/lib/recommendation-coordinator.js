@@ -40,6 +40,11 @@ import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 const SITE_LEVEL_GENERATOR_IDS = new Set([
   'cookie-policy', 'privacy-policy', 'terms-of-service',
   'llms-txt', 'security-headers', 'html-lang', 'sitemap', 'robots-fix',
+  // Exactly one real nginx config per site, same as security-headers above.
+  'soft-404-nginx',
+  // Exactly one robots.txt per site, same as robots-fix above — a site
+  // either has one or doesn't, so this can never collide across pages.
+  'robots-bootstrap',
 ]);
 
 // Every `reportOnly.kind` any agent raises (agents/types.js's ReportOnly) —
@@ -58,7 +63,9 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
 const REPORT_ONLY_KINDS = new Set([
   'query-cannibalization', 'authority-backlinks-lost', 'duplicate-content',
   'device-ctr-deficit', 'competitor-outranking', 'competitor-backlink-gap',
-  'font-size-inconsistency', 'keyword-cluster-gap',
+  'font-size-inconsistency', 'keyword-cluster-gap', 'templated-duplicate-family',
+  'url-variant-duplicate', 'sitemap-index-conflict', 'redirect-chain', 'query-param-duplicate',
+  'soft-404',
 ]);
 
 // The real key for a recommendation row — (siteId, page, generatorId) isn't

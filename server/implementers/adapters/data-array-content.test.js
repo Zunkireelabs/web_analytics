@@ -751,3 +751,108 @@ describe('data-array-content computeChange — cross-generator batch sequencing 
     assert.match(second.newContent, /Pokhara Q\?/);
   });
 });
+
+describe('data-array-content computeChange — content-integrity-repair (data-array-generated pages)', () => {
+  const widgetA = '<table><tbody></tbody></table>';
+  const widgetB = '<table><tbody></tbody></table>'; // identical markup on a SIBLING entry, on purpose
+  const fixture = `export default [
+  { id: "widget-a", name: "Widget A", content: "intro text ${widgetA} more text" },
+  { id: "widget-b", name: "Widget B", content: "intro text ${widgetB} more text" },
+];
+`;
+  const tenantE = {
+    id: 5,
+    url_file_map: {
+      patterns: [{
+        match: '^/products/([^/]+)$',
+        adapters: { 'content-integrity-repair': { id: 'data-array-content', format: 'js-export-array', dataFile: 'src/_data/products.js', idField: 'id' } },
+      }],
+    },
+  };
+  const fetchProducts = async () => ({ content: fixture });
+
+  test('removes a broken table anchor scoped to the matched entry only — the identical anchor on a sibling entry is untouched', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, true);
+    assert.equal(r.filePath, 'src/_data/products.js');
+    // widget-a's own table is gone...
+    assert.doesNotMatch(r.newContent.split('widget-b')[0], /<table>/);
+    // ...but widget-b's byte-identical table survives — scoping to the
+    // matched object's own range is what makes this safe despite the two
+    // entries sharing identical markup.
+    assert.match(r.newContent.split('widget-b')[1], /<table>/);
+  });
+
+  test('faq-schema-mismatch anchors on originalRaw and writes the new JSON-LD verbatim', async () => {
+    const schemaFixture = `export default [
+  { id: "widget-a", name: "Widget A", schema: '{"old":"data"}' },
+];
+`;
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: {
+        page: 'https://example.com/products/widget-a/', fixType: 'faq-schema-mismatch',
+        originalRaw: '{"old":"data"}', jsonLd: { '@type': 'FAQPage', mainEntity: [] },
+      },
+    }, async () => ({ content: schemaFixture }));
+    assert.equal(r.ok, true);
+    assert.match(r.newContent, /"@type":"FAQPage"/);
+    assert.doesNotMatch(r.newContent, /"old":"data"/);
+  });
+
+  test('anchor no longer found verbatim (source changed since detection) -> honest source-anchor-not-found, never a guess', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: '<table><tbody><tr><td>real row</td></tr></tbody></table>', replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'source-anchor-not-found');
+  });
+
+  test('unknown fixType -> honest draft-not-ready, never a silent no-op', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'not-a-real-fixtype' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'draft-not-ready');
+  });
+
+  test('no entry matches this id -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/does-not-exist/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+
+  test('no adapter configured for content-integrity-repair on this route -> honest no-file-mapping, not a crash', async () => {
+    const tenantNoAdapter = {
+      id: 6,
+      url_file_map: { patterns: [{ match: '^/products/([^/]+)$', adapters: {} }] },
+    };
+    const r = await computeChange(tenantNoAdapter, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-file-mapping');
+  });
+
+  test('a fresh computeChange re-parse of the result succeeds — the write is valid JS', async () => {
+    const r = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-a/', fixType: 'malformed-table', anchorHtml: widgetA, replacement: '' },
+    }, fetchProducts);
+    assert.equal(r.ok, true);
+    const reread = await computeChange(tenantE, {
+      action_type: 'content-integrity-repair',
+      content: { page: 'https://example.com/products/widget-b/', fixType: 'malformed-table', anchorHtml: widgetB, replacement: '' },
+    }, async () => ({ content: r.newContent }));
+    assert.equal(reread.ok, true);
+  });
+});

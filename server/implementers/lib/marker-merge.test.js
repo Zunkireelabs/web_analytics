@@ -115,6 +115,41 @@ describe('head-scoped fields (canonical, open-graph)', () => {
     assert.match(spliced.newContent, /<link rel=\\"canonical\\" href=\\"https:\/\/example\.com\/\\">/);
   });
 
+  // Regression coverage for web-chayce-properties PR #17: src/index.njk
+  // nests its whole SEOAI:HEAD region inside a `headExtra: |` YAML
+  // block-scalar front-matter value, indented 2 spaces. Auto-creating the
+  // nested CANONICAL/OPENGRAPH markers (and splicing open-graph's
+  // multi-line meta tags into OPENGRAPH) at column 0 dropped below the
+  // block scalar's indentation, ending it early — the next real
+  // front-matter key (footScripts) then got misparsed as stray content and
+  // Eleventy's build failed with a YAMLException. Confirmed real on that
+  // PR, 2026-09-15.
+  test('nested head-scoped markers and multi-line splice values preserve a YAML block-scalar front matter\'s indentation', () => {
+    const file = [
+      '---',
+      'title: "Chayce"',
+      'headExtra: |',
+      '  <style>.chayce-footer{display:flex}</style>',
+      '  <!-- SEOAI:HEAD:START --><!-- SEOAI:HEAD:END -->',
+      'footScripts: |',
+      '  <script src="/js/a.js"></script>',
+      '---',
+      'body',
+    ].join('\n');
+    const markerMap = { canonical: 'CANONICAL', openGraph: 'OPENGRAPH' };
+    const { content: ensured } = ensureMarkers(file, markerMap, 'src/index.njk');
+    const spliced = spliceMarkers(ensured, markerMap, {
+      canonical: '<link rel="canonical" href="https://chayceproperties.com/">',
+      openGraph: ['<meta property="og:title" content="Chayce">', '<meta name="twitter:card" content="summary_large_image">'].join('\n'),
+    });
+    assert.equal(spliced.ok, true);
+    // Every line inside the headExtra block scalar — including both
+    // continuation lines of the multi-line openGraph value — must keep the
+    // block's 2-space indentation; nothing drops to column 0.
+    const headExtraLines = spliced.newContent.split('headExtra: |\n')[1].split('footScripts:')[0].split('\n').filter(Boolean);
+    for (const line of headExtraLines) assert.match(line, /^  /, `expected 2-space indent, got: ${JSON.stringify(line)}`);
+  });
+
   // Plain Markdown/MDX is the one shape where EOF really is inside the
   // rendered body (see isNoEofInsertField's comment) — every OTHER body
   // field, including faq, now needs real structural detection

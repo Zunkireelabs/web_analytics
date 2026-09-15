@@ -2,6 +2,8 @@ import { getSiteById } from '../store/read.js';
 import { listPageInventory, listOrphanedPages } from '../store/page-inventory.js';
 import { discoverSitemapEntries } from './lib/site-discovery.js';
 import { computeMissingUrls, buildMissingUrlsFinding } from './lib/sitemap-diff.js';
+import { getTechnicalSeoSignalsForPages } from '../store/technical-seo-checks.js';
+import { isConfirmedBlocked } from './lib/index-status.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -40,7 +42,25 @@ export async function run({ siteId }) {
     listOrphanedPages(siteId),
   ]);
 
-  const missingUrls = computeMissingUrls(inventory.map((r) => r.page), sitemapEntries);
+  const rawMissingUrls = computeMissingUrls(inventory.map((r) => r.page), sitemapEntries);
+  // Loop-prevention: sitemap-conflict.js's sitemap-removal fallback removes
+  // a URL from the sitemap specifically BECAUSE Google's own inspection
+  // confirms it's blocked/excluded — without this filter, this agent's own
+  // "URL known but missing from sitemap" check would immediately propose
+  // re-adding the exact URL that removal just took out, and the two
+  // findings would fight every run. A URL Google confirms is currently
+  // blocked is correctly NOT "missing" — it's excluded on purpose (or at
+  // least on record), which is exactly the state sitemap-removal aligned
+  // the sitemap to. The moment the real block is lifted (a human fixes it,
+  // or robots-fix.js's own un-block ships), technical_seo_checks reflects
+  // that on its next check and this URL becomes "missing" again here,
+  // re-adding it automatically — no separate reconciliation needed.
+  let missingUrls = rawMissingUrls;
+  if (rawMissingUrls.length) {
+    const signals = await getTechnicalSeoSignalsForPages(siteId, { pages: rawMissingUrls });
+    const blockedPages = new Set(signals.filter((s) => isConfirmedBlocked(s.index_status)).map((s) => s.page));
+    missingUrls = rawMissingUrls.filter((u) => !blockedPages.has(u));
+  }
   const orphanedUrls = orphanedPages.map((p) => p.page);
 
   if (!missingUrls.length) {

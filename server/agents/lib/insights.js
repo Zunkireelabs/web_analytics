@@ -23,7 +23,7 @@ import { getLatestAgentRuns, getLatestFindings } from './fresh-runs.js';
 // entry here the analyst's keyword gaps were computed, stored and then read
 // by nobody — the agent was scheduled but structurally unable to produce a
 // recommendation.
-export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency', 'visual-quality', 'blog-image', 'keyword-narrative'];
+export const RECOMMENDATION_AGENT_IDS = ['query-intelligence', 'opportunity', 'country-intelligence', 'device-intelligence', 'ai-visibility', 'content-gap', 'competitor-intelligence', 'technical-seo', 'authority', 'ai-recommendation', 'security-headers', 'internal-linking', 'duplicate-content', 'accessibility', 'mobile-usability', 'sitemap', 'growth-queries', 'trust-compliance', 'geo-signals', 'content-integrity', 'font-consistency', 'visual-quality', 'blog-image', 'keyword-narrative', 'soft-404', 'templated-duplicates', 'url-variant-duplicates', 'sitemap-conflict', 'redirect-chain', 'query-param-duplicates'];
 
 
 // Findings from these agents are inherently upside-framed (growth,

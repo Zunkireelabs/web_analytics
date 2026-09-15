@@ -2,6 +2,7 @@ import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
 import { stripFixedHeightClass } from './marker-merge.js';
+import { slugifyTitle } from './url-file-map.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
 // needs to understand a template's syntax because it only replaces text
@@ -148,15 +149,30 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
 // component is written once per site (a real, human-reviewed file in the
 // client's own repo, not generated per post) and can be restyled without
 // regenerating any existing post.
+//
+// `post` is exported (not a private `const`) so a listing page can import
+// title/featuredImage/publishedAt straight out of each generated post's own
+// file at build time — the single source of truth this file already writes,
+// rather than a second sidecar/metadata file that could drift from it. See
+// e.g. Admizz's src/app/blogs/page.tsx, which merges these with its Sanity
+// posts.
 export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  const title = content.title || content.topic || 'Untitled';
   const props = {
-    title: content.title || content.topic || 'Untitled',
+    title,
+    // The post's own identity — same slugifyTitle call resolveNewContentTarget
+    // used to decide this file's own directory name, so GeneratedBlogPost's
+    // "exclude myself from related posts" check can never disagree with the
+    // real URL. featuredImage/categories are optional real facts, never
+    // invented if absent (see blog-outline.js's own fetchRealCategories).
+    slug: slugifyTitle(title),
     sections: (content.sections || [])
       .filter((s) => s?.heading)
       .map((s) => ({ heading: s.heading, body: s.body || '' })),
     featuredImage: content.featuredImage?.url
       ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
       : null,
+    categories: Array.isArray(content.categories) ? content.categories : [],
     publishedAt: new Date().toISOString(),
   };
   const metaTitle = content.title || content.topic || 'Untitled';
@@ -165,7 +181,7 @@ export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } 
     'import type { Metadata } from "next";',
     'import GeneratedBlogPost from "@/components/GeneratedBlogPost";',
     '',
-    `const post = ${JSON.stringify(props, null, 2)};`,
+    `export const post = ${JSON.stringify(props, null, 2)};`,
     '',
     'export const metadata: Metadata = {',
     `  title: ${JSON.stringify(metaTitle)},`,

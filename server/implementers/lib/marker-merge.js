@@ -310,11 +310,42 @@ function insertHeadScopedMarker(fileContent, markerName, filePath) {
   const match = regex.exec(fileContent);
   if (!match) return null;
   const [full, start, inner, end] = match;
+  // Matches the outer HEAD marker's own line indentation — see lineIndent's
+  // comment: on chayceproperties.com (Eleventy), the whole SEOAI:HEAD region
+  // for src/index.njk lives inside a `headExtra: |` YAML block-scalar
+  // front-matter value, indented 2 spaces. Nesting this new marker at column
+  // 0 (the previous behavior) put a less-indented line inside that block
+  // scalar, which YAML treats as ending the scalar right there — the very
+  // next real front-matter key (`footScripts: |`) then gets misparsed as
+  // stray content instead of a mapping key. Confirmed real: PR #17 on
+  // web-chayce-properties failed Eleventy's build this exact way.
+  const indent = lineIndent(fileContent, match.index);
   const nested = jsx
     ? `{/* SEOAI:${markerName}:START */}{/* SEOAI:${markerName}:END */}`
     : `<!-- SEOAI:${markerName}:START --><!-- SEOAI:${markerName}:END -->`;
-  const newInner = `${inner}\n${nested}`;
+  const newInner = `${inner}\n${indent}${nested}`;
   return fileContent.slice(0, match.index) + start + newInner + end + fileContent.slice(match.index + full.length);
+}
+
+// The leading whitespace on the source line containing `index`, but only
+// when everything from that line's start up to `index` is whitespace —
+// i.e. `index` really is the start of the line's visible content, not
+// partway through other text. Returns '' otherwise (safe no-op default).
+// Used wherever this module splices multi-line content at a marker's
+// position, so the splice preserves whatever indentation that marker's own
+// line already had instead of always starting subsequent lines at column 0
+// (see insertHeadScopedMarker and applyMarker's BLOCK path above/below).
+function lineIndent(fileContent, index) {
+  const lineStart = fileContent.lastIndexOf('\n', index - 1) + 1;
+  const prefix = fileContent.slice(lineStart, index);
+  return /^[ \t]*$/.test(prefix) ? prefix : '';
+}
+
+// Re-applies `indent` to every line after the first in `text` — a no-op for
+// single-line text or when there's no indent to preserve.
+function reindentContinuationLines(text, indent) {
+  if (!indent) return text;
+  return String(text).split('\n').join(`\n${indent}`);
 }
 
 // LINE_HEAD_FALLBACK_KEY's own insertion: adds a brand-new front-matter key
@@ -467,8 +498,17 @@ function jsxSafeWrap(rawHtml) {
 
 function applyMarker(fileContent, name, newValue) {
   const block = blockRegex(name);
-  if (block.test(fileContent)) {
-    return fileContent.replace(block, (_m, start, _old, end) => `${start}${newValue}${end}`);
+  const blockMatch = block.exec(fileContent);
+  if (blockMatch) {
+    // Same indentation hazard as insertHeadScopedMarker above: `newValue`
+    // (e.g. open-graph.js's multi-line og:/twitter: meta tags, joined by
+    // '\n') must keep the marker's own line indentation on every line, not
+    // just the first, or it can break a YAML block-scalar front-matter
+    // value this marker happens to be nested inside.
+    const indent = lineIndent(fileContent, blockMatch.index);
+    const indented = reindentContinuationLines(newValue, indent);
+    return fileContent.slice(0, blockMatch.index) + blockMatch[1] + indented + blockMatch[3]
+      + fileContent.slice(blockMatch.index + blockMatch[0].length);
   }
   const jsx = jsxBlockRegex(name);
   if (jsx.test(fileContent)) {

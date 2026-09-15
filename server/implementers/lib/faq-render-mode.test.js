@@ -1,6 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { countCurrentlyVisibleFaqPages, decideFaqRenderMode } from './faq-render-mode.js';
+import {
+  countCurrentlyVisibleFaqPages, decideFaqRenderMode, decideFaqRenderModeForDataDrivenPage,
+  templateRendersItemsField, resolveFaqRenderMode,
+} from './faq-render-mode.js';
 
 function siteWithPages(pages) {
   const url_file_map = { pages: {} };
@@ -103,5 +106,89 @@ describe('decideFaqRenderMode — never a second visible FAQ', () => {
     const readLivePage = async () => { throw new Error('network down'); };
     const result = await decideFaqRenderMode(site, '/team/', '<p>plain page</p>', 'faq', { readLivePage });
     assert.notEqual(result.source, 'live-page');
+  });
+});
+
+describe('templateRendersItemsField', () => {
+  test('recognizes the real PR #99 Nunjucks loop shape ("comp.faqs")', () => {
+    const source = '{% if comp.faqs and comp.faqs.length > 0 %}{% for faq in comp.faqs %}{{ faq.question }}{% endfor %}{% endif %}';
+    assert.equal(templateRendersItemsField(source, 'faqs'), true);
+  });
+
+  test('recognizes a plain top-level loop variable ("faqs")', () => {
+    assert.equal(templateRendersItemsField('{% for item in faqs %}{{ item.question }}{% endfor %}', 'faqs'), true);
+  });
+
+  test('recognizes a JSX .map form near the field', () => {
+    assert.equal(templateRendersItemsField('{comp.faqs.map((f) => <div>{f.question}</div>)}', 'faqs'), true);
+  });
+
+  test('false when the template has FAQ-shaped markup but never loops the actual field', () => {
+    // Same class of false-positive render-inspector.js's own strong-signal
+    // scan would produce against a shared, data-conditional layout: literal
+    // "FAQPage"/"accordion" text present, but no real render mechanism for
+    // THIS field.
+    const source = '<h2>Frequently Asked Questions</h2><div class="accordion"></div><script>{"@type":"FAQPage"}</script>';
+    assert.equal(templateRendersItemsField(source, 'faqs'), false);
+  });
+
+  test('false for empty/missing inputs', () => {
+    assert.equal(templateRendersItemsField('', 'faqs'), false);
+    assert.equal(templateRendersItemsField('{% for f in comp.faqs %}', ''), false);
+    assert.equal(templateRendersItemsField(null, 'faqs'), false);
+  });
+});
+
+describe('decideFaqRenderModeForDataDrivenPage', () => {
+  const site = { id: 1, visible_faq_cap: 5, visible_faq_baseline: 0, url_file_map: { pages: {} } };
+
+  test('visible when the live page has no existing FAQ and the cap is open', async () => {
+    const readLivePage = async () => ({ ok: true, analysis: { faqVisibleQuestionCount: 0 } });
+    const result = await decideFaqRenderModeForDataDrivenPage(site, '/compare/a-vs-b/', { readLivePage });
+    assert.equal(result.mode, 'visible');
+    assert.ok(result.confidence >= 70);
+  });
+
+  test('schema-only when the live page already shows a visible FAQ', async () => {
+    const readLivePage = async () => ({ ok: true, analysis: { faqVisibleQuestionCount: 3 } });
+    const result = await decideFaqRenderModeForDataDrivenPage(site, '/compare/a-vs-b/', { readLivePage });
+    assert.equal(result.mode, 'schema-only');
+    assert.equal(result.source, 'live-page');
+  });
+
+  test('schema-only when the sitewide visible-FAQ cap is already exhausted', async () => {
+    const readLivePage = async () => ({ ok: true, analysis: { faqVisibleQuestionCount: 0 } });
+    const cappedSite = { ...site, visible_faq_cap: 0 };
+    const result = await decideFaqRenderModeForDataDrivenPage(cappedSite, '/compare/a-vs-b/', { readLivePage });
+    assert.equal(result.mode, 'schema-only');
+    assert.equal(result.source, 'cap');
+  });
+});
+
+describe('resolveFaqRenderMode — pagination/data-array routes with no per-page file', () => {
+  const site = {
+    id: 1, visible_faq_cap: 5, visible_faq_baseline: 0,
+    url_file_map: {
+      pages: {},
+      patterns: [{
+        match: '^/compare/([^/]+)/?$',
+        adapters: { faq: { id: 'data-array-content', dataFile: 'src/_data/comparisons.js', itemsField: 'faqs' } },
+      }],
+    },
+  };
+
+  test('routes to decideFaqRenderModeForDataDrivenPage instead of the generic "no-template" confidence-0 stop', async () => {
+    const fetchFile = async () => { throw new Error('should not fetch a per-page file — there is none'); };
+    const result = await resolveFaqRenderMode(site, { content: { page: 'https://example.com/compare/a-vs-b/' } }, { fetchFile });
+    assert.notEqual(result.source, 'no-template');
+    assert.ok(result.mode); // a real decision, not a stop
+  });
+
+  test('still falls through to the honest "no-template" stop when there is no matching adapter at all', async () => {
+    const bareSite = { ...site, url_file_map: { pages: {}, patterns: [] } };
+    const fetchFile = async () => null;
+    const result = await resolveFaqRenderMode(bareSite, { content: { page: 'https://example.com/unmapped/' } }, { fetchFile });
+    assert.equal(result.source, 'no-template');
+    assert.equal(result.mode, null);
   });
 });
