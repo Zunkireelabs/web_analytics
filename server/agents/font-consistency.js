@@ -138,7 +138,18 @@ export async function run({
   // (see that file's siteConvention field) — this site's own evidence,
   // never a value carried over from another tenant or another finding.
   const classOutlier = !safeOutlier ? outliers.find((o) => o.siteConvention) : null;
-  const fixableOutlier = safeOutlier || classOutlier;
+  // The element carries no class of its own (styled purely via an ancestor
+  // wrapper + tag selector, e.g. Chayce's ".hiw-hero h1") but this run's own
+  // evidence already confirmed that wrapper class is unique to this one page
+  // AND its real declared value is a plain length — see
+  // findFontSizeOutliers' scopedSelector field.
+  const scopedOutlier = !safeOutlier && !classOutlier ? outliers.find((o) => o.scopedSelector) : null;
+  const fixableOutlier = safeOutlier || classOutlier || scopedOutlier;
+  // A page-scoped ancestor selector was confirmed safe to target, but its
+  // real declared value is a fluid/responsive expression (clamp()/vw/calc())
+  // — genuinely unfixable without inventing new responsive bounds, not the
+  // generic "shared CSS" reason every other unresolvable case gets.
+  const fluidOutlier = !fixableOutlier ? outliers.find((o) => o.scopedButFluid) : null;
 
   const finding = outliers.length ? makeFinding({
     id: 'font-consistency:size-outlier',
@@ -166,6 +177,17 @@ export async function run({
         textRole: classOutlier.group === 'p' ? 'body' : 'heading',
       },
       effort: effortForGenerator('content-integrity-repair'),
+    } : scopedOutlier ? {
+      label: 'Correct this page-specific heading style to this site\'s own real convention',
+      generatorId: 'content-integrity-repair',
+      params: {
+        page: scopedOutlier.url,
+        fixType: 'typography-drift-scoped',
+        ancestorClass: scopedOutlier.scopedSelector.ancestorClass,
+        tag: scopedOutlier.scopedSelector.tag,
+        expectedFontSize: scopedOutlier.expectedFontSize,
+      },
+      effort: effortForGenerator('content-integrity-repair'),
     } : null,
     // No safe automatic fix, but a real, measured defect — so it goes to the
     // Action Center as a read-only row rather than being dropped, which is
@@ -181,8 +203,10 @@ export async function run({
     reportOnly: fixableOutlier ? null : {
       kind: 'font-size-inconsistency',
       label: 'Text renders at an inconsistent size',
-      page: outliers[0].url,
-      whyBlocked: 'This font-size comes from a shared CSS class with no resolvable single-element replacement (either this template has too few sampled pages of its own to have a confirmed convention, or the class is already correct and a stylesheet rule is the real cause) — changing it blind could move every other element on the site that shares the class. Someone needs to decide which size is the correct one.',
+      page: fluidOutlier ? fluidOutlier.url : outliers[0].url,
+      whyBlocked: fluidOutlier
+        ? `This page's own heading style is confirmed scoped to only this one page (no other page uses "${fluidOutlier.scopedSelector?.ancestorClass || fluidOutlier.sample.ancestorClass}"), so a fix here can't affect any other element — but its real font-size is a responsive expression ("${fluidOutlier.scopedButFluid}"), not a plain size. Correcting it would mean inventing new responsive bounds that haven't been observed anywhere on this site, so someone needs to pick the right fluid value.`
+        : 'This font-size comes from a shared CSS class with no resolvable single-element replacement (either this template has too few sampled pages of its own to have a confirmed convention, or the class is already correct and a stylesheet rule is the real cause) — changing it blind could move every other element on the site that shares the class. Someone needs to decide which size is the correct one.',
     },
     expectedImpact: { label: outliers.length >= 3 ? 'High' : 'Medium', basis: 'computed', value: outliers.length },
   }) : null;

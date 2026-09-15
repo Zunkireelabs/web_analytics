@@ -12,6 +12,7 @@
 // (not safely auto-fixable) apart from a one-element inline override (is).
 import { launchBrowser, discoverPages } from '../../design-agent/live-analysis/capture.js';
 import { classifyPageType } from '../../design-agent/live-analysis/schema.js';
+import { extractScopedFontSizeDeclaration } from './font-consistency-analysis.js';
 
 const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
@@ -19,22 +20,44 @@ const MAX_PARAGRAPHS_PER_PAGE = 20;
 
 /* eslint-disable no-undef */
 function extractStyleSamplesInPage(maxParagraphs) {
-  function sample(el) {
+  // The nearest ancestor carrying its own class — the real wrapper a
+  // headless-of-its-own-class heading (a bare `<h1>`, styled entirely via
+  // `.some-wrapper h1{...}` rather than a class on the element itself) is
+  // actually scoped by. Needed because font-consistency-analysis.js's
+  // existing class-swap fix has nothing to act on when the element itself
+  // carries no class at all — this is what lets it instead recognize a
+  // SCOPED ancestor-selector fix as safe (see that file's
+  // ancestorClassIsPageUnique/buildScopedFontSizeFix).
+  function nearestAncestorClass(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      if (typeof node.className === 'string' && node.className.trim()) {
+        return node.className.trim().split(/\s+/)[0];
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function sample(el, { captureAncestor = false } = {}) {
     if (!el) return null;
     const cs = window.getComputedStyle(el);
+    const classes = (el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '';
     return {
       tag: el.tagName.toLowerCase(),
-      classes: (el.className && typeof el.className === 'string') ? el.className.trim().slice(0, 300) : '',
+      classes,
       fontSize: cs.fontSize,
       inlineStyle: el.getAttribute('style') || null,
       outerHtml: el.outerHTML,
       text: el.textContent.trim().slice(0, 120),
+      // Only meaningful (and only ever looked up) for a heading with no
+      // class of its own — see extractStyleSamplesInPage's caller.
+      ancestorClass: captureAncestor && !classes ? nearestAncestorClass(el) : null,
     };
   }
-  const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map(sample).filter(Boolean);
+  const headings = [...document.querySelectorAll('h1, h2, h3, h4')].map((el) => sample(el, { captureAncestor: true })).filter(Boolean);
   const paragraphs = [...document.querySelectorAll('main p, article p, body > p')]
     .slice(0, maxParagraphs)
-    .map(sample)
+    .map((el) => sample(el))
     .filter(Boolean);
   return { headings, paragraphs };
 }
@@ -43,6 +66,25 @@ function extractStyleSamplesInPage(maxParagraphs) {
 export async function captureFontSamplePage(browserPage, url) {
   await browserPage.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const { headings, paragraphs } = await browserPage.evaluate(extractStyleSamplesInPage, MAX_PARAGRAPHS_PER_PAGE);
+
+  // The real authored CSS text (e.g. "clamp(40px,6vw,74px)"), never the
+  // browser-resolved pixel number getComputedStyle above already captured —
+  // needed to tell a plain, safely-swappable length apart from a fluid/
+  // responsive expression this platform refuses to flatten (see
+  // font-consistency-analysis.js's isFlatLength). `page.content()` is the
+  // DOM's own live-serialized HTML, not a second network fetch — for this
+  // class of static-site template, an inline <style> block's text content
+  // round-trips through DOM serialization byte-for-byte (no template syntax
+  // survives into rendered output for a plain CSS declaration), so this is
+  // exactly what the real template source also contains.
+  const headingsNeedingRaw = headings.filter((h) => h.ancestorClass);
+  if (headingsNeedingRaw.length) {
+    const html = await browserPage.content();
+    for (const h of headingsNeedingRaw) {
+      h.rawFontSizeDeclaration = extractScopedFontSizeDeclaration(html, h.ancestorClass, h.tag)?.value || null;
+    }
+  }
+
   // classifyPageType is a pure URL-shape heuristic (design-agent/live-analysis/
   // schema.js) — the same one the Design Agent's own capture already tags
   // every page with. Threading it through here is what lets

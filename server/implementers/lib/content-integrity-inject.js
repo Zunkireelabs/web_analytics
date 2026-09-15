@@ -4,17 +4,20 @@ import { baseBranch, pushDraftBranch } from './github-ops.js';
 import { detectConflictMarkers } from './conflict-marker-check.js';
 import { applyExactMatchPatches, describePatchFailure } from './exact-match-patch.js';
 
-// Applies generators/content-integrity-repair.js's seven fix shapes against
+// Applies generators/content-integrity-repair.js's eight fix shapes against
 // the real source file. 'malformed-table'/'raw-text-table'/'duplicate-faq'/
-// 'font-size-override'/'table-style-drift'/'typography-drift' all replace
-// one exact HTML anchor (anchorHtml) with new markup (or empty string, for a
-// removal); 'faq-schema-mismatch' replaces the exact raw FAQPage <script>
+// 'font-size-override'/'table-style-drift'/'typography-drift'/
+// 'typography-drift-scoped' all replace one exact HTML (or CSS declaration)
+// anchor (anchorHtml) with new text (or empty string, for a removal);
+// 'faq-schema-mismatch' replaces the exact raw FAQPage <script>
 // text with corrected JSON, same shape as schema-repair-inject.js's
 // 'repair-malformed'. Every branch anchors on the EXACT text captured at
 // detection time (page-content.js's static fetch for the first two and
 // faq-schema-mismatch/duplicate-faq; a real Playwright DOM capture for
-// font-size-override and the two design-consistency fixTypes — see
-// font-consistency-capture.js and design-agent/live-analysis/capture.js) —
+// font-size-override and the two design-consistency fixTypes; a fresh
+// re-fetch for typography-drift-scoped, since its anchor is CSS text rather
+// than an element outerHTML — see font-consistency-capture.js and
+// design-agent/live-analysis/capture.js) —
 // see exact-match-patch.js for why that's the only safe way to patch
 // arbitrary existing template source; a site that changed since detection
 // (edited the table, removed the FAQ, re-rendered from different data,
@@ -29,7 +32,8 @@ import { applyExactMatchPatches, describePatchFailure } from './exact-match-patc
 export function buildEdit(content) {
   if (content.fixType === 'malformed-table' || content.fixType === 'raw-text-table'
     || content.fixType === 'duplicate-faq' || content.fixType === 'font-size-override'
-    || content.fixType === 'table-style-drift' || content.fixType === 'typography-drift') {
+    || content.fixType === 'table-style-drift' || content.fixType === 'typography-drift'
+    || content.fixType === 'typography-drift-scoped') {
     return { anchor: content.anchorHtml, replacement: content.replacement };
   }
   if (content.fixType === 'faq-schema-mismatch') {

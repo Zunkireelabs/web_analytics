@@ -10,8 +10,8 @@ mock.module(resolve('../llm.js'), { namedExports: { callLLM: async () => 'stubbe
 
 const { run, meta } = await import('./font-consistency.js');
 
-function h(tag, fontSize, outerHtml, classes = '') {
-  return { tag, fontSize, outerHtml, inlineStyle: null, classes, text: '' };
+function h(tag, fontSize, outerHtml, classes = '', ancestorClass = null, rawFontSizeDeclaration = null) {
+  return { tag, fontSize, outerHtml, inlineStyle: null, classes, text: '', ancestorClass, rawFontSizeDeclaration };
 }
 
 describe('font-consistency agent', () => {
@@ -97,6 +97,53 @@ describe('font-consistency agent', () => {
     assert.equal(finding.recommendedAction.params.fixType, 'typography-drift');
     assert.equal(finding.recommendedAction.params.siteConvention, 'text-h1');
     assert.equal(finding.recommendedAction.params.page, 'https://example.com/c');
+  });
+
+  test('flags an unclassed, page-uniquely-scoped outlier and routes it through typography-drift-scoped', async () => {
+    // Chayce's real shape: bare <h1>, no class of its own, styled entirely
+    // via ".hiw-hero h1" — a wrapper class no other sampled page reuses,
+    // with a plain (non-fluid) declared value.
+    const pages = [
+      { url: 'https://example.com/a', headings: [h('h1', '48px', '<h1>A</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h1', '48px', '<h1>B</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h1', '48px', '<h1>C</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/how-it-works', headings: [h('h1', '74px', '<h1>D</h1>', '', 'hiw-hero', '74px')], paragraphs: [] },
+    ];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => pages,
+    });
+    assert.equal(result.facts.findings.length, 1);
+    const finding = result.facts.findings[0];
+    assert.ok(finding.recommendedAction);
+    assert.equal(finding.recommendedAction.generatorId, 'content-integrity-repair');
+    assert.equal(finding.recommendedAction.params.fixType, 'typography-drift-scoped');
+    assert.equal(finding.recommendedAction.params.ancestorClass, 'hiw-hero');
+    assert.equal(finding.recommendedAction.params.tag, 'h1');
+    assert.equal(finding.recommendedAction.params.expectedFontSize, '48px');
+    assert.equal(finding.recommendedAction.params.page, 'https://example.com/how-it-works');
+    assert.equal(finding.reportOnly, null);
+  });
+
+  test('a page-uniquely-scoped outlier with a fluid declared value stays reportOnly with a specific, real reason', async () => {
+    const pages = [
+      { url: 'https://example.com/a', headings: [h('h1', '48px', '<h1>A</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/b', headings: [h('h1', '48px', '<h1>B</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/c', headings: [h('h1', '48px', '<h1>C</h1>', '', 'page-hero', '48px')], paragraphs: [] },
+      { url: 'https://example.com/how-it-works', headings: [h('h1', '74px', '<h1>D</h1>', '', 'hiw-hero', 'clamp(40px,6vw,74px)')], paragraphs: [] },
+    ];
+    const result = await run({
+      siteId: 1,
+      fetchSite: async () => ({ id: 1, website_domain: 'example.com' }),
+      capture: async () => pages,
+    });
+    assert.equal(result.facts.findings.length, 1);
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction, null);
+    assert.equal(finding.reportOnly.kind, 'font-size-inconsistency');
+    assert.match(finding.reportOnly.whyBlocked, /confirmed scoped to only this one page/);
+    assert.match(finding.reportOnly.whyBlocked, /clamp\(40px,6vw,74px\)/);
   });
 
   test('flags an outlier but attaches no recommendedAction when its class already matches the resolved convention', async () => {

@@ -1,6 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasInlineFontSizeOverride, buildFontSizeOverrideRemoved, findFontSizeOutliers } from './font-consistency-analysis.js';
+import {
+  hasInlineFontSizeOverride, buildFontSizeOverrideRemoved, findFontSizeOutliers,
+  extractScopedFontSizeDeclaration, isFlatLength, buildScopedFontSizeFix,
+} from './font-consistency-analysis.js';
 
 describe('hasInlineFontSizeOverride', () => {
   test('true when the inline style attribute sets font-size', () => {
@@ -34,8 +37,8 @@ describe('buildFontSizeOverrideRemoved', () => {
 function page(url, headings = [], paragraphs = [], pageType = null) {
   return { url, pageType, headings, paragraphs };
 }
-function h(tag, fontSize, outerHtml, inlineStyle = null, classes = '') {
-  return { tag, fontSize, outerHtml, inlineStyle, classes, text: '' };
+function h(tag, fontSize, outerHtml, inlineStyle = null, classes = '', ancestorClass = null, rawFontSizeDeclaration = null) {
+  return { tag, fontSize, outerHtml, inlineStyle, classes, text: '', ancestorClass, rawFontSizeDeclaration };
 }
 
 describe('findFontSizeOutliers', () => {
@@ -134,5 +137,111 @@ describe('findFontSizeOutliers', () => {
     const outliers = findFontSizeOutliers(pages);
     assert.equal(outliers.length, 1);
     assert.equal(outliers[0].siteConvention, null);
+  });
+
+  test('an unclassed outlier with a page-unique ancestor wrapper and a flat value gets a scopedSelector', () => {
+    // Chayce's own real shape: bare <h1>, no class, styled via ".hiw-hero h1"
+    // — a wrapper class no other sampled page uses.
+    const pages = [
+      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/how-it-works', [h('h1', '74px', '<h1>D</h1>', null, '', 'hiw-hero', '74px')]),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.deepEqual(outliers[0].scopedSelector, { ancestorClass: 'hiw-hero', tag: 'h1' });
+    assert.equal(outliers[0].scopedButFluid, null);
+  });
+
+  test('an ancestor wrapper class reused across other pages never gets a scopedSelector (real cross-page blast radius)', () => {
+    const pages = [
+      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
+      // Same wrapper class as the majority pages, not unique to itself.
+      page('https://example.com/d', [h('h1', '30px', '<h1>D</h1>', null, '', 'page-hero', '30px')]),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.equal(outliers[0].scopedSelector, null);
+  });
+
+  test('a page-unique ancestor wrapper with a fluid declared value is reported as scopedButFluid, not auto-fixable', () => {
+    const pages = [
+      page('https://example.com/a', [h('h1', '48px', '<h1>A</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/b', [h('h1', '48px', '<h1>B</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/c', [h('h1', '48px', '<h1>C</h1>', null, '', 'page-hero', '48px')]),
+      page('https://example.com/how-it-works', [h('h1', '74px', '<h1>D</h1>', null, '', 'hiw-hero', 'clamp(40px,6vw,74px)')]),
+    ];
+    const outliers = findFontSizeOutliers(pages);
+    assert.equal(outliers.length, 1);
+    assert.equal(outliers[0].scopedSelector, null);
+    assert.equal(outliers[0].scopedButFluid, 'clamp(40px,6vw,74px)');
+  });
+});
+
+describe('extractScopedFontSizeDeclaration', () => {
+  test('finds the exact declaration for an ancestor-wrapper + tag selector', () => {
+    const html = '<style>.hiw-hero h1{color:#fff;font-size:clamp(40px,6vw,74px);line-height:1.04}</style>';
+    const found = extractScopedFontSizeDeclaration(html, 'hiw-hero', 'h1');
+    assert.equal(found.value, 'clamp(40px,6vw,74px)');
+    assert.equal(found.declarationText, '.hiw-hero h1{color:#fff;font-size:clamp(40px,6vw,74px);line-height:1.04}');
+  });
+
+  test('does not match a descendant rule for a different element under the same wrapper', () => {
+    const html = '<style>.hiw-hero h1 em{color:gold}.hiw-hero p{font-size:18px}</style>';
+    assert.equal(extractScopedFontSizeDeclaration(html, 'hiw-hero', 'h1'), null);
+  });
+
+  test('refuses when the selector appears more than once (ambiguous)', () => {
+    const html = '<style>.hiw-hero h1{font-size:48px}</style><style>.hiw-hero h1{font-size:48px}</style>';
+    assert.equal(extractScopedFontSizeDeclaration(html, 'hiw-hero', 'h1'), null);
+  });
+
+  test('refuses when the matched rule has no font-size at all', () => {
+    const html = '<style>.hiw-hero h1{color:#fff}</style>';
+    assert.equal(extractScopedFontSizeDeclaration(html, 'hiw-hero', 'h1'), null);
+  });
+
+  test('refuses when the selector is not found at all', () => {
+    assert.equal(extractScopedFontSizeDeclaration('<style>.other h1{font-size:20px}</style>', 'hiw-hero', 'h1'), null);
+  });
+});
+
+describe('isFlatLength', () => {
+  test('true for plain px/pt lengths', () => {
+    assert.equal(isFlatLength('48px'), true);
+    assert.equal(isFlatLength('12pt'), true);
+  });
+  test('false for fluid/dynamic expressions', () => {
+    assert.equal(isFlatLength('clamp(40px,6vw,74px)'), false);
+    assert.equal(isFlatLength('calc(1rem + 2vw)'), false);
+    assert.equal(isFlatLength('4vw'), false);
+    assert.equal(isFlatLength('120%'), false);
+    assert.equal(isFlatLength('var(--h1-size)'), false);
+  });
+});
+
+describe('buildScopedFontSizeFix', () => {
+  test('swaps only the font-size value, keeping the rest of the declaration byte-identical', () => {
+    const html = '<style>.hiw-hero h1{color:#fff;font-size:74px;line-height:1.04}</style>';
+    const fix = buildScopedFontSizeFix(html, 'hiw-hero', 'h1', '48px');
+    assert.equal(fix.anchorHtml, '.hiw-hero h1{color:#fff;font-size:74px;line-height:1.04}');
+    assert.equal(fix.replacement, '.hiw-hero h1{color:#fff;font-size:48px;line-height:1.04}');
+  });
+
+  test('refuses (returns null) when the real value is a fluid expression, never flattens it', () => {
+    const html = '<style>.hiw-hero h1{font-size:clamp(40px,6vw,74px)}</style>';
+    assert.equal(buildScopedFontSizeFix(html, 'hiw-hero', 'h1', '48px'), null);
+  });
+
+  test('refuses when the declaration already matches the expected value (would be a no-op)', () => {
+    const html = '<style>.hiw-hero h1{font-size:48px}</style>';
+    assert.equal(buildScopedFontSizeFix(html, 'hiw-hero', 'h1', '48px'), null);
+  });
+
+  test('refuses when the selector cannot be uniquely located, same as extractScopedFontSizeDeclaration', () => {
+    assert.equal(buildScopedFontSizeFix('<style>.other h1{font-size:20px}</style>', 'hiw-hero', 'h1', '48px'), null);
   });
 });
