@@ -6,6 +6,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let site;
 let inventory;
 let perfRowsByPage;
+let queryRows;
 
 mock.module(resolve('../store/read.js'), {
   namedExports: {
@@ -13,6 +14,7 @@ mock.module(resolve('../store/read.js'), {
     getSearchPerformanceForPages: async (siteId, start, end, pages) => (
       pages.filter((p) => perfRowsByPage.has(p)).map((p) => ({ dim_value: p, ...perfRowsByPage.get(p) }))
     ),
+    getQueryPageMetrics: async () => queryRows,
   },
 });
 mock.module(resolve('../store/page-inventory.js'), {
@@ -25,6 +27,7 @@ beforeEach(() => {
   site = { id: 1, timezone: 'UTC' };
   inventory = [];
   perfRowsByPage = new Map();
+  queryRows = [];
 });
 
 describe('query-param-duplicates agent', () => {
@@ -81,6 +84,25 @@ describe('query-param-duplicates agent', () => {
       assert.equal(finding.evidence.confidence, 'medium');
       assert.equal(finding.recommendedAction, null);
       assert.equal(finding.reportOnly.kind, 'query-param-duplicate');
+    });
+
+    test('MEDIUM escalates to HIGH when query sets overlap substantially and one variant has strictly more clicks', async () => {
+      inventory = [
+        { page: 'https://example.com/resources/', orphaned: false },
+        { page: 'https://example.com/resources/?type=ebook', orphaned: false },
+        { page: 'https://example.com/resources/?type=case-study', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/resources/?type=ebook', { clicks: 30, impressions: 300 });
+      perfRowsByPage.set('https://example.com/resources/?type=case-study', { clicks: 4, impressions: 40 });
+      queryRows = ['resources', 'guides', 'downloads'].flatMap((q) => [
+        { query: q, page: 'https://example.com/resources/?type=ebook', impressions: 50 },
+        { query: q, page: 'https://example.com/resources/?type=case-study', impressions: 10 },
+      ]);
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/resources/?type=ebook');
+      assert.equal(result.facts.autoConsolidated, 1);
     });
 
     test('LOW confidence: no real traffic for any variant -> stays reportOnly', async () => {

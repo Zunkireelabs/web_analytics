@@ -1,14 +1,15 @@
-import { getSiteById, getSearchPerformanceForPages } from '../store/read.js';
+import { getSiteById } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
 import { daysAgoInTz } from '../util/dates.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
   id: 'templated-duplicates',
   name: 'Templated Near-Duplicate Page Family Detector',
-  description: 'Groups a site\'s own real pages by which url_file_map.patterns entry generated them, and flags a large templated family (e.g. a location × service combination section) as a likely near-duplicate/thin-content risk. Confidence-gated: 90 days of real GSC traffic per family member, restricted to members old enough to have had a fair chance to rank, decides whether exactly one member is the real, earning page and every other member has genuinely earned nothing — if so, the losers get the SAME evidence-gated canonical-consolidation url-variant-duplicates.js/query-param-duplicates.js/sitemap-conflict.js already use, pointing them at the one member Google actually sends traffic to.',
+  description: 'Groups a site\'s own real pages by which url_file_map.patterns entry generated them, and flags a large templated family (e.g. a location × service combination section) as a likely near-duplicate/thin-content risk. Confidence-gated (lib/duplicate-evidence.js, shared with url-variant-duplicates.js/query-param-duplicates.js): 90 days of real GSC traffic per family member, restricted to members old enough to have had a fair chance to rank, decides a clean winner outright, or — with 2+ traffic-bearing members — a query-overlap check across every pair can still confirm shared search intent before auto-consolidating the rest onto it.',
   category: 'seo',
   version: 1,
 };
@@ -35,10 +36,6 @@ const EXCLUDED_CONTENT_TYPES = new Set(['blog', 'product']);
 // every page, since getOrClassifyPageContentType is cached per (site, page)
 // but still costs a real LLM call the first time it sees a page.
 const SAMPLE_SIZE = 6;
-
-// Same 90-day rationale as url-variant-duplicates.js: long enough that a
-// genuine zero is real evidence, not a quiet week.
-const EVIDENCE_LOOKBACK_DAYS = 90;
 
 // A member younger than the lookback window hasn't had a fair chance to
 // earn traffic yet — "zero clicks in its first two weeks" is not evidence
@@ -99,8 +96,7 @@ export async function run({ siteId }) {
     };
   }
 
-  const evidenceEnd = daysAgoInTz(site.timezone || 'UTC', 0);
-  const evidenceStart = daysAgoInTz(site.timezone || 'UTC', EVIDENCE_LOOKBACK_DAYS);
+  const { start: evidenceStart, end: evidenceEnd } = evidenceWindow(site);
   const ageThreshold = new Date(daysAgoInTz(site.timezone || 'UTC', MIN_AGE_DAYS_FOR_EVIDENCE));
 
   const findings = [];
@@ -122,51 +118,69 @@ export async function run({ siteId }) {
 
     const priority = pages.length >= MIN_GROUP_SIZE * 2 ? 'high' : 'medium';
 
-    const perfRows = await getSearchPerformanceForPages(siteId, evidenceStart, evidenceEnd, pages);
-    const perfByPage = new Map(perfRows.map((r) => [r.dim_value, { clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0 }]));
     const evidenceEligible = group.rows.filter((r) => r.first_seen_at && new Date(r.first_seen_at) <= ageThreshold);
-    const traffic = evidenceEligible.map((r) => ({ page: r.page, ...(perfByPage.get(r.page) || { clicks: 0, impressions: 0 }) }));
-    const withTraffic = traffic.filter((t) => t.clicks > 0 || t.impressions > 0);
     // Only act when EVERY eligible member has a verdict (not just a
     // majority) — a group where most members are still too young to judge
     // has too little evidence-eligible population to trust a single
     // winner, even if the few eligible ones look clean.
-    const winner = evidenceEligible.length >= MIN_GROUP_SIZE && withTraffic.length === 1 ? withTraffic[0] : null;
+    if (evidenceEligible.length < MIN_GROUP_SIZE) {
+      findings.push(makeFinding({
+        id: `templated-duplicates:pattern:${group.pattern.match}`,
+        evidence: { pattern: group.pattern.match, pageCount: pages.length, contentType: dominant, evidenceEligibleCount: evidenceEligible.length, confidence: 'low' },
+        whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern were classified as the same content type (${dominant}) — a templated family this large commonly reads to Google as near-duplicate/thin content even when every page has its own valid canonical tag. Most members are too new for 90 days of traffic evidence to mean anything yet.`,
+        priority,
+        recommendedAction: null,
+        reportOnly: {
+          kind: 'templated-duplicate-family',
+          label: `${pages.length} templated pages may read as near-duplicate content`,
+          page: [...pages].sort()[0],
+          whyBlocked: 'Most of this family is too new for 90 days of traffic evidence to be meaningful — revisit once more members have had a fair chance to rank.',
+        },
+        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: 0 },
+      }));
+      continue;
+    }
 
-    if (winner) {
-      const losers = evidenceEligible.map((r) => r.page).filter((p) => p !== winner.page);
+    const eligiblePages = evidenceEligible.map((r) => r.page);
+    const traffic = (await fetchTraffic(siteId, eligiblePages, evidenceStart, evidenceEnd));
+    const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
+
+    if (decision.winner) {
+      const losers = eligiblePages.filter((p) => p !== decision.winner.page);
       findings.push(makeFinding({
         id: `templated-duplicates:pattern:${group.pattern.match}`,
         evidence: {
           pattern: group.pattern.match, pageCount: pages.length, contentType: dominant,
-          evidenceEligibleCount: evidenceEligible.length, traffic, winner: winner.page, confidence: 'high',
+          evidenceEligibleCount: evidenceEligible.length, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap,
         },
-        whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern, all classified as ${dominant} content — ${winner.page} has all ${winner.clicks} real click(s)/${winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days among the ${evidenceEligible.length} members old enough to judge, and every other eligible member has earned genuinely nothing. Confident enough to consolidate automatically.`,
+        whyItMatters: decision.queryOverlap?.overlapping
+          ? `${pages.length} pages under the "${group.pattern.match}" URL pattern, all classified as ${dominant} content — ${decision.winner.page} earns more real clicks than every other eligible member, and their real search queries overlap substantially, confirming shared search intent. Confident enough to consolidate automatically.`
+          : `${pages.length} pages under the "${group.pattern.match}" URL pattern, all classified as ${dominant} content — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days among the ${evidenceEligible.length} members old enough to judge, and every other eligible member has earned genuinely nothing. Confident enough to consolidate automatically.`,
         priority,
         // One recommendation per losing page (each is its own file/PR
         // target), same shape as url-variant-duplicates.js — the
         // coordinator's own dedup means re-running this doesn't re-draft an
         // already-open recommendation for the same (page, 'canonical').
         recommendedAction: {
-          label: `Canonicalize templated duplicate → ${winner.page}`,
+          label: `Canonicalize templated duplicate → ${decision.winner.page}`,
           generatorId: 'canonical',
-          params: { page: losers[0], canonicalTarget: winner.page },
+          params: { page: losers[0], canonicalTarget: decision.winner.page },
           effort: effortFromDifficulty(1),
         },
-        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: winner.clicks },
+        expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: decision.winner.clicks },
       }));
       continue;
     }
 
+    const withTraffic = decision.withTraffic;
     findings.push(makeFinding({
       id: `templated-duplicates:pattern:${group.pattern.match}`,
       evidence: {
         pattern: group.pattern.match, pageCount: pages.length, contentType: dominant,
         samplePages: [...pages].sort().slice(0, 5),
-        evidenceEligibleCount: evidenceEligible.length, traffic,
-        confidence: withTraffic.length > 1 ? 'medium' : 'low',
+        evidenceEligibleCount: evidenceEligible.length, traffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap,
       },
-      whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern were classified as the same content type (${dominant}) — a templated family this large commonly reads to Google as near-duplicate/thin content even when every page has its own valid canonical tag.${withTraffic.length > 1 ? ` ${withTraffic.length} members earn real traffic independently, so there's no single winner to consolidate onto.` : evidenceEligible.length < MIN_GROUP_SIZE ? ' Most members are too new for 90 days of traffic evidence to mean anything yet.' : ' No member earns real traffic yet, so there\'s no winner to point the rest at.'}`,
+      whyItMatters: `${pages.length} pages under the "${group.pattern.match}" URL pattern were classified as the same content type (${dominant}) — a templated family this large commonly reads to Google as near-duplicate/thin content even when every page has its own valid canonical tag.${withTraffic.length > 1 ? ` ${withTraffic.length} members earn real traffic independently${decision.queryOverlap && !decision.queryOverlap.overlapping ? ' with no confirmed shared search intent' : ''}, so there's no single winner to consolidate onto.` : ' No member earns real traffic yet, so there\'s no winner to point the rest at.'}`,
       priority,
       // Differentiating each page with genuinely unique content, or
       // consolidating/pruning the weaker combinations, changes which pages
@@ -180,10 +194,8 @@ export async function run({ siteId }) {
         label: `${pages.length} templated pages may read as near-duplicate content`,
         page: [...pages].sort()[0],
         whyBlocked: withTraffic.length > 1
-          ? 'More than one member earns real search traffic — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning real clicks.'
-          : evidenceEligible.length < MIN_GROUP_SIZE
-            ? 'Most of this family is too new for 90 days of traffic evidence to be meaningful — revisit once more members have had a fair chance to rank.'
-            : 'No member of this family earns real traffic yet, so there\'s no evidenced winner to consolidate the rest onto — needs a person to decide whether to add unique content or prune the family.',
+          ? 'More than one member earns real search traffic with no confirmed shared intent — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning its own real clicks.'
+          : 'No member of this family earns real traffic yet, so there\'s no evidenced winner to consolidate the rest onto — needs a person to decide whether to add unique content or prune the family.',
       },
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: 0 },
     }));

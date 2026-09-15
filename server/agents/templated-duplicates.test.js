@@ -7,6 +7,7 @@ let site;
 let inventory;
 let contentTypeByPage; // page -> contentType string, or a function(page) => contentType
 let perfRowsByPage; // page -> {clicks, impressions}
+let queryRows;
 
 mock.module(resolve('../store/read.js'), {
   namedExports: {
@@ -14,6 +15,7 @@ mock.module(resolve('../store/read.js'), {
     getSearchPerformanceForPages: async (siteId, start, end, pages) => (
       pages.filter((p) => perfRowsByPage.has(p)).map((p) => ({ dim_value: p, ...perfRowsByPage.get(p) }))
     ),
+    getQueryPageMetrics: async () => queryRows,
   },
 });
 mock.module(resolve('../store/page-inventory.js'), {
@@ -46,6 +48,7 @@ beforeEach(() => {
   inventory = [];
   contentTypeByPage = 'service';
   perfRowsByPage = new Map();
+  queryRows = [];
 });
 
 describe('templated-duplicates agent', () => {
@@ -116,6 +119,25 @@ describe('templated-duplicates agent', () => {
       const finding = result.facts.findings[0];
       assert.equal(finding.evidence.confidence, 'medium');
       assert.equal(finding.recommendedAction, null);
+    });
+
+    test('MEDIUM escalates to HIGH when query sets overlap substantially across every eligible member with real traffic', async () => {
+      inventory = pagesFor(LOCATION_PATTERN, 8);
+      perfRowsByPage.set(inventory[0].page, { clicks: 30, impressions: 300 });
+      perfRowsByPage.set(inventory[1].page, { clicks: 4, impressions: 40 });
+      queryRows = ['ai development', 'software company'].flatMap((q) => [
+        { query: q, page: inventory[0].page, impressions: 50 },
+        { query: q, page: inventory[1].page, impressions: 10 },
+      ]);
+      // three shared queries minimum required by duplicate-evidence.js —
+      // add one more shared term.
+      queryRows.push({ query: 'custom software', page: inventory[0].page, impressions: 20 });
+      queryRows.push({ query: 'custom software', page: inventory[1].page, impressions: 5 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, inventory[0].page);
+      assert.equal(result.facts.autoConsolidated, 1);
     });
 
     test('a family mostly too young for evidence never auto-consolidates, even if the few eligible members look clean', async () => {

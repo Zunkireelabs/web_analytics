@@ -6,6 +6,7 @@ const resolve = (p) => new URL(p, import.meta.url).href;
 let site;
 let inventory;
 let perfRowsByPage; // page -> {clicks, impressions} — absent means zero real traffic
+let queryRows; // [{query, page, impressions}] — for the medium->high query-overlap escalation
 
 mock.module(resolve('../store/read.js'), {
   namedExports: {
@@ -13,6 +14,7 @@ mock.module(resolve('../store/read.js'), {
     getSearchPerformanceForPages: async (siteId, start, end, pages) => (
       pages.filter((p) => perfRowsByPage.has(p)).map((p) => ({ dim_value: p, ...perfRowsByPage.get(p) }))
     ),
+    getQueryPageMetrics: async () => queryRows,
   },
 });
 mock.module(resolve('../store/page-inventory.js'), {
@@ -25,6 +27,7 @@ beforeEach(() => {
   site = { id: 1, timezone: 'UTC' };
   inventory = [];
   perfRowsByPage = new Map();
+  queryRows = [];
 });
 
 describe('url-variant-duplicates agent', () => {
@@ -110,6 +113,43 @@ describe('url-variant-duplicates agent', () => {
       assert.equal(finding.evidence.confidence, 'medium');
       assert.equal(finding.recommendedAction, null);
       assert.equal(finding.reportOnly.kind, 'url-variant-duplicate');
+    });
+
+    test('MEDIUM escalates to HIGH when query sets overlap substantially and one variant has strictly more clicks', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 90, impressions: 900 });
+      perfRowsByPage.set('https://example.com/about', { clicks: 5, impressions: 50 });
+      queryRows = ['company', 'contact us', 'about page'].flatMap((q) => [
+        { query: q, page: 'https://example.com/about/', impressions: 50 },
+        { query: q, page: 'https://example.com/about', impressions: 10 },
+      ]);
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/about/');
+      assert.equal(finding.evidence.queryOverlap.overlapping, true);
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
+      assert.equal(result.facts.autoConsolidated, 1);
+    });
+
+    test('MEDIUM stays MEDIUM when query sets do not overlap, even with a large traffic gap', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 90, impressions: 900 });
+      perfRowsByPage.set('https://example.com/about', { clicks: 5, impressions: 50 });
+      queryRows = [
+        { query: 'our company', page: 'https://example.com/about/', impressions: 50 },
+        { query: 'unrelated term', page: 'https://example.com/about', impressions: 10 },
+      ];
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'medium');
+      assert.equal(finding.recommendedAction, null);
     });
 
     test('LOW confidence: no real traffic evidence for any variant -> stays reportOnly', async () => {

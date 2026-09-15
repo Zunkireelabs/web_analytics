@@ -1,12 +1,12 @@
-import { getSiteById, getSearchPerformanceForPages } from '../store/read.js';
+import { getSiteById } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
-import { daysAgoInTz } from '../util/dates.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
 
 export const meta = {
   id: 'query-param-duplicates',
   name: 'Query-Param Faceted URL Duplicate Detector',
-  description: 'Groups a site\'s own already-known real URLs by their base path (query string stripped) and flags when two or more DIFFERENT query-string variants of the same page are all separately known/crawlable. Confidence-gated exactly like url-variant-duplicates.js: 90 days of real GSC clicks/impressions decide whether one URL in the group has ALL the real traffic (auto-consolidate) or the evidence is mixed/absent (human decision).',
+  description: 'Groups a site\'s own already-known real URLs by their base path (query string stripped) and flags when two or more DIFFERENT query-string variants of the same page are all separately known/crawlable. Confidence-gated exactly like url-variant-duplicates.js: 90 days of real GSC clicks/impressions decide a clean winner outright, or — with 2+ traffic-bearing variants — a query-overlap check across every pair can still confirm shared search intent before auto-consolidating.',
   category: 'technical',
   version: 1,
 };
@@ -33,11 +33,6 @@ function hasQuery(pageUrl) {
 // which is the actual duplication risk (multiple separately-indexable
 // facet combinations, not just one optional parameter existing).
 const MIN_QUERY_VARIANTS = 2;
-
-// Same rationale as url-variant-duplicates.js: 7-day daily-battery windows
-// are too short/noisy to safely call a variant "dead" — 90 days is long
-// enough that a genuine zero is real evidence, not a quiet week.
-const EVIDENCE_LOOKBACK_DAYS = 90;
 
 export async function run({ siteId }) {
   const site = await getSiteById(siteId);
@@ -74,54 +69,56 @@ export async function run({ siteId }) {
   }
 
   const allVariants = candidateGroups.flatMap(([, pagesSet]) => [...pagesSet]);
-  const evidenceEnd = daysAgoInTz(site.timezone || 'UTC', 0);
-  const evidenceStart = daysAgoInTz(site.timezone || 'UTC', EVIDENCE_LOOKBACK_DAYS);
-  const perfRows = await getSearchPerformanceForPages(siteId, evidenceStart, evidenceEnd, allVariants);
-  const perfByPage = new Map(perfRows.map((r) => [r.dim_value, { clicks: Number(r.clicks) || 0, impressions: Number(r.impressions) || 0 }]));
+  const { start: evidenceStart, end: evidenceEnd } = evidenceWindow(site);
+  const trafficByPage = new Map(
+    (await fetchTraffic(siteId, allVariants, evidenceStart, evidenceEnd)).map((t) => [t.page, t])
+  );
 
-  const findings = candidateGroups
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, pagesSet]) => {
-      const pages = [...pagesSet].sort();
-      const queryVariants = pages.filter(hasQuery);
-      const traffic = pages.map((p) => ({ page: p, ...(perfByPage.get(p) || { clicks: 0, impressions: 0 }) }));
-      const withTraffic = traffic.filter((t) => t.clicks > 0 || t.impressions > 0);
-      const winner = withTraffic.length === 1 ? withTraffic[0] : null;
+  const findings = [];
+  for (const [key, pagesSet] of [...candidateGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const pages = [...pagesSet].sort();
+    const queryVariants = pages.filter(hasQuery);
+    const traffic = pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
+    const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
 
-      if (winner) {
-        const losers = pages.filter((p) => p !== winner.page);
-        return makeFinding({
-          id: `query-param-duplicates:key:${key}`,
-          evidence: { basePath: key, variants: pages, traffic, winner: winner.page, confidence: 'high' },
-          whyItMatters: `${pages.length} URL variants of the same page (${key}) — ${winner.page} has all ${winner.clicks} real click(s)/${winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other ${losers.length} variant(s) have none. Confident enough to consolidate automatically.`,
-          priority: 'medium',
-          recommendedAction: {
-            label: `Canonicalize query-param variant → ${winner.page}`,
-            generatorId: 'canonical',
-            params: { page: losers[0], canonicalTarget: winner.page },
-            effort: effortFromDifficulty(1),
-          },
-          expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: winner.clicks },
-        });
-      }
-
-      return makeFinding({
+    if (decision.winner) {
+      const losers = pages.filter((p) => p !== decision.winner.page);
+      findings.push(makeFinding({
         id: `query-param-duplicates:key:${key}`,
-        evidence: { basePath: key, variants: pages, traffic, confidence: withTraffic.length > 1 ? 'medium' : 'low' },
-        whyItMatters: `${queryVariants.length} different query-string variants of the same page (${key}) are all separately known/crawlable — unless each one carries a canonical tag pointing back at the winning URL, Google can index them as separate, competing pages instead of one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
+        evidence: { basePath: key, variants: pages, traffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },
+        whyItMatters: decision.queryOverlap?.overlapping
+          ? `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than every other variant, and their real search queries overlap substantially, confirming shared search intent. Confident enough to consolidate automatically.`
+          : `${pages.length} URL variants of the same page (${key}) — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other ${losers.length} variant(s) have none. Confident enough to consolidate automatically.`,
         priority: 'medium',
-        recommendedAction: null,
-        reportOnly: {
-          kind: 'query-param-duplicate',
-          label: `${queryVariants.length} query-param variants of the same page`,
-          page: pages.find((p) => !hasQuery(p)) || pages[0],
-          whyBlocked: withTraffic.length > 1
-            ? 'More than one variant has real search traffic — picking a winner here would risk redirecting a URL that\'s still earning real clicks, so it needs a person to confirm which one is intended.'
-            : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm whether these already canonicalize correctly.',
+        recommendedAction: {
+          label: `Canonicalize query-param variant → ${decision.winner.page}`,
+          generatorId: 'canonical',
+          params: { page: losers[0], canonicalTarget: decision.winner.page },
+          effort: effortFromDifficulty(1),
         },
-        expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
-      });
-    });
+        expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: decision.winner.clicks },
+      }));
+      continue;
+    }
+
+    const withTraffic = decision.withTraffic;
+    findings.push(makeFinding({
+      id: `query-param-duplicates:key:${key}`,
+      evidence: { basePath: key, variants: pages, traffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
+      whyItMatters: `${queryVariants.length} different query-string variants of the same page (${key}) are all separately known/crawlable — unless each one carries a canonical tag pointing back at the winning URL, Google can index them as separate, competing pages instead of one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants${decision.queryOverlap && !decision.queryOverlap.overlapping ? ', and their real search queries don\'t overlap substantially, so they may genuinely serve different intents' : ''}, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
+      priority: 'medium',
+      recommendedAction: null,
+      reportOnly: {
+        kind: 'query-param-duplicate',
+        label: `${queryVariants.length} query-param variants of the same page`,
+        page: pages.find((p) => !hasQuery(p)) || pages[0],
+        whyBlocked: withTraffic.length > 1
+          ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm shared intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
+          : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm whether these already canonicalize correctly.',
+      },
+      expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
+    }));
+  }
 
   const facts = {
     checkedCount: live.length, groupsWithQueryVariants: findings.length,

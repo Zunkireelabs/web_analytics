@@ -23,7 +23,7 @@
 // backstop below because their target being "shared" IS the design, not an
 // accident of resolution.
 const GLOBAL_BY_DESIGN = new Set([
-  'analytics-install', 'security-headers', 'html-lang', 'llms-txt', 'robots-fix', 'sitemap',
+  'analytics-install', 'security-headers', 'html-lang', 'llms-txt', 'robots-fix', 'robots-bootstrap', 'sitemap',
 ]);
 
 export function actionScopeFor(generatorId) {
