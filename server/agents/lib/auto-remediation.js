@@ -3,7 +3,7 @@ import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftFo
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
-import { batchBranchName, beginBatchPush, checkBatchSequencing } from '../../implementers/lib/github-ops.js';
+import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
@@ -164,25 +164,19 @@ export async function autoRemediateSafeRecommendations(siteId, {
     return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'onboarding-analysis-pending' });
   }
 
-  // Batch sequencing gate (github-ops.js's checkBatchSequencing): never fork
-  // today's batch branch while a PREVIOUS day's batch PR/branch for this
-  // site is still unresolved — see that function's own comment for the
-  // confirmed 2026-09-08 incident this closes. Checked before ANYTHING else
-  // below builds a queue or generates a draft, so a blocked day creates
-  // zero new rows: nothing to abandon, nothing to duplicate, nothing to mark
-  // failed. The exact same eligible recommendations are simply reconsidered
-  // next time this function runs — this site's own hourly ship catch-up
-  // (isShipCatchupOwed treats a 0-shipped day as still owed) or tomorrow's
-  // scheduled run — so recovery is automatic the moment a human resolves
-  // yesterday's PR, with no separate retry timer of its own. Purely a
-  // per-site check (one `site` at a time), so one tenant's slow reviewer
-  // never holds up any other tenant's run, credential-sharing or not.
-  const batchSequencing = await checkBatchSequencing(site);
-  if (batchSequencing.blocked) {
-    console.log(`[auto-remediation] ${clientLabel}: today's batch is waiting — ${batchSequencing.priorBranch} (${batchSequencing.priorPrUrl || 'no PR opened yet'}) is still unresolved.`);
-    return finish({ attempted: 0, shipped: 0, failed: 0, skipped: 0, stoppedReason: 'previous-batch-unresolved' });
-  }
-
+  // No day-level gate here on purpose: a still-open, unmerged PR from a
+  // previous day's batch must never stop today's batch from running (each
+  // calendar day gets its own batchBranchName/PR regardless of yesterday's
+  // review status). What that old gate actually protected against — two
+  // days' batches independently touching the same file and silently
+  // colliding once the delayed PR merges (confirmed live: site 1,
+  // 2026-09-08, PR #86/#87) — is handled below at file granularity instead:
+  // pendingDraftFilePaths excludes any recommendation whose target file
+  // already has an earlier, still-open PR sitting on it, so today's batch
+  // only ever touches files no unresolved prior batch has claimed.
+  // getOrInitBatchBranch's own sync-corruption check (github-ops.js) is the
+  // second line of defense at the git level for anything that still slips
+  // through.
   const [rows, draftedFindingIds, pendingDraftFilePaths, draftsSpentToday, fileEditsSpentToday, learnedMap] = await Promise.all([
     listOpenRecommendations(siteId),
     getDraftedFindingIds(siteId),
