@@ -20,7 +20,13 @@ import { applyExactMatchPatches, describePatchFailure } from './exact-match-patc
 // (edited the table, removed the FAQ, re-rendered from different data,
 // fixed the style itself) makes the anchor not-found, and this refuses
 // rather than guessing at a new location.
-function buildEdit(content) {
+// Exported so implementers/adapters/data-array-content.js's own
+// content-integrity-repair branch can reuse the exact same fixType->
+// {anchor,replacement} mapping instead of a second, driftable copy — the
+// only difference between the two implementers is WHERE the anchor is
+// searched for (a whole template file here vs. one data-array entry's own
+// byte range there), never how the edit itself is derived.
+export function buildEdit(content) {
   if (content.fixType === 'malformed-table' || content.fixType === 'raw-text-table'
     || content.fixType === 'duplicate-faq' || content.fixType === 'font-size-override'
     || content.fixType === 'table-style-drift' || content.fixType === 'typography-drift') {
