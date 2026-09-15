@@ -1,9 +1,10 @@
 import { createHash } from 'crypto';
-import { getSearchPerformanceForPages } from '../store/read.js';
-import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
+import { getSearchPerformanceForPages, getSiteById } from '../store/read.js';
+import { priorityByRank, impactFromPriority, makeFinding, effortFromDifficulty } from './lib/findings.js';
 import { analyzePageUrl } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { updatePageContentHashBatch, listContentHashesForSite } from '../store/page-inventory.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -124,7 +125,59 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const sumImpressions = (pages) => pages.reduce((s, p) => s + (impressionsByPage.get(p) || 0), 0);
   const rankedGroups = [...unresolvedGroups].sort((a, b) => sumImpressions(b.pages) - sumImpressions(a.pages));
   const priorities = priorityByRank(rankedGroups);
+
+  // Evidence-based winner decision — same shared model url-variant-duplicates.js,
+  // query-param-duplicates.js and templated-duplicates.js already use for
+  // "which of these competing URLs is the real one": HIGH confidence only
+  // when exactly one page has any real 90-day clicks/impressions and the
+  // rest have none, or when 2+ pages each earn real traffic AND every pair's
+  // real search queries overlap substantially (confirming shared search
+  // intent, not just shared bytes). That query-overlap escalation is what
+  // was missing until now — it's a genuinely independent signal from raw
+  // impressions, and is exactly the kind of editorial-intent evidence the
+  // comment below used to say didn't exist. Still never auto-decides on
+  // impressions alone (MEDIUM/LOW stays a human reportOnly decision, same
+  // as before) — see decideWinner's own doc comment for the exact bar.
+  const site = await getSiteById(siteId);
+  const { start: evidenceStart, end: evidenceEnd } = evidenceWindow(site);
+  const allGroupPages = rankedGroups.flatMap((g) => g.pages);
+  const trafficByPage = new Map(
+    (await fetchTraffic(siteId, allGroupPages, evidenceStart, evidenceEnd)).map((t) => [t.page, t])
+  );
+  const decisionByHash = new Map();
+  for (const g of rankedGroups) {
+    const traffic = g.pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
+    decisionByHash.set(g.hash, await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd }));
+  }
+
   const findings = rankedGroups.map((g, i) => {
+    const decision = decisionByHash.get(g.hash);
+    if (decision.winner) {
+      const losers = g.pages.filter((p) => p !== decision.winner.page);
+      return makeFinding({
+        id: `duplicate-content:hash:${g.hash}`,
+        evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash, traffic: decision.withTraffic, winner: decision.winner.page, confidence: 'high', queryOverlap: decision.queryOverlap },
+        whyItMatters: decision.queryOverlap?.overlapping
+          ? `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} earns more real clicks (${decision.winner.clicks}) than the other(s), and their real search queries overlap substantially, confirming they compete for the same search intent. Confident enough to consolidate automatically.`
+          : `${g.pages.length} pages have byte-identical body content at different URLs — ${decision.winner.page} has all ${decision.winner.clicks} real click(s)/${decision.winner.impressions} impression(s) across the last ${EVIDENCE_LOOKBACK_DAYS} days, and the other page(s) have none. Confident enough to consolidate automatically: the losing page(s) get a canonical tag pointing at the real one.`,
+        priority: priorities[i],
+        // Same safe canonical generator every self-referential canonical
+        // fix already uses — one loser per recommendation (mirrors
+        // url-variant-duplicates.js), since each is its own separate
+        // page/file/PR target. The generator re-verifies the target is
+        // still live and refuses rather than guess if anything changed
+        // since this evidence was gathered. Still ends at a human-reviewed
+        // PR — autonomy here means zero manual investigation to REACH that
+        // PR, not a bypass of the merge step.
+        recommendedAction: {
+          label: `Canonicalize duplicate content → ${decision.winner.page}`,
+          generatorId: 'canonical',
+          params: { page: losers[0], canonicalTarget: decision.winner.page },
+          effort: effortFromDifficulty(1),
+        },
+        expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: decision.winner.clicks || sumImpressions(g.pages) },
+      });
+    }
     return makeFinding({
       // Keyed on the CONTENT HASH the group is defined by, not on a member
       // page. The id used to be the alphabetically-first page in the group,
@@ -140,24 +193,27 @@ export async function run({ siteId, start, end, pageCache, params }) {
       id: `duplicate-content:hash:${g.hash}`,
       // Sorted so the same group renders identically run to run regardless of
       // the order pages happened to come back from the inventory query.
-      evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash },
+      evidence: { pages: [...g.pages].sort(), pageCount: g.pages.length, contentHash: g.hash, traffic: decision.withTraffic, confidence: decision.confidence, queryOverlap: decision.queryOverlap },
       whyItMatters: `${g.pages.length} pages have byte-identical body content — the same content is reachable at ${g.pages.length} different URLs, which splits ranking signals and wastes crawl budget instead of consolidating them onto one real page.`,
       priority: priorities[i],
-      recommendedAction: null, // picking a canonical URL / merging pages is a real editorial decision, not draftable content
-      // Deliberately NOT auto-canonicalized. Choosing which URL owns the
-      // content decides which of these pages keeps its ranking and which
-      // ones stop being indexed independently — pointing that at the wrong
-      // page is a traffic loss no later fix recovers cheaply, and impressions
-      // (the only signal available here) do not establish editorial intent.
-      // So it stays a human decision — but a VISIBLE one. Until 2026-09-09
-      // this finding had a null action and no reportOnly, which meant
-      // buildRecommendations dropped it outright: byte-identical duplicate
-      // pages were detected on every run and shown to nobody.
+      recommendedAction: null, // no evidenced winner yet — see decideWinner's HIGH-confidence bar above
+      // Deliberately NOT auto-canonicalized when the evidence doesn't clear
+      // decideWinner's HIGH bar (exactly one page with real traffic, or
+      // substantial cross-page query overlap confirming shared intent).
+      // Choosing which URL owns the content decides which page keeps its
+      // ranking — pointing that at the wrong page is a traffic loss no
+      // later fix recovers cheaply, so with split/no traffic evidence this
+      // stays a human decision, same as every sibling duplicate detector.
+      // Until 2026-09-09 this finding had a null action and no reportOnly,
+      // which meant buildRecommendations dropped it outright: byte-identical
+      // duplicate pages were detected on every run and shown to nobody.
       reportOnly: {
         kind: 'duplicate-content',
         label: `${g.pages.length} URLs serve identical content`,
         page: [...g.pages].sort()[0],
-        whyBlocked: 'These URLs serve byte-identical content. Consolidating them means choosing which single URL should own this content and pointing the others at it — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
+        whyBlocked: decision.withTraffic.length > 1
+          ? 'These URLs serve byte-identical content and more than one of them earns real search traffic with no confirmed shared search intent — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning its own real clicks, so it needs a person who knows which page is the intended one.'
+          : 'These URLs serve byte-identical content, but no real search traffic points to a clear winner yet. Consolidating them means choosing which single URL should own this content — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
       },
       expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
     });

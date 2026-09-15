@@ -6,11 +6,19 @@ process.env.DATABASE_URL ||= 'postgres://test:test@localhost:5432/test';
 const resolve = (p) => new URL(p, import.meta.url).href;
 
 let knownHashes; // what past runs already recorded for this site
+// Per-page traffic override for the confidence-gated evidence tests below —
+// any page NOT in this map falls back to the flat impressions:100 every
+// pre-existing test in this file was already written against, so adding
+// this override capability changes no existing test's outcome.
+let perfRowsByPage;
+let queryRows; // [{query, page, impressions}] — for the medium->high query-overlap escalation
 
 mock.module(resolve('../store/read.js'), {
   namedExports: {
     getSearchPerformanceForPages: async (siteId, start, end, pages) =>
-      pages.map((p) => ({ dim_value: p, impressions: 100 })),
+      pages.map((p) => ({ dim_value: p, ...(perfRowsByPage.get(p) || { impressions: 100 }) })),
+    getSiteById: async () => ({ id: 1, timezone: 'UTC' }),
+    getQueryPageMetrics: async () => queryRows,
   },
 });
 mock.module(resolve('../store/page-inventory.js'), {
@@ -36,7 +44,7 @@ const pageCache = async (page) => ({
 
 const runOn = (pages) => run({ siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache, params: { pages } });
 
-beforeEach(() => { knownHashes = []; });
+beforeEach(() => { knownHashes = []; perfRowsByPage = new Map(); queryRows = []; });
 
 describe('duplicate-content finding ids', () => {
   // The bug: the id was keyed on the alphabetically-first page in the group,
@@ -105,15 +113,58 @@ describe('duplicate-content finding ids', () => {
     // Points at a real member page, and at a stable one (sorted), so the row's
     // (page, kind) dedup key does not move between runs.
     assert.equal(ro.page, 'https://example.com/a');
-    assert.match(ro.whyBlocked, /which single URL should own this content/);
+    assert.match(ro.whyBlocked, /needs a person who knows which page is the intended one/);
   });
 
-  test('still refuses to pick a canonical URL automatically', async () => {
+  test('still refuses to pick a canonical URL automatically when evidence is only equal, unconfirmed impressions', async () => {
     const result = await runOn(['https://example.com/a', 'https://example.com/b']);
-    // Choosing the canonical decides which page keeps its ranking — evidence
-    // here (impressions) does not establish editorial intent, so no generator
-    // may be attached however tempting the canonical generator looks.
+    // Both pages get the flat impressions:100 default — real traffic on
+    // both sides, no query-overlap evidence available (empty queryRows), so
+    // this must stay MEDIUM confidence and never guess a winner.
     assert.equal(result.facts.findings[0].recommendedAction, null);
+  });
+
+  describe('confidence-gated evidence (decideWinner)', () => {
+    test('HIGH confidence: exactly one page has all the real traffic, the other none -> auto-drafts a canonical consolidation', async () => {
+      perfRowsByPage.set('https://example.com/a', { clicks: 0, impressions: 0 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 40, impressions: 300 });
+      const result = await runOn(['https://example.com/a', 'https://example.com/b']);
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/b');
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
+      assert.deepEqual(finding.recommendedAction.params, { page: 'https://example.com/a', canonicalTarget: 'https://example.com/b' });
+      assert.equal(finding.reportOnly, null);
+    });
+
+    test('MEDIUM escalates to HIGH when query sets overlap substantially and one page has strictly more clicks', async () => {
+      perfRowsByPage.set('https://example.com/a', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 90, impressions: 900 });
+      queryRows = ['company', 'contact us', 'about page'].flatMap((q) => [
+        { query: q, page: 'https://example.com/b', impressions: 50 },
+        { query: q, page: 'https://example.com/a', impressions: 10 },
+      ]);
+      const result = await runOn(['https://example.com/a', 'https://example.com/b']);
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/b');
+      assert.equal(finding.evidence.queryOverlap.overlapping, true);
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
+    });
+
+    test('MEDIUM stays MEDIUM when query sets do not overlap, even with a large traffic gap', async () => {
+      perfRowsByPage.set('https://example.com/a', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 90, impressions: 900 });
+      queryRows = [
+        { query: 'our company', page: 'https://example.com/b', impressions: 50 },
+        { query: 'unrelated term', page: 'https://example.com/a', impressions: 10 },
+      ];
+      const result = await runOn(['https://example.com/a', 'https://example.com/b']);
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'medium');
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.kind, 'duplicate-content');
+    });
   });
 });
 
