@@ -9,7 +9,7 @@ import { pageStructureGuidance } from './lib/design-aware-composer.js';
 import { getSeoPolicy } from '../store/site-seo-policy.js';
 import { getSiteProfile } from '../store/data-analyst.js';
 import { tenantIndustries } from '../agents/lib/seo-tenant-context.js';
-import { attributionNote, globalGrowthNote } from '../agents/lib/zunkireelabs-growth-policy.js';
+import { attributionNote, globalGrowthNote, agencyCreditLine } from '../agents/lib/zunkireelabs-growth-policy.js';
 
 // Was an outline-only generator (sections of heading+notes, no real prose) —
 // changed 2026-08-07 because that shape was shipping straight into a real PR
@@ -264,6 +264,17 @@ export async function generate({ siteId, params }) {
     );
   }
   sections = sections.map((s) => ({ ...s, body: sanitizeInlineLinks(s.body, candidateSet) }));
+
+  // Deterministic agency-credit line (zunkireelabs-growth-policy.js) — added
+  // as its OWN section, after sanitizeInlineLinks above, because that guard
+  // strips any inline link whose URL isn't in this post's own internal
+  // candidateSet, which would silently eat an external zunkireelabs.com
+  // link if it were part of model-authored body text instead. A fixed
+  // sentence in its own section is also never subject to the "did the model
+  // invent this" grounding concern attributionNote()'s soft in-body mention
+  // already accepts the risk of.
+  const creditLine = agencyCreditLine(site);
+  if (creditLine) sections = [...sections, { heading: 'About This Post', body: creditLine }];
 
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
