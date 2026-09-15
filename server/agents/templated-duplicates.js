@@ -12,6 +12,19 @@ export const meta = {
   version: 1,
 };
 
+// Deliberately stays reportOnly, even under the confidence-gated-autonomy
+// model url-variant-duplicates.js/query-param-duplicates.js now use for
+// their own duplicate groups — not because evidence can't establish a
+// confident answer here, but because there is no existing SAFE, reversible
+// fix PRIMITIVE this platform can apply once a confident answer is reached.
+// Consolidating/redirecting a page family member needs a "this page should
+// noindex" or "merge page A into page B" action, and no generator for
+// either exists yet (unlike url-variant-duplicates' canonical-consolidation,
+// which reuses the already-safe, already-shipped canonical generator).
+// Building that primitive — and proving it as safe as canonical.js's own
+// exact-match-or-refuse discipline — is real, separate future work, not
+// something to bolt onto detection as an afterthought.
+
 // Real, found live 2026-09-15 on site 1: a `/locations/<city>/<service>/`
 // pattern generating 36 near-identical pages (differing only by city/service
 // name, same schema.org types, same section structure) — each with a valid

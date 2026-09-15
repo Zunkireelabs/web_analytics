@@ -11,6 +11,21 @@ export const meta = {
   version: 1,
 };
 
+// Deliberately stays reportOnly. The robots.txt-blocked sub-case has real
+// overlap with an ALREADY-autonomous existing check — technical-seo.js's
+// 'technical-seo:site:robots-blocked' finding already auto-drafts a
+// robots-fix Allow-override for any real GSC-top-traffic page a local
+// robots.txt parse finds disallowed (a different, narrower evidence source
+// than this agent's Google-Inspection-API signal, but the same fix
+// primitive), so duplicating that auto-fix here — from a signal this agent
+// can't fully reconcile with robots-fix's own blockedPattern computation
+// without re-fetching and re-parsing robots.txt itself — would risk two
+// independent "safe" drafts racing each other on the same file. The
+// non-canonical sub-case has no safe primitive at all: nothing removes or
+// edits an existing sitemap entry (server/generators/sitemap.js is
+// deliberately additive-only), so there is no reversible action to auto-
+// apply even at full confidence.
+//
 // Google's real per-page verdict, already collected by technical-seo.js's
 // existing rotation (server/ingest/gsc-technical.js's inspectUrl) — this
 // check is purely a read of already-collected signals, no new fetch/API

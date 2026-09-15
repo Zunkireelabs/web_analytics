@@ -11,6 +11,15 @@ export const meta = {
   version: 1,
 };
 
+// Deliberately stays reportOnly regardless of hop count/traffic — unlike
+// the URL/query-param duplicate detectors, evidence here (however
+// confident) can't be turned into a safe autonomous fix: collapsing a
+// chain means editing whatever created EACH intermediate hop, and that
+// owner (an old redirect rule in a file this platform doesn't know about, a
+// CDN/DNS-level forward, a third-party ad/affiliate link) isn't derivable
+// from the chain response itself. There is no "rewrite hop 2 of 3" fix
+// primitive to gate on confidence — the fix target is unknown, not just
+// the confidence level.
 const MAX_PAGES = 20;
 // A single 301/302 straight to the final destination is normal and not
 // flagged — this only fires once a page's own address requires TWO OR MORE
