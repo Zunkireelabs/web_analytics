@@ -28,7 +28,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -135,6 +135,23 @@ async function previewLiveSecurityHeaders(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
   }
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', content }] };
+}
+
+// robots-bootstrap is site-level like llms-txt/sitemap, and
+// draft.content.robotsTxt is already the complete new file body
+// (server/generators/robots-bootstrap.js) — a straight file write, zero
+// content transformation, same shape as pushSitemapBranch. Deliberately NOT
+// a hash-marker splice like robots-fix.js below: this generator's whole job
+// is creating the file for a site that has none, so there is nothing
+// existing to splice into (an existing file is robots-fix.js's job, not
+// this one's — technical-seo.js only ever recommends robots-bootstrap when
+// robotsTxtFound is false, so this never risks overwriting a real file).
+async function pushRobotsBootstrapBranch(site, draft, batchInfo) {
+  const path = resolveSiteRootFile(site, 'robotsTxt');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  return pushDraftBranch(site, draft, [{ path, content: draft.content.robotsTxt }], batchInfo);
 }
 
 // Real, hash-comment-marker splice for a robots.txt Allow-override — third
@@ -1125,6 +1142,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'robots-bootstrap') return pushRobotsBootstrapBranch(site, draft, batchInfo);
   if (draft.action_type === 'redirect-fix') return pushRedirectFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'broken-link-fix') return pushBrokenLinkFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
@@ -1176,6 +1194,12 @@ export async function preview(site, draft, opts = {}) {
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
     if (draft.action_type === 'robots-fix') return previewLiveRobotsFix(site, draft);
+    if (draft.action_type === 'robots-bootstrap') {
+      const path = resolveSiteRootFile(site, 'robotsTxt');
+      if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
+      const file = await getFileContent(site, path, baseBranch(site));
+      return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'robotsTxt', content: file?.content || '' }] };
+    }
     if (draft.action_type === 'redirect-fix') return previewLiveRedirectFix(site, draft);
     if (draft.action_type === 'broken-link-fix') return previewLiveBrokenLinkFix(site, draft);
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
@@ -1207,6 +1231,12 @@ export async function preview(site, draft, opts = {}) {
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
   if (draft.action_type === 'robots-fix') return computeRobotsFixMerge(site, draft, beforeRef);
+  if (draft.action_type === 'robots-bootstrap') {
+    const path = resolveSiteRootFile(site, 'robotsTxt');
+    if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.robotsTxt is not configured.' };
+    const file = await getFileContent(site, path, beforeRef);
+    return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.robotsTxt };
+  }
   if (draft.action_type === 'redirect-fix') return computeRedirectFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'broken-link-fix') return computeBrokenLinkFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);

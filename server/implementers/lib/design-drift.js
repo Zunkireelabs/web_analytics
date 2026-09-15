@@ -1139,7 +1139,7 @@ export const DESIGN_CONTEXT_GENERATOR_IDS = new Set([
 // confirms it produces no visible styling, so a new generator defaults to
 // GETTING the check rather than silently skipping it.
 export const NO_MARKUP_GENERATOR_IDS = new Set([
-  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'security-headers',
+  'meta-title', 'schema', 'canonical', 'sitemap', 'robots-fix', 'robots-bootstrap', 'security-headers',
   'html-lang', 'viewport', 'open-graph', 'llms-txt', 'analytics-install',
   'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'geo-audit', 'blog-image',
 ]);
