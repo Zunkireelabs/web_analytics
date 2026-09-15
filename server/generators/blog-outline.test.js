@@ -23,7 +23,9 @@ describe('blog-outline generator — multi-attempt expansion', () => {
 
   after(async () => {
     await query('DELETE FROM sites WHERE id = $1', [site.id]);
-    await pool.end();
+    // pool.end() deferred to the LAST describe block in this file (real
+    // Postgres test DB, module-level pool — closing it here would break
+    // every describe block that runs after this one).
   });
 
   test('meta.id is stable (existing recommendations/drafts key on it)', () => {
@@ -120,6 +122,163 @@ describe('blog-outline generator — multi-attempt expansion', () => {
       else process.env.REPORT_PROVIDER = originalProvider;
       if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = originalKey;
+    }
+  });
+});
+
+// Regression coverage for the 2026-09-15 "locally-generated posts should be
+// able to carry real categories, never an invented one" change.
+describe('blog-outline generator — real-category validation', () => {
+  let site;
+
+  before(async () => {
+    const { rows } = await query(
+      `INSERT INTO sites (name, gsc_property, ga4_property_id, url_file_map)
+       VALUES ('Blog Outline Categories Test Site', 'sc-domain:blog-outline-categories-test.example', 'test-ga4', $1)
+       RETURNING *`,
+      [JSON.stringify({ newContentTargets: { 'blog-outline': { categoriesSource: { projectId: 'test-project', dataset: 'production' } } } })],
+    );
+    site = rows[0];
+  });
+
+  after(async () => {
+    await query('DELETE FROM sites WHERE id = $1', [site.id]);
+    // pool.end() deferred to the LAST describe block in this file.
+  });
+
+  function longEnoughSections() {
+    return [{ heading: 'Section', body: Array(850).fill('word').join(' ') }];
+  }
+
+  async function runWithMocks({ categoriesResult, llmCategories }) {
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('apicdn.sanity.io')) {
+        return new Response(JSON.stringify({ result: categoriesResult }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      const text = JSON.stringify({
+        title: 'T', metaDescription: 'D', sections: longEnoughSections(),
+        suggestedFaqTopics: [], suggestedInternalLinks: [], categories: llmCategories,
+      });
+      const body = { id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const originalProvider = process.env.REPORT_PROVIDER;
+    const originalKey = process.env.ANTHROPIC_API_KEY;
+    const originalPexelsKey = process.env.PEXELS_API_KEY;
+    const originalBlogImages = process.env.BLOG_IMAGES_ENABLED;
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    delete process.env.PEXELS_API_KEY;
+    delete process.env.BLOG_IMAGES_ENABLED;
+    try {
+      return await generate({ siteId: site.id, params: { topic: 'A test blog topic' } });
+    } finally {
+      globalThis.fetch = original;
+      if (originalProvider === undefined) delete process.env.REPORT_PROVIDER;
+      else process.env.REPORT_PROVIDER = originalProvider;
+      if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = originalKey;
+      if (originalPexelsKey === undefined) delete process.env.PEXELS_API_KEY;
+      else process.env.PEXELS_API_KEY = originalPexelsKey;
+      if (originalBlogImages === undefined) delete process.env.BLOG_IMAGES_ENABLED;
+      else process.env.BLOG_IMAGES_ENABLED = originalBlogImages;
+    }
+  }
+
+  test('a category the model picks from the real list is kept, with its real slug', async () => {
+    const { content } = await runWithMocks({
+      categoriesResult: [{ title: 'Study Abroad', slug: 'study-abroad' }, { title: 'Visas', slug: 'visas' }],
+      llmCategories: ['Study Abroad'],
+    });
+    assert.deepEqual(content.categories, [{ slug: 'study-abroad', title: 'Study Abroad' }]);
+  });
+
+  test('an invented category the model returns (not in the real list) is dropped, never fabricated', async () => {
+    const { content } = await runWithMocks({
+      categoriesResult: [{ title: 'Study Abroad', slug: 'study-abroad' }],
+      llmCategories: ['Study Abroad', 'Made Up Category That Does Not Exist'],
+    });
+    assert.deepEqual(content.categories, [{ slug: 'study-abroad', title: 'Study Abroad' }]);
+  });
+
+  test('more than 3 real categories picked is capped at 3', async () => {
+    const categoriesResult = [1, 2, 3, 4].map((n) => ({ title: `Cat ${n}`, slug: `cat-${n}` }));
+    const { content } = await runWithMocks({
+      categoriesResult,
+      llmCategories: categoriesResult.map((c) => c.title),
+    });
+    assert.equal(content.categories.length, 3);
+  });
+
+  test('no categoriesSource configured -> no category fetch, empty categories, never blocks generation', async () => {
+    const original = globalThis.fetch;
+    let sanityFetchCalled = false;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('apicdn.sanity.io')) sanityFetchCalled = true;
+      const text = JSON.stringify({ title: 'T', metaDescription: 'D', sections: longEnoughSections(), suggestedFaqTopics: [], suggestedInternalLinks: [] });
+      const body = { id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    try {
+      const { rows } = await query(
+        `INSERT INTO sites (name, gsc_property, ga4_property_id) VALUES ('No Categories Site', 'sc-domain:no-categories-test.example', 'test-ga4') RETURNING *`,
+      );
+      try {
+        const { content } = await generate({ siteId: rows[0].id, params: { topic: 'A test blog topic' } });
+        assert.equal(sanityFetchCalled, false);
+        assert.deepEqual(content.categories, []);
+      } finally {
+        await query('DELETE FROM sites WHERE id = $1', [rows[0].id]);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+// Regression coverage for the 2026-09-15 "body may use light Markdown, but
+// an inline link must still only ever point at a real candidate URL, same
+// as suggestedInternalLinks" change.
+describe('blog-outline generator — inline-link sanitization', () => {
+  let site;
+
+  before(async () => {
+    const { rows } = await query(
+      `INSERT INTO sites (name, gsc_property, ga4_property_id) VALUES ('Blog Outline Inline Links Test Site', 'sc-domain:blog-outline-inline-links-test.example', 'test-ga4') RETURNING *`,
+    );
+    site = rows[0];
+  });
+
+  after(async () => {
+    await query('DELETE FROM sites WHERE id = $1', [site.id]);
+    await pool.end();
+  });
+
+  test('an inline Markdown link to a URL that is not a real candidate is stripped to plain text', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => {
+      const body = 'Read our [pricing guide](https://example.com/totally-invented-page) for more details. '
+        + Array(800).fill('word').join(' ');
+      const text = JSON.stringify({
+        title: 'T', metaDescription: 'D', sections: [{ heading: 'Section', body }],
+        suggestedFaqTopics: [], suggestedInternalLinks: [],
+      });
+      const resBody = { id: 'msg', type: 'message', role: 'assistant', content: [{ type: 'text', text }], model: 'claude-haiku-4-5', stop_reason: 'end_turn', usage: {} };
+      return new Response(JSON.stringify(resBody), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    process.env.REPORT_PROVIDER = 'anthropic';
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    delete process.env.PEXELS_API_KEY;
+    delete process.env.BLOG_IMAGES_ENABLED;
+    try {
+      const { content } = await generate({ siteId: site.id, params: { topic: 'A test blog topic' } });
+      assert.doesNotMatch(content.sections[0].body, /\[pricing guide\]\(/);
+      assert.match(content.sections[0].body, /Read our pricing guide for more details/);
+    } finally {
+      globalThis.fetch = original;
     }
   });
 });

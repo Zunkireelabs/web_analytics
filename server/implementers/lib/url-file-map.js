@@ -377,7 +377,10 @@ export function resolveNewContentTarget(site, actionType, title) {
 // The single slug both the file path above and the public URL below derive
 // from — they must agree, or a page gets written to one place and declares
 // it lives at another.
-function slugifyTitle(title) {
+// Exported so callers building something ELSE keyed on the same slug (e.g.
+// frontend.js's generated-posts manifest entry) always derive it identically
+// to the file path/URL above — never a second, driftable slugify call.
+export function slugifyTitle(title) {
   return String(title || 'untitled')
     .toLowerCase().trim()
     .replace(/[^a-z0-9]+/g, '-')

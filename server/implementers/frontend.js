@@ -1,9 +1,10 @@
-import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget } from './lib/url-file-map.js';
+import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, resolveNewContentUrl, resolveNewContentLayout, resolveTranslationTarget, resolveMissingPageTarget, slugifyTitle } from './lib/url-file-map.js';
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
 import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 export const meta = {
   id: 'frontend',
@@ -242,6 +243,52 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
   return { ok: false, reason: 'merge-strategy-not-implemented', error: `No merge strategy for action type "${actionType}".` };
 }
 
+// Appends this new post's listing metadata to the site's own "generated
+// posts" manifest — url_file_map.newContentTargets['blog-outline'].manifestFile
+// (e.g. Admizz's src/data/generated-posts.json) — in the SAME commit as the
+// post file itself, so a post can never be created successfully without
+// also being discoverable by the blog listing page (which does a plain
+// static import of this file — no runtime fs scan, no dynamic import,
+// deterministic on Vercel). Reuses the same tested "managed flat-array"
+// splice (spliceMarkedArray/findRootArrayBounds) data-array-content.js's
+// flat-array shape already uses for FAQ items, keyed by `slug` instead of
+// question/answer, tagged `_aiManaged` so re-applying never disturbs a
+// hand-authored manifest entry.
+//
+// Only sites that configured a manifestFile get this second write — every
+// other tenant's blog-outline (markdown/Eleventy) keeps today's
+// single-file behavior unchanged, since their static-site generator
+// discovers new pages by directory/collection, not a manifest.
+//
+// Returns null (nothing to do) when unconfigured, or {ok:false,...} on a
+// genuine failure — callers must treat a failure here as fatal to the whole
+// apply, never push the post file without its manifest entry landing in the
+// same commit.
+export async function computeGeneratedPostsManifestUpdate(site, entry, fetchFile, beforeRef) {
+  const manifestPath = site.url_file_map?.newContentTargets?.['blog-outline']?.manifestFile;
+  if (!manifestPath) return null;
+
+  const file = await fetchFile(site, manifestPath, beforeRef);
+  const content = file ? file.content : '[]';
+  const arrayRange = findRootArrayBounds(content, 'json-array');
+  if (!arrayRange) {
+    return { ok: false, reason: 'invalid-edit', error: `${manifestPath} does not contain a valid top-level JSON array — refusing to guess its shape.` };
+  }
+  const interior = content.slice(arrayRange.start, arrayRange.end);
+  let existing;
+  try { existing = interior.trim() ? JSON.parse(`[${interior}]`) : []; } catch {
+    return { ok: false, reason: 'invalid-edit', error: `${manifestPath} is not valid JSON — refusing to guess its shape.` };
+  }
+  const aiManaged = existing.filter((it) => it && it._aiManaged);
+  const nextSet = [...aiManaged.filter((it) => it.slug !== entry.slug), entry];
+  const newContent = spliceMarkedArray(content, arrayRange, nextSet, 'json-array');
+  const check = assertValidContent(newContent, 'json-array');
+  if (!check.ok) {
+    return { ok: false, reason: 'invalid-edit', error: `Auto-generated edit would break ${manifestPath}'s syntax (${check.error}) — refused to apply.` };
+  }
+  return { ok: true, filePath: manifestPath, newContent };
+}
+
 // Pushes a real branch (forked from the site's default branch) with the
 // real new-file content — not merged yet (see mergeToStage below). Staff
 // reviews the real diff (Draft Preview panel, unchanged — same
@@ -275,10 +322,38 @@ export async function apply(site, draft) {
 
   const batchInfo = await getOrInitBatchBranch(site);
   if (batchInfo.conflicted) return batchBranchConflictError(site, batchInfo);
-  return pushDraftBranch(site, draft, [{
+
+  const files = [{
     path: resolved.filePath, content: resolved.body,
     contentFormat: resolved.contentFormat, actionType: draft.action_type,
-  }], batchInfo);
+  }];
+
+  // blog-outline + filename-mode (App Router directory-per-post) is the
+  // only combination with a manifest to update — see
+  // computeGeneratedPostsManifestUpdate's own comment.
+  if (draft.action_type === 'blog-outline' && resolved.contentFormat === 'jsx') {
+    const beforeRef = batchInfo.exists ? batchInfo.branchName : baseBranch(site);
+    const title = draft.content?.title || draft.content?.topic || 'Untitled';
+    const manifestUpdate = await computeGeneratedPostsManifestUpdate(site, {
+      slug: slugifyTitle(title),
+      title,
+      excerpt: draft.content?.metaDescription || null,
+      imageUrl: draft.content?.featuredImage?.url || null,
+      imageAlt: draft.content?.featuredImage?.alt || null,
+      categories: Array.isArray(draft.content?.categories) ? draft.content.categories : [],
+      publishedAt: new Date().toISOString(),
+      href: resolveNewContentUrl(site, 'blog-outline', title),
+    }, getFileContent, beforeRef);
+    if (manifestUpdate) {
+      // Fatal to the whole apply — never push the post file without its
+      // manifest entry landing in the same commit (see the atomic-workflow
+      // requirement in this function's own doc comment above).
+      if (!manifestUpdate.ok) return manifestUpdate;
+      files.push({ path: manifestUpdate.filePath, content: manifestUpdate.newContent, actionType: draft.action_type });
+    }
+  }
+
+  return pushDraftBranch(site, draft, files, batchInfo);
 }
 
 // branch_pushed -> PR opened into the site's default branch (human merges
