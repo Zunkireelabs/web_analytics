@@ -38,7 +38,7 @@ Respond with ONLY a JSON object matching this exact shape (all string values mus
     "footer": { "sectionRoles": string[], "notes": string }
   },
   "pageTypePatterns": {
-    "<pageType>": { "sectionOrder": string[], "textHierarchy": [{"role": string, "styleNotes": string}], "notes": string }
+    "<pageType>": { "sectionOrder": string[], "textHierarchy": [{"role": string, "classes": string|null, "styleNotes": string}], "notes": string }
   },
   "evidence": { "pagesAnalyzed": string[], "notes": string }
 }`;
@@ -263,6 +263,65 @@ export function headingPageSamplesByContext(segmentedPages) {
   return { hero, standard };
 }
 
+// Real 'subheading' textHierarchy samples (role assigned by segment.js's
+// textHierarchyOf: any non-h1 heading), grouped by pageType — the same
+// per-page real-class evidence compactPageForPrompt already hands the model,
+// just re-grouped here for cross-checking the model's OWN pageTypePatterns
+// summary against it. Excludes chrome and label-styled text, same as
+// headingSamplesByLevel above.
+function subheadingSamplesByPageType(segmentedPages) {
+  const byType = new Map();
+  for (const page of segmentedPages || []) {
+    for (const section of page.sections || []) {
+      if (CHROME_ROLES.has(section.role)) continue;
+      for (const item of section.textHierarchy || []) {
+        if (item.role !== 'subheading' || !item.classes) continue;
+        if (isLabelStyle(item.style)) continue;
+        if (!byType.has(page.pageType)) byType.set(page.pageType, []);
+        byType.get(page.pageType).push(item);
+      }
+    }
+  }
+  return byType;
+}
+
+// pageTypePatterns.textHierarchy is a MODEL SUMMARY across a page type's own
+// pages, not a direct per-page capture — same distance from ground truth
+// that made typography.body/heading need their own correction pass above.
+// Left unchecked, the model regularly returned this shape with 'subheading'
+// entries carrying only a prose styleNotes and no classes at all (or, worse,
+// an unobserved/invented one), which is exactly why
+// marker-merge.js's groundedInlineHeadingClass — the one consumer of this
+// field — could never find a real class to restyle an inline (blog/article)
+// page's stripped section heading with, and shipped a bare, unstyled <h2>
+// instead. Same discipline as correctBodyTypography: a `classes` value only
+// stands when it is actually OBSERVED for that exact (pageType, role) pair;
+// otherwise it is replaced with the real central class for that pair, or
+// left null when there is no evidence at all — never invented.
+export function correctPageTypeTextHierarchy(patterns, segmentedPages) {
+  const samplesByType = subheadingSamplesByPageType(segmentedPages);
+  const out = {};
+  const corrected = [];
+
+  for (const [pageType, pattern] of Object.entries(patterns || {})) {
+    const samples = samplesByType.get(pageType) || [];
+    const textHierarchy = (pattern.textHierarchy || []).map((entry) => {
+      if (entry.role !== 'subheading') return entry;
+      if (!samples.length) return entry.classes ? { ...entry, classes: null } : entry;
+
+      const matching = samples.filter((s) => normalizeClasses(s.classes) === normalizeClasses(entry.classes || ''));
+      if (entry.classes && matching.length) return entry;
+
+      const best = pickCentralClass(samples);
+      if (best !== entry.classes) corrected.push(pageType);
+      return { ...entry, classes: best };
+    });
+    out[pageType] = { ...pattern, textHierarchy };
+  }
+
+  return { pageTypePatterns: out, corrected };
+}
+
 function normalizeClasses(classes) {
   return classes.trim().split(/\s+/).filter(Boolean).join(' ');
 }
@@ -318,6 +377,17 @@ export async function extractDesignProfile(segmentedPages, {
     );
   }
 
+  const { pageTypePatterns, corrected: pageTypesCorrected } = correctPageTypeTextHierarchy(
+    extracted.pageTypePatterns || {}, segmentedPages,
+  );
+  if (pageTypesCorrected.length) {
+    console.warn(
+      `[design-agent] site ${siteId}: pageTypePatterns subheading class(es) for page type(s) `
+      + `${[...new Set(pageTypesCorrected)].join(', ')} were not grounded in this page type's own real `
+      + `sections — corrected against observed evidence.`,
+    );
+  }
+
   const components = extracted.components || {};
   const { link, corrected: linkCorrected } = correctLinkTypography(typography.link || null, components);
   if (linkCorrected) {
@@ -348,7 +418,7 @@ export async function extractDesignProfile(segmentedPages, {
     responsive: { ...(extracted.responsive || { breakpoints: [] }), measured: responsiveMeasured },
     navigation: extracted.navigation || {},
     pages: (segmentedPages || []).map((p) => ({ url: p.url, pageType: p.pageType, sections: p.sections })),
-    pageTypePatterns: extracted.pageTypePatterns || {},
+    pageTypePatterns,
     evidence: extracted.evidence || { pagesAnalyzed: pages.map((p) => p.url), notes: '' },
   };
 }

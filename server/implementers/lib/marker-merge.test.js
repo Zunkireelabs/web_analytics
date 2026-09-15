@@ -1148,4 +1148,29 @@ describe('sanitizeCapturedTemplate — page-type-aware heading-size correction',
     assert.doesNotMatch(result.values.faq, /md:text-3xl/);
     assert.match(result.values.faq, /text-xl font-semibold text-slate-800/);
   });
+
+  // The real gap: a site with NO page-type-specific subheading evidence yet
+  // (freshly onboarded, or a page type the weekly rescan hasn't covered) used
+  // to strip straight to a bare, unstyled row with nothing replacing it. The
+  // site's own real, already-corrected typography.heading.section class is
+  // grounded evidence too, just not page-type-specific, and is a strictly
+  // better floor than shipping no styling at all.
+  test('buildMergeValues falls back to the site\'s real section-heading class when no page-type-specific evidence exists', () => {
+    const designProfile = { typography: { heading: { section: 'text-2xl font-bold text-navy-900' } } };
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, designProfile, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.match(result.values.faq, /font-bold/);
+    assert.match(result.values.faq, /text-navy-900/);
+  });
+
+  test('buildMergeValues strips to nothing when neither page-type evidence nor a site-wide heading class exists', () => {
+    const result = buildMergeValues('faq', {
+      items: [{ question: 'Q?', answer: 'A' }],
+    }, 'visible', { faq: captured }, {}, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+  });
 });

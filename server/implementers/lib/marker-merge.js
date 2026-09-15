@@ -688,14 +688,25 @@ function isInlineContentPage(pageUrl) {
 // this site already uses for an in-page subheading on THIS page type, not a
 // guess. Only 'subheading' counts — 'heading' is the page's own H1/top-level
 // anchor, never the right role for an inserted FAQ question or similar.
-// Returns null (never invents a class) when the site has no such evidence,
-// which is the common case — most sites have no pageTypePatterns at all yet.
+// Falls back to null (never invents a class) only when the site has NEITHER
+// piece of real evidence — no page-type-specific subheading class AND no
+// site-wide section-heading class. That floor matters because
+// pageTypePatterns[type].textHierarchy is a page-TYPE-specific summary a
+// site only has once the Design Agent has actually seen a page of that
+// type; a site mid-rollout (freshly onboarded, or a page type the weekly
+// rescan hasn't covered yet) can easily have neither. Rather than stripping
+// straight to an unstyled tag in that gap, typography.heading.section is
+// used instead — the site's own real h2/section-heading class, already
+// cross-checked against live evidence by correctHeadingTypography
+// (profile-extract.js), just not specific to this exact page type. Still
+// 100% grounded in something this site's own pages actually use, never a
+// guess, same discipline as every other slot here.
 function groundedInlineHeadingClass(designProfile, pageUrl) {
   const pageType = typeof pageUrl === 'string' ? classifyPageType(pageUrl) : null;
   const hierarchy = pageType && designProfile?.pageTypePatterns?.[pageType]?.textHierarchy;
-  if (!Array.isArray(hierarchy)) return null;
-  const entry = hierarchy.find((h) => h?.role === 'subheading' && h.classes);
-  return entry ? entry.classes : null;
+  const entry = Array.isArray(hierarchy) && hierarchy.find((h) => h?.role === 'subheading' && h.classes);
+  if (entry) return entry.classes;
+  return designProfile?.typography?.heading?.section || null;
 }
 
 function stripClassesMatching(html, predicate) {
