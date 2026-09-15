@@ -176,6 +176,14 @@ const SAFE_GENERATOR_IDS = new Set([
   // the daily run ships whatever is genuinely open, rather than inventing a
   // topic every morning.
   'blog-outline',
+  // Same exact-match-or-refuse shape as schema-repair/content-integrity-repair
+  // above: the actual file patch (implementers/lib/soft-404-inject.js) only
+  // ever applies when the exact known-vulnerable `try_files ... /index.html;`
+  // line is still present byte-for-byte, with no existing error_page 404 and
+  // no ambiguous second occurrence — anything else refuses rather than
+  // guessing, so a failed match already leaves the recommendation open for a
+  // human instead of force-applying a misread config.
+  'soft-404-nginx',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated

@@ -1149,7 +1149,7 @@ const GENERATOR_EFFORT = {
   'meta-title': 'Low', faq: 'Low', 'qa-content': 'Low', schema: 'Low', 'internal-links': 'Low', 'llms-txt': 'Low',
   'analytics-install': 'Low',
   'security-headers': 'Low', 'html-lang': 'Low', sitemap: 'Low',
-  viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'open-graph': 'Low',
+  viewport: 'Low', canonical: 'Low', 'robots-fix': 'Low', 'robots-bootstrap': 'Low', 'open-graph': 'Low',
   'broken-link-fix': 'Low', 'redirect-fix': 'Low', breadcrumbs: 'Low', 'alt-text': 'Low',
   'blog-outline': 'High', 'landing-page': 'High', translation: 'High', 'expand-content': 'High', 'direct-answer': 'High',
   // High, not Low like its broken-link-fix sibling: removing a link is a
@@ -1158,6 +1158,7 @@ const GENERATOR_EFFORT = {
   'cookie-policy': 'High', 'privacy-policy': 'High', 'terms-of-service': 'High',
   'content-integrity-repair': 'Low',
   'blog-image': 'Low',
+  'soft-404-nginx': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
