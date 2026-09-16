@@ -42,7 +42,22 @@ export function createLiveDesignAnalysisHandler({
     const pageUrl = job.params?.pageUrl;
     if (!pageUrl) throw taggedError('No target page URL was provided for this design analysis job.', 'input_validation');
 
-    const capture = await captureSiteFn(pageUrl).catch((err) => {
+    // Fetched once, up front, so its known page inventory (url_file_map.pages
+    // — populated at onboarding, independent of anything this crawl finds
+    // linked from the homepage) can be handed to the capture as extra
+    // candidates. Reused below instead of re-fetching per mode branch.
+    //
+    // This closes a real discovery gap, not a hypothetical one: confirmed on
+    // chayceproperties.com, whose /faq/ and /news/ pages are real, correctly
+    // classifiable pages that simply aren't linked from the homepage at
+    // all — no depth of homepage-only crawling can ever find a page nothing
+    // on the homepage points to.
+    const site = await getSiteByIdFn(job.site_id).catch(() => null);
+    const knownUrls = Object.keys(site?.url_file_map?.pages || {})
+      .map((path) => { try { return new URL(path, pageUrl).href; } catch { return null; } })
+      .filter(Boolean);
+
+    const capture = await captureSiteFn(pageUrl, { knownUrls }).catch((err) => {
       const { message } = safeMessage('live-analysis-handler.capture', err, 'Could not load the live site to analyze its design');
       throw taggedError(message, 'live_capture');
     });

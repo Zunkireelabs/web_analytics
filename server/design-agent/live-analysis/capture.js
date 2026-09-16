@@ -14,7 +14,15 @@
 import { chromium } from 'playwright';
 import { classifyPageType } from './schema.js';
 
-const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 8;
+// Raised from 8 (2026-09-16): with 'other' no longer sub-capped (see
+// discoverPages), a real small-business site's actual page variety needs
+// real room — chayceproperties.com alone has 11 real 'other'-classified
+// pages plus homepage/faq/blog-listing, 14 total. 8 would still have quietly
+// dropped most of them. Each extra page costs one more Playwright page load
+// in a capture that already only runs once a week per site (or once now, on
+// deploy — see force-design-profile-rescan.js), not per request, so the
+// added cost is small and bounded, not per-generation.
+const DEFAULT_MAX_PAGES = Number(process.env.DESIGN_AGENT_CAPTURE_MAX_PAGES) || 20;
 const NAV_TIMEOUT_MS = Number(process.env.DESIGN_AGENT_CAPTURE_NAV_TIMEOUT_MS) || 20_000;
 
 // The viewports this agent actually looks at. `desktop` is the one the design
@@ -87,28 +95,83 @@ const DEEPER_SAMPLE_TYPES = Object.freeze([
   ['blog-listing', 'blog-article'],
 ]);
 
+// classifyPageType sorts every URL into one of nine buckets, and 'other' is
+// the catch-all for everything that doesn't match a named pattern — which on
+// a real site is frequently where the most DESIGN-DISTINCT pages live: a
+// pricing/package-tier page, a property/product detail page, an "our story"
+// page. Keeping only the first URL per bucket (the original behaviour)
+// treated all of those as interchangeable and sampled exactly one.
+//
+// Confirmed on chayceproperties.com: /gold-prestige/, /silver-comfort/,
+// /platinum-bespoke/ and /bronze-essentials/ (its four service-package
+// pages — as commercially central to that site as any named type) all
+// classify 'other' alongside /contact/, /packages/, /about-chayce/,
+// /how-it-works/, /get-started/ and /discovery/ — eleven real pages
+// competing for one slot, so ten were never even opened.
+//
+// 'other' is deliberately NOT given a fixed sub-limit the way every named
+// type keeps exactly one representative: a fixed number picks whichever
+// pages happen to appear FIRST in nav order, which is arbitrary — Chayce's
+// four package-tier pages are its last four nav links, so any fixed cap
+// smaller than ~11 would exclude exactly its most commercially central pages
+// while keeping /contact/ and /discovery/. 'other' instead competes for the
+// SAME overall maxPages budget every other type already shares — the only
+// real fix is giving a site with real page variety enough total budget to
+// fit it (maxPages), not guessing which few 'other' pages deserve a slot.
+//
 // Finds a small, page-type-diverse set of real URLs on this site: the
-// homepage plus the first URL discovered for each OTHER page type, up to
-// maxPages total. Deliberately not a full-site crawl — the goal is one good
-// representative of each page-type pattern (homepage/service/location/
-// landing/faq/blog-listing/blog-article/legal), not exhaustive coverage,
-// so a big site stays a bounded, fast analysis.
-export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES } = {}) {
+// homepage, every distinct 'other' page found (bounded only by maxPages),
+// and one representative of every other page-type pattern found (service/
+// location/landing/faq/blog-listing/blog-article/legal), up to maxPages
+// total. Deliberately not an unbounded crawl otherwise — real page VARIETY
+// gets covered, not every last URL on a large site.
+//
+// `knownUrls` (absolute URLs, e.g. from the site's own onboarded page
+// inventory) are considered as ADDITIONAL candidates alongside whatever this
+// crawl finds linked from the homepage. This closes the other half of the
+// same Chayce finding: /faq/ and /news/ are real, correctly-classifiable
+// pages that are simply not linked from the homepage at all (confirmed
+// directly against the live site) — no depth of crawling from the homepage
+// can ever find a page nothing on the homepage points to. A caller that
+// already knows a site's real page list (this platform's onboarding already
+// records one) can hand it in here instead of leaving those pages
+// permanently undiscoverable.
+export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAULT_MAX_PAGES, knownUrls = [] } = {}) {
   await browserPage.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
   const rawLinks = await browserPage.evaluate(collectLinksInPage);
 
   const seen = new Set([homepageUrl]);
-  const byType = new Map([['homepage', homepageUrl]]);
+  const byType = new Map([['homepage', [homepageUrl]]]);
+  let total = 1;
 
-  for (const href of rawLinks) {
+  const consider = (href) => {
+    if (total >= maxPages) return false;
     let abs;
-    try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { continue; }
-    if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
-    if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
-    seen.add(abs);
+    try { abs = new URL(href, homepageUrl).href.split('#')[0]; } catch { return true; }
+    if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) return true;
+    if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) return true;
+
     const type = classifyPageType(abs);
-    if (!byType.has(type)) byType.set(type, abs);
-    if (byType.size >= maxPages) break;
+    const limit = type === 'other' ? Infinity : 1;
+    const existing = byType.get(type) || [];
+    if (existing.length >= limit) return true;
+
+    seen.add(abs);
+    byType.set(type, [...existing, abs]);
+    total++;
+    return total < maxPages;
+  };
+
+  // Real crawled links first — an actual example the site itself surfaces
+  // is preferred evidence over one this platform merely knows the URL of.
+  for (const href of rawLinks) {
+    if (!consider(href)) break;
+  }
+  // Known-but-unlinked pages fill remaining slots, honoring the exact same
+  // per-type limits (an already-full 'other' bucket stays full; this is
+  // ADDITIONAL reach, not a way around the bound).
+  for (const url of knownUrls) {
+    if (!consider(url)) break;
   }
 
   // ONE LEVEL DEEPER FOR THE PAGE TYPES INSERTED CONTENT ACTUALLY LANDS ON.
@@ -133,9 +196,9 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
   // crawl. A listing page that yields no usable article link simply leaves
   // that type unrepresented, exactly as before.
   for (const [listingType, articleType] of DEEPER_SAMPLE_TYPES) {
-    if (byType.size >= maxPages) break;
+    if (total >= maxPages) break;
     if (byType.has(articleType) || !byType.has(listingType)) continue;
-    const listingUrl = byType.get(listingType);
+    const [listingUrl] = byType.get(listingType);
     let listingLinks;
     try {
       await browserPage.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
@@ -150,24 +213,28 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
       if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
       seen.add(abs);
       if (classifyPageType(abs) !== articleType) continue;
-      byType.set(articleType, abs);
+      byType.set(articleType, [abs]);
+      total++;
       break;
     }
   }
 
-  return [...byType.entries()].map(([pageType, url]) => ({ url, pageType }));
+  return [...byType.entries()].flatMap(([pageType, urls]) => urls.map((url) => ({ url, pageType })));
 }
 
 // classifyPageType is a URL-shape heuristic (schema.js) — every page whose
 // path doesn't match a known pattern (service/location/faq/blog/legal/...)
-// falls into the same 'other' bucket, and discoverPages keeps only the FIRST
-// url it meets for that whole bucket. A card-grid portfolio/case-study page
-// (e.g. /projects/) is exactly as likely to be URL-classified 'other' as any
-// unrelated miscellaneous page, so it can lose that one slot to something
-// else entirely and never get captured — "flat" content-injection on such a
-// page (design-profile.js's pageUsesCardSections/projectExpandContentCard
-// has nothing to key off) traces back to this targeting gap, not a rendering
-// bug. Whether a page is card-heavy is a STRUCTURAL fact invisible from its
+// falls into the same 'other' bucket. discoverPages now keeps every distinct
+// 'other' page it finds within the shared maxPages budget (see its own
+// comment), not just the first — but on a large site that budget can still
+// run out before a genuine card-grid portfolio/case-study page (e.g.
+// /projects/) is reached, and URL classification alone has no way to know
+// that page is any more worth a slot than an unrelated miscellaneous one.
+// This function exists for exactly that residual gap: "flat" content-
+// injection on a card-heavy page (design-profile.js's
+// pageUsesCardSections/projectExpandContentCard has nothing to key off) can
+// still trace back to it never being captured at all, not a rendering bug.
+// Whether a page is card-heavy is a STRUCTURAL fact invisible from its
 // URL, so it can only be found by loading candidates and looking — this scans
 // a bounded number of not-yet-captured same-origin links (re-collected from a
 // fresh homepage visit, since discoverPages doesn't expose its own link list)
@@ -675,6 +742,13 @@ export async function captureSite(homepageUrl, {
   extraCardPages = DEFAULT_EXTRA_CARD_PAGES,
   responsiveViewports = RESPONSIVE_VIEWPORTS,
   responsiveMaxPages = DEFAULT_RESPONSIVE_MAX_PAGES,
+  // Passed straight through to discoverPages — see its own comment. A caller
+  // that knows this site's real page inventory (this platform's onboarding
+  // already records one, url_file_map.pages) can hand the absolute URLs in
+  // here so a page never linked from the homepage — confirmed real on
+  // chayceproperties.com's /faq/ and /news/ — still gets a chance to be
+  // captured instead of staying permanently invisible to this analysis.
+  knownUrls = [],
 } = {}) {
   const browser = await launchBrowserFn();
   try {
@@ -682,7 +756,7 @@ export async function captureSite(homepageUrl, {
       viewport: { width: DESKTOP_VIEWPORT.width, height: DESKTOP_VIEWPORT.height },
     });
     const page = await context.newPage();
-    const targets = await discoverPages(page, homepageUrl, { maxPages });
+    const targets = await discoverPages(page, homepageUrl, { maxPages, knownUrls });
 
     const pages = [];
     for (const { url, pageType } of targets) {
