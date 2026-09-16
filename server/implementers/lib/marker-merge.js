@@ -1210,7 +1210,20 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
 
   if (actionType === 'faq') {
     if (!content.items?.length) return { ok: false, error: 'This FAQ draft has no items.' };
-    const visible = renderFaqHtml(content.items, templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE));
+    // A blog/article/legal page (isInlineContentPage — same classifier
+    // sanitizeCapturedTemplate's stripping above uses) gets the site's
+    // captured inline Q&A treatment instead of its section-scale accordion,
+    // same "different page type, different real component" precedent as
+    // expandContentTemplate's card variant above. componentTemplates.faqInline
+    // is authored to already match the page's own body typography (see
+    // scripts/store-inline-faq-template.js), so it only needs the fixed-
+    // height strip every captured template gets, not the blog-unsafe one.
+    // Falls back to the ordinary faq template/projection when no inline
+    // variant has been captured yet — never invents a look.
+    const faqTemplate = inline && componentTemplates.faqInline
+      ? sanitizeCapturedTemplate(componentTemplates.faqInline)
+      : templateFor('faq', componentTemplates.faq, DEFAULT_FAQ_TEMPLATE);
+    const visible = renderFaqHtml(content.items, faqTemplate);
     // suppressSchema: the page already carries an FAQPage schema from the
     // OTHER FAQ/Q&A slot (qa-content) — see backend.js's hasExistingFaqSchema
     // check. 'faq' and 'qa-content' are independent marker fields, so
