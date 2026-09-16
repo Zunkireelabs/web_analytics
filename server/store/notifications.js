@@ -59,3 +59,28 @@ export async function hasRecentNotification(siteId, type, sinceDays) {
   );
   return rows.length > 0;
 }
+
+// The email-spam guard: runDailyAgentAnalysisForSite (job.js) is reachable
+// from three places in a single day — the main daily chain, the
+// product-vertical chain, and a manual HTTP-triggered re-analysis — and
+// each one independently calls detectNotificationEvents/deliverToAllChannels.
+// Most event types there (critical-issue, opportunity, competitor-change)
+// carry no cooldown at all, and the "new finding" detection just diffs the
+// two most recent agent runs — so a second run later the SAME day, diffing
+// against the first run's own findings, freely re-emails for whatever
+// changed between just those two runs. This is the one gate that gets
+// checked BEFORE the email channel fires (not before in-app — the dashboard
+// bell should still show every real event; only the inbox shouldn't get hit
+// twice), so at most one notification email goes out per site per day
+// regardless of how many times the detection pipeline itself runs.
+// Same day-scoping idiom as store/drafts.js's countDraftsBySourceToday.
+export async function hasNotificationToday(siteId, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT 1 FROM notifications
+      WHERE site_id = $1
+        AND (created_at AT TIME ZONE $2)::date = (now() AT TIME ZONE $2)::date
+      LIMIT 1`,
+    [siteId, timezone]
+  );
+  return rows.length > 0;
+}
