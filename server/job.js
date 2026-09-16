@@ -647,25 +647,33 @@ export async function runGeoAuditIfDueForAllSites() {
 // impolite. Also folds in GSC's own top pages as a third discovery source,
 // tagged 'gsc', so page_inventory becomes the single superset rather than
 // just the sitemap+crawl subset.
-export async function runSiteDiscoveryIfDue(site) {
+export async function runSiteDiscoveryIfDue(site, {
+  force = false,
+  getLastDiscoveryAtFn = getLastDiscoveryAt,
+  discoverFromSitemapsFn = discoverFromSitemaps,
+  crawlSiteFn = crawlSite,
+  getSearchPerformanceRangeFn = getSearchPerformanceRange,
+  upsertPageInventoryBatchFn = upsertPageInventoryBatch,
+  markOrphanedPagesFn = markOrphanedPages,
+} = {}) {
   const { start, end } = previousWeek(site.timezone);
-  const lastDiscoveredAt = await getLastDiscoveryAt(site.id);
-  if (lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
+  const lastDiscoveredAt = await getLastDiscoveryAtFn(site.id);
+  if (!force && lastDiscoveredAt && new Date(lastDiscoveredAt) >= new Date(start)) {
     console.log(`[site-discovery] site ${site.id} week of ${start} already discovered — skipping.`);
     return null;
   }
 
   const [sitemapUrls, crawledUrls, gscPagesRaw] = await Promise.all([
-    discoverFromSitemaps(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
-    crawlSite(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
-    getSearchPerformanceRange(site.id, start, end, 'page', 200),
+    discoverFromSitemapsFn(site).catch((err) => { console.error(`[site-discovery] site ${site.id} sitemap fetch failed:`, err.message); return []; }),
+    crawlSiteFn(site).catch((err) => { console.error(`[site-discovery] site ${site.id} crawl failed:`, err.message); return []; }),
+    getSearchPerformanceRangeFn(site.id, start, end, 'page', 200),
   ]);
   const domain = ownDomains(site);
   const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
 
-  await upsertPageInventoryBatch(site.id, sitemapUrls, 'sitemap');
-  await upsertPageInventoryBatch(site.id, crawledUrls, 'crawl');
-  await upsertPageInventoryBatch(site.id, gscPages.map((p) => p.dim_value), 'gsc');
+  await upsertPageInventoryBatchFn(site.id, sitemapUrls, 'sitemap');
+  await upsertPageInventoryBatchFn(site.id, crawledUrls, 'crawl');
+  await upsertPageInventoryBatchFn(site.id, gscPages.map((p) => p.dim_value), 'gsc');
 
   // Real orphaned-page signal: a page the sitemap lists but this run's real
   // homepage-outward crawl never reached via any actual internal link — the
@@ -678,18 +686,35 @@ export async function runSiteDiscoveryIfDue(site) {
   const normalize = (u) => u.replace(/\/+$/, '');
   const crawledSet = new Set(crawledUrls.map(normalize));
   const orphanedUrls = sitemapUrls.filter((u) => !crawledSet.has(normalize(u)));
-  await markOrphanedPages(site.id, orphanedUrls);
+  await markOrphanedPagesFn(site.id, orphanedUrls);
 
   console.log(`[site-discovery] site ${site.id}: ${sitemapUrls.length} sitemap URL(s), ${crawledUrls.length} crawled URL(s), ${gscPages.length} GSC page(s), ${orphanedUrls.length} orphaned.`);
   return { sitemapCount: sitemapUrls.length, crawlCount: crawledUrls.length, gscCount: gscPages.length, orphanedCount: orphanedUrls.length };
 }
 
-export async function runSiteDiscoveryIfDueForAllSites() {
-  const sites = await listConnectedSites();
+// `force` bypasses only the weekly staleness gate (every other precondition
+// still applies) — for the same reason design-profile rescanning gained one
+// (see queueDesignProfileRescanForSite): page_inventory can go stale not
+// just from time passing but from a site's OWN sitemap changing. Confirmed
+// on chayceproperties.com: its real sitemap.xml lists /news/, but every
+// existing page_inventory row is tagged discovered_via 'crawl', never
+// 'sitemap' — the sitemap fetch never successfully landed a result there,
+// so /news/ has stayed invisible to every page-level agent
+// (selectCandidatePages, candidate-pages.js) regardless of how long it
+// waits, since the weekly gate only asks "did we run recently," never
+// "did the site change since." force-site-discovery.js is the one-time
+// catch-up; routine weekly discovery resumes normally afterward.
+export async function runSiteDiscoveryIfDueForAllSites({
+  force = false,
+  listAllSites = listConnectedSites,
+  runForSite = runSiteDiscoveryIfDue,
+} = {}) {
+  const sites = await listAllSites();
   const results = [];
   for (const site of sites) {
     try {
-      results.push(await runSiteDiscoveryIfDue(site));
+      // eslint-disable-next-line no-await-in-loop -- sequential, same as every other fleet loop in this file
+      results.push(await runForSite(site, { force }));
     } catch (err) {
       console.error(`[job] site discovery failed for site ${site.id} "${site.name}":`, err.message);
     }
@@ -1537,6 +1562,16 @@ export async function queueDesignProfileRescanForSite(site, {
   resolvePageUrl = sitePageUrl,
   now = () => Date.now(),
   staleAfterMs = DESIGN_PROFILE_RESCAN_STALE_AFTER_MS,
+  // Bypasses the staleness check only — every other precondition (usable
+  // profile required, no double-queueing) still applies. For the one-time
+  // post-deploy catch-up (server/scripts/force-design-profile-rescan.js):
+  // a fix to HOW the profile is derived (a capture-cap change, a correction-
+  // pass bug fix) makes every EXISTING profile worth re-deriving immediately,
+  // regardless of how recently it happened to run under the old code. The
+  // routine weekly cadence resumes normally the moment this one force-run
+  // completes, since it goes through the exact same job and re-sets
+  // derivedAt like any other rescan.
+  force = false,
 } = {}) {
   if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
   // A site with no usable profile yet is queueDesignAgentDerivationForSite's
@@ -1546,7 +1581,7 @@ export async function queueDesignProfileRescanForSite(site, {
 
   const profile = getProfile(site);
   const derivedAt = profile?.derivedAt ? Date.parse(profile.derivedAt) : NaN;
-  if (Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
+  if (!force && Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
 
   try {
     const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
@@ -1562,13 +1597,15 @@ export async function queueDesignProfileRescanForSite(site, {
 export async function queueDesignProfileRescanForAllSites({
   listAllSites = listSites,
   queueForSite = queueDesignProfileRescanForSite,
+  force = false,
 } = {}) {
   const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
-    if (await queueForSite(site)) queued++;
+    // eslint-disable-next-line no-await-in-loop -- sequential enqueue, same as every other fleet loop in this file
+    if (await queueForSite(site, { force })) queued++;
   }
-  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for sites with a stale profile`);
+  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for ${force ? 'every site (forced)' : 'sites with a stale profile'}`);
   return { queued };
 }
 

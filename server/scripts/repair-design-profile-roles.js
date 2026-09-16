@@ -42,7 +42,7 @@ import { query } from '../db.js';
 import {
   correctBodyTypography, bodySamples,
   correctHeadingTypography, headingSamplesByLevel,
-  correctLinkTypography,
+  correctLinkTypography, correctSpacing,
 } from '../design-agent/live-analysis/profile-extract.js';
 import {
   projectAllComponentTemplates, isProfileUsable,
@@ -148,16 +148,20 @@ async function repairSite(site, { commit, show }) {
   const { body } = correctBodyTypography(typography.body || null, bodySamples(profile.pages));
   const { heading } = correctHeadingTypography(typography.heading || {}, headingSamplesByLevel(profile.pages));
   const { link } = correctLinkTypography(typography.link || null, profile.components || {});
+  const spacing = correctSpacing(profile.spacing, site.id);
 
   note('typography.body', typography.body, body);
   note('typography.heading.section', typography.heading?.section, heading.section);
   note('typography.heading.item', typography.heading?.item, heading.item);
   note('typography.link', typography.link, link);
+  note('spacing.section', profile.spacing?.section, spacing.section);
+  note('spacing.itemGap', profile.spacing?.itemGap, spacing.itemGap);
   if (!changes.length) console.log('  roles already correct.');
 
   const repaired = {
     ...profile,
     typography: { ...typography, body, heading, link },
+    spacing,
     repairedAt: new Date().toISOString(),
     repairedBy: 'repair-design-profile-roles',
   };
@@ -200,7 +204,13 @@ async function repairSite(site, { commit, show }) {
     const key = COMPONENT_TEMPLATE_KEY[actionType];
     if (!key) throw new Error(`No componentTemplates key for action type "${actionType}"`);
 
-    const result = await verifyTemplateAgainstLiveSite(actionType, template, { pageUrl })
+    // These are PROJECTIONS re-composed from the corrected profile a few
+    // lines above, not captures — so the structural shape check is skipped
+    // (see verifyTemplateAgainstLiveSite's header). Asking it here failed
+    // every template on every site whose components don't already exist on
+    // its homepage, and since this function REPLACES componentTemplates with
+    // only what verifies, that silently emptied them every morning.
+    const result = await verifyTemplateAgainstLiveSite(actionType, template, { pageUrl, expectsLiveExample: false })
       .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
     if (result.ok) {
       verified[key] = result.stamped;
@@ -227,7 +237,7 @@ async function repairSite(site, { commit, show }) {
   if (cardPage) {
     const cardTemplate = projectExpandContentCard(repaired);
     if (cardTemplate) {
-      const cardResult = await verifyTemplateAgainstLiveSite('expand-content', cardTemplate, { pageUrl: cardPage.url })
+      const cardResult = await verifyTemplateAgainstLiveSite('expand-content', cardTemplate, { pageUrl: cardPage.url, expectsLiveExample: false })
         .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
       if (cardResult.ok) {
         verified.expandContentCard = cardResult.stamped;

@@ -438,6 +438,37 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(queuedFor, site.id, 'the profile itself is re-derived, since that is where the bad body class came from');
   });
 
+  test('a projection is NOT structurally checked — it composes new markup, it does not claim to mirror the page', async () => {
+    // The admizzeducation.com incident, from the other direction. A projected
+    // template for a component the site has never had cannot possibly already
+    // appear on the reference page, so running the structural shape check
+    // against it produces a guaranteed failure that means nothing. All five of
+    // that site's templates failed exactly this way; enforcing it would leave
+    // every newly onboarded client on plain unstyled defaults forever. Class
+    // existence and body-slot role ARE still checked here — only shape is
+    // skipped, and only for projections.
+    const site = {
+      ...baseSite,
+      website_domain: 'admizzeducation.com',
+      url_file_map: { siteRoot: { designProfile: PROFILE } },
+    };
+    let saved = null;
+
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+      // A live page that contains no FAQ whatsoever — the exact situation a
+      // first-ever FAQ projection is created in.
+      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>No FAQ on this page at all.</p></body></html>',
+      fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}.text-lg{a}.font-medium{a}.text-gray-600{a}.prose{a}',
+    });
+
+    assert.equal(result.ok, true, 'the projection is usable despite matching no existing shape');
+    assert.equal(result.source, 'design-profile');
+    assert.equal(result.template.verifiedBy, 'freshness-check', 'verified on live CSS evidence, the check that IS meaningful here');
+    assert.ok(saved.siteRoot.componentTemplates.faq, 'and persisted, not discarded');
+  });
+
   test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {
     // The self-heal check runs BEFORE the projection path — for a template
     // that is merely unstamped and genuinely matches the live site, checking

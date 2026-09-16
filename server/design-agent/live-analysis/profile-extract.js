@@ -7,6 +7,7 @@
 // source.
 import { callLLMForJson } from '../../llm.js';
 import { DESIGN_PROFILE_VERSION } from './schema.js';
+import { maxTextPx, isFixedHeightOnly } from '../../lib/text-scale.js';
 
 const SYSTEM_PROMPT = `You are analyzing structural facts already extracted from a real, live website's rendered pages — real HTML class attributes, real computed text styles, real section ordering. You are NOT reading source code and you must NEVER invent a class name, color, or pattern that isn't present in the data you're given.
 
@@ -152,6 +153,31 @@ function pickCentralClass(samples) {
     .sort((a, b) => b.meanDf - a.meanDf || b.count - a.count || a.size - b.size)[0].classes;
 }
 
+// Real measured px for a sample's `style.fontSize` (capture.js always writes
+// this as a real computed-style string, e.g. '36px') — the notation-free
+// alternative to parsing a class NAME for a size.
+function samplePx(sample) {
+  const m = /^([\d.]+)px$/.exec(String(sample?.style?.fontSize || '').trim());
+  return m ? parseFloat(m[1]) : null;
+}
+
+// The MEDIAN measured size across every sample this site actually captured
+// for a role, not one element's incidental size. Why this exists at all: a
+// site that names classes semantically (`home-h2`, `sectionHeading` — real,
+// confirmed on chayceproperties.com) carries no parseable size in the class
+// string the way `text-[42px]` does, so any check reading the class NAME
+// (this file's own maxTextPx-based comparison, or marker-merge.js's render-
+// time strip) is silently inert on it. The real computed pixel size was
+// already captured alongside every sample regardless of naming convention —
+// this reads THAT instead, so the item-vs-section hierarchy check below
+// holds for a Tailwind site and a semantic-CSS site identically.
+function medianSamplePx(samples) {
+  const values = (samples || []).map(samplePx).filter((n) => n != null).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+}
+
 // typography.link is meant to be the site's INLINE link style — what a link
 // inside a sentence or a related-links list looks like. When it comes back
 // byte-identical to components.button.primary, it is not that: capture.js used
@@ -228,6 +254,42 @@ export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSample
     if (best !== chosen.item) { out.item = best; corrected.push('item'); }
   }
 
+  // A repeating ITEM heading (an FAQ question, a card title) can never
+  // legitimately render LARGER than the section heading it sits beneath —
+  // that inverts the site's own hierarchy, and an FAQ question set at page-
+  // title scale is exactly what it looks like on the page. This is a
+  // self-consistency rule, not an imported design opinion: both values are
+  // this site's own real captured evidence, and the check only asks whether
+  // they agree with each other.
+  //
+  // It fires when a site has no h3 samples at all and `item` had to fall back
+  // to the same h2 pool as `section` (above), but the two central picks
+  // landed on different h2 treatments — one a genuine section heading, one an
+  // oversized display heading. Confirmed live on admizzeducation.com, which
+  // derived item at 50px against a 42px section heading, then shipped FAQ
+  // questions bigger than the section title above them.
+  //
+  // The repair is deliberately to reuse `section` rather than invent a
+  // smaller class: a step-down size this site never actually uses would be a
+  // guess, while the section heading is real, live, and known to render
+  // correctly. Equal-size is a mild hierarchy flattening; larger is a visible
+  // defect.
+  //
+  // Judged by REAL measured pixels from the samples themselves first
+  // (medianSamplePx), falling back to parsing the chosen class NAME
+  // (maxTextPx) only when no samples were passed in (e.g. a caller checking
+  // two already-stored profile values with no capture evidence at hand).
+  // The samples-based reading is what makes this hold on a semantic-CSS site
+  // (`home-h2`, `sectionHeading` — no parseable size in the class name at
+  // all) exactly as it does on a Tailwind site — confirmed necessary on
+  // chayceproperties.com, whose typography is entirely semantic classes.
+  const itemPx = medianSamplePx(itemSamples) ?? maxTextPx(out.item);
+  const sectionPx = medianSamplePx(sectionSamples) ?? maxTextPx(out.section);
+  if (itemPx != null && sectionPx != null && itemPx > sectionPx) {
+    out.item = out.section;
+    corrected.push('item:capped-to-section');
+  }
+
   const page = { ...(chosen.page || {}) };
   if (pageHeadingSamples.hero?.length) {
     const best = pickCentralClass(pageHeadingSamples.hero);
@@ -240,6 +302,41 @@ export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSample
   out.page = page;
 
   return { heading: out, corrected };
+}
+
+// spacing.section describes a section's VERTICAL RHYTHM — the padding/margin
+// that separates it from what's around it. A fixed height (`h-[70px]`,
+// `h-16`) is never that: it is the measured height of whatever single element
+// the capture happened to read (very often the site's own fixed-height
+// navbar), and applying it to a wrapper holding arbitrary-length drafted
+// content clips or overlaps that content.
+//
+// Confirmed live on admizzeducation.com, whose profile stored
+// `spacing.section: "h-[70px]"` — its navbar height — which then composed
+// into every projected component wrapper, including the `<dl>` holding six
+// Q&A pairs. marker-merge.js already strips a fixed height at RENDER time,
+// so this is the same rule one stage earlier, at the point the value would be
+// stored as a site convention: a measurement mistake should not be persisted
+// as design knowledge and then repeatedly stripped by every consumer that
+// remembers to.
+//
+// Dropped to null rather than replaced with a guessed padding — null means
+// "this site has no recorded section rhythm", which every consumer already
+// handles, while an invented `py-16` would be a cross-site default of exactly
+// the kind this platform never applies.
+export function correctSpacing(spacing, siteId = null) {
+  const out = { ...(spacing || {}) };
+  for (const field of ['section', 'itemGap']) {
+    if (out[field] && isFixedHeightOnly(out[field])) {
+      if (siteId != null) {
+        console.warn(
+          `[design-agent] site ${siteId}: spacing.${field} was "${out[field]}" — a fixed height, not spacing. Dropped.`,
+        );
+      }
+      out[field] = null;
+    }
+  }
+  return out;
 }
 
 // Real <h1> samples, split by whether their own section is a hero — the only
@@ -404,7 +501,7 @@ export async function extractDesignProfile(segmentedPages, {
     framework: extracted.framework || null,
     typography: { ...typography, body, heading, link },
     color: extracted.color || {},
-    spacing: extracted.spacing || {},
+    spacing: correctSpacing(extracted.spacing, siteId),
     layout: extracted.layout || {},
     components,
     // `breakpoints` stays exactly what it always was: the class PREFIXES the

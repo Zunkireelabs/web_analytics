@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverCardHeavyPages } from './capture.js';
+import { discoverCardHeavyPages, discoverPages } from './capture.js';
 
 // A fake Playwright Page — goto/evaluate are the only two methods
 // discoverCardHeavyPages and the capturePage() it calls internally use.
@@ -218,5 +218,170 @@ describe('captureSite — responsive pass', () => {
     const result = await captureSite(HOME, { launchBrowserFn: async () => browser, extraCardPages: 0, responsiveMaxPages: 0 });
     assert.deepEqual(result.responsive.pages, []);
     assert.equal(result.pages.length, 1, 'the design profile capture still happens');
+  });
+});
+
+// A fake Page whose collectLinksInPage result depends on which URL was last
+// navigated to — discoverPages' second hop visits the listing page and reads
+// ITS links, so a single fixed link list can't exercise that path.
+function fakePagePerUrl(linksByUrl, { failOn = [] } = {}) {
+  let currentUrl = null;
+  return {
+    navigations: [],
+    async goto(url) {
+      if (failOn.includes(url)) throw new Error(`nav failed: ${url}`);
+      currentUrl = url;
+      this.navigations.push(url);
+    },
+    async evaluate(fn) {
+      if (fn.name !== 'collectLinksInPage') throw new Error(`unexpected evaluate(): ${fn.name}`);
+      return linksByUrl[currentUrl] || [];
+    },
+  };
+}
+
+describe('discoverPages — second hop for blog-article', () => {
+  const HOME = 'https://example.com/';
+
+  test('follows the blog listing to capture a real article when the homepage links only to the listing', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/', '/services/web/'],
+      'https://example.com/blog/': ['/blog/a-real-post/', '/blog/another-post/'],
+    });
+    const pages = await discoverPages(page, HOME);
+    const byType = Object.fromEntries(pages.map((p) => [p.pageType, p.url]));
+
+    assert.equal(byType['blog-listing'], 'https://example.com/blog/');
+    assert.equal(byType['blog-article'], 'https://example.com/blog/a-real-post/',
+      'the first real article on the listing must be sampled — without it the profile has no blog-article typography');
+  });
+
+  test('does not make the extra navigation when an article was already found from the homepage', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/', '/blog/already-linked/'],
+    });
+    await discoverPages(page, HOME);
+    assert.ok(!page.navigations.includes('https://example.com/blog/'),
+      'the listing must not be re-visited when blog-article already has a representative');
+  });
+
+  test('a site with no blog listing at all is untouched', async () => {
+    const page = fakePagePerUrl({ [HOME]: ['/services/web/', '/contact/'] });
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
+    assert.equal(page.navigations.length, 1, 'only the homepage is visited');
+  });
+
+  test('an unreachable listing page leaves the type unrepresented instead of throwing', async () => {
+    const page = fakePagePerUrl(
+      { [HOME]: ['/blog/'] },
+      { failOn: ['https://example.com/blog/'] }
+    );
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
+    assert.ok(pages.some((p) => p.pageType === 'blog-listing'));
+  });
+
+  test('a listing whose links are all non-article leaves the type unrepresented', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/'],
+      'https://example.com/blog/': ['/contact/', '/about/'],
+    });
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
+  });
+});
+
+// The chayceproperties.com finding: ten of its real fourteen pages classify
+// 'other', including all four of its service-package pages — as commercially
+// central to that site as any named type — and two more real pages
+// (/faq/, /news/) are never linked from the homepage at all.
+describe('discoverPages — the "other" bucket and knownUrls (chayceproperties.com)', () => {
+  const HOME = 'https://chayceproperties.com/';
+  // The site's REAL homepage link order, captured live 2026-09-17.
+  const CHAYCE_HOME_LINKS = [
+    '/how-it-works/', '/our-services/', '/about-chayce/', '/contact/', '/get-started/',
+    '/packages/', '/discovery/', '/bronze-essentials/', '/silver-comfort/', '/gold-prestige/',
+    '/platinum-bespoke/', 'tel:07708925432', 'mailto:info@chayceproperties.com',
+  ];
+
+  test('multiple "other" pages are captured, not just the first — including the package-tier pages', async () => {
+    const page = fakePagePerUrl({ [HOME]: CHAYCE_HOME_LINKS });
+    const pages = await discoverPages(page, HOME, { maxPages: 20 });
+    const otherUrls = pages.filter((p) => p.pageType === 'other').map((p) => p.url);
+
+    assert.ok(otherUrls.length > 1, 'the old behaviour kept exactly one "other" page — this must keep more');
+    for (const tier of ['bronze-essentials', 'silver-comfort', 'gold-prestige', 'platinum-bespoke']) {
+      assert.ok(otherUrls.some((u) => u.includes(tier)), `${tier} must be one of the captured "other" pages`);
+    }
+  });
+
+  // /our-services/ classifies 'other' too (classifyPageType's 'service'
+  // pattern requires a literal "/service(s)" path segment — "our-services"
+  // doesn't have one) — none of Chayce's 14 real pages actually hit a named
+  // bucket besides homepage/faq/blog-listing. Confirmed directly against
+  // schema.js's classifyPageType, not assumed.
+  test('"other" is bounded only by the overall maxPages budget, not a fixed sub-limit', async () => {
+    const page = fakePagePerUrl({ [HOME]: CHAYCE_HOME_LINKS });
+    const pages = await discoverPages(page, HOME, { maxPages: 20 });
+    const byType = {};
+    for (const p of pages) byType[p.pageType] = (byType[p.pageType] || 0) + 1;
+    // 11 of Chayce's real links classify 'other' — all of them fit given
+    // enough overall budget, order no longer excludes the last few.
+    assert.equal(byType.other, 11);
+    assert.equal(byType.homepage, 1);
+  });
+
+  test('a tight maxPages still bounds "other" — it competes for the shared budget, not an unlimited crawl', async () => {
+    const page = fakePagePerUrl({ [HOME]: CHAYCE_HOME_LINKS });
+    const pages = await discoverPages(page, HOME, { maxPages: 3 });
+    assert.equal(pages.length, 3);
+  });
+
+  test('every NAMED (non-"other") type still stays capped at one, even with room to spare', async () => {
+    const page = fakePagePerUrl({ [HOME]: ['/faq/', '/faq-alt-example/'] });
+    const pages = await discoverPages(page, HOME, { maxPages: 20 });
+    const faqUrls = pages.filter((p) => p.pageType === 'faq');
+    assert.equal(faqUrls.length, 1, 'faq is a single-slot bucket, unlike "other"');
+    assert.equal(faqUrls[0].url, 'https://chayceproperties.com/faq/', 'the first one found');
+  });
+
+  test('maxPages still bounds the TOTAL across every bucket combined', async () => {
+    const page = fakePagePerUrl({ [HOME]: CHAYCE_HOME_LINKS });
+    const pages = await discoverPages(page, HOME, { maxPages: 4 });
+    assert.ok(pages.length <= 4);
+  });
+
+  test('knownUrls fills in a page never linked from the homepage at all', async () => {
+    // /faq/ and /news/ are real pages on chayceproperties.com that appear in
+    // NEITHER CHAYCE_HOME_LINKS above (confirmed against the live site) —
+    // no crawl depth from the homepage can find them.
+    const page = fakePagePerUrl({ [HOME]: CHAYCE_HOME_LINKS });
+    const pages = await discoverPages(page, HOME, {
+      maxPages: 20,
+      knownUrls: ['https://chayceproperties.com/faq/', 'https://chayceproperties.com/news/'],
+    });
+    assert.ok(pages.some((p) => p.pageType === 'faq' && p.url.includes('/faq/')));
+    assert.ok(pages.some((p) => p.pageType === 'blog-listing' && p.url.includes('/news/')));
+  });
+
+  test('knownUrls never bypasses the per-type limit — a crawled example still wins the slot', async () => {
+    const page = fakePagePerUrl({ [HOME]: ['/faq/'] });
+    const pages = await discoverPages(page, HOME, {
+      maxPages: 20,
+      knownUrls: ['https://chayceproperties.com/help/'], // also classifies 'faq'
+    });
+    const faqUrls = pages.filter((p) => p.pageType === 'faq');
+    assert.equal(faqUrls.length, 1, 'faq is a single-slot bucket regardless of source');
+    assert.equal(faqUrls[0].url, 'https://chayceproperties.com/faq/', 'the real crawled one, found first');
+  });
+
+  test('knownUrls is additive within maxPages, never forcing the total over it', async () => {
+    const page = fakePagePerUrl({ [HOME]: ['/how-it-works/'] });
+    const pages = await discoverPages(page, HOME, {
+      maxPages: 2, // homepage + one more, no room for both known URLs
+      knownUrls: ['https://chayceproperties.com/faq/', 'https://chayceproperties.com/news/'],
+    });
+    assert.equal(pages.length, 2);
   });
 });

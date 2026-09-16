@@ -990,7 +990,26 @@ describe('buildMergeValues — captured template with unsafe classes never ships
     assert.equal(result.ok, true);
     assert.doesNotMatch(result.values.faq, /max-w-7xl/);
     assert.doesNotMatch(result.values.faq, /mx-auto/);
-    assert.match(result.values.faq, /text-\[50px\]/);
+    // Non-size typography — weight, color, opacity — is what "keeps
+    // typography" means here, and still carries over untouched.
+    assert.match(result.values.faq, /font-bold/);
+    assert.match(result.values.faq, /opacity-80/);
+  });
+
+  // This fixture IS admizzeducation.com's real stored template. Section-scale
+  // SIZE has to be stripped inline for the same reason `max-w-7xl` is — and
+  // this assertion used to require the exact opposite, encoding the bug as
+  // expected behaviour: the strip rule only recognised NAMED Tailwind scales
+  // (`text-4xl`), so every arbitrary-value class sailed through it and the
+  // site's FAQ questions shipped at 50px inside article body copy. Judged by
+  // rendered size now (lib/text-scale.js), not by notation: 28px is ordinary
+  // subheading scale and stays, 36px and 50px are section scale and go.
+  test('section-scale ARBITRARY-value sizes are stripped inline, exactly like named ones', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /text-\[50px\]/);
+    assert.doesNotMatch(result.values.faq, /text-\[36px\]/);
+    assert.match(result.values.faq, /text-\[28px\]/);
   });
 
   // Site 8862's real capture bug wasn't limited to faq/qaContent — EVERY
@@ -1210,18 +1229,36 @@ describe('sanitizeCapturedTemplate — page-type-aware heading-size correction',
   // The real gap: a site with NO page-type-specific subheading evidence yet
   // (freshly onboarded, or a page type the weekly rescan hasn't covered) used
   // to strip straight to a bare, unstyled row with nothing replacing it. The
-  // site's own real, already-corrected typography.heading.section class is
-  // grounded evidence too, just not page-type-specific, and is a strictly
-  // better floor than shipping no styling at all.
-  test('buildMergeValues falls back to the site\'s real section-heading class when no page-type-specific evidence exists', () => {
-    const designProfile = { typography: { heading: { section: 'text-2xl font-bold text-navy-900' } } };
+  // site's own real typography is grounded evidence too, just not
+  // page-type-specific, and is a better floor than shipping no styling at all.
+  //
+  // The fallback is typography.heading.ITEM, not .section. This test used to
+  // assert .section, which was the defect: .section is the site's own
+  // page/section HEADLINE class, so the fallback INFLATED the very heading
+  // this correction exists to shrink. Confirmed live on site 1, where every
+  // block spliced into a blog post rendered at `text-3xl md:text-4xl
+  // lg:text-5xl` because no 'blog-article' evidence had ever been captured.
+  test('buildMergeValues falls back to the site\'s real ITEM-scale heading class, never its section headline', () => {
+    const designProfile = {
+      typography: {
+        heading: {
+          item: 'text-2xl md:text-3xl font-bold text-navy-900',
+          section: 'text-5xl font-black text-hero',
+        },
+      },
+    };
     const result = buildMergeValues('faq', {
       items: [{ question: 'Q?', answer: 'A' }],
     }, 'visible', { faq: captured }, designProfile, { page: 'https://example.com/blog/some-post/' });
     assert.equal(result.ok, true);
-    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
     assert.match(result.values.faq, /font-bold/);
     assert.match(result.values.faq, /text-navy-900/);
+    // The section headline must never be reachable from an inline insert...
+    assert.doesNotMatch(result.values.faq, /text-hero|font-black|text-5xl/);
+    // ...and even the item class gets its own section-scale size filtered out,
+    // since an item scale can legitimately include md:text-3xl (site 1's does).
+    assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+    assert.match(result.values.faq, /text-2xl/);
   });
 
   test('buildMergeValues strips to nothing when neither page-type evidence nor a site-wide heading class exists', () => {
@@ -1230,5 +1267,48 @@ describe('sanitizeCapturedTemplate — page-type-aware heading-size correction',
     }, 'visible', { faq: captured }, {}, { page: 'https://example.com/blog/some-post/' });
     assert.equal(result.ok, true);
     assert.doesNotMatch(result.values.faq, /md:text-3xl/);
+  });
+});
+
+describe('inline inserts must not break the article they land in', () => {
+  // The three defects that shipped together on site 1's blog posts, each
+  // reproduced from the real stored template shapes.
+  const expandTemplate = {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '<section class="gap-2 text-3xl md:text-4xl">\n  <h2 class="text-3xl font-normal text-gray-900">{{HEADING}}</h2>\n  <p>{{BODY}}</p>\n</section>',
+  };
+  const profile = { typography: { heading: { item: 'text-2xl font-normal text-gray-900', section: 'text-5xl font-black' } } };
+  const blogPage = 'https://example.com/blog/a-post/';
+
+  test('section-scale vertical padding is stripped so the block does not open a gap in the copy', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    assert.equal(r.ok, true);
+    const html = Object.values(r.values)[0];
+    assert.doesNotMatch(html, /py-12/);
+    assert.doesNotMatch(html, /md:py-20/);
+  });
+
+  test('the grounded class lands on the real heading, not the row wrapper', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    const html = Object.values(r.values)[0];
+    assert.match(html, /<h2 class="[^"]*text-2xl/, 'the <h2> itself must carry the corrected size');
+    assert.doesNotMatch(html, /<section class="[^"]*text-2xl/, 'the wrapper must not inherit a heading size that cascades to all children');
+  });
+
+  test('no hero-scale size survives anywhere in an inline insert', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: blogPage });
+    const html = Object.values(r.values)[0];
+    assert.doesNotMatch(html, /text-3xl|text-4xl|text-5xl|font-black/);
+  });
+
+  test('the same template on a NON-inline page keeps its full section treatment', () => {
+    const r = buildMergeValues('expand-content', { sections: [{ heading: 'H', body: 'B' }] },
+      'visible', { expandContent: expandTemplate }, profile, { page: 'https://example.com/' });
+    const html = Object.values(r.values)[0];
+    assert.match(html, /py-12/, 'a homepage section legitimately earns its own vertical rhythm');
+    assert.match(html, /text-3xl/, 'and its own headline scale');
   });
 });

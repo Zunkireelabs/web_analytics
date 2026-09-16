@@ -3,7 +3,7 @@ import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftFo
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
-import { batchBranchName, beginBatchPush } from '../../implementers/lib/github-ops.js';
+import { batchBranchName, beginBatchPush, pushDraftBranch as pushFileEditsOntoBatch } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
 import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
@@ -810,7 +810,7 @@ export async function autoRemediateSafeRecommendations(siteId, {
     attempted++;
     try {
       const files = (item.params?.edits || []).map(({ path, content }) => ({ path, content }));
-      const pushed = await pushDraftBranch(
+      const pushed = await pushFileEditsOntoBatch(
         site,
         { id: `${item.source}-${item.id}`, action_type: item.source },
         files,

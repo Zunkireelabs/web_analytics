@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy } from './profile-extract.js';
+import { correctBodyTypography, bodySamples, correctHeadingTypography, headingSamplesByLevel, headingPageSamplesByContext, correctLinkTypography, correctPageTypeTextHierarchy, correctSpacing } from './profile-extract.js';
 
 // The real classes and computed styles captured from zunkireelabs.com on
 // 2026-08-31. The eyebrow is the site's most consistent body-role paragraph —
@@ -165,6 +165,51 @@ describe('correctHeadingTypography', () => {
     assert.equal(correctHeadingTypography({}, noH3).heading.item, H2);
   });
 
+  test('an item heading is never left LARGER than the section heading above it', () => {
+    // admizzeducation.com's real defect: no h3 anywhere, so `item` fell back to
+    // the h2 pool — but the central pick for `item` landed on an oversized
+    // display h2 (50px) while `section` landed on the real section heading
+    // (42px). FAQ questions then shipped bigger than the section titles above
+    // them. Both values are this site's own real evidence; the rule only asks
+    // whether they agree with each other.
+    const DISPLAY_H2 = 'text-[28px] sm:text-[36px] md:text-[50px] font-bold leading-[1.15]';
+    const SECTION_H2 = 'text-3xl md:text-[42px] font-bold leading-tight';
+    const { heading, corrected } = correctHeadingTypography(
+      { section: SECTION_H2, item: DISPLAY_H2 }, new Map(),
+    );
+    assert.equal(heading.item, SECTION_H2, 'capped to the real section class, never an invented smaller one');
+    assert.ok(corrected.includes('item:capped-to-section'));
+  });
+
+  test('the cap works on SEMANTIC class names too, using real measured pixels not the class string', () => {
+    // chayceproperties.com's real shape: typography.heading uses semantic
+    // classes ('home-h2') with no parseable size in the name at all — the
+    // class-name-only reading (maxTextPx) sees null for both sides and can
+    // never fire on this site. The real captured samples carry the actual
+    // computed font-size regardless of naming convention, so this has to be
+    // what the hierarchy check reads for it to mean anything here: a card
+    // heading genuinely marked up as a literal <h3> but styled bigger (48px)
+    // than the real section heading (34px) — same shape as Admizz's defect,
+    // expressed in a naming convention maxTextPx can't parse at all.
+    const pages = [page([
+      h('h2', 'section-title', '34px'),
+      h('h3', 'card-title-oversized', '48px'),
+    ])];
+    const { heading, corrected } = correctHeadingTypography({}, headingSamplesByLevel(pages));
+    assert.equal(heading.item, 'section-title', 'capped to the real section class, which maxTextPx could never have picked either');
+    assert.ok(corrected.includes('item:capped-to-section'));
+  });
+
+  test('an item heading SMALLER than the section heading is left exactly as it is', () => {
+    const SECTION_H2 = 'text-3xl md:text-[42px] font-bold';
+    const ITEM_H3 = 'text-xl md:text-2xl font-semibold';
+    const { heading, corrected } = correctHeadingTypography(
+      { section: SECTION_H2, item: ITEM_H3 }, new Map(),
+    );
+    assert.equal(heading.item, ITEM_H3);
+    assert.deepEqual(corrected, []);
+  });
+
   test('an uppercase eyebrow marked up as an h2 is not a heading candidate', () => {
     const EYEBROW_H2 = 'text-sm uppercase tracking-widest text-gray-500 font-medium mb-4';
     const H2 = 'text-3xl md:text-4xl font-normal text-gray-900';
@@ -290,5 +335,28 @@ describe('correctPageTypeTextHierarchy', () => {
     const { pageTypePatterns, corrected } = correctPageTypeTextHierarchy(patterns, []);
     assert.deepEqual(pageTypePatterns['blog-article'].textHierarchy, patterns['blog-article'].textHierarchy);
     assert.deepEqual(corrected, []);
+  });
+});
+
+describe('correctSpacing', () => {
+  test('a fixed height stored as section spacing is dropped, not persisted as design knowledge', () => {
+    // admizzeducation.com's profile held spacing.section: 'h-[70px]' — its
+    // navbar height — which then composed into every projected component
+    // wrapper, including the <dl> holding six Q&A pairs.
+    assert.deepEqual(correctSpacing({ section: 'h-[70px]', itemGap: 'gap-2.5' }), { section: null, itemGap: 'gap-2.5' });
+  });
+
+  test('real spacing is untouched', () => {
+    const real = { section: 'py-16 md:py-24', itemGap: 'space-y-4' };
+    assert.deepEqual(correctSpacing(real), real);
+  });
+
+  test('a value carrying real spacing alongside a height is not a pure mistake and is kept', () => {
+    assert.deepEqual(correctSpacing({ section: 'h-[70px] py-8' }), { section: 'h-[70px] py-8' });
+  });
+
+  test('missing/empty spacing stays empty', () => {
+    assert.deepEqual(correctSpacing(null), {});
+    assert.deepEqual(correctSpacing({}), {});
   });
 });
