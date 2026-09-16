@@ -161,6 +161,24 @@ mock.module(resolve('./generator-learning.js'), {
 mock.module(resolve('../../implementers/lib/onboarding-readiness.js'), {
   namedExports: { isOnboardingAnalysisPending: async () => onboardingPending },
 });
+// batchBranchName/beginBatchPush are left real (pure/synchronous, no
+// network) — only pushDraftBranch (imported in auto-remediation.js under
+// the alias pushFileEditsOntoBatch) is faked here, for the file-edits queue
+// drain's own push. draftLike.id is `${source}-${queueId}`
+// (auto-remediation.js's own format), so the numeric id is whatever trails
+// the LAST hyphen.
+const realGithubOps = await import(resolve('../../implementers/lib/github-ops.js'));
+mock.module(resolve('../../implementers/lib/github-ops.js'), {
+  namedExports: {
+    ...realGithubOps,
+    pushDraftBranch: async (site, draftLike, files, target) => {
+      const queueId = Number(String(draftLike.id).split('-').pop());
+      calls.branchPushRetries.push(draftLike.id);
+      if (contentRepairPushOn(queueId)) return { ok: false, error: `simulated push failure for file-edits item ${queueId}` };
+      return { ok: true, branchName: target.branchName };
+    },
+  },
+});
 // The shared shipping queue's other lanes — learned-repair's queued intents
 // and content-repair's already-prepared file edits (see store/shipping-queue.js,
 // migration 148). This module's own real logic (dedupe, state transitions)
@@ -238,22 +256,15 @@ mock.module(resolve('../../routes/action-center.js'), {
         : { id: draftId, branch_name: `auto/${draftId}` };
     },
     // The manual "Push Branch" retry the unattended path now reuses to
-    // resume a draft stranded at 'approved' by a failed apply(). This same
-    // mocked export also stands in for github-ops.js's real pushDraftBranch
-    // in its OTHER call shape — the file-edits queue drain (content-repair,
-    // template-capability-repair) calls it as (site, draftLike, files,
-    // target) directly, never through the resume-a-stranded-draft path
-    // above, so the two are told apart by arity. draftLike.id is
-    // `${source}-${queueId}` (auto-remediation.js's own format), so the
-    // numeric id is whatever trails the LAST hyphen.
-    pushDraftBranch: async (a, b, files, target) => {
-      if (files !== undefined) {
-        const queueId = Number(String(b.id).split('-').pop());
-        calls.branchPushRetries.push(b.id);
-        if (contentRepairPushOn(queueId)) return { ok: false, error: `simulated push failure for file-edits item ${queueId}` };
-        return { ok: true, branchName: target.branchName };
-      }
-      const draftId = b;
+    // resume a draft stranded at 'approved' by a failed apply(). Only the
+    // (siteId, draftId) shape — the file-edits queue drain now calls
+    // github-ops.js's own pushDraftBranch directly (imported under the
+    // alias pushFileEditsOntoBatch), mocked separately below, after a
+    // production bug where this action-center.js export was called with
+    // github-ops.js's (site, draftLike, files, target) arguments instead
+    // and silently ran its real (siteId, draftId) body against them — the
+    // whole `site` object landing in a getDraft() call's siteId parameter.
+    pushDraftBranch: async (siteId, draftId) => {
       calls.branchPushRetries.push(draftId);
       return { id: draftId, branch_name: `retry/${draftId}` };
     },
