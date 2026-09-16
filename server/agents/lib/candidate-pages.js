@@ -36,6 +36,68 @@ const ZERO_TRAFFIC_SHARE = 0.25;
 // already-important pages come first.
 const MAX_ZERO_TRAFFIC_SHARE = 0.6;
 
+// A query-string decorated URL sharing a pathname with an already-present
+// query-less URL is, in every real case seen so far, dead tracking cruft
+// riding on top of the real page (Chayce Properties' `?h=...` — a hash
+// param inherited from a prior site on the same domain, matched by nothing
+// this or any other site's own templates read) rather than a second real
+// page. Left undeduped, GSC can hand a junk `?h=` URL more raw impressions
+// than the real page it decorates (bot/referrer traffic), which let it win
+// `aggregateSystemicFinding`'s highest-impression `pickRepresentative` for
+// content-gap.js/technical-seo.js's missing-canonical check — so the one
+// draftable canonical-tag fix a whole site got pointed at a junk URL, never
+// a real one. geo-signals.js has no representative-picking step at all: it
+// loops every candidate in the batch, so an undeduped junk URL there simply
+// earned its own "add author byline" etc. finding right next to real pages.
+// Both bugs share one cause and one fix location: this is the one pool
+// every page-level agent (technical-seo, content-gap, geo-signals, ...)
+// reads its candidates from, so deduping here fixes it for all of them at
+// once — the same "one shared choke point" reasoning as the soft-404 filter
+// below.
+//
+// A pathname with NO query-less URL in the pool at all is left completely
+// untouched: get-started.njk's own `?package=...` variants are real,
+// independently valuable content (the sitemap generator's own comment
+// documents this), and they never collide with this rule because their
+// pathname (`/get-started/index.html`) has no bare sibling — only
+// `/get-started/` does, which is a different pathname entirely.
+export function dedupeQueryVariants(urls, impressionsByPage = null) {
+  const groups = new Map();
+  for (const url of urls) {
+    let key = url;
+    let hasQuery = false;
+    try {
+      const parsed = new URL(url);
+      key = parsed.origin + parsed.pathname;
+      hasQuery = Boolean(parsed.search);
+    } catch { /* unparsable URL: treat as its own singleton group below */ }
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ url, hasQuery });
+  }
+
+  const kept = [];
+  for (const variants of groups.values()) {
+    const bare = variants.find((v) => !v.hasQuery);
+    if (!bare || variants.length === 1) {
+      kept.push(...variants.map((v) => v.url));
+      continue;
+    }
+    kept.push(bare.url);
+    // Fold the dropped variants' impressions into the survivor rather than
+    // discarding that traffic signal outright — a page shouldn't look less
+    // trafficked than it really is just because some of its real visits
+    // arrived via a decorated URL.
+    if (impressionsByPage) {
+      for (const v of variants) {
+        if (v.url === bare.url) continue;
+        const extra = impressionsByPage.get(v.url);
+        if (extra) impressionsByPage.set(bare.url, (impressionsByPage.get(bare.url) || 0) + extra);
+      }
+    }
+  }
+  return kept;
+}
+
 export function zeroTrafficSlotsFor(batchSize, gscCount, zeroCount) {
   if (zeroCount <= 0) return 0;
   if (gscCount <= 0) return batchSize;
@@ -205,8 +267,17 @@ export async function selectCandidatePages(siteId, agentId, {
   const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
 
   const impressionsByPage = new Map(gscPages.map((p) => [p.dim_value, Number(p.impressions)]));
-  const gscUrls = gscPages.map((p) => p.dim_value);
-  const zeroTrafficUrls = inventory.map((r) => r.page).filter((page) => !impressionsByPage.has(page)).slice(0, zeroTrafficLimit);
+  const gscUrls = dedupeQueryVariants(gscPages.map((p) => p.dim_value), impressionsByPage);
+  // Zero-traffic query variants have nothing to merge (both sides are 0
+  // impressions) — a plain drop, and also checked against gscUrls' own
+  // pathnames so a zero-traffic `?h=`-style sibling of an already-kept,
+  // real-traffic page doesn't sneak into the batch through this pool instead.
+  const gscPathnames = new Set(gscUrls.map((url) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return url; } }));
+  const zeroTrafficUrls = dedupeQueryVariants(
+    inventory.map((r) => r.page).filter((page) => !impressionsByPage.has(page)),
+  )
+    .filter((page) => { try { const u = new URL(page); return !gscPathnames.has(u.origin + u.pathname); } catch { return true; } })
+    .slice(0, zeroTrafficLimit);
 
   const checkedAt = await getCheckedAtForPages(siteId, agentId, [...gscUrls, ...zeroTrafficUrls]);
   const gscSorted = sortByRotation(gscUrls, checkedAt);

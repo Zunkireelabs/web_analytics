@@ -15,7 +15,12 @@ export const meta = {
   ],
 };
 
-const MAX_PAGES = 20;
+// Raised from 20 — see content-gap.js's MAX_PAGES comment for the full
+// reasoning (merge-sync fix + 800+ open recommendations backlog on
+// Zunkiree Labs meant the scan rate, not the ship ceiling, was the real
+// bottleneck). This agent's only per-page cost is a page-content fetch, no
+// external per-page quota to respect.
+const MAX_PAGES = 40;
 
 const GEO_SIGNAL_RULES = [
   {

@@ -76,3 +76,56 @@ export async function fetchKeywordIdeas(seedTerms, { locationCode, languageCode,
     }))
     .sort((a, b) => b.searchVolume - a.searchVolume);
 }
+
+const SEARCH_VOLUME_ENDPOINT = 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live';
+
+// Fallback for a location the Labs keyword_ideas product above doesn't
+// cover (confirmed live: Nepal returns "Invalid Field: 'location_code'"
+// from keyword_ideas specifically) — this is a DIFFERENT DataForSEO
+// product (Google Ads' own Search Volume data, not Labs' keyword-expansion
+// layer built on top of it), and product coverage differs by location
+// between the two, so a location missing from one may still exist in the
+// other. Real, but strictly narrower than fetchKeywordIdeas: this only
+// returns volume for the EXACT keywords given (the site's own seed terms),
+// never expands them into new related suggestions the way keyword_ideas
+// does — so a location that falls back to this path yields real but
+// thinner keyword coverage than one Labs can serve directly. No
+// keyword_difficulty here either (a Labs-only metric); the caller's
+// difficultyBucket(null) already handles that honestly as 'medium', never
+// a fabricated score.
+export async function fetchSearchVolume(seedTerms, { locationCode, languageCode } = {}) {
+  const keywords = seedTerms.slice(0, MAX_SEED_TERMS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(SEARCH_VOLUME_ENDPOINT, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Authorization: authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify([{ keywords, location_code: locationCode, language_code: languageCode }]),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) {
+    throw new Error(`DataForSEO search_volume request failed: HTTP ${res.status}`);
+  }
+  const body = await res.json();
+  const task = body?.tasks?.[0];
+  if (task?.status_code && task.status_code !== 20000) {
+    throw new Error(`DataForSEO search_volume task error: ${task.status_message || task.status_code}`);
+  }
+
+  const items = task?.result || [];
+  return items
+    .filter((item) => item.keyword && item.search_volume)
+    .map((item) => ({
+      keyword: item.keyword,
+      searchVolume: item.search_volume,
+      competition: item.competition_level || null,
+      difficulty: null,
+    }))
+    .sort((a, b) => b.searchVolume - a.searchVolume);
+}

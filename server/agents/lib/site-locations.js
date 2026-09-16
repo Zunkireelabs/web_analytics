@@ -22,6 +22,24 @@ export function resolveSiteLocations(site) {
     ? { locationCode: Number(site.country_code), languageCode: site.language_code || DEFAULT_LANGUAGE_CODE }
     : null;
 
+  // An explicit multi-market list (migration 162) takes priority over
+  // target_scope entirely — for a business that genuinely serves several
+  // real markets at once (e.g. Zunkiree Labs itself: Nepal-based, but
+  // serving clients in the US/UK/India/Australia/Canada/Switzerland/
+  // Netherlands/Germany too), neither 'hybrid' (home market + one shared
+  // default) nor 'global' (one shared default alone) can express that;
+  // this can name exactly the real markets that matter, of any length.
+  // Each entry carries its OWN languageCode (not one site-wide language)
+  // because DataForSEO's Keyword Data product validates language against
+  // location per request — Germany/Switzerland reject 'en' outright and
+  // need 'de', the Netherlands needs 'nl' (confirmed live) — a single
+  // language_code field can't serve a mixed-language market list.
+  if (Array.isArray(site?.target_markets) && site.target_markets.length) {
+    return site.target_markets
+      .filter((m) => m && m.locationCode != null)
+      .map((m) => ({ locationCode: Number(m.locationCode), languageCode: m.languageCode || DEFAULT_LANGUAGE_CODE }));
+  }
+
   switch (site?.target_scope) {
     case 'local': return ownLocation ? [ownLocation] : [globalLocation];
     case 'hybrid': return ownLocation ? [ownLocation, globalLocation] : [globalLocation];
