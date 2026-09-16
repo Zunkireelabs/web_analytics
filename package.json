@@ -15,6 +15,7 @@
     "onboard-client": "node server/scripts/onboard-client.js",
     "audit-url-file-map": "node server/scripts/audit-url-file-map.js",
     "verify-component-templates": "node server/scripts/verify-component-templates.js",
+    "force-design-profile-rescan": "node server/scripts/force-design-profile-rescan.js",
     "verify-github-app": "node server/scripts/verify-github-app.js",
     "bootstrap-structural-markers": "node server/scripts/bootstrap-structural-markers.js",
     "install-rendering-workflow": "node server/scripts/install-rendering-workflow.js",

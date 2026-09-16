@@ -229,6 +229,29 @@ describe('queueDesignProfileRescanForSite — refreshes an existing profile, nev
     assert.equal(queued, false);
     assert.equal(touched, false);
   });
+
+  // force-design-profile-rescan.js's whole reason to exist: a fix to HOW a
+  // profile is derived makes every EXISTING profile worth re-deriving right
+  // away, not after up to 7 more days of the old, buggy logic.
+  test('force bypasses the staleness check, queuing even a freshly-derived profile', async () => {
+    const site = { id: 36, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true };
+    const queued = await queueDesignProfileRescanForSite(site, fakeRescanDeps({ getProfile: () => ({ derivedAt: FRESH_ISO }), force: true }));
+    assert.equal(queued, true);
+    assert.equal(createdJobs.length, 1);
+  });
+
+  test('force does not bypass the OTHER preconditions — no usable profile is still left to first-derivation', async () => {
+    const site = { id: 37, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true };
+    const queued = await queueDesignProfileRescanForSite(site, fakeRescanDeps({ hasUsableProfile: () => false, force: true }));
+    assert.equal(queued, false);
+  });
+
+  test('force does not duplicate an already-queued rescan', async () => {
+    const site = { id: 38, repo_owner: 'acme', repo_name: 'acme-web', auto_remediation_enabled: true };
+    const queued = await queueDesignProfileRescanForSite(site, fakeRescanDeps({ findQueuedProfileJob: async () => ({ id: 999 }), force: true }));
+    assert.equal(queued, false);
+    assert.equal(createdJobs.length, 0);
+  });
 });
 
 describe('queueDesignProfileRescanForAllSites', () => {
@@ -244,5 +267,16 @@ describe('queueDesignProfileRescanForAllSites', () => {
     });
     assert.equal(result.queued, 1);
     assert.deepEqual(queuedSites, [40]);
+  });
+
+  test('force is passed through to every site\'s queueForSite call', async () => {
+    const sites = [{ id: 42, repo_owner: 'a', repo_name: 'a-web', auto_remediation_enabled: true }];
+    const forceValues = [];
+    await queueDesignProfileRescanForAllSites({
+      listAllSites: async () => sites,
+      queueForSite: async (site, opts) => { forceValues.push(opts?.force); return true; },
+      force: true,
+    });
+    assert.deepEqual(forceValues, [true]);
   });
 });

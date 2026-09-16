@@ -181,6 +181,25 @@ describe('correctHeadingTypography', () => {
     assert.ok(corrected.includes('item:capped-to-section'));
   });
 
+  test('the cap works on SEMANTIC class names too, using real measured pixels not the class string', () => {
+    // chayceproperties.com's real shape: typography.heading uses semantic
+    // classes ('home-h2') with no parseable size in the name at all — the
+    // class-name-only reading (maxTextPx) sees null for both sides and can
+    // never fire on this site. The real captured samples carry the actual
+    // computed font-size regardless of naming convention, so this has to be
+    // what the hierarchy check reads for it to mean anything here: a card
+    // heading genuinely marked up as a literal <h3> but styled bigger (48px)
+    // than the real section heading (34px) — same shape as Admizz's defect,
+    // expressed in a naming convention maxTextPx can't parse at all.
+    const pages = [page([
+      h('h2', 'section-title', '34px'),
+      h('h3', 'card-title-oversized', '48px'),
+    ])];
+    const { heading, corrected } = correctHeadingTypography({}, headingSamplesByLevel(pages));
+    assert.equal(heading.item, 'section-title', 'capped to the real section class, which maxTextPx could never have picked either');
+    assert.ok(corrected.includes('item:capped-to-section'));
+  });
+
   test('an item heading SMALLER than the section heading is left exactly as it is', () => {
     const SECTION_H2 = 'text-3xl md:text-[42px] font-bold';
     const ITEM_H3 = 'text-xl md:text-2xl font-semibold';

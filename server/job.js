@@ -1537,6 +1537,16 @@ export async function queueDesignProfileRescanForSite(site, {
   resolvePageUrl = sitePageUrl,
   now = () => Date.now(),
   staleAfterMs = DESIGN_PROFILE_RESCAN_STALE_AFTER_MS,
+  // Bypasses the staleness check only — every other precondition (usable
+  // profile required, no double-queueing) still applies. For the one-time
+  // post-deploy catch-up (server/scripts/force-design-profile-rescan.js):
+  // a fix to HOW the profile is derived (a capture-cap change, a correction-
+  // pass bug fix) makes every EXISTING profile worth re-deriving immediately,
+  // regardless of how recently it happened to run under the old code. The
+  // routine weekly cadence resumes normally the moment this one force-run
+  // completes, since it goes through the exact same job and re-sets
+  // derivedAt like any other rescan.
+  force = false,
 } = {}) {
   if (!site?.auto_remediation_enabled || !site?.repo_owner || !site?.repo_name) return false;
   // A site with no usable profile yet is queueDesignAgentDerivationForSite's
@@ -1546,7 +1556,7 @@ export async function queueDesignProfileRescanForSite(site, {
 
   const profile = getProfile(site);
   const derivedAt = profile?.derivedAt ? Date.parse(profile.derivedAt) : NaN;
-  if (Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
+  if (!force && Number.isFinite(derivedAt) && now() - derivedAt < staleAfterMs) return false;
 
   try {
     const pending = await findQueuedProfileJob(site.id, DESIGN_PROFILE_JOB_KEY);
@@ -1562,13 +1572,15 @@ export async function queueDesignProfileRescanForSite(site, {
 export async function queueDesignProfileRescanForAllSites({
   listAllSites = listSites,
   queueForSite = queueDesignProfileRescanForSite,
+  force = false,
 } = {}) {
   const sites = (await listAllSites()).filter((s) => s.auto_remediation_enabled && s.repo_owner && s.repo_name);
   let queued = 0;
   for (const site of sites) {
-    if (await queueForSite(site)) queued++;
+    // eslint-disable-next-line no-await-in-loop -- sequential enqueue, same as every other fleet loop in this file
+    if (await queueForSite(site, { force })) queued++;
   }
-  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for sites with a stale profile`);
+  if (queued) console.log(`[job] design-agent: queued ${queued} design-profile rescan(s) for ${force ? 'every site (forced)' : 'sites with a stale profile'}`);
   return { queued };
 }
 

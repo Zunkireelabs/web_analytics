@@ -153,6 +153,31 @@ function pickCentralClass(samples) {
     .sort((a, b) => b.meanDf - a.meanDf || b.count - a.count || a.size - b.size)[0].classes;
 }
 
+// Real measured px for a sample's `style.fontSize` (capture.js always writes
+// this as a real computed-style string, e.g. '36px') — the notation-free
+// alternative to parsing a class NAME for a size.
+function samplePx(sample) {
+  const m = /^([\d.]+)px$/.exec(String(sample?.style?.fontSize || '').trim());
+  return m ? parseFloat(m[1]) : null;
+}
+
+// The MEDIAN measured size across every sample this site actually captured
+// for a role, not one element's incidental size. Why this exists at all: a
+// site that names classes semantically (`home-h2`, `sectionHeading` — real,
+// confirmed on chayceproperties.com) carries no parseable size in the class
+// string the way `text-[42px]` does, so any check reading the class NAME
+// (this file's own maxTextPx-based comparison, or marker-merge.js's render-
+// time strip) is silently inert on it. The real computed pixel size was
+// already captured alongside every sample regardless of naming convention —
+// this reads THAT instead, so the item-vs-section hierarchy check below
+// holds for a Tailwind site and a semantic-CSS site identically.
+function medianSamplePx(samples) {
+  const values = (samples || []).map(samplePx).filter((n) => n != null).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const mid = Math.floor(values.length / 2);
+  return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+}
+
 // typography.link is meant to be the site's INLINE link style — what a link
 // inside a sentence or a related-links list looks like. When it comes back
 // byte-identical to components.button.primary, it is not that: capture.js used
@@ -249,8 +274,17 @@ export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSample
   // guess, while the section heading is real, live, and known to render
   // correctly. Equal-size is a mild hierarchy flattening; larger is a visible
   // defect.
-  const itemPx = maxTextPx(out.item);
-  const sectionPx = maxTextPx(out.section);
+  //
+  // Judged by REAL measured pixels from the samples themselves first
+  // (medianSamplePx), falling back to parsing the chosen class NAME
+  // (maxTextPx) only when no samples were passed in (e.g. a caller checking
+  // two already-stored profile values with no capture evidence at hand).
+  // The samples-based reading is what makes this hold on a semantic-CSS site
+  // (`home-h2`, `sectionHeading` — no parseable size in the class name at
+  // all) exactly as it does on a Tailwind site — confirmed necessary on
+  // chayceproperties.com, whose typography is entirely semantic classes.
+  const itemPx = medianSamplePx(itemSamples) ?? maxTextPx(out.item);
+  const sectionPx = medianSamplePx(sectionSamples) ?? maxTextPx(out.section);
   if (itemPx != null && sectionPx != null && itemPx > sectionPx) {
     out.item = out.section;
     corrected.push('item:capped-to-section');
