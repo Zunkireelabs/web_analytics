@@ -589,6 +589,34 @@ jobs:
               echo "One-time post-fix design-profile rescan already queued; relying on the weekly cron from here."
             fi
 
+            # ── One-time site-discovery catch-up (page_inventory) ──────────
+            # Same reasoning as the design-profile rescan directly above, for
+            # a different pipeline: page_inventory (the page list every
+            # finding-generating agent — selectCandidatePages — scans for
+            # issues to fix) is refreshed weekly from each site's sitemap +
+            # a real crawl, but only if that week's run hasn't happened yet.
+            # It has no way to notice a site's OWN sitemap changed since
+            # then. Confirmed on chayceproperties.com: its real sitemap.xml
+            # lists /news/, but every stored page_inventory row is tagged
+            # 'crawl', never 'sitemap' — that fetch never landed, so /news/
+            # has been invisible to every page-level agent regardless of how
+            # long it waits. This runs it once, synchronously (unlike the
+            # design-profile rescan, this reads/writes fast HTTP fetches, no
+            # LLM or slow browser render, so there's no need to background
+            # it), then never fires again.
+            DISCOVERY_MARKER="/home/zunkireelabs/devprojects/analytics-app-stage/.site-discovery-2026-09-17-done"
+            if [ ! -f "$DISCOVERY_MARKER" ]; then
+              echo "Running one-time site-discovery catch-up for all connected sites..."
+              if docker compose -f docker-compose.dev.yml exec -T analytics npm run force-site-discovery; then
+                touch "$DISCOVERY_MARKER"
+                echo "Site discovery complete — page_inventory is now current; routine weekly discovery resumes from here."
+              else
+                echo "Site discovery run failed — marker NOT written, will retry on the next deploy."
+              fi
+            else
+              echo "One-time post-fix site-discovery catch-up already run; relying on the weekly cron from here."
+            fi
+
       - name: Verify Health
         run: |
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ vars.STAGING_DOMAIN }}")
