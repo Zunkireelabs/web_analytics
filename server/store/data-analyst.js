@@ -137,11 +137,12 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
   for (const g of gaps) {
     await query(
       `INSERT INTO keyword_gaps (site_id, topic, reason, priority, status, source,
-                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role, location_code)
+                                 first_discovery_week, last_observed_week, topic_cluster, cluster_role, location_code,
+                                 search_volume)
        SELECT $1, $2, $3, $4, 'pending_review', $5,
               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
               COALESCE($6::date, (date_trunc('week', now() AT TIME ZONE 'UTC'))::date),
-              $7, $8, $9
+              $7, $8, $9, $10
         WHERE NOT EXISTS (
           SELECT 1 FROM keyword_gaps
            WHERE site_id = $1 AND topic = $2 AND status IN ('accepted', 'dismissed')
@@ -156,8 +157,12 @@ export async function saveKeywordGaps(siteId, gaps, source = 'internal_analysis'
          reason = COALESCE(EXCLUDED.reason, keyword_gaps.reason),
          topic_cluster = COALESCE(EXCLUDED.topic_cluster, keyword_gaps.topic_cluster),
          cluster_role = COALESCE(EXCLUDED.cluster_role, keyword_gaps.cluster_role),
-         location_code = COALESCE(EXCLUDED.location_code, keyword_gaps.location_code)`,
-      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null, g.location_code || null]
+         location_code = COALESCE(EXCLUDED.location_code, keyword_gaps.location_code),
+         -- A fresh DataForSEO measurement replaces the old one outright
+         -- (demand can genuinely rise or fall month to month); only missing
+         -- entirely does it fall back to whatever was already stored.
+         search_volume = COALESCE(EXCLUDED.search_volume, keyword_gaps.search_volume)`,
+      [siteId, g.topic, g.reason || null, g.priority || 'medium', source, discoveryWeek, g.topic_cluster || null, g.cluster_role || null, g.location_code || null, g.search_volume ?? null]
     );
   }
 }
@@ -199,7 +204,7 @@ const GAP_STATUS_FROM_DB = { pending_review: 'pending_review', accepted: 'approv
 export async function getKeywordGaps(siteId, status) {
   const { rows } = await query(
     `SELECT id, topic, reason, priority, status, source, search_intent, product_relevance, existing_page_match,
-            topic_cluster, cluster_role,
+            topic_cluster, cluster_role, search_volume,
             first_seen_at, last_seen_at, observation_count, evidence_snapshots, created_at,
             -- ::text deliberately. node-postgres parses a DATE into a JS Date at
             -- LOCAL midnight, so in any positive-offset timezone (this app runs

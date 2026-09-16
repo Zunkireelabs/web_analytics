@@ -706,6 +706,25 @@ export async function countDraftsBySourcesToday(siteId, sources, timezone = 'UTC
   return rows[0]?.n ?? 0;
 }
 
+// Weekly counterpart of countDraftsBySourceToday, additionally scoped to one
+// action_type — backs analyst-seo-mapping.js's on-page (faq) weekly shipping
+// cap. On-page keyword updates from keyword gaps have no cadence gate of
+// their own today (unlike blog-outline's blog_min_gap_days, see
+// ship-pacing.js): they ship immediately whenever a gap qualifies, bounded
+// only by the pipeline's overall daily budget. This counts just this week's
+// (Monday-start, matching isoWeekStart in analyst-seo-mapping.js) faq drafts
+// from the keyword-gap source specifically, so a batch of qualifying gaps in
+// one run can't all become on-page edits at once.
+export async function countDraftsBySourceAndTypeThisWeek(siteId, source, actionType, timezone = 'UTC') {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS n FROM drafts
+      WHERE site_id = $1 AND source = $2 AND action_type = $3
+        AND (created_at AT TIME ZONE $4)::date >= date_trunc('week', (now() AT TIME ZONE $4))::date`,
+    [siteId, source, actionType, timezone]
+  );
+  return rows[0]?.n ?? 0;
+}
+
 // Same shape as countDraftsBySourceToday, summed across every site — backs
 // job.js's optional AUTO_REMEDIATION_GLOBAL_DAILY_CEILING. Per-site budgets
 // each use their own timezone (a site's "today" is meaningful to that

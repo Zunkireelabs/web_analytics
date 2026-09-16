@@ -197,6 +197,7 @@ export async function runKeywordDemandIfDue(site) {
       reason: `Real Google search demand (~${idea.searchVolume}/mo) for this site's own offerings, from DataForSEO — not an LLM guess.`,
       priority: DIFFICULTY_TO_PRIORITY[difficultyBucket(idea.difficulty)],
       location_code: idea.locationCode,
+      search_volume: idea.searchVolume ?? null,
     }));
     await saveKeywordGaps(site.id, gaps, 'dataforseo_demand');
   }

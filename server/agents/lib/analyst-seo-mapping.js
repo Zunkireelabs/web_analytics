@@ -15,6 +15,7 @@ import { impactFromPriority } from './findings.js';
 import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
+import { PACED_GENERATORS } from './ship-pacing.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -24,7 +25,7 @@ import { callLLMForJson } from '../../llm.js';
 // gives keyword-gap-approved recommendations the exact same
 // Design-fit-before-Action-Center guarantee with no new code of its own.
 import { generateDraft } from '../../routes/action-center.js';
-import { countDraftsBySourceToday } from '../../store/drafts.js';
+import { countDraftsBySourceToday, countDraftsBySourceAndTypeThisWeek, hasRecentDraftOfType } from '../../store/drafts.js';
 
 // Maps an Analyst (data-analyst-agent) insight onto the existing Action
 // Center draft-generation pipeline — a completely separate system keyed by
@@ -930,6 +931,34 @@ const GAP_DRAFT_SOURCE = 'analyst-keyword-gap';
 // like auto-remediation's own over-budget candidates.
 const CONTENT_GAP_DAILY_MAX = Number(process.env.ANALYST_CONTENT_GAP_DAILY_MAX || 20);
 
+// Net-new blog topics are ranked by REAL search volume and thinned to this
+// pool before anything else applies — the daily/weekly caps below answer
+// "how much", this answers "which ones, when there's more demand evidence
+// than there is publishing capacity". search_volume is only ever real
+// (keyword-demand.js never fabricates one for an LLM-guessed gap), so an
+// LLM-guessed topic sorts to the back of the pool rather than being dropped
+// outright — it can still ship once nothing with measured demand outranks it.
+const MAX_BLOG_TOPIC_POOL = 5;
+
+// blog-outline already has a publishing cadence (ship-pacing.js's
+// blog_min_gap_days) enforced on auto-remediation.js's daily sweep of
+// already-open recommendations. This pipeline never goes through that sweep
+// — it creates AND ships a recommendation in the same call
+// (createActionCenterRecommendationForGap) — so without its own check here a
+// single Monday run could ship several blog-outline drafts at once, the
+// exact "several years' worth of blog posts in one run" class of bug
+// ship-pacing.js's own header comment describes for a different path. Reused
+// from PACED_GENERATORS rather than re-declared, so the two enforcement
+// points can't drift on the gap length or the per-site override column.
+const BLOG_PACING = PACED_GENERATORS.find((p) => p.generatorId === 'blog-outline');
+
+// On-page keyword updates (a gap matching an EXISTING page, drafted as an faq
+// addition — see gapDraftEligibility) had no cadence gate at all until now,
+// only the shared CONTENT_GAP_DAILY_MAX above. Capped to 10/week so they
+// batch on a predictable weekly rhythm instead of shipping immediately
+// whenever a gap happens to qualify.
+const FAQ_WEEKLY_MAX = 10;
+
 export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, now = new Date() } = {}) {
   const resolvedSite = site || await getSiteById(siteId);
   const gaps = await getKeywordGaps(siteId, 'pending_review');
@@ -973,10 +1002,56 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
   const spentToday = dryRun ? 0 : await countDraftsBySourceToday(siteId, GAP_DRAFT_SOURCE, resolvedSite?.timezone || 'UTC');
   let remaining = Math.max(0, CONTENT_GAP_DAILY_MAX - spentToday);
 
+  const timezone = resolvedSite?.timezone || 'UTC';
+
+  // Rank this run's blog-outline-eligible candidates by real search volume
+  // and keep only the top MAX_BLOG_TOPIC_POOL — computed once, up front, so
+  // the main loop below can treat "in the pool" as a plain lookup. A NULL
+  // search_volume (LLM-guessed) sorts last (-1), never first.
+  const rankedBlogPool = candidates
+    .filter((gap) => gapDraftEligibility(gap)?.generatorId === 'blog-outline')
+    .sort((a, b) => (b.search_volume ?? -1) - (a.search_volume ?? -1))
+    .slice(0, MAX_BLOG_TOPIC_POOL);
+  const blogPoolIds = new Set(rankedBlogPool.map((gap) => gap.id));
+  // The one slot this run may fill always goes to the pool's highest-volume
+  // member, never to whichever pool member the main loop below happens to
+  // reach first (candidates are ordered by created_at, not by volume).
+  const chosenBlogGapId = rankedBlogPool[0]?.id ?? null;
+  const blogGapDays = resolvedSite?.[BLOG_PACING.gapColumn] ?? BLOG_PACING.defaultGapDays;
+  // Same dryRun convention as spentToday above: a dry run reports against a
+  // fully-open cadence/budget rather than the real, already-spent one.
+  const blogOnCooldown = dryRun ? false : await hasRecentDraftOfType(siteId, 'blog-outline', blogGapDays, timezone);
+
+  const faqShippedThisWeek = dryRun ? 0 : await countDraftsBySourceAndTypeThisWeek(siteId, GAP_DRAFT_SOURCE, 'faq', timezone);
+  let faqRemainingThisWeek = Math.max(0, FAQ_WEEKLY_MAX - faqShippedThisWeek);
+
   const results = [];
   for (const gap of candidates) {
     const eligibility = gapDraftEligibility(gap);
     if (!eligibility) { results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'no-draft-eligibility' }); continue; }
+
+    if (eligibility.generatorId === 'blog-outline') {
+      if (!blogPoolIds.has(gap.id)) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `blog-topic-pool-cap (top ${MAX_BLOG_TOPIC_POOL} by search volume)`, generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+      if (blogOnCooldown) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `blog-cadence-gap (min ${blogGapDays}d)`, generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+      // Only the pool's single highest-volume member gets this run's one
+      // slot — never just whichever pool member the loop reaches first,
+      // which follows created_at order, not volume.
+      if (gap.id !== chosenBlogGapId) {
+        results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'blog-one-per-run', generatorId: eligibility.generatorId, deferred: true });
+        continue;
+      }
+    }
+
+    if (eligibility.generatorId === 'faq' && faqRemainingThisWeek <= 0) {
+      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: `on-page-weekly-cap (max ${FAQ_WEEKLY_MAX}/week)`, generatorId: eligibility.generatorId, deferred: true });
+      continue;
+    }
 
     // LANDING PAGES ARE NEVER AUTO-APPROVED HERE, no matter how strong the
     // evidence — a dedicated product/use-case page is a bigger commitment
@@ -1019,6 +1094,7 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     const updated = await updateKeywordGapStatus(siteId, gap.id, 'approved');
     const outcome = await createActionCenterRecommendationForGap(siteId, updated || gap);
     remaining -= 1;
+    if (eligibility.generatorId === 'faq') faqRemainingThisWeek -= 1;
     results.push({ gapId: gap.id, topic: gap.topic, qualified: true, generatorId: eligibility.generatorId, ...outcome });
   }
 
@@ -1027,6 +1103,8 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     shipped: results.filter((r) => r.qualified && !dryRun).length,
     deferred: results.filter((r) => r.deferred).length,
     dailyLimit: CONTENT_GAP_DAILY_MAX, spentToday,
+    blogTopicPoolMax: MAX_BLOG_TOPIC_POOL, blogGapDays, blogOnCooldown,
+    faqWeeklyMax: FAQ_WEEKLY_MAX, faqShippedThisWeek,
     dryRun, results,
   };
 }
