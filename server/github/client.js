@@ -37,10 +37,20 @@ async function authHeaders(site, { forSearch = false } = {}) {
     if (forSearch) {
       message = `No classic PAT with "repo" scope set for code search — set ${githubTokenEnvVar(site)}_SEARCH (or the global GITHUB_SEARCH_PAT) to enable the code-search fallback.`;
     } else if (usesGithubApp(site)) {
-      // A null token on the App path means GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64
-      // are unset (see credentials.js's usesGithubApp/appConfigured) — naming
-      // the PAT env var here would blame the wrong credential instead.
-      message = 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
+      // A null token on the App path means the relevant App id/private-key
+      // env var are unset (see credentials.js's usesGithubApp/appConfigured).
+      // Which ones depends on whether this site has its own registered App
+      // (migration 154: site.github_app_id + site.github_app_private_key_env_var)
+      // or uses the shared default — naming the WRONG pair here sent whoever
+      // read this error (or a draft's abandoned_reason) looking at
+      // GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 for a site whose real
+      // missing secret was its own dedicated env var the whole time
+      // (confirmed live: 21 qa-content/schema drafts abandoned for
+      // chayceproperties.com with this exact generic message, while its own
+      // GITHUB_APP_PRIVATE_KEY_B64_CHAYCE was the actual gap).
+      message = site.github_app_id != null
+        ? `GitHub App ${site.github_app_id} is not configured for this site — set ${site.github_app_private_key_env_var || '(no github_app_private_key_env_var set on this site)'}`
+        : 'GitHub App is not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64';
     } else {
       message = `No GitHub PAT set in env var "${githubTokenEnvVar(site)}"`;
     }

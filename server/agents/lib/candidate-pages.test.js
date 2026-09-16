@@ -1,6 +1,6 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterSoftNotFoundPages, clearSoftNotFoundCache, zeroTrafficSlotsFor } from './candidate-pages.js';
+import { filterSoftNotFoundPages, clearSoftNotFoundCache, zeroTrafficSlotsFor, dedupeQueryVariants } from './candidate-pages.js';
 
 // A 200 status does not prove a page exists. zunkireelabs.com serves its
 // homepage byte-for-byte for ANY unmatched path — /gaas/ and /zzz-not-a-page/
@@ -106,6 +106,45 @@ describe('filterSoftNotFoundPages', () => {
       checkSoftNotFound: async () => true,
     });
     assert.deepEqual(junk.pages, ['not-a-url'], 'no origin to fingerprint against — filter cannot apply');
+  });
+});
+
+describe('dedupeQueryVariants — the Chayce Properties `?h=` regression', () => {
+  test('drops a tracking-param variant that shares a pathname with a real page, folding its impressions in', () => {
+    const impressions = new Map([
+      ['https://chayceproperties.com/', 5],
+      ['https://chayceproperties.com/?h=123210041280', 9],
+    ]);
+    const kept = dedupeQueryVariants(
+      ['https://chayceproperties.com/', 'https://chayceproperties.com/?h=123210041280'],
+      impressions,
+    );
+    assert.deepEqual(kept, ['https://chayceproperties.com/']);
+    assert.equal(impressions.get('https://chayceproperties.com/'), 14);
+  });
+
+  test('leaves a query-driven page untouched when no bare sibling shares its pathname', () => {
+    // get-started.njk's own ?package= variants — real, distinct content.
+    const urls = [
+      'https://chayceproperties.com/get-started/index.html?package=Gold',
+      'https://chayceproperties.com/get-started/index.html?package=Silver',
+    ];
+    assert.deepEqual(dedupeQueryVariants(urls), urls);
+  });
+
+  test('leaves a lone query-string URL alone when it is the only entry', () => {
+    const urls = ['https://chayceproperties.com/?h=8020347041280'];
+    assert.deepEqual(dedupeQueryVariants(urls), urls);
+  });
+
+  test('works without an impressions map (zero-traffic pool has nothing to merge)', () => {
+    const urls = ['https://chayceproperties.com/', 'https://chayceproperties.com/?h=1630566011280'];
+    assert.deepEqual(dedupeQueryVariants(urls), ['https://chayceproperties.com/']);
+  });
+
+  test('an unparseable URL is treated as its own group rather than throwing', () => {
+    const urls = ['not-a-url', 'https://chayceproperties.com/'];
+    assert.deepEqual(dedupeQueryVariants(urls).sort(), urls.sort());
   });
 });
 

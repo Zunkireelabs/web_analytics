@@ -506,6 +506,33 @@ describe('authHeaders — missing-credential error names the right credential', 
     );
   });
 
+  test('a site with its OWN registered App (migration 154) and no matching key: blames its own env var, not the shared default', async () => {
+    resetEnv();
+    // The shared default App IS configured here — proving the bug: before
+    // this fix, a site on its own dedicated App still got blamed for the
+    // shared GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY_B64 even though those were
+    // never the actual credential this site depends on.
+    process.env.GITHUB_APP_ID = 'shared-default-app-is-fine';
+    process.env.GITHUB_APP_PRIVATE_KEY_B64 = 'shared-default-key-is-fine';
+    delete process.env.GITHUB_APP_PRIVATE_KEY_B64_CHAYCE;
+    clearInstallationTokenCache();
+    const chaycePropertiesSite = {
+      id: 8864, repo_owner: 'acme', repo_name: 'site',
+      github_app_installation_id: 160525254,
+      github_app_id: 4894335,
+      github_app_private_key_env_var: 'GITHUB_APP_PRIVATE_KEY_B64_CHAYCE',
+    };
+    await assert.rejects(
+      () => getBranchSha(chaycePropertiesSite, 'main'),
+      (err) => {
+        assert.match(err.message, /GITHUB_APP_PRIVATE_KEY_B64_CHAYCE/);
+        assert.match(err.message, /4894335/);
+        assert.doesNotMatch(err.message, /set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_B64\b/, 'must not blame the shared default App when this site has its own');
+        return true;
+      },
+    );
+  });
+
   test('code search with no search-specific PAT, even on an otherwise-fully-configured App site: blames the search PAT, never the App', async () => {
     resetEnv();
     process.env.GITHUB_APP_ID = 'irrelevant-app-is-fine';
