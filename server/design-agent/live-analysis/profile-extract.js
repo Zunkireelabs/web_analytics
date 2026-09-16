@@ -7,6 +7,7 @@
 // source.
 import { callLLMForJson } from '../../llm.js';
 import { DESIGN_PROFILE_VERSION } from './schema.js';
+import { maxTextPx, isFixedHeightOnly } from '../../lib/text-scale.js';
 
 const SYSTEM_PROMPT = `You are analyzing structural facts already extracted from a real, live website's rendered pages — real HTML class attributes, real computed text styles, real section ordering. You are NOT reading source code and you must NEVER invent a class name, color, or pattern that isn't present in the data you're given.
 
@@ -228,6 +229,33 @@ export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSample
     if (best !== chosen.item) { out.item = best; corrected.push('item'); }
   }
 
+  // A repeating ITEM heading (an FAQ question, a card title) can never
+  // legitimately render LARGER than the section heading it sits beneath —
+  // that inverts the site's own hierarchy, and an FAQ question set at page-
+  // title scale is exactly what it looks like on the page. This is a
+  // self-consistency rule, not an imported design opinion: both values are
+  // this site's own real captured evidence, and the check only asks whether
+  // they agree with each other.
+  //
+  // It fires when a site has no h3 samples at all and `item` had to fall back
+  // to the same h2 pool as `section` (above), but the two central picks
+  // landed on different h2 treatments — one a genuine section heading, one an
+  // oversized display heading. Confirmed live on admizzeducation.com, which
+  // derived item at 50px against a 42px section heading, then shipped FAQ
+  // questions bigger than the section title above them.
+  //
+  // The repair is deliberately to reuse `section` rather than invent a
+  // smaller class: a step-down size this site never actually uses would be a
+  // guess, while the section heading is real, live, and known to render
+  // correctly. Equal-size is a mild hierarchy flattening; larger is a visible
+  // defect.
+  const itemPx = maxTextPx(out.item);
+  const sectionPx = maxTextPx(out.section);
+  if (itemPx != null && sectionPx != null && itemPx > sectionPx) {
+    out.item = out.section;
+    corrected.push('item:capped-to-section');
+  }
+
   const page = { ...(chosen.page || {}) };
   if (pageHeadingSamples.hero?.length) {
     const best = pickCentralClass(pageHeadingSamples.hero);
@@ -240,6 +268,41 @@ export function correctHeadingTypography(chosen = {}, byLevel, pageHeadingSample
   out.page = page;
 
   return { heading: out, corrected };
+}
+
+// spacing.section describes a section's VERTICAL RHYTHM — the padding/margin
+// that separates it from what's around it. A fixed height (`h-[70px]`,
+// `h-16`) is never that: it is the measured height of whatever single element
+// the capture happened to read (very often the site's own fixed-height
+// navbar), and applying it to a wrapper holding arbitrary-length drafted
+// content clips or overlaps that content.
+//
+// Confirmed live on admizzeducation.com, whose profile stored
+// `spacing.section: "h-[70px]"` — its navbar height — which then composed
+// into every projected component wrapper, including the `<dl>` holding six
+// Q&A pairs. marker-merge.js already strips a fixed height at RENDER time,
+// so this is the same rule one stage earlier, at the point the value would be
+// stored as a site convention: a measurement mistake should not be persisted
+// as design knowledge and then repeatedly stripped by every consumer that
+// remembers to.
+//
+// Dropped to null rather than replaced with a guessed padding — null means
+// "this site has no recorded section rhythm", which every consumer already
+// handles, while an invented `py-16` would be a cross-site default of exactly
+// the kind this platform never applies.
+export function correctSpacing(spacing, siteId = null) {
+  const out = { ...(spacing || {}) };
+  for (const field of ['section', 'itemGap']) {
+    if (out[field] && isFixedHeightOnly(out[field])) {
+      if (siteId != null) {
+        console.warn(
+          `[design-agent] site ${siteId}: spacing.${field} was "${out[field]}" — a fixed height, not spacing. Dropped.`,
+        );
+      }
+      out[field] = null;
+    }
+  }
+  return out;
 }
 
 // Real <h1> samples, split by whether their own section is a hero — the only
@@ -404,7 +467,7 @@ export async function extractDesignProfile(segmentedPages, {
     framework: extracted.framework || null,
     typography: { ...typography, body, heading, link },
     color: extracted.color || {},
-    spacing: extracted.spacing || {},
+    spacing: correctSpacing(extracted.spacing, siteId),
     layout: extracted.layout || {},
     components,
     // `breakpoints` stays exactly what it always was: the class PREFIXES the

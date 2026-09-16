@@ -438,17 +438,15 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(queuedFor, site.id, 'the profile itself is re-derived, since that is where the bad body class came from');
   });
 
-  test('a projection whose composed shape matches nothing on the live site is BLOCKED, never stamped verified', async () => {
-    // The admizzeducation.com incident this branch was added for: a site with
-    // no real FAQ on its live site yet gets a PROJECTED template composed
-    // from generic profile classes. Every class the projection uses is real
-    // and live (so this is neither 'stale' nor 'body-slot-is-label') — but
-    // the composed wrapper/row shape has never appeared on the reference
-    // page, because the component doesn't exist there yet. That must block
-    // the stamp exactly like 'body-slot-is-label' does, not fall through to
-    // `verifiedBy: 'design-agent'` the way 'unreachable'/'invalid-placeholders'
-    // legitimately do — those mean "could not confirm", this means "checked,
-    // and it doesn't match anything real".
+  test('a projection is NOT structurally checked — it composes new markup, it does not claim to mirror the page', async () => {
+    // The admizzeducation.com incident, from the other direction. A projected
+    // template for a component the site has never had cannot possibly already
+    // appear on the reference page, so running the structural shape check
+    // against it produces a guaranteed failure that means nothing. All five of
+    // that site's templates failed exactly this way; enforcing it would leave
+    // every newly onboarded client on plain unstyled defaults forever. Class
+    // existence and body-slot role ARE still checked here — only shape is
+    // skipped, and only for projections.
     const site = {
       ...baseSite,
       website_domain: 'admizzeducation.com',
@@ -459,15 +457,16 @@ describe('resolveOrCreateComponentTemplate', () => {
     const result = await resolveOrCreateComponentTemplate(site, 'faq', {
       ...noopDeps(),
       saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
-      // Every class the projection composes is genuinely live in the CSS...
+      // A live page that contains no FAQ whatsoever — the exact situation a
+      // first-ever FAQ projection is created in.
       fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>No FAQ on this page at all.</p></body></html>',
       fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}.text-lg{a}.font-medium{a}.text-gray-600{a}.prose{a}',
     });
 
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'structural-mismatch');
-    assert.equal(result.template, null, 'no template is handed back for a draft to render with');
-    assert.equal(saved, null, 'nothing is persisted — an unproven shape must not be stamped verified');
+    assert.equal(result.ok, true, 'the projection is usable despite matching no existing shape');
+    assert.equal(result.source, 'design-profile');
+    assert.equal(result.template.verifiedBy, 'freshness-check', 'verified on live CSS evidence, the check that IS meaningful here');
+    assert.ok(saved.siteRoot.componentTemplates.faq, 'and persisted, not discarded');
   });
 
   test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {

@@ -6,6 +6,7 @@ import {
 import { safeMessage } from '../../lib/errors.js';
 import { todayInTz } from '../../util/dates.js';
 import { validateRenderingBatch } from './rendering-gate.js';
+import { validateSectionPreservation } from './section-preservation-gate.js';
 import { actionScopeFor } from './action-scope.js';
 import { findMarkerCorruption } from './marker-merge.js';
 
@@ -294,6 +295,16 @@ export async function pushDraftBranch(site, draft, files, target) {
   // gate automatically, with no per-generator code.
   const renderGate = await validateRenderingBatch(site, files);
   if (!renderGate.ok) return renderGate;
+
+  // Section Preservation Gate (CLAUDE.md §2) — same placement and same
+  // reasoning as the rendering gate directly above: checked before anything
+  // is written, in the one function every implementer funnels through, so no
+  // generator can opt out and no future one has to opt in. Compares what is
+  // about to be committed against what the base branch actually has today,
+  // and refuses an edit that would take away structure the client already
+  // has. See section-preservation-gate.js for why only DISAPPEARANCE fails.
+  const sectionGate = await validateSectionPreservation(site, draft, files, { ref: baseBranch(site) });
+  if (!sectionGate.ok) return sectionGate;
 
   const { branchName, exists } = target;
   try {

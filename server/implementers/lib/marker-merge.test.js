@@ -990,7 +990,26 @@ describe('buildMergeValues — captured template with unsafe classes never ships
     assert.equal(result.ok, true);
     assert.doesNotMatch(result.values.faq, /max-w-7xl/);
     assert.doesNotMatch(result.values.faq, /mx-auto/);
-    assert.match(result.values.faq, /text-\[50px\]/);
+    // Non-size typography — weight, color, opacity — is what "keeps
+    // typography" means here, and still carries over untouched.
+    assert.match(result.values.faq, /font-bold/);
+    assert.match(result.values.faq, /opacity-80/);
+  });
+
+  // This fixture IS admizzeducation.com's real stored template. Section-scale
+  // SIZE has to be stripped inline for the same reason `max-w-7xl` is — and
+  // this assertion used to require the exact opposite, encoding the bug as
+  // expected behaviour: the strip rule only recognised NAMED Tailwind scales
+  // (`text-4xl`), so every arbitrary-value class sailed through it and the
+  // site's FAQ questions shipped at 50px inside article body copy. Judged by
+  // rendered size now (lib/text-scale.js), not by notation: 28px is ordinary
+  // subheading scale and stays, 36px and 50px are section scale and go.
+  test('section-scale ARBITRARY-value sizes are stripped inline, exactly like named ones', () => {
+    const result = buildMergeValues('faq', { items }, 'visible', { faq: captured }, null, { page: 'https://example.com/blog/patient-data-security/' });
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.values.faq, /text-\[50px\]/);
+    assert.doesNotMatch(result.values.faq, /text-\[36px\]/);
+    assert.match(result.values.faq, /text-\[28px\]/);
   });
 
   // Site 8862's real capture bug wasn't limited to faq/qaContent — EVERY
