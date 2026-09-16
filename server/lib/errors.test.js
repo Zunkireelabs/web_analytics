@@ -1,6 +1,27 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { UserFacingError, sanitizeForCustomer, sanitizeDeep, safeMessage, logInternal, describeFetchFailure, describeHttpFailure } from './errors.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+
+// logInternal persists every ref it hands out (server/migrations/164) so a
+// customer-facing "ref: <id>" is still resolvable after container logs
+// rotate — confirmed dead end otherwise: Chayce Properties draft #1741's
+// "ref: b6cfde8a" was unrecoverable 13 days later. Captures each INSERT INTO
+// internal_errors call this suite makes so the persistence itself is
+// verified, not just the pre-existing console.error/return-id behavior.
+const insertedErrors = [];
+mock.module(resolve('../db.js'), {
+  namedExports: {
+    query: (text, params) => {
+      if (text.includes('INSERT INTO internal_errors')) {
+        insertedErrors.push({ id: params[0], context: params[1], message: params[2], stack: params[3], causeMessage: params[4], causeStack: params[5] });
+      }
+      return { rows: [] };
+    },
+  },
+});
+
+const { UserFacingError, sanitizeForCustomer, sanitizeDeep, safeMessage, logInternal, describeFetchFailure, describeHttpFailure } = await import('./errors.js');
 
 describe('UserFacingError', () => {
   test('is a real Error with userFacing marker', () => {
@@ -123,6 +144,27 @@ describe('safeMessage / logInternal', () => {
         logged.some((line) => line.includes('Docker daemon unreachable')),
         'the cause must reach the developer-facing log, not just the generic wrapper message'
       );
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test('logInternal persists the ref so it is still resolvable after logs rotate', async () => {
+    const original = console.error;
+    console.error = () => {};
+    insertedErrors.length = 0;
+    try {
+      const wrapped = new UserFacingError('Generic customer-safe message.', {
+        cause: new Error('the real underlying detail'),
+      });
+      const id = logInternal('github-ops.openPrForBranch', wrapped);
+      // The insert is fire-and-forget (never awaited by logInternal itself),
+      // so give its microtask a tick to run before asserting on it.
+      await new Promise((r) => setImmediate(r));
+      assert.equal(insertedErrors.length, 1);
+      assert.equal(insertedErrors[0].id, id);
+      assert.equal(insertedErrors[0].context, 'github-ops.openPrForBranch');
+      assert.equal(insertedErrors[0].causeMessage, 'the real underlying detail');
     } finally {
       console.error = original;
     }

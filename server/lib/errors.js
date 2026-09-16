@@ -16,6 +16,7 @@
 // future provider's error format.
 
 import { randomUUID } from 'node:crypto';
+import { query } from '../db.js';
 
 // The one legitimate way code may put a specific message in front of a
 // customer — e.g. "this page isn't mapped in url_file_map yet, run
@@ -55,7 +56,29 @@ export function logInternal(context, err) {
   // message on every failed run, even with direct server access, because
   // this line never printed the one thing (Docker daemon vs LLM auth) that
   // would have told an engineer what to actually fix.
-  if (err?.cause) console.error(`[internal-error:${id}] caused by:`, err.cause?.stack || err.cause?.message || err.cause);
+  const causeStack = err?.cause ? (err.cause?.stack || err.cause?.message || String(err.cause)) : null;
+  if (causeStack) console.error(`[internal-error:${id}] caused by:`, causeStack);
+
+  // Console output alone is only as durable as the container's log
+  // retention — a customer-facing "ref: <id>" promises a developer can look
+  // it up later, and once logs rotate that promise is broken (confirmed:
+  // Chayce Properties draft #1741's "ref: b6cfde8a" was unresolvable 13 days
+  // later, log evidence long gone). Best-effort and fire-and-forget: a
+  // failure to persist this record must never mask, delay, or throw over
+  // the original error logInternal exists to report.
+  // Wrapped in Promise.resolve() because a handful of test suites mock this
+  // module's `query` with a synchronous fake (returns a plain object, not a
+  // Promise) — real db.js's query is always a Promise, but this call must
+  // not assume that to stay fire-and-forget-safe either way.
+  Promise.resolve(query(
+    `INSERT INTO internal_errors (id, context, message, stack, cause_message, cause_stack)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING`,
+    [id, context, err?.message || String(err), err?.stack || null, err?.cause?.message || null, causeStack]
+  )).catch((persistErr) => {
+    console.error(`[internal-error:${id}] could not persist this error record:`, persistErr.message);
+  });
+
   return id;
 }
 

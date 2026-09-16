@@ -147,6 +147,13 @@ function fakeQuery(text, params = []) {
     if (rec) rec.status = 'superseded';
     return { rows: [] };
   }
+  // logInternal's (server/lib/errors.js) best-effort, fire-and-forget error
+  // persistence — fires on any real failure path this suite exercises
+  // (recheckRecommendation errors, apply_error abandons). This test doesn't
+  // assert anything about it, just needs it to not blow up the fake DB.
+  if (sql.startsWith('INSERT INTO internal_errors')) {
+    return { rows: [] };
+  }
   throw new Error(`action-center-reconciler.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
