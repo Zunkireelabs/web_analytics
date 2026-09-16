@@ -1547,6 +1547,38 @@ export async function resolveOrCreateComponentTemplate(site, actionType, {
         // placeholders before verifying, so 'invalid-placeholders' here would
         // only mean the LIVE check disagreed, which should never happen.
         //
+        // 'structural-mismatch' must NOT fall through either — same reasoning
+        // as 'body-slot-is-label' below, just for shape instead of role. A
+        // projected template composes generic classes (typography.heading.item,
+        // typography.body, ...) into brand-new markup for a component this
+        // site may never have had before (e.g. its first-ever FAQ). Nothing
+        // about "the classes are real" tells you the composed SHAPE looks
+        // right, and checkTemplateStructuralMatch already did the one check
+        // that can: does this exact markup shape appear anywhere on the site's
+        // real reference page. When it doesn't, that's not an infra hiccup —
+        // it means what's about to ship has never been proven to look like
+        // anything on this site. Confirmed live: admizzeducation.com's
+        // projected FAQ template was stamped `verifiedBy: design-agent`
+        // despite failing exactly this check, and shipped an FAQ with
+        // page-title-scale (50px) questions and a nonsensical `h-[70px]`
+        // wrapper on /about — this branch is why. Falling through here is not
+        // "defensible" the way an unreachable network call is; it's shipping
+        // an unproven shape to a live customer site. Blocking instead lets
+        // action-center.js's existing fallback take over (the generator's own
+        // plain, zero-config default), which is exactly what the projection
+        // failed to safely improve on.
+        if (checked.reason === 'structural-mismatch') {
+          return {
+            ok: false,
+            reason: 'structural-mismatch',
+            detail: `This site has no real example of a "${actionType}" component to project a design-matched template from `
+              + `(${checked.error}). Falling back to the generator's plain default rather than shipping an unverified, `
+              + 'possibly mismatched shape.',
+            template: null,
+            componentKey,
+          };
+        }
+        //
         // 'body-slot-is-label' is the one verdict that must NOT fall through.
         // Every other failure here means "we could not confirm this template",
         // and the DESIGN_AGENT default is defensible for those. This one means

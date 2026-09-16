@@ -438,6 +438,38 @@ describe('resolveOrCreateComponentTemplate', () => {
     assert.equal(queuedFor, site.id, 'the profile itself is re-derived, since that is where the bad body class came from');
   });
 
+  test('a projection whose composed shape matches nothing on the live site is BLOCKED, never stamped verified', async () => {
+    // The admizzeducation.com incident this branch was added for: a site with
+    // no real FAQ on its live site yet gets a PROJECTED template composed
+    // from generic profile classes. Every class the projection uses is real
+    // and live (so this is neither 'stale' nor 'body-slot-is-label') — but
+    // the composed wrapper/row shape has never appeared on the reference
+    // page, because the component doesn't exist there yet. That must block
+    // the stamp exactly like 'body-slot-is-label' does, not fall through to
+    // `verifiedBy: 'design-agent'` the way 'unreachable'/'invalid-placeholders'
+    // legitimately do — those mean "could not confirm", this means "checked,
+    // and it doesn't match anything real".
+    const site = {
+      ...baseSite,
+      website_domain: 'admizzeducation.com',
+      url_file_map: { siteRoot: { designProfile: PROFILE } },
+    };
+    let saved = null;
+
+    const result = await resolveOrCreateComponentTemplate(site, 'faq', {
+      ...noopDeps(),
+      saveConfig: async ({ urlFileMap }) => { saved = urlFileMap; return { id: 1, url_file_map: urlFileMap }; },
+      // Every class the projection composes is genuinely live in the CSS...
+      fetchPage: async () => '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>No FAQ on this page at all.</p></body></html>',
+      fetchStylesheet: async () => '.max-w-3xl{a}.mx-auto{a}.text-lg{a}.font-medium{a}.text-gray-600{a}.prose{a}',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'structural-mismatch');
+    assert.equal(result.template, null, 'no template is handed back for a draft to render with');
+    assert.equal(saved, null, 'nothing is persisted — an unproven shape must not be stamped verified');
+  });
+
   test('an UNVERIFIED existing template with real markup is self-healed by a live-CSS check, not replaced', async () => {
     // The self-heal check runs BEFORE the projection path — for a template
     // that is merely unstamped and genuinely matches the live site, checking
