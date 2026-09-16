@@ -79,6 +79,14 @@ function collectLinksInPage() {
 }
 /* eslint-enable no-undef */
 
+// [listing page type, the detail page type reached FROM it] — see the
+// second-hop block inside discoverPages for why this exists. Kept as a
+// table rather than hardcoding "blog" so a future listing/detail pair
+// (schema.js's PAGE_TYPES) is a one-line addition here.
+const DEEPER_SAMPLE_TYPES = Object.freeze([
+  ['blog-listing', 'blog-article'],
+]);
+
 // Finds a small, page-type-diverse set of real URLs on this site: the
 // homepage plus the first URL discovered for each OTHER page type, up to
 // maxPages total. Deliberately not a full-site crawl — the goal is one good
@@ -101,6 +109,50 @@ export async function discoverPages(browserPage, homepageUrl, { maxPages = DEFAU
     const type = classifyPageType(abs);
     if (!byType.has(type)) byType.set(type, abs);
     if (byType.size >= maxPages) break;
+  }
+
+  // ONE LEVEL DEEPER FOR THE PAGE TYPES INSERTED CONTENT ACTUALLY LANDS ON.
+  //
+  // Everything above is reachable from the HOMEPAGE's own links, and a site
+  // typically links to its blog LISTING (/blog/) from the nav, never to an
+  // individual post. So 'blog-article' — the single most common target for
+  // inserted FAQ/Q&A/expand-content — routinely ended up with no captured
+  // representative at all, and therefore no entry in the derived profile's
+  // pageTypePatterns.
+  //
+  // That absence is not cosmetic: marker-merge.js's groundedInlineHeadingClass
+  // asks pageTypePatterns[pageType] for this page type's real SUBHEADING
+  // class, and with nothing recorded it falls back to the site's
+  // section/page-title heading class — so every block spliced into a blog
+  // post rendered at hero scale. Confirmed live on site 1 (zunkireelabs):
+  // pageTypePatterns held 'blog-listing' but never 'blog-article'.
+  //
+  // Bounded deliberately: at most one extra navigation per missing inline
+  // type, only when a listing page for it was already discovered above, and
+  // only up to maxPages overall — this stays a targeted second hop, not a
+  // crawl. A listing page that yields no usable article link simply leaves
+  // that type unrepresented, exactly as before.
+  for (const [listingType, articleType] of DEEPER_SAMPLE_TYPES) {
+    if (byType.size >= maxPages) break;
+    if (byType.has(articleType) || !byType.has(listingType)) continue;
+    const listingUrl = byType.get(listingType);
+    let listingLinks;
+    try {
+      await browserPage.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+      listingLinks = await browserPage.evaluate(collectLinksInPage);
+    } catch {
+      continue; // an unreachable listing page tells us nothing — leave the type unrepresented
+    }
+    for (const href of listingLinks) {
+      let abs;
+      try { abs = new URL(href, listingUrl).href.split('#')[0]; } catch { continue; }
+      if (!sameOrigin(abs, homepageUrl) || seen.has(abs)) continue;
+      if (/\.(pdf|jpg|jpeg|png|svg|gif|zip|css|js|xml)$/i.test(abs)) continue;
+      seen.add(abs);
+      if (classifyPageType(abs) !== articleType) continue;
+      byType.set(articleType, abs);
+      break;
+    }
   }
 
   return [...byType.entries()].map(([pageType, url]) => ({ url, pageType }));

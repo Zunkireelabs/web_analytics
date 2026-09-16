@@ -654,6 +654,17 @@ const BLOG_UNSAFE_WRAPPER_CLASS_RE = /^(container(-\w+)?|max-w-\S+|mx-auto)$/;
 // Responsive variants (`md:text-3xl`) carry the same prefix.
 const BLOG_UNSAFE_HEADING_SIZE_RE = /^(?:[\w-]+:)?text-(3xl|4xl|5xl|6xl|7xl|8xl|9xl)$/;
 
+// Section-scale VERTICAL RHYTHM, stripped from the wrapper for the same
+// reason BLOG_UNSAFE_WRAPPER_CLASS_RE strips section-scale width: a
+// standalone section on a page of its own earns `py-12 md:py-20`, but the
+// same markup spliced into the middle of an article opens a visible gap that
+// reads as a different page breaking into the copy — the exact complaint
+// this was reported as. Only py/my at 10+ (2.5rem+) qualifies as section
+// scale; ordinary in-flow spacing (py-4, mb-6, ...) is left alone, since
+// SOME breathing room is correct for an inserted block. Responsive variants
+// carry the same prefix convention as the size rule above.
+const BLOG_UNSAFE_SECTION_SPACING_RE = /^(?:[\w-]+:)?(?:py|my)-(?:1[0-9]|[2-9][0-9])$/;
+
 // Generalized beyond "blog" (2026-09-10): the real question was never
 // specifically about /blog/ — it's whether the TARGET page is one where an
 // inserted component is a small addition to an established page (an
@@ -701,12 +712,36 @@ function isInlineContentPage(pageUrl) {
 // (profile-extract.js), just not specific to this exact page type. Still
 // 100% grounded in something this site's own pages actually use, never a
 // guess, same discipline as every other slot here.
+// Whatever class is chosen here is about to be applied to a heading nested
+// INSIDE an article's body copy, so it can never be allowed to carry a
+// section-headline size — that is the exact defect the caller is correcting.
+// Filtering the chosen class rather than trusting its source is what makes
+// this safe for both branches below: a page-type-specific subheading class is
+// real evidence but still comes from a page where that role may render at
+// section scale, and typography.heading.item is a site-wide item scale that
+// legitimately includes `md:text-3xl` on some sites (site 1's does).
+function inlineSafeHeadingClass(classes) {
+  const kept = String(classes || '').split(/\s+/).filter((c) => c && !BLOG_UNSAFE_HEADING_SIZE_RE.test(c));
+  return kept.length ? kept.join(' ') : null;
+}
+
 function groundedInlineHeadingClass(designProfile, pageUrl) {
   const pageType = typeof pageUrl === 'string' ? classifyPageType(pageUrl) : null;
   const hierarchy = pageType && designProfile?.pageTypePatterns?.[pageType]?.textHierarchy;
   const entry = Array.isArray(hierarchy) && hierarchy.find((h) => h?.role === 'subheading' && h.classes);
-  if (entry) return entry.classes;
-  return designProfile?.typography?.heading?.section || null;
+  // typography.heading.ITEM, not .section. The old fallback here was
+  // .section — the site's own page/section HEADLINE class — which made this
+  // function INFLATE the very heading it exists to shrink whenever a site had
+  // no page-type-specific evidence (confirmed live on site 1: every block
+  // spliced into a blog post rendered at `text-3xl md:text-4xl lg:text-5xl`,
+  // because pageTypePatterns had no 'blog-article' entry to draw on — see
+  // design-agent/live-analysis/capture.js's DEEPER_SAMPLE_TYPES for why that
+  // entry was systematically missing). .item is the site's own repeating-item
+  // scale, which is what an in-article subheading actually is. Falling through
+  // to null (leave the stripped heading unsized, inheriting the article's own
+  // copy) is strictly better than restoring a hero size.
+  const candidate = entry ? entry.classes : designProfile?.typography?.heading?.item;
+  return candidate ? inlineSafeHeadingClass(candidate) : null;
 }
 
 function stripClassesMatching(html, predicate) {
@@ -741,11 +776,33 @@ export function sanitizeCapturedTemplate(template, { inline = false, groundedHea
   return {
     ...template,
     wrapper: stripClassesMatching(stripFixedHeightClass(template.wrapper),
-      (c) => inline && BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c)),
+      (c) => inline && (BLOG_UNSAFE_WRAPPER_CLASS_RE.test(c) || BLOG_UNSAFE_SECTION_SPACING_RE.test(c))),
     row: (inline && groundedHeadingClass && strippedRow !== template.row)
-      ? strippedRow.replace(/class="([^"]*)"/, (full, list) => `class="${cx(list, groundedHeadingClass)}"`)
+      ? applyHeadingClass(strippedRow, groundedHeadingClass)
       : strippedRow,
   };
+}
+
+// The replacement class belongs on the HEADING the size was just stripped
+// from, not on whatever element happens to carry the row's first class
+// attribute. Those are frequently not the same element: expand-content's row
+// opens with a <section> wrapper and only then the <h2>, so the old
+// first-class-attribute replace put a heading class on the section (where it
+// cascades onto every child) and left the real <h2> with no size at all —
+// visible live on site 1 as an oversized block whose own heading was unstyled.
+// Falls back to the previous behaviour only when the row has no heading tag
+// at all, so a template shape this doesn't understand degrades rather than
+// silently dropping the correction.
+const HEADING_WITH_CLASS_RE = /(<h[1-6]\b[^>]*?\sclass=")([^"]*)(")/i;
+const HEADING_WITHOUT_CLASS_RE = /(<h[1-6])(\s|>)/i;
+function applyHeadingClass(row, headingClass) {
+  if (HEADING_WITH_CLASS_RE.test(row)) {
+    return row.replace(HEADING_WITH_CLASS_RE, (full, open, list, close) => `${open}${cx(list, headingClass)}${close}`);
+  }
+  if (HEADING_WITHOUT_CLASS_RE.test(row)) {
+    return row.replace(HEADING_WITHOUT_CLASS_RE, (full, tag, after) => `${tag} class="${headingClass}"${after}`);
+  }
+  return row.replace(/class="([^"]*)"/, (full, list) => `class="${cx(list, headingClass)}"`);
 }
 
 // The JSON-LD itself (content.schemaJsonLd) is already a deterministic

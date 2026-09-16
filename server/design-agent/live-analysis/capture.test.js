@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { discoverCardHeavyPages } from './capture.js';
+import { discoverCardHeavyPages, discoverPages } from './capture.js';
 
 // A fake Playwright Page — goto/evaluate are the only two methods
 // discoverCardHeavyPages and the capturePage() it calls internally use.
@@ -218,5 +218,76 @@ describe('captureSite — responsive pass', () => {
     const result = await captureSite(HOME, { launchBrowserFn: async () => browser, extraCardPages: 0, responsiveMaxPages: 0 });
     assert.deepEqual(result.responsive.pages, []);
     assert.equal(result.pages.length, 1, 'the design profile capture still happens');
+  });
+});
+
+// A fake Page whose collectLinksInPage result depends on which URL was last
+// navigated to — discoverPages' second hop visits the listing page and reads
+// ITS links, so a single fixed link list can't exercise that path.
+function fakePagePerUrl(linksByUrl, { failOn = [] } = {}) {
+  let currentUrl = null;
+  return {
+    navigations: [],
+    async goto(url) {
+      if (failOn.includes(url)) throw new Error(`nav failed: ${url}`);
+      currentUrl = url;
+      this.navigations.push(url);
+    },
+    async evaluate(fn) {
+      if (fn.name !== 'collectLinksInPage') throw new Error(`unexpected evaluate(): ${fn.name}`);
+      return linksByUrl[currentUrl] || [];
+    },
+  };
+}
+
+describe('discoverPages — second hop for blog-article', () => {
+  const HOME = 'https://example.com/';
+
+  test('follows the blog listing to capture a real article when the homepage links only to the listing', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/', '/services/web/'],
+      'https://example.com/blog/': ['/blog/a-real-post/', '/blog/another-post/'],
+    });
+    const pages = await discoverPages(page, HOME);
+    const byType = Object.fromEntries(pages.map((p) => [p.pageType, p.url]));
+
+    assert.equal(byType['blog-listing'], 'https://example.com/blog/');
+    assert.equal(byType['blog-article'], 'https://example.com/blog/a-real-post/',
+      'the first real article on the listing must be sampled — without it the profile has no blog-article typography');
+  });
+
+  test('does not make the extra navigation when an article was already found from the homepage', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/', '/blog/already-linked/'],
+    });
+    await discoverPages(page, HOME);
+    assert.ok(!page.navigations.includes('https://example.com/blog/'),
+      'the listing must not be re-visited when blog-article already has a representative');
+  });
+
+  test('a site with no blog listing at all is untouched', async () => {
+    const page = fakePagePerUrl({ [HOME]: ['/services/web/', '/contact/'] });
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
+    assert.equal(page.navigations.length, 1, 'only the homepage is visited');
+  });
+
+  test('an unreachable listing page leaves the type unrepresented instead of throwing', async () => {
+    const page = fakePagePerUrl(
+      { [HOME]: ['/blog/'] },
+      { failOn: ['https://example.com/blog/'] }
+    );
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
+    assert.ok(pages.some((p) => p.pageType === 'blog-listing'));
+  });
+
+  test('a listing whose links are all non-article leaves the type unrepresented', async () => {
+    const page = fakePagePerUrl({
+      [HOME]: ['/blog/'],
+      'https://example.com/blog/': ['/contact/', '/about/'],
+    });
+    const pages = await discoverPages(page, HOME);
+    assert.ok(!pages.some((p) => p.pageType === 'blog-article'));
   });
 });
