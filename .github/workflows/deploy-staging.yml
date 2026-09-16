@@ -391,10 +391,16 @@ jobs:
           # transformers, sentence-transformers) from scratch with no cached
           # layers — a real deploy on 2026-08-13 got through git pull, image
           # build, and dependency install, then died on "exporting layers" at
-          # the 20m mark, one step from finishing. 35m covers a full cold
-          # build with headroom; a normal warm-cache deploy still finishes in
-          # its usual few minutes and never gets close to this ceiling.
-          command_timeout: 35m
+          # the 20m mark, one step from finishing. 35m was raised to cover
+          # that with headroom, but a real cold-cache deploy on 2026-09-16
+          # still hit it — this step's pip install alone (scipy, tokenizers,
+          # transformers, sentence-transformers, plus the design-agent-worker
+          # and analytics/analytics-mcp builds ahead of it) ran past 35m and
+          # was killed by this timeout mid-download, one `docker compose ...
+          # build` short of finishing. 50m covers a full cold build with
+          # headroom again; a normal warm-cache deploy still finishes in its
+          # usual few minutes and never gets close to this ceiling.
+          command_timeout: 50m
           script: |
             # Without this, a failed step (e.g. `docker compose build` running
             # out of disk space) doesn't stop the script — it falls through to
