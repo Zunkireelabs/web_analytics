@@ -50,7 +50,14 @@ const GAP_TYPE_TO_COMPETITOR_SIGNAL = {
 };
 const MIN_TRACKED_COMPETITORS = 2; // below this, a "X of Y" ratio isn't a real market signal
 
-const MAX_PAGES = 20;
+// Raised from 20: with the merge-sync 403 fixed (classic PAT, 2026-09-16)
+// and 800+ open recommendations sitting on Zunkiree Labs' own board, 20
+// pages/day was the actual bottleneck on backlog throughput, not the
+// 100/day ship ceiling (autonomous-quota.js) — this agent alone never got
+// close to it. No external per-page quota here (unlike technical-seo.js's
+// GSC URL Inspection calls), so there's no equivalent hard ceiling to
+// respect on this side; revisit if ship-side rate-limit abandons increase.
+const MAX_PAGES = 40;
 const MAX_AI_SUGGESTION_PAGES = 6; // bounds LLM cost — entity suggestions run only for the top-impression pages
 const AI_SUGGESTION_MAX_ITEMS = 4;
 
