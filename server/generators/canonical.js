@@ -84,15 +84,35 @@ export async function generate({ siteId, params }) {
   // forever.
   const fetched = await analyzePageUrl(page);
   if (fetched.ok && fetched.analysis.hasCanonical) {
+    const existingCanonical = fetched.analysis.canonicalUrl;
     // A page that already canonicalizes to the SAME target this draft
     // would set is not stale — it's already fixed by a prior run/human,
     // and re-drafting an identical value is a no-op worth refusing quietly
-    // rather than noisily. Only a DIFFERENT existing canonical is treated
-    // as "someone already made a different call here."
-    throw Object.assign(
-      new Error(`"${page}" already has a canonical tag — drafting another would duplicate it, not fix a gap.`),
-      { status: 400, userFacing: true, refusal: true, stale: true },
-    );
+    // rather than noisily.
+    if (existingCanonical && stripSlash(existingCanonical) === stripSlash(targetUrl.href)) {
+      throw Object.assign(
+        new Error(`"${page}" already has a canonical tag — drafting another would duplicate it, not fix a gap.`),
+        { status: 400, userFacing: true, refusal: true, stale: true },
+      );
+    }
+    // A canonical that just self-references the page itself is the shared
+    // layout's own default (every page gets one, whether it's a real
+    // canonical URL or a duplicate variant) — not a deliberate editorial
+    // decision, so it's safe to override once real, evidenced upstream
+    // consolidation evidence (canonicalTarget) says this page is actually a
+    // duplicate of something else. Anything OTHER than self-reference is a
+    // real prior decision (a human edit, another agent's own
+    // consolidation, ...) this generator still has no basis to overwrite.
+    const isDefaultSelfReference = existingCanonical && stripSlash(existingCanonical) === stripSlash(url.href);
+    if (!canonicalTarget || !isDefaultSelfReference) {
+      throw Object.assign(
+        new Error(`"${page}" already has a canonical tag pointing elsewhere (${existingCanonical}) — a different decision is already live, refusing to overwrite it without a human call.`),
+        { status: 400, userFacing: true, refusal: true, stale: true },
+      );
+    }
+    // Falls through: existing canonical is just the page's own default
+    // self-reference, and a validated canonicalTarget says this page is
+    // really a duplicate of another URL — draft the override below.
   }
 
   return {
@@ -154,6 +174,17 @@ export async function verifyCurrentState(rec, { site } = {}) {
     const intendedTarget = canonicalTarget || page;
     if (canonicalUrl && stripSlash(canonicalUrl) === stripSlash(intendedTarget)) {
       return { decision: 'already_resolved', reason: 'canonical-already-set-to-target', evidence: { page, canonicalUrl } };
+    }
+    // Same distinction generate()'s own override check makes: a canonical
+    // that just self-references the page is the shared layout's default,
+    // not a real prior decision — still fixable, not a conflict, as long as
+    // a real canonicalTarget exists to override it with. Only a canonical
+    // pointing somewhere else entirely (neither the target nor the page
+    // itself) reflects an actual decision this generator has no basis to
+    // overwrite.
+    const isDefaultSelfReference = canonicalUrl && stripSlash(canonicalUrl) === stripSlash(page);
+    if (canonicalTarget && isDefaultSelfReference) {
+      return { decision: 'still_valid', reason: 'default-self-canonical-overridable', evidence: { page, canonicalUrl, canonicalTarget } };
     }
     return {
       decision: 'conflict', reason: 'different-canonical-already-present',

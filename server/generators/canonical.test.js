@@ -96,6 +96,46 @@ describe('canonical generator — cross-page canonicalTarget (evidence-based con
       (err) => err.stale === true,
     );
   });
+
+  test('overrides a default self-referencing canonical when a validated canonicalTarget disagrees', async () => {
+    // A target that differs from `page` by more than just a trailing slash —
+    // `target` above is page+'/', which stripSlash treats as the SAME URL as
+    // `page`, so it can't tell "override" apart from "already matches
+    // target" here. This case needs a genuinely different resource.
+    const otherTarget = 'https://example.com/about-us';
+    site = { id: 1, website_domain: 'example.com' };
+    analyzeResultByUrl = new Map([
+      [otherTarget, { ok: true, analysis: { hasCanonical: false } }],
+      [page, { ok: true, analysis: { hasCanonical: true, canonicalUrl: page } }],
+    ]);
+    const draft = await generate({ siteId: 1, params: { page, canonicalTarget: otherTarget } });
+    assert.equal(draft.content.canonicalUrl, otherTarget);
+    assert.match(draft.summary, /consolidating a duplicate URL variant/);
+  });
+
+  test('refuses (stale) when the existing canonical already matches the target — no-op, not a conflict', async () => {
+    site = { id: 1, website_domain: 'example.com' };
+    analyzeResultByUrl = new Map([
+      [target, { ok: true, analysis: { hasCanonical: false } }],
+      [page, { ok: true, analysis: { hasCanonical: true, canonicalUrl: target } }],
+    ]);
+    await assert.rejects(
+      () => generate({ siteId: 1, params: { page, canonicalTarget: target } }),
+      (err) => err.stale === true,
+    );
+  });
+
+  test('still refuses when the existing canonical points at a real THIRD page, not self or the target', async () => {
+    site = { id: 1, website_domain: 'example.com' };
+    analyzeResultByUrl = new Map([
+      [target, { ok: true, analysis: { hasCanonical: false } }],
+      [page, { ok: true, analysis: { hasCanonical: true, canonicalUrl: 'https://example.com/somewhere-else' } }],
+    ]);
+    await assert.rejects(
+      () => generate({ siteId: 1, params: { page, canonicalTarget: target } }),
+      (err) => err.stale === true,
+    );
+  });
 });
 
 describe('canonical verifyCurrentState (server/generators/lib/verification-layer.js contract)', () => {
@@ -132,6 +172,15 @@ describe('canonical verifyCurrentState (server/generators/lib/verification-layer
     const result = await verifyCurrentState({ params: { page, canonicalTarget: target } }, {});
     assert.equal(result.decision, 'conflict');
     assert.equal(result.reason, 'different-canonical-already-present');
+  });
+
+  test('canonical is just the page\'s own default self-reference, and a canonicalTarget disagrees: still_valid, overridable — not a conflict', async () => {
+    analyzeResultByUrl = new Map([
+      [page, { ok: true, analysis: { hasCanonical: true, canonicalUrl: page } }],
+    ]);
+    const result = await verifyCurrentState({ params: { page, canonicalTarget: target } }, {});
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'default-self-canonical-overridable');
   });
 
   test('no canonical, no cross-page target: still_valid, plain missing-tag fix', async () => {
