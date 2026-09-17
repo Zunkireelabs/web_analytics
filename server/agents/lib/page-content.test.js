@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent } from './page-content.js';
+import { robotsAllowsAiCrawlers, analyzePage, contentGapsFor, isCompressedEncoding, llmsTxtHasValidStructure, titleKeywordConsistency, inferSchemaType, MAX_INLINE_STYLE_COUNT, MIN_GROUNDING_WORDS, hasSufficientGroundingContent, requireGroundedContent, rebuildFaqContainerText } from './page-content.js';
 
 // Regression coverage for a real false-positive found in production: a
 // robots.txt that correctly Allow's every real answer-engine crawler while
@@ -673,6 +673,57 @@ describe('inferSchemaType', () => {
     assert.equal(inferSchemaType('https://example.com/products/hat', []), 'Product');
     assert.equal(inferSchemaType('https://example.com/faq', []), 'FAQPage');
     assert.equal(inferSchemaType('https://example.com/blog/post', []), 'Article');
+  });
+});
+
+describe('analyzePage — faqContainerHtml (content-integrity-repair anchor)', () => {
+  test('captures the one qualifying FAQ container\'s exact outerHTML', () => {
+    const html = '<html><body><div id="faq"><button>What is X?</button><button>How does Y work?</button></div></body></html>';
+    const a = analyzePage(html, 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, '<div id="faq"><button>What is X?</button><button>How does Y work?</button></div>');
+  });
+
+  test('stays null when there are two qualifying FAQ containers — no single unambiguous anchor', () => {
+    const html = '<html><body>'
+      + '<div class="faq-a"><button>What is X?</button><button>How does Y work?</button></div>'
+      + '<div id="faq-b"><button>What is Z?</button><button>Who does W?</button></div>'
+      + '</body></html>';
+    const a = analyzePage(html, 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, null);
+  });
+
+  test('stays null when no FAQ-marked container qualifies at all', () => {
+    const a = analyzePage('<html><body><p>No FAQ here.</p></body></html>', 'https://example.com/x');
+    assert.equal(a.faqContainerHtml, null);
+  });
+});
+
+describe('rebuildFaqContainerText', () => {
+  test('swaps question/answer text via aria-controls, leaving every other byte of the container untouched', () => {
+    const container = '<div id="faq"><button aria-controls="a1">Old question?</button><div id="a1">Old answer.</div></div>';
+    const out = rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]);
+    assert.equal(out, '<div id="faq"><button aria-controls="a1">New question?</button><div id="a1">New answer.</div></div>');
+  });
+
+  test('swaps question/answer text via a dt/dd pair', () => {
+    const container = '<dl><dt>Old question?</dt><dd>Old answer.</dd></dl>';
+    const out = rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]);
+    assert.equal(out, '<dl><dt>New question?</dt><dd>New answer.</dd></dl>');
+  });
+
+  test('refuses (returns null) when the item count does not match the container\'s real question count', () => {
+    const container = '<div id="faq"><button aria-controls="a1">Q1?</button><div id="a1">A1.</div><button aria-controls="a2">Q2?</button><div id="a2">A2.</div></div>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'Only one?', answer: 'One answer.' }]), null);
+  });
+
+  test('refuses (returns null) for an unsupported answer shape (details/summary) rather than risk destroying nested markup', () => {
+    const container = '<details><summary>Old question?</summary><p>Old <strong>answer</strong>.</p></details>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]), null);
+  });
+
+  test('refuses (returns null) rather than overwrite a question element that has real nested markup', () => {
+    const container = '<div id="faq"><button aria-controls="a1"><em>Old</em> question?</button><div id="a1">Old answer.</div></div>';
+    assert.equal(rebuildFaqContainerText(container, [{ question: 'New question?', answer: 'New answer.' }]), null);
   });
 });
 

@@ -395,10 +395,12 @@ async function computeLocationServiceBootstrapChange(site, draft, fetchFile, bef
 }
 
 // content-integrity-repair's own generator (generators/content-integrity-repair.js)
-// already produces a uniform {anchor, replacement} edit for all seven fix
-// shapes (malformed-table/raw-text-table/duplicate-faq/font-size-override/
-// table-style-drift/typography-drift's anchorHtml+replacement, and
-// faq-schema-mismatch's originalRaw+jsonLd) via buildContentIntegrityEdit —
+// already produces a uniform array of {anchor, replacement} edits for every
+// fix shape (malformed-table/raw-text-table/duplicate-faq/font-size-override/
+// table-style-drift/typography-drift's anchorHtml+replacement,
+// faq-schema-mismatch's originalRaw+jsonLd, and faq-topic-mismatch/
+// faq-cross-page-inconsistency's anchorHtml+replacement plus an optional
+// second schema-resync edit) via buildContentIntegrityEdit —
 // the SAME function implementers/lib/content-integrity-inject.js uses for a
 // normal single-file page. The only thing this adapter adds is WHERE that
 // edit gets applied: a pagination-generated page (/locations/*, /compare/*)
@@ -412,8 +414,8 @@ async function computeLocationServiceBootstrapChange(site, draft, fetchFile, bef
 // patch can never land on the wrong entry.
 async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, config) {
   const page = draft.content?.page || draft.input?.page;
-  const edit = buildContentIntegrityEdit(draft.content || {});
-  if (!edit) return { ok: false, reason: 'draft-not-ready', error: `Unknown fix type "${draft.content?.fixType}" on this draft.` };
+  const edits = buildContentIntegrityEdit(draft.content || {});
+  if (!edits) return { ok: false, reason: 'draft-not-ready', error: `Unknown fix type "${draft.content?.fixType}" on this draft.` };
 
   const idField = config.idField || 'id';
   const { id, nestedId } = config.nestedField ? nestedIdsFromPageUrl(page) : { id: idFromPageUrl(page), nestedId: null };
@@ -435,7 +437,7 @@ async function computeContentIntegrityChange(site, draft, fetchFile, beforeRef, 
   }
 
   const objectContent = file.content.slice(objRange.start, objRange.end);
-  const patched = applyExactMatchPatches(objectContent, [edit]);
+  const patched = applyExactMatchPatches(objectContent, edits);
   if (!patched.ok) {
     return { ok: false, reason: 'source-anchor-not-found', error: describePatchFailure(config.dataFile, patched) };
   }

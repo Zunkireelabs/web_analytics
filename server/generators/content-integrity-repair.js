@@ -1,15 +1,19 @@
-import { analyzePageUrl, fetchHtml } from '../agents/lib/page-content.js';
+import { analyzePageUrl, fetchHtml, inferSchemaType, rebuildFaqContainerText } from '../agents/lib/page-content.js';
 import { buildFontSizeOverrideRemoved, buildScopedFontSizeFix } from '../agents/lib/font-consistency-analysis.js';
 import { getSiteById } from '../store/read.js';
 import { projectTable } from '../design-agent/lib/design-profile.js';
 import { buildTableHtml, escapeHtml } from './lib/markdown-table-render.js';
+import { generateFaqItemsFromEvidence, PAGE_PURPOSE_GUIDANCE } from './faq.js';
+import { pageStructureGuidance } from './lib/design-aware-composer.js';
 
-// Repairs the five defect shapes content-integrity.js/font-consistency.js
+// Repairs the defect shapes content-integrity.js/font-consistency.js
 // detect — broken/empty table markup, comparison content shipped as raw
 // delimited text instead of a real <table>, an FAQPage schema whose question
 // count has drifted from the real visible FAQ content, a confirmed-duplicate
-// visible FAQ section, and a one-element inline font-size override that
-// diverges from the rest of the site — using ONLY real facts already,
+// visible FAQ section, an FAQ whose visible questions don't match the page's
+// own topic, the same FAQ question answered inconsistently across pages, and
+// a one-element inline font-size override that diverges from the rest of the
+// site — using ONLY real facts already,
 // verifiably on the page. Never invents table data, an FAQ answer, a
 // judgment about which of two visually different FAQ sections is "the
 // duplicate," or which CSS class/rule is "correct" for a font-size
@@ -95,7 +99,8 @@ function buildFaqSchema(items) {
   };
 }
 
-// params: { page: string, fixType: 'malformed-table'|'raw-text-table'|'faq-schema-mismatch'|'duplicate-faq'|'font-size-override'|'table-style-drift'|'typography-drift' }
+// params: { page: string, fixType: 'malformed-table'|'raw-text-table'|'faq-schema-mismatch'|'duplicate-faq'|'faq-topic-mismatch'|'faq-cross-page-inconsistency'|'font-size-override'|'table-style-drift'|'typography-drift'|'typography-drift-scoped' }
+// 'faq-cross-page-inconsistency' additionally requires params.question and params.correctAnswer.
 export async function generate({ siteId, params }) {
   const { page, fixType } = params || {};
   if (!page || !fixType) throw Object.assign(new Error('page and fixType are required'), { status: 400 });
@@ -270,6 +275,129 @@ export async function generate({ siteId, params }) {
       content: { page, fixType, anchorHtml: a.duplicateFaqRemovalHtml, replacement: '' },
       summary: `Remove a duplicate visible FAQ section on ${page}`,
     };
+  }
+
+  // faq-topic-mismatch: content-integrity.js's findTopicallyMismatchedFaq
+  // already confirmed (via its own independent, self-consistency-checked LLM
+  // pass) that this page's visible FAQ questions are about a DIFFERENT topic
+  // than the page itself (the zunkireelabs.com/careers/ incident this whole
+  // check exists for — product-feature FAQs on a careers page). The fix
+  // regenerates the FAQ CONTENT using the exact same real-evidence-grounded
+  // generation generators/faq.js already uses for a net-new FAQ (page body
+  // text, the page's own real title as the subject, PAGE_PURPOSE_GUIDANCE for
+  // its inferred schema type) — never a second, bespoke FAQ-writing prompt —
+  // then places the new text back into the EXACT SAME markup structure the
+  // page already has (rebuildFaqContainerText only ever swaps text nodes,
+  // never classes/tags), so the page's own design is untouched. Only offered
+  // when every existing question's real answer was confidently extracted
+  // (faqExtractionComplete) and the page has exactly one unambiguous FAQ
+  // container (faqContainerHtml) — a page failing either bar still shows up
+  // in the finding, just without a one-click fix, same convention as every
+  // other narrow auto-fix in this file.
+  //
+  // No visible_faq_cap check here: this NEVER adds a new visible FAQ to a
+  // page — the page already has one (that's the only way faqExtractionComplete
+  // and faqContainerHtml could both be true) — it only corrects the words of
+  // an already-visible, already-cap-counted section. implementers/lib/
+  // faq-render-mode.js's cap logic governs whether a page gets a FIRST
+  // visible FAQ at all; it has nothing to decide here, and re-deriving it
+  // would just be a second, driftable copy of that same enforcement.
+  if (fixType === 'faq-topic-mismatch') {
+    if (!a.faqExtractionComplete) {
+      throw Object.assign(
+        new Error('Could not confidently extract the real answer text for every visible FAQ question on this page — regenerating it safely requires knowing what every question currently answers.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    if (!a.faqContainerHtml) {
+      throw Object.assign(
+        new Error('This page\'s FAQ isn\'t wrapped in one single, unambiguous container (or has more than one) — regenerating its content in place isn\'t safe to do automatically.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    const site = await getSiteById(siteId).catch(() => null);
+    const schemaType = inferSchemaType(page, a.schemaTypes, a);
+    const pageGuidance = schemaType ? PAGE_PURPOSE_GUIDANCE[schemaType] : null;
+    const structureGuidance = pageStructureGuidance(site, 'faq');
+    const bodyExcerpt = a.bodyText ? a.bodyText.slice(0, 3000) : null;
+    const newItems = await generateFaqItemsFromEvidence({
+      siteId, subject: a.title || page, bodyExcerpt, pageGuidance, structureGuidance,
+      expectedCount: a.faqVisibleItems.length,
+    });
+    const replacement = rebuildFaqContainerText(a.faqContainerHtml, newItems);
+    if (!replacement) {
+      throw Object.assign(
+        new Error('The regenerated FAQ content could not be safely placed back into this page\'s exact existing markup (a wrong item count from the model, or a question/answer element with nested markup this app won\'t overwrite) — left for manual review.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    const content = { page, fixType, anchorHtml: a.faqContainerHtml, replacement };
+    // Resync the FAQPage schema in the SAME draft, same bar as the
+    // faq-schema-mismatch fix above — otherwise the visible text would be
+    // corrected while the schema still describes the old, mismatched
+    // questions, a drift faqCountMismatch's own count-only comparison can
+    // never catch (see page-content.js's faqCountMismatch comment).
+    if (a.faqSchemaRaw && a.faqSchemaSimple) {
+      content.schemaOriginalRaw = a.faqSchemaRaw;
+      content.jsonLd = buildFaqSchema(newItems);
+    }
+    return { content, summary: `Rewrite ${newItems.length} FAQ item(s) on ${page} to match this page's own topic` };
+  }
+
+  // faq-cross-page-inconsistency: content-integrity.js's
+  // findInconsistentFaqQuestions found the SAME real question answered
+  // differently on 2+ pages checked this run, and the agent's own evidence-
+  // based decision (decideCrossPageFaqAnswer, content-integrity.js) already
+  // picked which page's answer is wrong and what the correct real answer
+  // text is (copied verbatim from the other, more-trustworthy page — never
+  // LLM-invented). This fix only ever replaces that ONE answer's text, in
+  // place, on the losing page — same narrow, exact-anchor discipline as
+  // every other fix here, and never touches the question text (identical on
+  // both pages by definition) or any other Q&A pair on the page.
+  if (fixType === 'faq-cross-page-inconsistency') {
+    const { question, correctAnswer } = params;
+    if (!question || !correctAnswer) throw Object.assign(new Error('question and correctAnswer are required for fixType "faq-cross-page-inconsistency"'), { status: 400 });
+    if (!a.faqExtractionComplete) {
+      throw Object.assign(
+        new Error('Could not confidently extract the real answer text for every visible FAQ question on this page — correcting just one answer in place still requires knowing every current answer.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    if (!a.faqContainerHtml) {
+      throw Object.assign(
+        new Error('This page\'s FAQ isn\'t wrapped in one single, unambiguous container — correcting just this answer in place isn\'t safe to do automatically.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    const normalizedTarget = question.toLowerCase().replace(/\s+/g, ' ').trim();
+    const match = a.faqVisibleItems.find((item) => item.question.toLowerCase().replace(/\s+/g, ' ').trim() === normalizedTarget);
+    if (!match) {
+      throw Object.assign(
+        new Error('That question is no longer visible on this page — it may have changed since detection.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    if (match.answer.trim() === correctAnswer.trim()) {
+      throw Object.assign(new Error('This page\'s answer already matches the correct text — nothing to fix.'), { status: 400, userFacing: true });
+    }
+    const newItems = a.faqVisibleItems.map((item) => (
+      item.question.toLowerCase().replace(/\s+/g, ' ').trim() === normalizedTarget
+        ? { question: item.question, answer: correctAnswer }
+        : item
+    ));
+    const replacement = rebuildFaqContainerText(a.faqContainerHtml, newItems);
+    if (!replacement) {
+      throw Object.assign(
+        new Error('This page\'s FAQ markup shape doesn\'t support a safe in-place text correction — left for manual review.'),
+        { status: 400, userFacing: true },
+      );
+    }
+    const content = { page, fixType, anchorHtml: a.faqContainerHtml, replacement };
+    if (a.faqSchemaRaw && a.faqSchemaSimple) {
+      content.schemaOriginalRaw = a.faqSchemaRaw;
+      content.jsonLd = buildFaqSchema(newItems);
+    }
+    return { content, summary: `Correct one inconsistent FAQ answer on ${page} to match its more authoritative page` };
   }
 
   throw Object.assign(new Error(`Unknown content-integrity fixType "${fixType}".`), { status: 400 });
