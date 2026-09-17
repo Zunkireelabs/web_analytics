@@ -8,12 +8,30 @@ let pendingDraftFilePathsRows = [];
 let countFailedAttemptsRows = [];
 let insertDraftConflict = null; // set to a fake draft row to simulate a 23505 race on the next INSERT
 let insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
+let activeBoardRows = [];
+let implementedBoardRows = [];
+let lifecycleCountRows = [];
 
 function fakeQuery(text, params = []) {
   const sql = text.replace(/\s+/g, ' ').trim();
   issued.push({ sql, params });
   if (sql.startsWith("UPDATE drafts SET status = 'branch_pushed'")) {
     return { rows: [{ id: params[1], status: 'branch_pushed' }] };
+  }
+  if (sql.includes("d.status NOT IN ('implemented', 'abandoned')")) {
+    return { rows: activeBoardRows };
+  }
+  if (sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT")) {
+    return { rows: implementedBoardRows };
+  }
+  if (sql.startsWith('SELECT status, COUNT(*)::int AS n,')) {
+    return { rows: lifecycleCountRows };
+  }
+  if (sql.includes('WHERE d.site_id = $1 AND d.status = $2 ORDER BY d.created_at DESC LIMIT $3')) {
+    return { rows: implementedBoardRows };
+  }
+  if (sql.includes('WHERE d.site_id = $1 AND d.status = $2 ORDER BY d.created_at DESC')) {
+    return { rows: activeBoardRows };
   }
   if (sql.startsWith('SELECT DISTINCT d.finding_id')) {
     return { rows: implementedFindingIdsRows };
@@ -56,9 +74,13 @@ const {
   markDraftBranchPushed, getImplementedFindingIds,
   countVisibleFaqDrafts, distinctVisibleFaqDraftPages, hasImplementedVisibleFaqForPage,
   createDraft, getPendingDraftFilePaths,
+  listDrafts, listDraftsForBoard, countDraftsByLifecycle,
 } = await import('./drafts.js');
 
-beforeEach(() => { issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique'; });
+beforeEach(() => {
+  issued = []; implementedFindingIdsRows = []; pendingDraftFilePathsRows = []; insertDraftConflict = null; insertDraftErrorConstraint = 'drafts_site_finding_id_unique';
+  activeBoardRows = []; implementedBoardRows = []; lifecycleCountRows = [];
+});
 
 // Prompt 7 audit / migration 118: the app-level getDraftByFindingId-then-
 // insert check in generateDraft() has a real concurrent window (LLM
@@ -332,5 +354,88 @@ describe('countFailedAttemptsByFinding — what must never count as an item fail
     ]);
     assert.equal(m.get('f1'), 4);
     assert.equal(m.has('f2'), false);
+  });
+});
+
+describe('listDrafts — limit', () => {
+  test('an explicit limit is sent as a real LIMIT clause, not applied client-side', async () => {
+    implementedBoardRows = [{ id: 1, status: 'implemented' }];
+    await listDrafts(1, { status: 'implemented', limit: 5 });
+    const call = issued.find((i) => i.sql.includes("d.status = $2 ORDER BY d.created_at DESC LIMIT $3"));
+    assert.ok(call, 'expected a LIMIT clause in the issued SQL');
+    assert.deepEqual(call.params, [1, 'implemented', 5]);
+  });
+
+  test('no limit given -> no LIMIT clause at all, same as before this existed', async () => {
+    activeBoardRows = [];
+    await listDrafts(1, { status: 'open' });
+    const call = issued[issued.length - 1];
+    assert.doesNotMatch(call.sql, /LIMIT/);
+  });
+});
+
+describe('listDraftsForBoard', () => {
+  test('active (non-terminal) drafts are fetched with no LIMIT at all — this is the set a human must be able to see in full', async () => {
+    activeBoardRows = [{ id: 1, status: 'approved' }, { id: 2, status: 'pr_opened' }];
+    implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    const activeCall = issued.find((i) => i.sql.includes("d.status NOT IN ('implemented', 'abandoned')"));
+    assert.ok(activeCall);
+    assert.doesNotMatch(activeCall.sql, /LIMIT/);
+  });
+
+  test('implemented drafts are capped, with the cap sent as a real query param', async () => {
+    activeBoardRows = [];
+    implementedBoardRows = [{ id: 3, status: 'implemented' }];
+    await listDraftsForBoard(1, { implementedLimit: 42 });
+    const implementedCall = issued.find((i) => i.sql.includes("d.status = 'implemented' ORDER BY d.created_at DESC LIMIT"));
+    assert.ok(implementedCall);
+    assert.deepEqual(implementedCall.params, [1, 42]);
+  });
+
+  test('abandoned drafts are never fetched at all — the Action Center UI never renders them', async () => {
+    activeBoardRows = [];
+    implementedBoardRows = [];
+    await listDraftsForBoard(1);
+    assert.ok(!issued.some((i) => i.sql.includes("'abandoned'") && !i.sql.includes('NOT IN')));
+  });
+
+  test('combines active + capped-implemented into one result, active first', async () => {
+    activeBoardRows = [{ id: 1, status: 'approved' }];
+    implementedBoardRows = [{ id: 2, status: 'implemented' }];
+    const result = await listDraftsForBoard(1);
+    assert.deepEqual(result.map((r) => r.id), [1, 2]);
+  });
+});
+
+describe('countDraftsByLifecycle', () => {
+  test('derives nonImplemented as total minus implemented minus abandoned, from real per-status counts alone', async () => {
+    lifecycleCountRows = [
+      { status: 'approved', n: 3, n_this_week: 0 },
+      { status: 'pr_opened', n: 2, n_this_week: 0 },
+      { status: 'implemented', n: 10, n_this_week: 4 },
+      { status: 'abandoned', n: 7, n_this_week: 0 },
+    ];
+    const counts = await countDraftsByLifecycle(1);
+    assert.equal(counts.total, 22);
+    assert.equal(counts.implemented, 10);
+    assert.equal(counts.abandoned, 7);
+    assert.equal(counts.nonImplemented, 5); // 3 approved + 2 pr_opened
+    assert.equal(counts.implementedThisWeek, 4);
+  });
+
+  test('never fetches a single draft row — one GROUP BY query only, so this can never be the thing that times out', async () => {
+    lifecycleCountRows = [];
+    await countDraftsByLifecycle(1);
+    assert.equal(issued.length, 1);
+    assert.match(issued[0].sql, /GROUP BY status/);
+  });
+
+  test('all-zero site (no drafts at all) reports zero everywhere, not a crash', async () => {
+    lifecycleCountRows = [];
+    const counts = await countDraftsByLifecycle(1);
+    assert.deepEqual(counts, {
+      total: 0, nonImplemented: 0, implemented: 0, abandoned: 0, submittedForApproval: 0, implementedThisWeek: 0,
+    });
   });
 });

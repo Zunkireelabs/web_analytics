@@ -32,7 +32,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
-  createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
@@ -704,8 +704,26 @@ const ACTION_CENTER_HIDDEN_ACTION_TYPES = new Set(['geo-audit']);
 router.get('/action-center/drafts', async (req, res, next) => {
   try {
     const { actionType, status } = req.query;
-    const drafts = await listDrafts(req.siteId, { actionType, status });
+    // The unfiltered "whole board" load (neither param given — the
+    // dashboard's own default fetch) is the one that grew without bound as
+    // autonomous shipping accumulated history; see listDraftsForBoard's own
+    // comment for the real incident. Any actual filter (actionType/status)
+    // is already naturally bounded by that filter, so it keeps the exact
+    // unbounded behavior it always had — explicit history/export use is
+    // unaffected.
+    const drafts = (actionType || status)
+      ? await listDrafts(req.siteId, { actionType, status })
+      : await listDraftsForBoard(req.siteId);
     res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
+  } catch (e) { next(e); }
+});
+
+// Exact tab-badge counts, independent of listDraftsForBoard's own cap —
+// see countDraftsByLifecycle's own comment for why these must never be
+// derived from a possibly-capped list.
+router.get('/action-center/drafts/counts', async (req, res, next) => {
+  try {
+    res.json(await countDraftsByLifecycle(req.siteId));
   } catch (e) { next(e); }
 });
 
