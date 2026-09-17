@@ -187,6 +187,75 @@ describe('permalink front matter on net-new pages', () => {
   });
 });
 
+// Regression for the zunkireelabs incident: a brand-new/near-empty blog
+// directory has no siblings for newcontent-contract.js to sample, so
+// renderBlogOutlineBody's own hardcoded defaults are what actually ships.
+// They must match FIELD_ALIASES' own first/most-likely name for each field
+// (newcontent-contract.js) — 'image'/'image_alt'/'image_credit' are real
+// blog templates use, but they are lower-priority aliases in that same list,
+// not the canonical default a no-evidence case should guess first.
+describe('blog featured-image front matter defaults with no sibling evidence', () => {
+  const site = { url_file_map: {} };
+
+  test('with no fieldNames (no siblings sampled), the canonical featuredImage/featuredImageAlt/featuredImageCredit keys are used', () => {
+    const body = renderBlogOutlineBody(
+      { title: 'Boilers', featuredImage: { url: 'https://images.pexels.com/photo.jpg', alt: 'A boiler', photographer: 'Jane Doe' } },
+      site,
+    );
+    assert.match(body, /^featuredImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.match(body, /^featuredImageAlt: "A boiler"$/m);
+    assert.match(body, /^featuredImageCredit: "Photo by Jane Doe on Pexels"$/m);
+    assert.doesNotMatch(body, /^image:/m);
+  });
+
+  test('fieldNames from real sibling sampling still wins over the default', () => {
+    const body = renderBlogOutlineBody(
+      { title: 'Boilers', featuredImage: { url: 'https://images.pexels.com/photo.jpg' } },
+      site,
+      { fieldNames: { featuredImage: 'heroImage' } },
+    );
+    assert.match(body, /^heroImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.doesNotMatch(body, /^featuredImage:/m);
+  });
+});
+
+// Landing pages and direct-answer pages, unlike blog, have no established
+// featured-image convention on this platform — until sibling evidence proves
+// otherwise, this renderer must never guess a key and invent an image slot
+// the site's own template doesn't have (same "never invent a look" rule
+// DEFAULT_EXPAND_TEMPLATE's fallback follows in marker-merge.js).
+describe('landing-page/direct-answer featured-image front matter is opt-in, never guessed', () => {
+  const site = { url_file_map: {} };
+  const featuredImage = { url: 'https://images.pexels.com/photo.jpg', alt: 'A city skyline', photographer: 'Jane Doe' };
+
+  test('renderLandingPageBody omits any image field with no sibling evidence, even when a Pexels image was found', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds', featuredImage }, site);
+    assert.doesNotMatch(body, /image/i);
+  });
+
+  test('renderLandingPageBody writes the image under the directory\'s real sibling-sampled key', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds', featuredImage }, site, { fieldNames: { featuredImage: 'heroImage' } });
+    assert.match(body, /^heroImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+    assert.match(body, /^featuredImageAlt: "A city skyline"$/m);
+    assert.match(body, /^featuredImageCredit: "Photo by Jane Doe on Pexels"$/m);
+  });
+
+  test('renderDirectAnswerBody omits any image field with no sibling evidence', () => {
+    const body = renderDirectAnswerBody({ heading: 'How long?', featuredImage }, site);
+    assert.doesNotMatch(body, /image/i);
+  });
+
+  test('renderDirectAnswerBody writes the image under the directory\'s real sibling-sampled key', () => {
+    const body = renderDirectAnswerBody({ heading: 'How long?', featuredImage }, site, { fieldNames: { featuredImage: 'coverImage' } });
+    assert.match(body, /^coverImage: "https:\/\/images\.pexels\.com\/photo\.jpg"$/m);
+  });
+
+  test('sibling evidence with no actual Pexels result still omits the field — nothing to write', () => {
+    const body = renderLandingPageBody({ headline: 'Leeds' }, site, { fieldNames: { featuredImage: 'heroImage' } });
+    assert.doesNotMatch(body, /image/i);
+  });
+});
+
 describe('layout front matter on net-new pages', () => {
   const site = { url_file_map: {} };
 

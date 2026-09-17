@@ -12,6 +12,8 @@ let site;
 let llmCalls;
 let llmResponse;
 let getSiteByIdShouldThrow;
+let pexelsResult;
+let pexelsCalls;
 
 mock.module(resolve('../store/read.js'), {
   namedExports: { getSiteById: async () => { if (getSiteByIdShouldThrow) throw new Error('db unreachable'); return site; } },
@@ -24,6 +26,26 @@ mock.module(resolve('../llm.js'), {
     },
   },
 });
+// Real pexels-client.js/blog-image-usage.js hit the network/DB — mocked here
+// the same way blog-outline.test.js mocks them, so this test only proves the
+// generator WIRES the search in and passes its result through, not that
+// Pexels itself works (pexels-client.test.js already covers that).
+mock.module(resolve('./lib/pexels-client.js'), {
+  namedExports: {
+    searchImage: async (queries, opts) => { pexelsCalls.push({ queries, opts }); return pexelsResult; },
+    buildImageQueries: ({ title, topic, fallback }) => [title, topic, fallback].filter(Boolean),
+    configured: () => true,
+  },
+});
+mock.module(resolve('./lib/blog-image-usage.js'), {
+  namedExports: { usedPhotoIds: async () => new Set() },
+});
+mock.module(resolve('./lib/blog-image-query.js'), {
+  namedExports: {
+    imageQueryContextFor: async () => ({ topic: null, fallback: undefined }),
+    IMAGE_CANDIDATE_POOL: 40,
+  },
+});
 
 const { generate, meta } = await import('./landing-page.js');
 
@@ -32,6 +54,8 @@ beforeEach(() => {
   llmCalls = [];
   getSiteByIdShouldThrow = false;
   llmResponse = { headline: 'Grow in Austin', subheadline: 'sub', sections: [{ heading: 'h', body: 'b' }], cta: 'Start', metaTitle: 'mt', metaDescription: 'md' };
+  pexelsResult = null;
+  pexelsCalls = [];
 });
 
 describe('landing-page generator — meta', () => {
@@ -93,5 +117,26 @@ describe('landing-page generator — content shape (unchanged)', () => {
     assert.equal(result.content.headline, 'Grow in Austin');
     assert.equal(result.content.target, 'Texas');
     assert.deepEqual(result.content.sections, [{ heading: 'h', body: 'b' }]);
+  });
+});
+
+// The user's own ask: any new page this platform generates — not just blog
+// posts — should get a real Pexels image the same way blog-outline.js
+// already does, so a freshly created page never looks unfinished next to
+// the site's other real pages.
+describe('landing-page generator — Pexels image sourcing (same as blog-outline.js)', () => {
+  test('a matched Pexels image is attached to content.featuredImage', async () => {
+    site = { id: 1 };
+    pexelsResult = { url: 'https://images.pexels.com/photo.jpg', alt: 'A city skyline', photographer: 'Jane Doe' };
+    const result = await generate({ siteId: 1, params: { market: 'Texas' } });
+    assert.deepEqual(result.content.featuredImage, pexelsResult);
+    assert.equal(pexelsCalls.length, 1);
+  });
+
+  test('no match (or search disabled) never blocks the draft — featuredImage is simply absent', async () => {
+    site = { id: 1 };
+    pexelsResult = null;
+    const result = await generate({ siteId: 1, params: { market: 'Texas' } });
+    assert.equal('featuredImage' in result.content, false);
   });
 });

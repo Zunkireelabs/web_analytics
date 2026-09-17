@@ -1,4 +1,4 @@
-import { listOpenRecommendations, closeRecommendation } from '../../store/recommendations.js';
+import { listOpenRecommendations, closeRecommendation, blockRecommendation } from '../../store/recommendations.js';
 import { getDraft, getDraftedFindingIds, getPendingDraftFilePaths, submitDraftForApproval, updateDraft, markDraftAbandoned, recordMergeFailure } from '../../store/drafts.js';
 import { getSiteById } from '../../store/read.js';
 import { resolveFile } from '../../implementers/lib/url-file-map.js';
@@ -25,6 +25,7 @@ import { countDraftsBySourcesToday } from '../../store/drafts.js';
 import { listByState as listQueueItemsByState, markShipped as markQueueItemShipped, releaseItem as releaseQueueItem, countShippedFileEditsToday, QUEUE_STATES } from '../../store/shipping-queue.js';
 import { recordFixOutcome } from '../../agent-memory.js';
 import { sanitizeForCustomer } from '../../lib/errors.js';
+import { verifyRecommendation, VERIFICATION_DECISION } from '../../generators/lib/verification-layer.js';
 
 const SOURCE = 'auto-remediation';
 
@@ -428,6 +429,16 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // declined three items honestly is not read as three things going wrong.
   let refused = 0;
   let quarantined = 0;
+  // Closed pre-flight, before ever calling generateDraft — the shared
+  // verification layer's own live/repo re-check confirmed the
+  // recommendation's premise is already gone (see verifyRecommendation).
+  // Disjoint from `shipped`/`failed`: nothing was drafted at all.
+  let resolved = 0;
+  // Blocked pre-flight — verifyRecommendation found a genuine conflict it
+  // has no safe basis to resolve automatically. Also disjoint from
+  // `shipped`/`failed`: nothing was drafted, and unlike `resolved` this
+  // recommendation stays open (blocked, not closed) for a human.
+  let conflicted = 0;
   let consecutiveSystemicFailures = 0;
   let consecutiveRefusals = 0;
   let stoppedReason = null;
@@ -526,6 +537,50 @@ export async function autoRemediateSafeRecommendations(siteId, {
     // does not touch either streak counter.
     if (quarantinedGenerators.has(rec.recommendation_type)) {
       quarantined++;
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+
+    // "Is the requested outcome already true?" — a safe, side-effect-free
+    // re-check of live/repo reality, run BEFORE spending a generation
+    // attempt (an LLM call, a GitHub read) on a recommendation whose premise
+    // may already be gone by the time its turn in today's queue comes up.
+    // Only generators with a real verifyCurrentState (see
+    // server/generators/lib/verification-layer.js) can answer this —
+    // everything else falls through unaffected, exactly as before this
+    // existed. Same "skip without spending an attempt, backfill the freed
+    // slot" shape as the quarantine check just above, since nothing was
+    // actually attempted here either.
+    const preflight = await verifyRecommendation(rec, { site });
+    if (preflight.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
+      await closeRecommendation(rec.id).catch(() => {});
+      resolved++;
+      console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) closed before drafting — already resolved (${preflight.reason})`);
+      if (attempted < remaining) {
+        const backfill = nextBackfillCandidate();
+        if (backfill) workQueue.push(backfill);
+      }
+      continue;
+    }
+    // A genuine conflict — the generator's own re-check found the stored
+    // params contradicted by current live evidence in a way it has no safe
+    // basis to resolve itself (e.g. canonical.js: two detecting agents
+    // silently overwrote each other's canonicalTarget in recommendations.
+    // params, and the surviving one no longer matches the live content).
+    // Drafting from contradicted params would be worse than not drafting at
+    // all, so this blocks for a human rather than proceeding — the one
+    // "genuinely cannot safely determine the action" case #10 of the
+    // framework's design calls for, not a generic catch-all.
+    if (preflight.decision === VERIFICATION_DECISION.CONFLICT) {
+      await blockRecommendation(
+        rec.id,
+        `Pre-flight verification found a conflict (${preflight.reason}) that can't be safely resolved automatically — needs a human to pick the right outcome.`,
+      ).catch(() => {});
+      conflicted++;
+      console.log(`[auto-remediation] ${clientLabel}: rec ${rec.id} (${rec.recommendation_type}) blocked before drafting — conflict (${preflight.reason})`);
       if (attempted < remaining) {
         const backfill = nextBackfillCandidate();
         if (backfill) workQueue.push(backfill);
@@ -960,11 +1015,11 @@ export async function autoRemediateSafeRecommendations(siteId, {
   }
   console.log(
     `[auto-remediation] ${clientLabel}: run complete — attempted ${attempted}, shipped ${shipped}, failed ${failed}, `
-    + `refused ${refused}, quarantined ${quarantined}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
+    + `refused ${refused}, quarantined ${quarantined}, resolved ${resolved}, conflicted ${conflicted}${stoppedReason ? `, stopped: ${stoppedReason}` : ''}.`
   );
 
   return finish({
-    attempted, shipped, failed, refused, quarantined,
+    attempted, shipped, failed, refused, quarantined, resolved, conflicted,
     skipped: candidates.length - attempted,
     spentToday, dailyLimit, stoppedReason, prUrl,
     // Full selection reasoning — eligible/selected/skipped counts, per-tier

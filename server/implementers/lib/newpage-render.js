@@ -60,12 +60,34 @@ function frontMatter(fields, site) {
 // URL (see url-file-map.js's resolveNewContentUrl) with no second draft, no
 // second PR, and no edit to a sitemap file that in the Eleventy case doesn't
 // exist in the repo at all.
-export function renderLandingPageBody(content, site, { permalink = null, layout = null } = {}) {
+// featuredImage front matter is deliberately opt-IN here, unlike
+// renderBlogOutlineBody's guessed default (imageKey/altKey/creditKey above) —
+// a blog post having a hero image is an established convention this
+// platform can safely assume; a landing page or direct-answer page having
+// one is not (this renderer emitted nothing image-related at all until
+// site-wide Pexels sourcing was requested). So the field is only written
+// when `fieldNames.featuredImage` came from REAL sibling evidence
+// (newcontent-contract.js sampled an existing page in this same directory
+// that already has one) — never a guessed key for a page type with no
+// established image convention on this site.
+function featuredImageFields(content, fieldNames) {
+  if (!fieldNames?.featuredImage || !content.featuredImage?.url) return [];
+  return [
+    [fieldNames.featuredImage, content.featuredImage.url],
+    [fieldNames.featuredImageAlt || 'featuredImageAlt', content.featuredImage.alt],
+    [fieldNames.featuredImageCredit || 'featuredImageCredit', content.featuredImage.photographer
+      ? `Photo by ${content.featuredImage.photographer} on Pexels`
+      : null],
+  ];
+}
+
+export function renderLandingPageBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.metaTitle || content.headline],
     ['description', content.metaDescription || content.subheadline],
+    ...featuredImageFields(content, fieldNames),
   ], site);
   const parts = [`# ${content.headline || content.target}`];
   if (content.subheadline) parts.push(content.subheadline);
@@ -82,13 +104,17 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   // `fieldNames` maps a canonical field onto whatever THIS directory's
   // existing posts call it (newcontent-contract.js). The defaults below are
   // only what gets used when no sibling could be read — they are not a
-  // contract any particular site honours. This mattered: the hardcoded
-  // `image` key meant zunkireelabs.com's blog template, which reads
-  // `featuredImage`, rendered no image on any generated post even though the
-  // Pexels URL was sitting right there in the front matter.
-  const imageKey = fieldNames.featuredImage || 'image';
-  const altKey = fieldNames.featuredImageAlt || 'image_alt';
-  const creditKey = fieldNames.featuredImageCredit || 'image_credit';
+  // contract any particular site honours. This mattered: a hardcoded `image`
+  // key meant zunkireelabs.com's blog template, which reads `featuredImage`,
+  // rendered no image on any generated post even though the Pexels URL was
+  // sitting right there in the front matter. Fixed by defaulting to the exact
+  // same canonical names FIELD_ALIASES itself lists first/most-likely for
+  // each field (newcontent-contract.js) — the no-siblings case should guess
+  // the platform's own best-known name, not an arbitrary lower-priority
+  // alias from that same list.
+  const imageKey = fieldNames.featuredImage || 'featuredImage';
+  const altKey = fieldNames.featuredImageAlt || 'featuredImageAlt';
+  const creditKey = fieldNames.featuredImageCredit || 'featuredImageCredit';
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
@@ -201,13 +227,14 @@ export function renderBlogOutlineBodyTsx(content, site, { canonicalUrl = null } 
 // filler sections before it — since the whole point of this content type is
 // the AI-citation "answer-first" pattern: a real assistant (or a human
 // skimming) gets the complete answer without scrolling past preamble.
-export function renderDirectAnswerBody(content, site, { permalink = null, layout = null } = {}) {
+export function renderDirectAnswerBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
   const front = frontMatter([
     ['layout', layout],
     ['permalink', permalink],
     ['title', content.title || content.heading || content.query],
     ['description', content.directAnswer?.slice(0, 155)],
     ['date', new Date().toISOString().slice(0, 10)],
+    ...featuredImageFields(content, fieldNames),
   ], site);
   const parts = [`# ${content.heading || content.query}`, content.directAnswer || ''];
   for (const s of content.supportingSections || []) {

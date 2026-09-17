@@ -1,6 +1,20 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSitemapXml, looksLikeTemplateSource, meta } from './sitemap.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+let discoverImpl;
+let inventoryImpl;
+mock.module(resolve('../agents/lib/site-discovery.js'), {
+  namedExports: { discoverSitemapEntries: async (site) => discoverImpl(site) },
+});
+mock.module(resolve('../store/page-inventory.js'), {
+  namedExports: {
+    listPageInventory: async (siteId) => inventoryImpl(siteId),
+    listOrphanedPages: async () => { throw new Error('not used by verifyCurrentState'); },
+  },
+});
+
+const { buildSitemapXml, looksLikeTemplateSource, meta, verifyCurrentState } = await import('./sitemap.js');
 
 // Only exercises buildSitemapXml (pure, no DB/HTTP) — generate()'s
 // url_file_map.siteRoot.sitemap resolution and its no-mapping 400 both
@@ -89,5 +103,51 @@ describe('sitemap generator — looksLikeTemplateSource', () => {
 
   test('does not flag a plain static sitemap.xml', () => {
     assert.equal(looksLikeTemplateSource('<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>/a/</loc></url></urlset>'), false);
+  });
+});
+
+describe('sitemap verifyCurrentState (server/generators/lib/verification-layer.js contract)', () => {
+  const site = { id: 1, url_file_map: { siteRoot: { sitemap: 'src/sitemap.xml' } } };
+
+  test('no site context: still_valid without guessing', async () => {
+    const result = await verifyCurrentState({ params: {} }, {});
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'no-site-context');
+  });
+
+  test('no url_file_map.siteRoot.sitemap configured: still_valid', async () => {
+    const result = await verifyCurrentState({ params: {} }, { site: {} });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'no-file-mapping');
+  });
+
+  test('every named missing URL is already in the live sitemap: already_resolved', async () => {
+    discoverImpl = async () => [{ loc: '/a/' }, { loc: '/b/' }];
+    inventoryImpl = async () => [];
+    const result = await verifyCurrentState({ site_id: 1, params: { missingUrls: ['/a/', '/b/'] } }, { site });
+    assert.equal(result.decision, 'already_resolved');
+  });
+
+  test('a named URL is still genuinely missing: still_valid', async () => {
+    discoverImpl = async () => [{ loc: '/a/' }];
+    inventoryImpl = async () => [];
+    const result = await verifyCurrentState({ site_id: 1, params: { missingUrls: ['/a/', '/b/'] } }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.evidence.missingCount, 1);
+  });
+
+  test('no missingUrls param: recomputes from page_inventory the same way generate() does', async () => {
+    discoverImpl = async () => [{ loc: '/a/' }];
+    inventoryImpl = async () => [{ page: '/a/' }, { page: '/b/' }];
+    const result = await verifyCurrentState({ site_id: 1, params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.evidence.missingCount, 1);
+  });
+
+  test('a lookup failure is not evidence: still_valid, not a crash', async () => {
+    discoverImpl = async () => { throw new Error('GitHub error'); };
+    const result = await verifyCurrentState({ site_id: 1, params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'unreachable');
   });
 });

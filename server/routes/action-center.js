@@ -57,6 +57,7 @@ import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
 import { markQueryDrafted } from '../store/growth-queries.js';
 import { safeMessage, sanitizeForCustomer } from '../lib/errors.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
 
 // Best-effort post-merge Search Console notification (multi-tenant
 // refactor Part 3) — never blocks or fails the caller's response, since
@@ -1846,21 +1847,6 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 // refresh (never fails the caller's response — the draft is already
 // correctly marked implemented at this point; runSiteDiscoveryIfDue is
 // already cheap/idempotent when a real discovery isn't due yet).
-// The public origin a site's live pages are served from — the anchor for
-// site-level verification targets (/llms.txt, /robots.txt, /sitemap.xml) that
-// have no per-page URL of their own. Returns null rather than guessing when a
-// site has no domain configured, which verificationMethodFor turns into an
-// explicit 'unverifiable' reason instead of a fabricated check.
-function siteOriginFor(site) {
-  const raw = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '') || null;
-  if (!raw) return null;
-  try {
-    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).origin;
-  } catch {
-    return null;
-  }
-}
-
 // Records that a human's merge happened, and what commit it produced, so the
 // question "did this actually reach the live site?" has something to hang off.
 // Deliberately NOT a claim that anything deployed: the row starts 'pending'

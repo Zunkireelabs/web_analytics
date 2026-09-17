@@ -480,7 +480,7 @@ async function previewLiveViewport(site, draft) {
 // href match instead (see href-rewrite-inject.js). `no-match` is an honest
 // failure (link already fixed/removed since detection, or lives in a
 // shared partial outside this page's own template file) — never guessed.
-async function computeRedirectFixMerge(site, draft, beforeRef) {
+export async function computeRedirectFixMerge(site, draft, beforeRef) {
   const filePath = resolveFile(site, draft.content.page);
   if (!filePath) {
     return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}" — add one via \`npm run connect-repo\` before this can be applied.` };

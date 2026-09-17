@@ -70,6 +70,8 @@ import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap, MAX_REFUSAL_RECOVERY_CYCL
 // its own doc comment in recommendation-coordinator.js for why this, and not
 // a second live-content reader, is the right thing to call from here.
 import { recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { verifyRecommendation, VERIFICATION_DECISION } from '../generators/lib/verification-layer.js';
+import { getGenerator } from '../generators/registry.js';
 import { recoverUnopenedBatchPrs } from './batch-pr-recovery.js';
 
 // How long a draft may sit without progress before its recommendation is
@@ -507,14 +509,16 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
 // through the normal shared pipeline, with the daily ceiling and pacing it
 // already respects.
 //
-// Scoped to 'broken-link-fix' only for now: it's the one generator whose
-// implementer (backend.js's computeBrokenLinkFixMerge) exposes a real,
-// read-only "would this succeed right now" check with no side effects.
-// Every other generator type facing this same cap is left exactly as
-// before (still permanently held) — a real, honest scope limit, not a
-// silent gap: extending this to another generator means giving IT an
-// equivalent read-only re-verification first, not looping it in here
-// blind.
+// Applies to every generator that exposes a `verifyCurrentState` (see
+// server/generators/lib/verification-layer.js) — currently broken-link-fix
+// and redirect-fix, the two generators whose implementer computation
+// (backend.js) exposes a real, read-only "would this succeed right now"
+// check with no side effects. A generator with no verifier is left exactly
+// as before it existed (still permanently held once its refusal cap is
+// reached) — a real, honest scope limit, not a silent gap: extending this
+// to another generator means giving IT an equivalent read-only
+// re-verification first (its own `verifyCurrentState`), not looping it in
+// here blind.
 async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
   const counts = await countRefusalsByRecommendation(siteId);
   const result = { recovered: 0, resolved: 0, blocked: 0, recommendations: [] };
@@ -522,7 +526,16 @@ async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
 
   const recoveries = await countRefusalRecoveryCyclesByRecommendation(siteId);
   const openRecs = await listOpenRecommendations(siteId);
-  const candidates = openRecs.filter((rec) => rec.recommendation_type === 'broken-link-fix' && !rec.blocked_reason);
+  // Same real scope limit as before, just generalized: a recommendation only
+  // enters this pass at all if ITS OWN generator has a verifier — a held
+  // type with none is left exactly as if this pass didn't exist for it, not
+  // merely skipped-and-counted.
+  const candidates = [];
+  for (const rec of openRecs) {
+    if (rec.blocked_reason) continue;
+    const generator = await getGenerator(rec.recommendation_type);
+    if (typeof generator?.verifyCurrentState === 'function') candidates.push(rec);
+  }
   if (!candidates.length) return result;
 
   let site = null;
@@ -537,7 +550,7 @@ async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
     if (cycles >= MAX_REFUSAL_RECOVERY_CYCLES) {
       await blockRecommendation(
         rec.id,
-        `This link has been refused ${refusals} times across ${cycles} autonomous re-checks, each against freshly re-fetched repo content. It needs a human to look at it directly.`,
+        `This has been refused ${refusals} times across ${cycles} autonomous re-checks, each against freshly re-fetched live/repo content. It needs a human to look at it directly.`,
       );
       result.blocked += 1;
       log?.(`[reconciler] site ${siteId}: rec ${rec.id} blocked — ${cycles} refusal-recovery cycles exhausted, ${refusals} total refusals`);
@@ -545,54 +558,46 @@ async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
     }
 
     site = site ?? await getSiteById(siteId);
-    const page = rec.params?.page;
-    const href = rec.params?.href;
-    if (!site || !page || !href) continue; // no evidence to re-check against — leave for next pass
+    if (!site) continue; // no evidence to re-check against — leave for next pass
 
-    let merged;
-    try {
-      // Dynamically imported — implementers/backend.js pulls in a heavy
-      // GitHub-client/fetch-polyfill chain this module never otherwise
-      // needs, same reason recoverUnopenedBatchPrs's own openPr dependency
-      // above is injected as a lazy import rather than a static one.
-      const { computeBrokenLinkFixMerge } = await import('../implementers/backend.js');
-      const { baseBranch } = await import('../implementers/lib/github-ops.js');
-      merged = await computeBrokenLinkFixMerge(site, { content: { page, href, sourcePages: rec.params?.sourcePages } }, baseBranch(site));
-    } catch (err) {
+    const verification = await verifyRecommendation(rec, { site });
+    if (verification.reason === 'verification-error') {
       // A transient error re-checking (rate limit, network) is not evidence
       // about the finding — must not consume a recovery cycle, same
       // reasoning driveAutonomousRecovery's own re-detection-failure catch
-      // uses above.
-      const id = logInternal(`action-center-reconciler refusal-recovery site ${siteId} rec ${rec.id}`, err);
-      log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery re-check failed (ref: ${id}) — will retry next run`);
+      // uses above. verifyRecommendation itself never throws (it catches
+      // internally and reports this reason instead), so this checks the
+      // reported reason rather than a try/catch.
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery re-check failed (${verification.evidence?.error}) — will retry next run`);
       continue;
     }
 
-    if (merged.stale) {
-      // The implementer's own live check confirms this link is genuinely
-      // gone from the repo now — nothing left to fix, same as
+    if (verification.decision === VERIFICATION_DECISION.ALREADY_RESOLVED) {
+      // The generator's own live/repo re-check confirms this recommendation's
+      // premise is genuinely gone now — nothing left to fix, same as
       // driveAutonomousRecovery's "resolved on re-check" case.
       await closeRecommendation(rec.id);
       result.resolved += 1;
-      log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on refusal-recovery re-check — confirmed gone, closed`);
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on refusal-recovery re-check — confirmed gone (${verification.reason}), closed`);
       continue;
     }
 
-    // Whether merged.ok is now true (genuinely fixable — the next scheduled
-    // ship run will pick it up and actually apply it, through the normal
-    // shared pipeline) or still false for a real, current reason, fresh
-    // evidence was gathered either way. Recording the cycle now is what
-    // raises the effective cap so applyRefusalCap stops filtering this
-    // candidate out of tomorrow's queue.
+    // Whether the fix is now genuinely fixable (the next scheduled ship run
+    // will pick it up and actually apply it, through the normal shared
+    // pipeline) or still blocked for a real, current reason, fresh evidence
+    // was gathered either way. Recording the cycle now is what raises the
+    // effective cap so applyRefusalCap stops filtering this candidate out of
+    // tomorrow's queue.
+    const nowFixable = verification.reason === 'fixable-now';
     await recordAttempt(siteId, {
       recommendationId: rec.id, findingId: null, draftId: null,
       outcome: 'recovered', retryPolicy: RETRY_POLICY.RETRY,
-      reason: merged.ok
-        ? `Re-checked live after ${refusals} refusal(s) — the link is no longer present in any file that was blocking it before; this counts as a fresh refusal-recovery cycle and will be re-attempted on the next scheduled run.`
-        : `Re-checked live after ${refusals} refusal(s) — still confirmed the same issue against current repo content (${merged.reason}); this counts as a fresh refusal-recovery cycle.`,
+      reason: nowFixable
+        ? `Re-checked live after ${refusals} refusal(s) — no longer blocked by what was blocking it before; this counts as a fresh refusal-recovery cycle and will be re-attempted on the next scheduled run.`
+        : `Re-checked live after ${refusals} refusal(s) — still confirmed the same issue against current live/repo content (${verification.reason}); this counts as a fresh refusal-recovery cycle.`,
     });
     result.recovered += 1;
-    log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery cycle spent — ${merged.ok ? 'now fixable, queued for next ship run' : 'still refuses'} (cycle ${cycles + 1}/${MAX_REFUSAL_RECOVERY_CYCLES})`);
+    log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery cycle spent — ${nowFixable ? 'now fixable, queued for next ship run' : 'still refuses'} (cycle ${cycles + 1}/${MAX_REFUSAL_RECOVERY_CYCLES})`);
   }
   return result;
 }

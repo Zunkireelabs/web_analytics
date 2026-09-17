@@ -119,3 +119,38 @@ export async function generate({ siteId, params }) {
 
   return { content, summary };
 }
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Re-runs the exact same real-data recompute generate() itself does
+// (discoverSitemapEntries + page_inventory, diffed the same way) rather than
+// trusting a `missingUrls` param captured whenever the finding was first
+// detected — a URL added to the live sitemap by some other means since then
+// (a prior draft, a manual edit) must not get a second, now-empty-diff draft.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const sitemapPath = site?.url_file_map?.siteRoot?.sitemap;
+  if (!sitemapPath) return { decision: 'still_valid', reason: 'no-file-mapping', evidence: null };
+
+  const siteId = rec.site_id ?? site.id;
+  let existingEntries;
+  let inventory;
+  try {
+    [existingEntries, inventory] = await Promise.all([
+      discoverSitemapEntries(site),
+      listPageInventory(siteId),
+    ]);
+  } catch (err) {
+    return { decision: 'still_valid', reason: 'unreachable', evidence: { error: err.message } };
+  }
+
+  const existingUrlSet = new Set(existingEntries.map((e) => e.loc));
+  const candidates = Array.isArray(rec.params?.missingUrls) && rec.params.missingUrls.length
+    ? rec.params.missingUrls
+    : [...new Set(inventory.map((r) => r.page))];
+  const missingUrls = [...new Set(candidates)].filter((url) => !existingUrlSet.has(url));
+
+  if (missingUrls.length === 0) {
+    return { decision: 'already_resolved', reason: 'sitemap-already-up-to-date', evidence: { sitemapPath } };
+  }
+  return { decision: 'still_valid', reason: 'missing-urls-remain', evidence: { sitemapPath, missingCount: missingUrls.length } };
+}

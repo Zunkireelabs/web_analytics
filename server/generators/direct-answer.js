@@ -3,6 +3,9 @@ import { knownDomain, ownDomains, filterOwnDomainPages } from '../agents/lib/sit
 import { callLLM, callLLMForJson } from '../llm.js';
 import { analyzePageUrl, hasSufficientGroundingContent } from '../agents/lib/page-content.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 // New file, not an extension of blog-outline.js — blog-outline's content
 // shape is explicitly an OUTLINE (sections of heading+notes, no real prose),
@@ -112,6 +115,19 @@ export async function generate({ siteId, params }) {
   const suggestedInternalLinks = (Array.isArray(parsed.suggestedInternalLinks) ? parsed.suggestedInternalLinks : [])
     .filter((s) => s && typeof s.anchorText === 'string' && candidateSet.has(s.targetUrl));
 
+  // Best-effort, same as landing-page.js/blog-outline.js: a failed/disabled/
+  // no-result search never blocks an otherwise complete draft, and
+  // renderDirectAnswerBody only ever WRITES this into front matter when the
+  // target directory's real sibling pages already have a featured-image
+  // field (fieldNames from newcontent-contract.js) — never invented for a
+  // directory with no such convention.
+  const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
+  const { fallback } = await imageQueryContextFor(site);
+  const featuredImage = await searchImage(
+    buildImageQueries({ title: parsed.title || parsed.heading || query, topic: query, fallback }),
+    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+  );
+
   const content = {
     query,
     title: parsed.title || '',
@@ -120,6 +136,7 @@ export async function generate({ siteId, params }) {
     supportingSections: Array.isArray(parsed.supportingSections) ? parsed.supportingSections : [],
     suggestedFaqTopics: Array.isArray(parsed.suggestedFaqTopics) ? parsed.suggestedFaqTopics : [],
     suggestedInternalLinks,
+    ...(featuredImage ? { featuredImage } : {}),
     // Same convention as landing-page.js's/blog-outline.js's
     // content.groundingContext — for claim-grounding-guard.js
     // (quality-gate.js) to check against. This generator's own prompt is

@@ -1,6 +1,6 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, meta, sanitizeTable } from './expand-content.js';
+import { generate, meta, sanitizeTable, mergeCitationSections } from './expand-content.js';
 import { runQualityGate } from './lib/quality-gate.js';
 import { query, pool } from '../db.js';
 import { _resetQuotaForTests } from '../ingest/search-grounding-providers/tavily.js';
@@ -77,6 +77,35 @@ describe('expand-content generator — sanitizeTable', () => {
     const table = [{ feature: 'Price', us: 42 }, { feature: 'Speed', us: 10 }];
     const result = sanitizeTable(table);
     assert.equal(result[0].us, '42');
+  });
+});
+
+// Regression for the 2026-09-17 zunkireelabs /about/ incident: the model
+// returned one section PER citation, each independently titled "References",
+// and marker-merge rendered every one as its own visible <h2> — three
+// duplicate "References" headings stacked down the live page.
+describe('expand-content generator — mergeCitationSections', () => {
+  test('a single section is returned unchanged', () => {
+    const sections = [{ heading: 'References', body: '- [A](https://a.example)' }];
+    assert.deepEqual(mergeCitationSections(sections), sections);
+  });
+
+  test('multiple per-source sections collapse into exactly one, bodies concatenated', () => {
+    const sections = [
+      { heading: 'References', body: '- [A](https://a.example)' },
+      { heading: 'References', body: '- [B](https://b.example)' },
+      { heading: 'References', body: '- [C](https://c.example)' },
+    ];
+    const result = mergeCitationSections(sections);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].heading, 'References');
+    assert.match(result[0].body, /a\.example/);
+    assert.match(result[0].body, /b\.example/);
+    assert.match(result[0].body, /c\.example/);
+  });
+
+  test('an empty array is returned unchanged', () => {
+    assert.deepEqual(mergeCitationSections([]), []);
   });
 });
 

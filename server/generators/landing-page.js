@@ -1,6 +1,9 @@
 import { callLLMForJson } from '../llm.js';
 import { getSiteById } from '../store/read.js';
 import { pageStructureGuidance } from './lib/design-aware-composer.js';
+import { searchImage, buildImageQueries, configured as imagesConfigured } from './lib/pexels-client.js';
+import { usedPhotoIds } from './lib/blog-image-usage.js';
+import { imageQueryContextFor, IMAGE_CANDIDATE_POOL } from './lib/blog-image-query.js';
 
 export const meta = {
   id: 'landing-page',
@@ -54,6 +57,21 @@ export async function generate({ siteId, params }) {
     throw Object.assign(new Error('Landing page generation failed: model did not return valid JSON'), { status: 400 });
   }
 
+  // Best-effort, same reasoning as blog-outline.js's own image search: a
+  // failed/disabled/no-result search must never block an otherwise complete
+  // landing-page draft. newpage-render.js's renderLandingPageBody only ever
+  // WRITES this into front matter when the target directory's real sibling
+  // pages already have a featured-image field of their own (fieldNames from
+  // newcontent-contract.js) — so on a directory with no such convention,
+  // this fetch simply goes unused rather than inventing a look the site's
+  // own landing pages don't have.
+  const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
+  const { fallback } = await imageQueryContextFor(site);
+  const featuredImage = await searchImage(
+    buildImageQueries({ title: target, topic: target, fallback }),
+    { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
+  );
+
   const content = {
     target,
     headline: parsed.headline || '',
@@ -62,6 +80,7 @@ export async function generate({ siteId, params }) {
     cta: parsed.cta || '',
     metaTitle: parsed.metaTitle || '',
     metaDescription: parsed.metaDescription || '',
+    ...(featuredImage ? { featuredImage } : {}),
     // The exact real supporting data this draft was grounded in — same
     // convention as compliance-draft.js's `content.factsUsed` — so
     // claim-grounding-guard.js (quality-gate.js) can check "is this claim

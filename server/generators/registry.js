@@ -38,5 +38,23 @@ export async function listGeneratorMeta() {
 }
 
 export async function getGenerator(id) {
+  if (cache) return cache.get(id) || null;
+  // Fast path: most callers ask for exactly one generator by its own id,
+  // which is its own file's basename (this registry's "adding a new action
+  // type is a one-file operation" convention) — importing just that file
+  // avoids dragging in every OTHER generator's dependency graph (LLM
+  // clients, etc.) just to answer "does generator X exist", which matters
+  // both for hot-path cost and because a caller that only ever asks for one
+  // or two specific ids (e.g. the verification layer) shouldn't force every
+  // generator module in the directory to load successfully. Falls back to
+  // the full directory scan (which also performs the duplicate-id check)
+  // only when the fast path can't resolve a valid module — e.g. an id that
+  // doesn't map 1:1 to a filename, if that convention is ever broken.
+  if (!NON_GENERATOR_FILES.has(`${id}.js`)) {
+    try {
+      const mod = await import(pathToFileURL(join(HERE, `${id}.js`)).href);
+      if (mod.meta?.id === id && typeof mod.generate === 'function') return mod;
+    } catch { /* fall through to the full scan below */ }
+  }
   return (await loadAll()).get(id) || null;
 }
