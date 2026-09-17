@@ -189,5 +189,27 @@ export async function resolveFaqRenderMode(site, draft, { fetchFile = getFileCon
   if (!file) {
     return { mode: null, confidence: 0, reason: `${filePath} does not exist on branch "${beforeRef}".`, source: 'error' };
   }
+
+  // A page-data-object page (see adapters/page-data-object.js) resolves a
+  // real `filePath` — it's a real file, just not JSX-body content — so it
+  // does not hit the `!filePath` branch above the way a data-array-content
+  // pagination route does. Left to fall through, decideFaqRenderMode's
+  // generic content scan reads a JS data-object literal looking for
+  // FAQ-shaped markup that was never going to be there, misjudging these
+  // pages as 'schema-only'. That verdict then routes to the default
+  // marker-merge implementer, which fails outright
+  // ('self-closing-root-no-body') because page-data-object.js's own docs
+  // are explicit: this template renders no schema-only representation at
+  // all — FAQPage schema is auto-derived from the same faqItems array by
+  // the template component itself, never drafted as a separate write. The
+  // real decision here is exactly the same deterministic, entry-specific
+  // question decideFaqRenderModeForDataDrivenPage already answers for
+  // data-array-content pages: does this page already show a visible FAQ,
+  // and is the sitewide visible-FAQ cap still open.
+  const adapterConfig = resolveAdapter(site, page, 'faq');
+  if (adapterConfig?.id === 'page-data-object') {
+    return decideFaqRenderModeForDataDrivenPage(site, page);
+  }
+
   return decideFaqRenderMode(site, page, file.content);
 }

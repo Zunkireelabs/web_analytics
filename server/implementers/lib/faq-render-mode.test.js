@@ -192,3 +192,37 @@ describe('resolveFaqRenderMode — pagination/data-array routes with no per-page
     assert.equal(result.mode, null);
   });
 });
+
+// Regression: a page-data-object page (adapters/page-data-object.js — e.g.
+// Admizz's study-in-<country> pages, each a page.tsx returning
+// `<CountryPageTemplate data={countryData} />`) DOES resolve a real
+// filePath, so it never hit the pagination "no per-page file" branch above.
+// Falling through to decideFaqRenderMode's generic content scan on that
+// file misread it as 'schema-only' every time (there is no FAQ-shaped
+// markup in a JS data object to find), which routed to the default
+// marker-merge implementer and failed outright — self-closing-root-no-body
+// — because these templates render no schema-only representation at all.
+describe('resolveFaqRenderMode — page-data-object pages (real file, no JSX body)', () => {
+  const site = {
+    id: 8862, visible_faq_cap: 5, visible_faq_baseline: 0,
+    url_file_map: {
+      pages: {
+        '/study-in-finland': { file: 'src/app/study-in-finland/page.tsx', adapters: { faq: { id: 'page-data-object' } } },
+      },
+      patterns: [],
+    },
+  };
+
+  test('routes to decideFaqRenderModeForDataDrivenPage instead of scanning the data-object file as if it were marker-based content', async () => {
+    const fetchFile = async () => ({ content: 'const finlandData = { faqItems: [] };' });
+    const result = await resolveFaqRenderMode(
+      site, { content: { page: 'https://example.com/study-in-finland' } },
+      { fetchFile }
+    );
+    // decideFaqRenderModeForDataDrivenPage's own deterministic 'visible'
+    // verdict when nothing else says otherwise — never the generic scan's
+    // misread of a data object as an already-schema-only page.
+    assert.equal(result.mode, 'visible');
+    assert.notEqual(result.source, 'cap');
+  });
+});

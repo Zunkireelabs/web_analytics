@@ -892,6 +892,38 @@ describe('checkTemplateFreshness', () => {
     assert.equal(result.stale, true);
     assert.deepEqual(result.missingClasses, ['divide-y']);
   });
+
+  // Regression: a site built with page-scoped inline CSS (a <style> block
+  // per page, no <link rel="stylesheet"> at all — Chayce's actual design)
+  // was reported stale on every page, because only linked stylesheets were
+  // ever checked. The classes are real and live; they were just never
+  // looked for in the one place this site actually puts them.
+  test('classes defined only in an inline <style> block on the page are found, not reported missing', async () => {
+    const inlineHtml = '<html><head><style>.py-12{padding-top:3rem}.text-xl{font-size:1.25rem}' +
+      '.font-normal{font-weight:400}@media(min-width:768px){.md\\:py-20{padding-top:5rem}' +
+      '.md\\:text-2xl{font-size:1.5rem}}</style></head><body></body></html>';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/',
+      templateEntry: template,
+      fetchPage: async () => inlineHtml,
+      fetchStylesheet: async () => { throw new Error('no linked stylesheet to fetch'); },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.stale, false);
+    assert.deepEqual(result.missingClasses, []);
+  });
+
+  test('no <link rel="stylesheet"> and no inline <style> -> honest error, not a false stale verdict', async () => {
+    const bareHtml = '<html><head></head><body></body></html>';
+    const result = await checkTemplateFreshness({
+      pageUrl: 'https://example.com/page/',
+      templateEntry: template,
+      fetchPage: async () => bareHtml,
+      fetchStylesheet: async () => 'irrelevant',
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  });
 });
 
 // A page whose body actually contains one real, filled-in example of
