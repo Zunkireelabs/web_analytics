@@ -86,6 +86,24 @@ const SHAPES = {
     ],
     minRows: 1,
   },
+  // The site's real Q&A card shape (products/search.njk's SEOAI:QACONTENT
+  // region) — native <details> disclosure cards, distinct from the
+  // 'accordion' shape's Alpine.js divide-y pattern used by SEOAI:FAQ. Added
+  // because qa-content's captured template had gone stale (verify-component-
+  // templates.js: "captured markup shape no longer found"), and neither
+  // existing shape's regex matches a <details> list, so every qa-content
+  // injection since had been falling back to the generic unstyled
+  // '<div class="qa-content">{{ROWS}}</div>' wrapper (marker-merge.js) — the
+  // literal "blog Q&A not using the FAQ design" defect reported live.
+  details: {
+    container: /(<div class="container-custom py-12 md:py-20">)([\s\S]*)(<\/div>)\s*$/,
+    row: /<details class="[^"]*">[\s\S]*?<\/details>/g,
+    slots: [
+      [/(<h3 class="[^"]*">)([\s\S]*?)(<\/h3>)/, 'QUESTION'],
+      [/(<div class="text-gray-600 leading-relaxed">)([\s\S]*?)(<\/div>)/, 'ANSWER'],
+    ],
+    minRows: 2,
+  },
 };
 
 const shapeName = arg('shape') || 'accordion';
