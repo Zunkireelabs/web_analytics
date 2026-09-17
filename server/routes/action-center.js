@@ -2054,6 +2054,12 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
     throw httpError(422, result.error, {
       reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted,
       missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
+      // result.stale (currently only set by backend.js's confirmed-absent
+      // broken-link case) means the implementer found live evidence this
+      // recommendation's own premise no longer holds — auto-remediation.js's
+      // stale-refusal handling closes it instead of leaving it to re-refuse
+      // forever, same as a generator throwing stale:true at generate time.
+      stale: result.stale,
     });
   }
   // Provenance for the reviewer: what actually renders this page, whether

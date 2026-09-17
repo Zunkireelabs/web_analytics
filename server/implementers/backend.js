@@ -981,11 +981,31 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   // as "this href is hardcoded nowhere in the repo" — reported as its own
   // reason so it classifies as an external/coverage limitation rather than
   // a confident per-item defect (attempt-classification.js).
+  //
+  // confirmedAbsent (same condition summarizeBrokenLinkAttempts computes
+  // internally for its own trailer sentence, duplicated here because THIS
+  // caller needs the boolean itself, not just prose): a full, unbounded
+  // repo search found the href hardcoded nowhere at all. That is proof the
+  // recommendation's own premise (a link on this page still points here)
+  // is stale, not evidence of an unresolvable defect — same "the generator
+  // discovered live evidence the premise is gone" shape schema.js already
+  // uses `stale: true` for. Without this, auto-remediation.js's refusal
+  // counter only ever sees the generic 'no-match' reason code (never the
+  // descriptive sentence this flag is derived from) and can't tell "this
+  // citation is genuinely gone, close it" apart from "found candidate
+  // files but couldn't safely strip any of them, still stuck" — so a
+  // confirmed-resolved finding sat re-refusing itself forever instead of
+  // closing. Kept as a DISTINCT reason code (not the same 'no-match') so
+  // it stays gone from a link that's simply currently unresolvable.
+  const searchAttempts = attempted.filter((a) => a.matchedVia === 'repo-local-search');
+  const searchError = searchAttempts.find((a) => a.reason === 'repo-local-search-error');
+  const confirmedAbsent = !coverageIncomplete && !searchError && searchAttempts.length === 0;
   return {
     ok: false,
     reason: attempted.length && attempted.every((a) => a.reason === 'no-file-mapping')
       ? 'no-file-mapping'
-      : coverageIncomplete ? 'search-coverage-incomplete' : 'no-match',
+      : coverageIncomplete ? 'search-coverage-incomplete' : confirmedAbsent ? 'confirmed-absent' : 'no-match',
+    stale: confirmedAbsent,
     error: coverageIncomplete
       ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
       : summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete),
