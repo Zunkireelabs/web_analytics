@@ -51,7 +51,9 @@
 import { query } from '../db.js';
 import { markDraftAbandoned, countFailedAttemptsByFinding, getDraftByFindingId } from '../store/drafts.js';
 import { reopenRecommendation, blockRecommendation, closeRecommendation, listOpenRecommendations } from '../store/recommendations.js';
-import { recordAttempt, countRecoveryCyclesByFinding } from '../store/recommendation-attempts.js';
+import { recordAttempt, countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../store/recommendation-attempts.js';
+import { countRefusalsByRecommendation } from '../agents/lib/generator-learning.js';
+import { getSiteById } from '../store/read.js';
 import { classifyAbandonReason, RETRY_POLICY } from './attempt-classification.js';
 import { logInternal } from './errors.js';
 // Reused rather than re-defined: one formula decides both "stop auto-drafting
@@ -60,7 +62,7 @@ import { logInternal } from './errors.js';
 // autonomous-recovery pass below) — the same question asked from two call
 // sites must get the same answer, or one silently excludes a finding the
 // other still considers eligible.
-import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap } from '../agents/lib/ship-pacing.js';
+import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap, MAX_REFUSAL_RECOVERY_CYCLES, effectiveRefusalCap } from '../agents/lib/ship-pacing.js';
 // recheckRecommendation is the ONE existing entry point that re-runs a
 // finding's detecting agent against LIVE content for a single recommendation
 // (originally built for the manual "Re-check now" button) — reused here with
@@ -480,6 +482,121 @@ async function driveAutonomousRecovery(siteId, { apply, log }) {
   return result;
 }
 
+// The refusal-cap counterpart to driveAutonomousRecovery above — same
+// "spend a recovery cycle on fresh evidence, or hand it to a human once
+// exhausted" shape, applied to ship-pacing.js's applyRefusalCap
+// (MAX_REFUSALS) instead of applyConvergenceCap. Built from a real,
+// verified case on site 1 (2026-09-17): 20 broken-link-fix recommendations
+// held after 5 refusals each, most of which were actually caused by GitHub
+// rate limiting during the exact runs that produced them — re-checking one
+// by hand once the rate limit cleared found it genuinely fixable, but
+// nothing autonomous would ever have re-tried it; applyRefusalCap filters a
+// held item out of every future candidate list before the generate/push
+// loop can see it again, so a refusal caused by a since-resolved transient
+// condition sat re-classified as a permanent defect forever, identically to
+// a genuinely unfixable one.
+//
+// Deliberately does NOT ship anything itself — same discipline
+// learned-repair.js was fixed to follow (see its own comment: shipping
+// directly from a second autonomous entry point bypasses the daily ceiling
+// and the "one shared batch PR" rule every other producer respects). This
+// only re-verifies, READ-ONLY, and records a recovery cycle (raising the
+// effective cap) or closes the recommendation outright when the
+// implementer's own check proves the finding is stale — the next
+// scheduled auto-remediation.js run is what actually attempts the ship,
+// through the normal shared pipeline, with the daily ceiling and pacing it
+// already respects.
+//
+// Scoped to 'broken-link-fix' only for now: it's the one generator whose
+// implementer (backend.js's computeBrokenLinkFixMerge) exposes a real,
+// read-only "would this succeed right now" check with no side effects.
+// Every other generator type facing this same cap is left exactly as
+// before (still permanently held) — a real, honest scope limit, not a
+// silent gap: extending this to another generator means giving IT an
+// equivalent read-only re-verification first, not looping it in here
+// blind.
+async function driveAutonomousRefusalRecovery(siteId, { apply, log }) {
+  const counts = await countRefusalsByRecommendation(siteId);
+  const result = { recovered: 0, resolved: 0, blocked: 0, recommendations: [] };
+  if (counts.size === 0) return result;
+
+  const recoveries = await countRefusalRecoveryCyclesByRecommendation(siteId);
+  const openRecs = await listOpenRecommendations(siteId);
+  const candidates = openRecs.filter((rec) => rec.recommendation_type === 'broken-link-fix' && !rec.blocked_reason);
+  if (!candidates.length) return result;
+
+  let site = null;
+  for (const rec of candidates) {
+    const refusals = counts.get(rec.id) || 0;
+    const cycles = recoveries.get(rec.id) || 0;
+    if (refusals < effectiveRefusalCap(cycles)) continue;
+
+    result.recommendations.push({ id: rec.id, refusals, cycles });
+    if (!apply) continue;
+
+    if (cycles >= MAX_REFUSAL_RECOVERY_CYCLES) {
+      await blockRecommendation(
+        rec.id,
+        `This link has been refused ${refusals} times across ${cycles} autonomous re-checks, each against freshly re-fetched repo content. It needs a human to look at it directly.`,
+      );
+      result.blocked += 1;
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} blocked — ${cycles} refusal-recovery cycles exhausted, ${refusals} total refusals`);
+      continue;
+    }
+
+    site = site ?? await getSiteById(siteId);
+    const page = rec.params?.page;
+    const href = rec.params?.href;
+    if (!site || !page || !href) continue; // no evidence to re-check against — leave for next pass
+
+    let merged;
+    try {
+      // Dynamically imported — implementers/backend.js pulls in a heavy
+      // GitHub-client/fetch-polyfill chain this module never otherwise
+      // needs, same reason recoverUnopenedBatchPrs's own openPr dependency
+      // above is injected as a lazy import rather than a static one.
+      const { computeBrokenLinkFixMerge } = await import('../implementers/backend.js');
+      const { baseBranch } = await import('../implementers/lib/github-ops.js');
+      merged = await computeBrokenLinkFixMerge(site, { content: { page, href, sourcePages: rec.params?.sourcePages } }, baseBranch(site));
+    } catch (err) {
+      // A transient error re-checking (rate limit, network) is not evidence
+      // about the finding — must not consume a recovery cycle, same
+      // reasoning driveAutonomousRecovery's own re-detection-failure catch
+      // uses above.
+      const id = logInternal(`action-center-reconciler refusal-recovery site ${siteId} rec ${rec.id}`, err);
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery re-check failed (ref: ${id}) — will retry next run`);
+      continue;
+    }
+
+    if (merged.stale) {
+      // The implementer's own live check confirms this link is genuinely
+      // gone from the repo now — nothing left to fix, same as
+      // driveAutonomousRecovery's "resolved on re-check" case.
+      await closeRecommendation(rec.id);
+      result.resolved += 1;
+      log?.(`[reconciler] site ${siteId}: rec ${rec.id} resolved on refusal-recovery re-check — confirmed gone, closed`);
+      continue;
+    }
+
+    // Whether merged.ok is now true (genuinely fixable — the next scheduled
+    // ship run will pick it up and actually apply it, through the normal
+    // shared pipeline) or still false for a real, current reason, fresh
+    // evidence was gathered either way. Recording the cycle now is what
+    // raises the effective cap so applyRefusalCap stops filtering this
+    // candidate out of tomorrow's queue.
+    await recordAttempt(siteId, {
+      recommendationId: rec.id, findingId: null, draftId: null,
+      outcome: 'recovered', retryPolicy: RETRY_POLICY.RETRY,
+      reason: merged.ok
+        ? `Re-checked live after ${refusals} refusal(s) — the link is no longer present in any file that was blocking it before; this counts as a fresh refusal-recovery cycle and will be re-attempted on the next scheduled run.`
+        : `Re-checked live after ${refusals} refusal(s) — still confirmed the same issue against current repo content (${merged.reason}); this counts as a fresh refusal-recovery cycle.`,
+    });
+    result.recovered += 1;
+    log?.(`[reconciler] site ${siteId}: rec ${rec.id} refusal-recovery cycle spent — ${merged.ok ? 'now fixable, queued for next ship run' : 'still refuses'} (cycle ${cycles + 1}/${MAX_REFUSAL_RECOVERY_CYCLES})`);
+  }
+  return result;
+}
+
 // Reconciles one site. `apply: false` makes it a pure dry run — it reports
 // exactly what it would do and writes nothing, which is how this gets
 // verified against production data before being trusted to run unattended.
@@ -508,7 +625,8 @@ export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, ap
   const stalled = await reclaimStalledDrafts(siteId, { idleHours, apply, log });
   const failures = await classifyUnrecordedFailures(siteId, { apply, log });
   const recovery = await driveAutonomousRecovery(siteId, { apply, log });
-  return { siteId, prRecovery, stalled, failures, itemDefects, recovery };
+  const refusalRecovery = await driveAutonomousRefusalRecovery(siteId, { apply, log });
+  return { siteId, prRecovery, stalled, failures, itemDefects, recovery, refusalRecovery };
 }
 
 // Every site, one at a time. Sequential on purpose: this shares a connection
@@ -541,10 +659,10 @@ export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply 
     reclaimed: acc.reclaimed + r.stalled.reclaimed,
     reopened: acc.reopened + r.stalled.reopened,
     classified: acc.classified + r.failures.classified,
-    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked,
-    resolved: acc.resolved + r.failures.resolved + r.recovery.resolved,
+    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked + r.refusalRecovery.blocked,
+    resolved: acc.resolved + r.failures.resolved + r.recovery.resolved + r.refusalRecovery.resolved,
     abandonedForRetry: acc.abandonedForRetry + r.itemDefects.abandoned,
-    recovered: acc.recovered + r.recovery.recovered,
+    recovered: acc.recovered + r.recovery.recovered + r.refusalRecovery.recovered,
   }), { reclaimed: 0, reopened: 0, classified: 0, blocked: 0, resolved: 0, abandonedForRetry: 0, recovered: 0 });
   return { results, totals };
 }

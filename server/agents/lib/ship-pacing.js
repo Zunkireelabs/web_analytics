@@ -1,5 +1,5 @@
 import { hasRecentDraftOfType, countFailedAttemptsByFinding } from '../../store/drafts.js';
-import { countRecoveryCyclesByFinding } from '../../store/recommendation-attempts.js';
+import { countRecoveryCyclesByFinding, countRefusalRecoveryCyclesByRecommendation } from '../../store/recommendation-attempts.js';
 import { countRefusalsByRecommendation } from './generator-learning.js';
 
 // Candidate thinning shared by BOTH ship paths — auto-remediation.js's
@@ -169,22 +169,54 @@ export async function applyPacing(site, candidates, { recentDraftCheck = hasRece
 // stops is spending a model call per run to reach the same honest refusal.
 export const MAX_REFUSALS = 5;
 
+// The refusal counterpart to MAX_RECOVERY_CYCLES/effectiveConvergenceCap
+// above — until this existed, MAX_REFUSALS was a permanent hold with no way
+// back: countRefusalsByRecommendation only ever sees refusals, and
+// applyRefusalCap filters a held item out of every future candidate list
+// before the generate/push loop can ever attempt it again, so a refusal
+// caused by a now-resolved transient condition (confirmed live: GitHub rate
+// limiting during the exact window that produced most of site 1's held
+// broken-link-fix refusals) sat re-classified as a permanent defect forever,
+// identically to a genuinely unfixable one. driveAutonomousRefusalRecovery
+// (action-center-reconciler.js) is what actually spends a cycle — one real,
+// fresh attempt against live evidence per cycle, same "earn it, don't assume
+// it" discipline the convergence cap already uses.
+export const MAX_REFUSAL_RECOVERY_CYCLES = 2;
+
+// The real, current refusal ceiling once however many recovery cycles have
+// already been earned — same formula shape as effectiveConvergenceCap,
+// kept as its own function (not a shared one) because the two caps count
+// two structurally different things (recommendation-scoped refusals vs.
+// finding-scoped failures) from two different queries.
+export function effectiveRefusalCap(recoveryCycles) {
+  return MAX_REFUSALS * ((recoveryCycles || 0) + 1);
+}
+
 /**
- * Drops candidates that have already been refused MAX_REFUSALS times.
- * Same shape as applyPacing/applyConvergenceCap so a caller applies all three
- * the same way.
+ * Drops candidates that have already been refused past their current
+ * effective cap. Same shape as applyPacing/applyConvergenceCap so a caller
+ * applies all three the same way.
  */
-export async function applyRefusalCap(site, candidates, { refusalCounts = null } = {}) {
+export async function applyRefusalCap(site, candidates, { refusalCounts = null, recoveryCounts = null } = {}) {
   if (candidates.length === 0) return { kept: candidates, notes: [] };
   const counts = refusalCounts ?? await countRefusalsByRecommendation(site.id);
   if (counts.size === 0) return { kept: candidates, notes: [] };
+  // Only fetched when there's actually a held candidate to raise the cap
+  // for — a site with no refusals never needs its recovery history either.
+  const recoveries = recoveryCounts ?? await countRefusalRecoveryCyclesByRecommendation(site.id);
 
   const notes = [];
   const kept = [];
   for (const rec of candidates) {
     const refusals = counts.get(rec.id) || 0;
-    if (refusals >= MAX_REFUSALS) {
-      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${refusals} honest refusal(s) — still open for a human, but no longer auto-drafted.`);
+    const cycles = recoveries.get(rec.id) || 0;
+    const cap = effectiveRefusalCap(cycles);
+    if (refusals >= cap) {
+      // Held here means "wait for the reconciler's next pass" — it either
+      // raises this very cap by spending a fresh recovery cycle (if any
+      // remain) or, once MAX_REFUSAL_RECOVERY_CYCLES is spent, hands the
+      // card to a human. Never a dead end on its own.
+      notes.push(`${rec.recommendation_type} #${rec.id}: held after ${refusals} honest refusal(s) (cap ${cap} after ${cycles} recovery cycle(s)) — awaiting autonomous re-analysis or a human.`);
       continue;
     }
     kept.push(rec);
