@@ -122,6 +122,14 @@ export async function fetchMobileUsabilityAudit(pageUrl, { strategy = 'mobile' }
       // the real percentage of the page's text PSI measured as legible,
       // straight from its audit output, never recomputed here.
       summary: typeof fontSize?.displayValue === 'string' ? fontSize.displayValue : null,
+      // Same real per-element detail as tapTargets.failingElements above —
+      // Lighthouse's font-size audit table also lists the real failing text
+      // nodes (each carrying a Lighthouse node-details object with its own
+      // .snippet) when the audit fails, not just the aggregate percentage.
+      // Passed through raw/uninterpreted, same discipline as tapTargets:
+      // this file's job is fetching PSI's real output, never reshaping it
+      // into a guessed contract the actual API might not match.
+      failingElements: (fontSize?.details?.items || []).slice(0, 10),
     },
   };
 }
