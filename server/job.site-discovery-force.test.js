@@ -48,6 +48,25 @@ describe('runSiteDiscoveryIfDue — force bypasses the weekly staleness gate', (
     const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({ discoverFromSitemapsFn: async () => { throw new Error('network'); } }));
     assert.equal(result.sitemapCount, 0);
   });
+
+  // Real incident: chayceproperties.com's GSC breakdown included a prior
+  // owner's legacy /shop/*.aspx and ?h=<digits> URLs, which passed the
+  // own-domain check and were being upserted into page_inventory as real
+  // 'gsc' pages every week.
+  test('legacy foreign-platform URLs from GSC never reach page_inventory', async () => {
+    const upserts = [];
+    const result = await runSiteDiscoveryIfDue(SITE, fakeDeps({
+      getSearchPerformanceRangeFn: async () => [
+        { dim_value: 'https://example.com/', impressions: 5 },
+        { dim_value: 'https://example.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top1', impressions: 3 },
+        { dim_value: 'https://example.com/?h=8020347041280', impressions: 1 },
+      ],
+      upsertPageInventoryBatchFn: async (siteId, urls, source) => { upserts.push({ siteId, urls, source }); },
+    }));
+    const gscUpsert = upserts.find((u) => u.source === 'gsc');
+    assert.deepEqual(gscUpsert.urls, ['https://example.com/']);
+    assert.equal(result.gscCount, 1);
+  });
 });
 
 describe('runSiteDiscoveryIfDueForAllSites — force threads through to every site', () => {

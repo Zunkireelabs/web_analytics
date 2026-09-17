@@ -3,6 +3,7 @@ import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
 import { sortByRotation } from './rotation.js';
 import { knownDomain, filterOwnDomainPages } from './site-domain.js';
+import { isForeignPlatformSpamUrl } from './index-bloat.js';
 // Already exported and already proven against this exact failure — see the
 // SOFT-404 block below for why it was never applied here until now.
 import { fetchSoftNotFoundFingerprint, isSoftNotFound } from './technical-seo-analysis.js';
@@ -263,8 +264,16 @@ export async function selectCandidatePages(siteId, agentId, {
   // Center. Confirmed 2026-08-24: scanning ownDomains here is what let
   // edgex.zunkireelabs.com pages generate real recommendations at all.
   const domain = knownDomain(site);
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
-  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page);
+  // Same-domain doesn't mean same site — a prior owner's legacy platform
+  // (index-bloat.js's FOREIGN_PLATFORM_EXTENSIONS/junk-numeric-param shapes,
+  // first found on chayceproperties.com) can still be sitting in GSC and in
+  // already-persisted page_inventory rows (e.g. from before this filter
+  // existed), so it's applied here too, not just at discovery-ingestion time
+  // in job.js — this is the one pool every page-level agent's batch comes
+  // from, so filtering here keeps those URLs out regardless of how they got
+  // into either source.
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
+  const inventory = filterOwnDomainPages(inventoryRaw, domain, (r) => r.page).filter((r) => !isForeignPlatformSpamUrl(r.page));
 
   const impressionsByPage = new Map(gscPages.map((p) => [p.dim_value, Number(p.impressions)]));
   const gscUrls = dedupeQueryVariants(gscPages.map((p) => p.dim_value), impressionsByPage);

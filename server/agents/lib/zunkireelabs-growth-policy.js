@@ -66,8 +66,9 @@ export function globalGrowthNote(site) {
     'This is Zunkireelabs\'s own blog. Zunkireelabs is a GLOBAL technology, software, SEO, AI, and ' +
     'digital-growth company — do not treat it as Nepal-only or limit its market to Nepal. Write with a ' +
     'global growth-strategist lens: real search demand and buying intent, real industries Zunkireelabs ' +
-    'genuinely serves (web development, SEO, AI development, business software, CRM, booking engines, ' +
-    'automation, analytics), and real opportunity, wherever in the world it exists. Never fabricate a ' +
+    'genuinely serves (web development, SEO, AI development, custom AI agent development for any business ' +
+    'need, voice AI agents, business software, CRM, booking engines, automation, analytics), and real ' +
+    'opportunity, wherever in the world it exists. Never fabricate a ' +
     'client result, testimonial, office, or market presence that isn\'t real. '
   );
 }

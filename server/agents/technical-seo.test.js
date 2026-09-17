@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { missingSchemaFinding } from './technical-seo.js';
+import { missingSchemaFinding, compressionFinding } from './technical-seo.js';
 
 // Regression coverage for the auto-shippable wrong-@type bug. This finding
 // used to build its action from `inferSchemaType(rep.page, [])` against a
@@ -69,5 +69,49 @@ describe('missingSchemaFinding', () => {
     assert.equal(missingSchemaFinding([
       { page: 'https://example.com/', impressions: 5, technicalAudit: { ok: true, hasSchema: true }, analysis: {} },
     ]), null);
+  });
+});
+
+// Regression coverage for the "server/CDN config, not draftable" abstention
+// this finding used to hard-code regardless of whether the site actually
+// tracks its own nginx config. Same real-capability gate as
+// server/agents/redirect-chain.js's nginxConfigPath check.
+
+const compressionPage = (page, { impressions = 0, compressed = false, ok = true } = {}) => ({
+  page, impressions, compression: { ok, compressed },
+});
+
+describe('compressionFinding', () => {
+  test('offers no action and stays reportOnly when the site has no tracked nginx config', () => {
+    const finding = compressionFinding([
+      compressionPage('https://example.com/a', { impressions: 500 }),
+      compressionPage('https://example.com/b', { impressions: 100, compressed: true }),
+    ], null);
+    assert.match(finding.whyItMatters, /1 of 2 checked pages/);
+    assert.equal(finding.recommendedAction, null);
+    assert.equal(finding.reportOnly.kind, 'uncompressed-response');
+    assert.match(finding.reportOnly.whyBlocked, /connect-repo/);
+  });
+
+  test('drafts a real compression-nginx action when the site tracks its own nginx config', () => {
+    const finding = compressionFinding([
+      compressionPage('https://example.com/a', { impressions: 500 }),
+    ], 'src/config/nginx/static.conf');
+    assert.equal(finding.recommendedAction.generatorId, 'compression-nginx');
+    assert.equal(finding.reportOnly, null);
+  });
+
+  test('no finding at all when every checked page is already compressed', () => {
+    assert.equal(compressionFinding([
+      compressionPage('https://example.com/a', { compressed: true }),
+    ], 'src/config/nginx/static.conf'), null);
+  });
+
+  test('pages whose compression check itself failed are excluded from both affected and checkedCount', () => {
+    const finding = compressionFinding([
+      compressionPage('https://example.com/a', { impressions: 10, compressed: false }),
+      compressionPage('https://example.com/b', { ok: false }),
+    ], null);
+    assert.match(finding.whyItMatters, /1 of 1 checked pages/);
   });
 });

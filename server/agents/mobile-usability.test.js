@@ -53,7 +53,7 @@ describe('mobile-usability — real Lighthouse tap-target/font-size audits', () 
     audits['https://example.com/a'] = {
       ok: true, dataSource: 'lab',
       tapTargets: { score: 0.4, failingElements: [{ tappable: 'a.nav-link', size: '18x16' }] },
-      fontSize: { score: 1, summary: '100% legible text' },
+      fontSize: { score: 1, summary: '100% legible text', failingElements: [] },
     };
     const result = await run({ siteId: 1, start: '2026-08-01', end: '2026-08-31', pageCache, params: { pages: ['https://example.com/a'] } });
     assert.equal(result.facts.pagesWithSmallTapTargets, 1);
@@ -62,20 +62,53 @@ describe('mobile-usability — real Lighthouse tap-target/font-size audits', () 
     assert.ok(finding);
     assert.equal(finding.recommendedAction, null, 'a shared-template style issue must not offer a blind auto-fix');
     assert.match(finding.whyItMatters, /1 of 1 checked pages/);
+    // Not silently dropped (the pre-2026-09-03 bug font-consistency.js's own
+    // header comment describes) — a real, ambiguous-cause reason instead.
+    assert.equal(finding.reportOnly.kind, 'tap-target-too-small');
+    assert.equal(finding.reportOnly.page, 'https://example.com/a');
+    assert.match(finding.reportOnly.whyBlocked, /doesn't say which CSS property/);
   });
 
-  test('a real failing font-size score produces a real, detection-only finding', async () => {
+  test('a real failing font-size score with no per-element inline override stays reportOnly, never a blind auto-fix', async () => {
     pagespeedIsConfigured = true;
     audits['https://example.com/a'] = {
       ok: true, dataSource: 'lab',
       tapTargets: { score: 1, failingElements: [] },
-      fontSize: { score: 0.5, summary: '52% legible text' },
+      fontSize: { score: 0.5, summary: '52% legible text', failingElements: [{ node: { snippet: '<p class="body-sm">too small</p>' } }] },
     };
     const result = await run({ siteId: 1, start: '2026-08-01', end: '2026-08-31', pageCache, params: { pages: ['https://example.com/a'] } });
     assert.equal(result.facts.pagesWithIllegibleFontSize, 1);
     const finding = result.facts.findings.find((f) => f.id === 'mobile-usability:illegible-font-size');
     assert.ok(finding);
     assert.equal(finding.evidence.samples[0].summary, '52% legible text');
+    assert.equal(finding.recommendedAction, null, 'a shared CSS class must not get a blind auto-fix');
+    assert.equal(finding.reportOnly.kind, 'font-size-too-small');
+    assert.equal(finding.reportOnly.page, 'https://example.com/a');
+  });
+
+  test('a real failing font-size score caused by one element\'s own inline font-size override reuses font-consistency\'s safe fix', async () => {
+    pagespeedIsConfigured = true;
+    audits['https://example.com/a'] = {
+      ok: true, dataSource: 'lab',
+      tapTargets: { score: 1, failingElements: [] },
+      fontSize: {
+        score: 0.5,
+        summary: '52% legible text',
+        failingElements: [
+          { node: { snippet: '<p class="body-sm">no override</p>' } },
+          { node: { snippet: '<span style="font-size: 9px;">too small</span>' } },
+        ],
+      },
+    };
+    const result = await run({ siteId: 1, start: '2026-08-01', end: '2026-08-31', pageCache, params: { pages: ['https://example.com/a'] } });
+    const finding = result.facts.findings.find((f) => f.id === 'mobile-usability:illegible-font-size');
+    assert.ok(finding);
+    assert.equal(finding.reportOnly, null, 'a safely fixable case must not also be reportOnly');
+    assert.ok(finding.recommendedAction);
+    assert.equal(finding.recommendedAction.generatorId, 'content-integrity-repair');
+    assert.equal(finding.recommendedAction.params.fixType, 'font-size-override');
+    assert.equal(finding.recommendedAction.params.page, 'https://example.com/a');
+    assert.equal(finding.recommendedAction.params.outerHtml, '<span style="font-size: 9px;">too small</span>');
   });
 
   test('a null score (audit not applicable to this page) is never treated as a failure', async () => {

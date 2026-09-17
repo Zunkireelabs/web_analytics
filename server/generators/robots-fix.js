@@ -8,6 +8,10 @@
 // real, already-indexed page the finding was about — everything else the
 // broad Disallow covers stays exactly as protected as before.
 
+import { fetchTextIfExists } from '../agents/lib/page-content.js';
+import { parseRobotsDisallowRules } from '../agents/lib/site-discovery.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
+
 export const meta = {
   id: 'robots-fix',
   name: 'Robots.txt Fix Generator',
@@ -28,4 +32,30 @@ export async function generate({ params }) {
     content: { robotsBlock, pagePath, blockedPattern: blockedPattern || null },
     summary: blockedPattern ? `Allow ${pagePath} (was blocked by ${blockedPattern})` : `Allow ${pagePath}`,
   };
+}
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Re-parses the live robots.txt with the same RFC 9309 longest-match logic
+// (site-discovery.js's parseRobotsDisallowRules) technical-seo.js's own
+// detection uses, rather than trusting whether `blockedPattern` (captured at
+// detection time) is still the actual rule in force — a robots.txt edited by
+// someone else between detection and drafting could have removed the
+// blocking rule entirely, or changed which rule wins.
+export async function verifyCurrentState(rec, { site } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const pagePath = rec.params?.pagePath;
+  if (!pagePath) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+  const origin = siteOriginFor(site);
+  if (!origin) return { decision: 'still_valid', reason: 'no-checkable-target', evidence: null };
+
+  const fetched = await fetchTextIfExists(`${origin}/robots.txt`);
+  if (!fetched.ok) {
+    // No real robots.txt at all to disallow anything — nothing left to fix.
+    return { decision: 'already_resolved', reason: 'no-robots-txt', evidence: { origin } };
+  }
+  const rules = parseRobotsDisallowRules(fetched.text);
+  if (rules.isAllowed(pagePath)) {
+    return { decision: 'already_resolved', reason: 'already-allowed', evidence: { pagePath } };
+  }
+  return { decision: 'still_valid', reason: 'still-disallowed', evidence: { pagePath, matchingDisallow: rules.matchingDisallow(pagePath) } };
 }

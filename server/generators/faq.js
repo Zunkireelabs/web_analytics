@@ -17,7 +17,7 @@ export const meta = {
 // with what a visitor to that specific page actually wants to ask. Every
 // other schemaType (Article, Product, Organization, FAQPage, ...) keeps the
 // existing query-grounded behavior, which fits regular content pages fine.
-const PAGE_PURPOSE_GUIDANCE = {
+export const PAGE_PURPOSE_GUIDANCE = {
   ContactPage: 'This is a Contact page. Write FAQs a visitor trying to reach the company would realistically ' +
     'ask — e.g. how to get in touch, response times, support channels, office location, how to schedule a call. ' +
     'Do NOT write generic company/product FAQs (what products/services exist, what industries are served, etc.) ' +
@@ -33,6 +33,43 @@ const PAGE_PURPOSE_GUIDANCE = {
     'at a high level (only if the page text supports it). Do NOT write deep product-specific or support FAQs ' +
     '— that content belongs on other pages, not here.',
 };
+
+// The real-evidence-grounded LLM draft itself — factored out of generate()
+// below so content-integrity-repair.js's 'faq-topic-mismatch' fix (correcting
+// an EXISTING visible FAQ whose questions don't match its own page) can reuse
+// the exact same grounding/prompt this generator uses for a net-new FAQ,
+// rather than a second, driftable copy of the same prompt. Deliberately
+// excludes findRealFaqDataSource's organic-FAQ refusal gate below — that gate
+// exists to stop THIS generator from drafting a second, competing FAQ over a
+// page's real existing one; a repair fix is the opposite case (the existing
+// one IS the thing being corrected), so it calls this directly instead of
+// going through generate().
+//
+// `expectedCount`, when given, asks the model for that exact number of pairs
+// (a repair caller doing an exact 1:1 in-place text swap needs the count to
+// match; net-new drafting leaves it unset and keeps the original 4-6 range).
+export async function generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance, expectedCount } = {}) {
+  const countInstruction = expectedCount
+    ? `Write EXACTLY ${expectedCount} FAQ question/answer pairs — not more, not fewer. `
+    : 'draft 4-6 FAQ question/answer pairs a reader would realistically ask. ';
+  const system = 'You are a content strategist. Given a real target query/topic and (if available) the page\'s ' +
+    `real body text, ${countInstruction}` +
+    'Ground every answer ONLY in the page content given — never invent a feature, price, policy, or fact not ' +
+    'present in the excerpt; if the page text doesn\'t support a specific answer, write a general, non-committal ' +
+    'answer instead. If no page content is given, write general informational answers about the topic only. ' +
+    (pageGuidance ? `${pageGuidance} ` : '') +
+    'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
+  const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
+    (structureGuidance ? `\n\n${structureGuidance}` : '');
+  let items;
+  try {
+    items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
+    if (!Array.isArray(items)) throw new Error('not an array');
+  } catch {
+    throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });
+  }
+  return items.filter((i) => i && typeof i.question === 'string' && typeof i.answer === 'string').slice(0, expectedCount || 8);
+}
 
 // params: { page?: string, query?: string, topic?: string, schemaType?: string }
 export async function generate({ siteId, params }) {
@@ -94,23 +131,7 @@ export async function generate({ siteId, params }) {
   // this only shapes the CONTENT decision, not the styling.
   const structureGuidance = pageStructureGuidance(site, 'faq');
 
-  const system = 'You are a content strategist. Given a real target query/topic and (if available) the page\'s ' +
-    'real body text, draft 4-6 FAQ question/answer pairs a reader would realistically ask. Ground every answer ' +
-    'ONLY in the page content given — never invent a feature, price, policy, or fact not present in the excerpt; ' +
-    'if the page text doesn\'t support a specific answer, write a general, non-committal answer instead. If no ' +
-    'page content is given, write general informational answers about the topic only. ' +
-    (pageGuidance ? `${pageGuidance} ` : '') +
-    'Respond with ONLY a JSON array: [{"question": "...", "answer": "..."}, ...]';
-  const user = `Subject: ${subject}\n${bodyExcerpt ? `Page text: ${bodyExcerpt}` : 'No existing page — new content.'}` +
-    (structureGuidance ? `\n\n${structureGuidance}` : '');
-  let items;
-  try {
-    items = await callLLMForJson(system, user, { maxTokens: 900, generatorId: meta.id, siteId });
-    if (!Array.isArray(items)) throw new Error('not an array');
-  } catch {
-    throw Object.assign(new Error('FAQ generation failed: model did not return valid JSON'), { status: 400 });
-  }
-  items = items.filter((i) => i && typeof i.question === 'string' && typeof i.answer === 'string').slice(0, 8);
+  const items = await generateFaqItemsFromEvidence({ siteId, subject, bodyExcerpt, pageGuidance, structureGuidance });
 
   // FAQPage JSON-LD is a deterministic transform of the items, not a
   // separate LLM call — nothing here can drift from what's shown above.

@@ -69,6 +69,27 @@ export async function run({ siteId }) {
   // own gate). Without it, removal has nowhere safe to write, so both
   // fallback branches stay reportOnly exactly as before.
   const sitemapConfigured = Boolean(site?.url_file_map?.siteRoot?.sitemap);
+  // The OTHER real sitemap shape: a build-time-templated sitemap.xml (e.g.
+  // Eleventy's sitemap.njk looping over collections.all), where
+  // sitemap-removal's exact <url><loc> match can never succeed — see
+  // implementers/lib/sitemap-frontmatter-exclude-inject.js's own header.
+  // Only set once a site's real template source has actually been read and
+  // confirmed to honor this exact front-matter key — never assumed from
+  // the sitemap's templating engine alone, since a template loop could in
+  // principle check a differently-named field or have no exclusion
+  // mechanism at all.
+  const sitemapExcludeField = site?.url_file_map?.siteRoot?.sitemapExcludeField || null;
+  const canRemoveFromSitemapAtAll = Boolean(sitemapExcludeField || sitemapConfigured);
+  // Front-matter exclusion first when verified for this site: it works
+  // regardless of whether the sitemap file itself is templated or static,
+  // while sitemap-removal only ever works against a hand-maintained static
+  // XML file. Falls back to sitemap-removal only when no front-matter
+  // field has been verified.
+  const sitemapRemovalAction = (loc) => (sitemapExcludeField
+    ? { label: `Exclude ${loc} from sitemap (front matter)`, generatorId: 'sitemap-frontmatter-exclude', params: { page: loc, field: sitemapExcludeField }, effort: effortForGenerator('sitemap-frontmatter-exclude') }
+    : sitemapConfigured
+      ? { label: `Remove ${loc} from sitemap`, generatorId: 'sitemap-removal', params: { page: loc, removeUrls: [loc] }, effort: effortForGenerator('sitemap-removal') }
+      : null);
 
   const byPage = new Map(signals.map((s) => [s.page, s]));
   const findings = [];
@@ -102,7 +123,7 @@ export async function run({ siteId }) {
       // signal — see generators/sitemap-removal.js's own comment for why
       // this is safe (self-correcting via sitemap.js's existing "URL
       // missing from sitemap" detection if the underlying signal changes).
-      const canRemoveFromSitemap = !canUnblock && sitemapConfigured;
+      const canRemoveFromSitemap = !canUnblock && canRemoveFromSitemapAtAll;
 
       findings.push(makeFinding({
         id: `sitemap-conflict:blocked:${loc}`,
@@ -114,17 +135,12 @@ export async function run({ siteId }) {
           generatorId: 'robots-fix',
           params: { pagePath: path, blockedPattern },
           effort: effortForGenerator('robots-fix'),
-        } : canRemoveFromSitemap ? {
-          label: `Remove ${loc} from sitemap`,
-          generatorId: 'sitemap-removal',
-          params: { page: loc, removeUrls: [loc] },
-          effort: effortForGenerator('sitemap-removal'),
-        } : null,
+        } : canRemoveFromSitemap ? sitemapRemovalAction(loc) : null,
         reportOnly: (canUnblock || canRemoveFromSitemap) ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a blocked/excluded URL',
           page: loc,
-          whyBlocked: 'This site has no tracked sitemap file to safely edit (url_file_map.siteRoot.sitemap not configured), so neither the block nor the sitemap listing can be auto-resolved — needs a person to fix directly.',
+          whyBlocked: 'This site has no tracked sitemap file this platform can safely edit — neither a hand-maintained static sitemap.xml (url_file_map.siteRoot.sitemap) nor a verified front-matter exclusion field (url_file_map.siteRoot.sitemapExcludeField) is configured, so neither the block nor the sitemap listing can be auto-resolved — needs a person to fix directly.',
         },
         expectedImpact: { label: impactFromPriority('high'), basis: 'computed', value: s.last_impressions || 0 },
       }));
@@ -149,7 +165,7 @@ export async function run({ siteId }) {
       // Google isn't safe (a human decision already exists) — but removing
       // the sitemap's OWN listing of a page it isn't authoritative for is
       // still safe and self-correcting.
-      const canRemoveFromSitemap = hasOwnCanonical && sitemapConfigured;
+      const canRemoveFromSitemap = hasOwnCanonical && canRemoveFromSitemapAtAll;
       findings.push(makeFinding({
         id: `sitemap-conflict:non-canonical:${loc}`,
         evidence: { page: loc, googleCanonical, hasOwnCanonical },
@@ -160,17 +176,12 @@ export async function run({ siteId }) {
           generatorId: 'canonical',
           params: { page: loc, canonicalTarget: googleCanonical },
           effort: effortForGenerator('canonical'),
-        } : canRemoveFromSitemap ? {
-          label: `Remove ${loc} from sitemap`,
-          generatorId: 'sitemap-removal',
-          params: { page: loc, removeUrls: [loc] },
-          effort: effortForGenerator('sitemap-removal'),
-        } : null,
+        } : canRemoveFromSitemap ? sitemapRemovalAction(loc) : null,
         reportOnly: (!hasOwnCanonical || canRemoveFromSitemap) ? null : {
           kind: 'sitemap-index-conflict',
           label: 'Sitemap lists a non-canonical URL',
           page: loc,
-          whyBlocked: 'This site has no tracked sitemap file to safely edit (url_file_map.siteRoot.sitemap not configured) — needs a person to fix directly.',
+          whyBlocked: 'This site has no tracked sitemap file this platform can safely edit — neither a hand-maintained static sitemap.xml (url_file_map.siteRoot.sitemap) nor a verified front-matter exclusion field (url_file_map.siteRoot.sitemapExcludeField) is configured — needs a person to fix directly.',
         },
         expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: s.last_impressions || 0 },
       }));

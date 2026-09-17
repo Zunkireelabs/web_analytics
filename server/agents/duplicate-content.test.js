@@ -33,6 +33,19 @@ mock.module(resolve('./lib/candidate-pages.js'), {
 mock.module(resolve('../llm.js'), {
   namedExports: { callLLM: async () => 'narrative' },
 });
+// Defaults to "unclassified" (null) so every pre-existing test's split-
+// traffic MEDIUM outcome is unaffected — a page-purpose signal that isn't
+// available must never be treated as "purposes differ." Individual tests
+// override contentTypeByPage to exercise the new escalation path.
+let contentTypeByPage = null;
+mock.module(resolve('./lib/page-content-classifier.js'), {
+  namedExports: {
+    getOrClassifyPageContentType: async (siteId, page) => {
+      const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
+      return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
+    },
+  },
+});
 
 const { run } = await import('./duplicate-content.js');
 
@@ -44,7 +57,7 @@ const pageCache = async (page) => ({
 
 const runOn = (pages) => run({ siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache, params: { pages } });
 
-beforeEach(() => { knownHashes = []; perfRowsByPage = new Map(); queryRows = []; });
+beforeEach(() => { knownHashes = []; perfRowsByPage = new Map(); queryRows = []; contentTypeByPage = null; });
 
 describe('duplicate-content finding ids', () => {
   // The bug: the id was keyed on the alphabetically-first page in the group,
@@ -164,6 +177,57 @@ describe('duplicate-content finding ids', () => {
       assert.equal(finding.evidence.confidence, 'medium');
       assert.equal(finding.recommendedAction, null);
       assert.equal(finding.reportOnly.kind, 'duplicate-content');
+    });
+
+    test('split-traffic escalation: a functional (non-tracking) query parameter blocks consolidation, decided as leave-both rather than punted', async () => {
+      perfRowsByPage.set('https://example.com/a?package=gold', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 90, impressions: 900 });
+      queryRows = [
+        { query: 'our company', page: 'https://example.com/b', impressions: 50 },
+        { query: 'unrelated term', page: 'https://example.com/a?package=gold', impressions: 10 },
+      ];
+      const result = await runOn(['https://example.com/a?package=gold', 'https://example.com/b']);
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /functional/);
+    });
+
+    test('split-traffic escalation: genuinely different declared page purposes are decided as leave-both, not merged', async () => {
+      perfRowsByPage.set('https://example.com/a', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 90, impressions: 900 });
+      queryRows = [
+        { query: 'our company', page: 'https://example.com/b', impressions: 50 },
+        { query: 'unrelated term', page: 'https://example.com/a', impressions: 10 },
+      ];
+      contentTypeByPage = (page) => (page.endsWith('/a') ? 'blog' : 'product');
+      const result = await runOn(['https://example.com/a', 'https://example.com/b']);
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /different page purposes/);
+    });
+
+    test('split-traffic escalation: canonical tag agreement wins outright, even without query overlap', async () => {
+      const cache = async (page) => ({
+        ok: true,
+        analysis: {
+          wordCount: 900,
+          bodyText: DUPLICATE_BODY,
+          hasCanonical: page === 'https://example.com/a',
+          canonicalUrl: 'https://example.com/b', // every OTHER page already points here
+        },
+      });
+      perfRowsByPage.set('https://example.com/a', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/b', { clicks: 3, impressions: 30 });
+      const result = await run({
+        siteId: 1, start: '2026-08-01', end: '2026-08-28', pageCache: cache,
+        params: { pages: ['https://example.com/a', 'https://example.com/b'] },
+      });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'high');
+      assert.equal(finding.evidence.winner, 'https://example.com/b');
+      assert.equal(finding.recommendedAction.generatorId, 'canonical');
     });
   });
 });

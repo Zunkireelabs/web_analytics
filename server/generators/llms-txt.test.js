@@ -1,6 +1,18 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderLlmsTxt, buildRobotsDirectives } from './llms-txt.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+let readinessImpl;
+mock.module(resolve('../agents/lib/page-content.js'), {
+  namedExports: {
+    // renderLlmsTxt/buildRobotsDirectives below never call these — real
+    // implementations, just faked for verifyCurrentState's own describe block.
+    checkLlmsReadiness: async (origin) => readinessImpl(origin),
+    analyzePageUrl: async () => { throw new Error('not used by these tests'); },
+  },
+});
+
+const { renderLlmsTxt, buildRobotsDirectives, verifyCurrentState } = await import('./llms-txt.js');
 
 // Regression coverage for a real finding from a separate spec-compliance
 // checker (llmstxt.org convention): a real merged llms.txt draft came back
@@ -109,5 +121,40 @@ describe('buildRobotsDirectives', () => {
     assert.match(text, /User-agent: GPTBot\nDisallow: \//); // the real original blocking line, untouched
     assert.match(text, /User-agent: GPTBot\nAllow: \//); // the new, more-specific override appended after it
     assert.match(text, /User-agent: ClaudeBot\nAllow: \//);
+  });
+});
+
+describe('llms-txt verifyCurrentState (server/generators/lib/verification-layer.js contract)', () => {
+  const site = { id: 1, website_domain: 'example.com' };
+
+  test('no site context: still_valid without guessing', async () => {
+    const result = await verifyCurrentState({ params: {} }, {});
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'no-site-context');
+  });
+
+  test('both llms.txt and robots.txt already compliant: already_resolved', async () => {
+    readinessImpl = async () => ({ hasLlmsTxt: true, hasValidLlmsTxtStructure: true, robotsAllowsAiCrawlers: true });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'already_resolved');
+  });
+
+  test('llms.txt valid but robots.txt still blocks AI crawlers: still_valid — this generator also fixes robots.txt', async () => {
+    readinessImpl = async () => ({ hasLlmsTxt: true, hasValidLlmsTxtStructure: true, robotsAllowsAiCrawlers: false });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+  });
+
+  test('llms.txt missing entirely: still_valid', async () => {
+    readinessImpl = async () => ({ hasLlmsTxt: false, hasValidLlmsTxtStructure: false, robotsAllowsAiCrawlers: true });
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+  });
+
+  test('a fetch failure is not evidence: still_valid, not a crash', async () => {
+    readinessImpl = async () => { throw new Error('network error'); };
+    const result = await verifyCurrentState({ params: {} }, { site });
+    assert.equal(result.decision, 'still_valid');
+    assert.equal(result.reason, 'unreachable');
   });
 });

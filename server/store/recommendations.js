@@ -1,5 +1,23 @@
 import { query } from '../db.js';
 
+// Every detecting agent already computes expected_impact.value — real
+// impressions/clicks/gap-magnitude at finding time (see
+// server/agents/*.js's expectedImpact literals) — but until now nothing
+// read it back: both open-recommendation queries below ordered purely by
+// priority tier + recency, discarding the one number that says which
+// same-tier finding is actually worth more. Generic across every site: no
+// client-specific weighting, just "prefer the bigger number this agent
+// already measured, within the same priority tier".
+//
+// Guarded by a regex rather than a bare ::numeric cast — expected_impact is
+// free-form JSONB written by ~20 different agents, and one future non-numeric
+// value would otherwise throw inside the ORDER BY and break the ship queue
+// for every site, not just the row that produced it. NULLS LAST (via
+// DESC NULLS LAST at each call site) so a finding with basis:'estimate' and
+// no value falls back to priority-tier + recency exactly as before.
+const IMPACT_VALUE_SQL = `(CASE WHEN expected_impact->>'value' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                                THEN (expected_impact->>'value')::numeric END)`;
+
 // CRUD for the recommendations table — the Recommendation Coordinator's only
 // persistence layer (see agents/lib/recommendation-coordinator.js, which is
 // the only caller allowed to invoke the writes below). Dedup key is
@@ -204,7 +222,8 @@ export async function listOpenBlockedRecommendations(siteId, { onlyDetectingAgen
 export async function listOpenRecommendations(siteId) {
   const { rows } = await query(
     `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' ORDER BY
-       CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC`,
+       CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+       ${IMPACT_VALUE_SQL} DESC NULLS LAST, last_seen_at DESC`,
     [siteId]
   );
   return rows;
@@ -330,7 +349,8 @@ export async function blockRecommendation(id, reason) {
 export async function listOpenSafeRecommendations(siteId, limit) {
   const { rows } = await query(
     `SELECT * FROM recommendations WHERE site_id = $1 AND status = 'open' AND risk_tier = 'safe' AND blocked_reason IS NULL AND execution_job_id IS NULL
-       ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC
+       ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+       ${IMPACT_VALUE_SQL} DESC NULLS LAST, last_seen_at DESC
        LIMIT $2`,
     [siteId, limit]
   );

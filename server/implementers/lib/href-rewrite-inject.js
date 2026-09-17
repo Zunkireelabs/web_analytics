@@ -5,6 +5,7 @@
 // hash-marker-merge.js), and it isn't a single unambiguous singleton tag
 // like <html>/<meta name="viewport"> (unlike html-lang-inject.js/
 // viewport-inject.js) — a page can have many <a> tags.
+import { scanBalanced } from '../adapters/lib/js-data-splice.js';
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -83,6 +84,95 @@ export function rewriteHref(fileContent, oldHref, newHref) {
   return { ok: false, reason: 'no-match', error: `No href="${oldHref}" found in this file.` };
 }
 
+// Removes whatever exact-text span [start, end) sits in an array literal —
+// a plain string element (sameAs: ["url1", "url2"]) or an object element
+// (socialLinks: [{ href: "url1", icon: <svg/> }, ...]) — along with
+// whichever ONE adjacent comma actually separated it from its neighbors,
+// so removing the array's only/first/last element never leaves a dangling
+// leading or double comma behind. Shared by both data-array strategies
+// below; the two differ only in how they locate [start, end).
+function removeArrayElementSpan(content, start, end) {
+  // This element's own leading indentation/newline (the whitespace that
+  // separated it from whatever came before) is never worth preserving once
+  // the element itself is gone — trimmed back to the nearest real
+  // character first, so neither strategy below leaves a dangling blank line.
+  let trimmedStart = start;
+  while (trimmedStart > 0 && /[ \t\n\r]/.test(content[trimmedStart - 1])) trimmedStart--;
+
+  // Prefer consuming a TRAILING comma — the common case (element is first
+  // or middle, or the array uses a trailing comma after its last element).
+  // Only when nothing trails does it fall back to consuming the LEADING
+  // comma instead (a true last element with no trailing-comma style),
+  // which is exactly the case a trailing-only rule would otherwise leave
+  // as `foo,\n]` with a newly-dangling comma after the new last element.
+  const after = /^\s*,/.exec(content.slice(end, end + 200));
+  if (after) return content.slice(0, trimmedStart) + content.slice(end + after[0].length);
+  const before = /,\s*$/.exec(content.slice(Math.max(0, trimmedStart - 200), trimmedStart));
+  if (before) return content.slice(0, trimmedStart - before[0].length) + content.slice(end);
+  // Sole remaining element (no comma either side) — just remove it.
+  return content.slice(0, trimmedStart) + content.slice(end);
+}
+
+// Icon-only social-link shape (zunkireelabs-web has none of these; found
+// live on Admizz's Footer.tsx/layout.tsx 2026-09-17): a broken href that
+// isn't inline anchor markup at all, but a `field: "url"` property inside
+// one object of an array (`const socialLinks = [{ name: "...", href:
+// "...", icon: (<svg>...</svg>) }, ...]`). There is no "inner text" to
+// preserve the way a normal <a> has — the visible content IS the icon, so
+// the only safe fix is removing the WHOLE object, never rewriting one
+// field in place (a link with no href is not a lesser link, it's a
+// dead click target still rendered). Anchored on the exact `href: "<url>"`
+// (or single-quoted) text — refuses on 0 or >1 occurrences, same ambiguity
+// discipline as every anchor-based strategy above, and refuses if the
+// enclosing `{...}` can't be bounded (malformed/unbalanced source).
+function hrefFieldRegex(href) {
+  const escaped = escapeRegExp(href);
+  return new RegExp(`href\\s*:\\s*(["'])${escaped}\\1`, 'g');
+}
+
+function stripDataArrayObject(fileContent, href) {
+  for (const variant of hrefVariants(href)) {
+    const matches = [...fileContent.matchAll(hrefFieldRegex(variant))];
+    if (matches.length !== 1) continue;
+    const anchorIndex = matches[0].index;
+    // Walk backward from the anchor tracking brace depth, so a `{` inside
+    // the object's OWN nested content (the icon's JSX, if it ever has one)
+    // is correctly skipped rather than mistaken for the object's start.
+    let depth = 0;
+    let objStart = -1;
+    for (let i = anchorIndex; i >= 0; i--) {
+      const ch = fileContent[i];
+      if (ch === '}') depth++;
+      else if (ch === '{') {
+        if (depth === 0) { objStart = i; break; }
+        depth--;
+      }
+    }
+    if (objStart === -1) continue;
+    const objEnd = scanBalanced(fileContent, objStart + 1, '{', '}');
+    if (objEnd === -1) continue;
+    return { ok: true, newContent: removeArrayElementSpan(fileContent, objStart, objEnd + 1), replaced: 1 };
+  }
+  return null;
+}
+
+// A bare string element inside an array — the JSON-LD `sameAs` shape
+// (`sameAs: ["https://...", "https://...instagram.../", ...]`), found on
+// the same Admizz layout.tsx alongside the socialLinks case above. No
+// object to bound, no inner text to preserve — the quoted literal itself
+// IS the element.
+function stripDataArrayString(fileContent, href) {
+  for (const variant of hrefVariants(href)) {
+    const escaped = escapeRegExp(variant);
+    const regex = new RegExp(`(["'])${escaped}\\1`, 'g');
+    const matches = [...fileContent.matchAll(regex)];
+    if (matches.length !== 1) continue;
+    const m = matches[0];
+    return { ok: true, newContent: removeArrayElementSpan(fileContent, m.index, m.index + m[0].length), replaced: 1 };
+  }
+  return null;
+}
+
 // Strips every anchor whose href exactly matches, replacing the whole
 // `<a ...>inner</a>` with just its inner content — always safe (never worse
 // than the current dead link). Refuses (rather than corrupts) if a matched
@@ -108,6 +198,16 @@ export function stripLink(fileContent, href) {
       return { ok: true, newContent, replaced: mdMatches.length };
     }
   }
+  // Neither a real HTML anchor nor a Markdown link exists for this href —
+  // before giving up, check the two real data-array shapes this href might
+  // instead be hardcoded as (see the two functions above). Object first:
+  // a bare string match inside an object's OWN unrelated field (a name, a
+  // label) would false-positive the string-array strategy, so the more
+  // specific object-field shape is always tried first.
+  const objectResult = stripDataArrayObject(fileContent, href);
+  if (objectResult) return objectResult;
+  const stringResult = stripDataArrayString(fileContent, href);
+  if (stringResult) return stringResult;
   return { ok: false, reason: 'no-match', error: `No <a href="${href}"> or markdown link to "${href}" found in this file.` };
 }
 

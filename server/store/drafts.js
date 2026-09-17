@@ -60,16 +60,81 @@ const SIBLING_COUNT_SELECT = `d.*, (
   WHERE d2.site_id = d.site_id AND d2.branch_name = d.branch_name AND d2.id != d.id
 ) AS sibling_count`;
 
-export async function listDrafts(siteId, { actionType, status } = {}) {
+export async function listDrafts(siteId, { actionType, status, limit } = {}) {
   const conditions = ['d.site_id = $1'];
   const values = [siteId];
   if (actionType) { values.push(actionType); conditions.push(`d.action_type = $${values.length}`); }
   if (status) { values.push(status); conditions.push(`d.status = $${values.length}`); }
-  const { rows } = await query(
-    `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE ${conditions.join(' AND ')} ORDER BY d.created_at DESC`,
-    values
-  );
+  let sql = `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE ${conditions.join(' AND ')} ORDER BY d.created_at DESC`;
+  if (limit) { values.push(limit); sql += ` LIMIT $${values.length}`; }
+  const { rows } = await query(sql, values);
   return rows;
+}
+
+// The Action Center's unfiltered "whole board" load — what listDrafts
+// itself used to be called with directly, and what grew without bound as
+// autonomous shipping accumulated history (site 1: 1,631 draft rows, ~7MB
+// raw before JSON serialization, EACH one also paying SIBLING_COUNT_SELECT's
+// own correlated subquery — see routes/action-center.js's real incident:
+// this made GET /action-center/drafts slow/fail outright, and the client's
+// own error handling (`.catch(() => setDrafts([]))`) silently turned that
+// into "Drafts (0)" / "Done (0)" with no visible error at all).
+//
+// ACTIVE work (not yet terminal) is always returned in FULL — it's what a
+// human needs to see everything that still needs a decision on, and is
+// naturally small: in-flight autonomous work only, reclaimed by
+// action-center-reconciler.js once genuinely stale. Terminal rows are
+// where the unbounded growth actually happened:
+//   - 'abandoned' is never rendered by the Action Center UI at all
+//     (ActionCenter.jsx's own nonImplementedDrafts/implementedDrafts
+//     filters both discard it) — excluded here rather than fetched and
+//     thrown away client-side on every single page load.
+//   - 'implemented' IS rendered (the Done tab), but only the most recent
+//     `implementedLimit` are useful to browse at once; real full history
+//     is still reachable via listDrafts(siteId, { status: 'implemented' })
+//     directly when something actually needs it (an export, an audit).
+// Tab badge counts must NOT be derived from this capped result — see
+// countDraftsByLifecycle below, which is exact regardless of any cap here.
+export async function listDraftsForBoard(siteId, { implementedLimit = 150 } = {}) {
+  const [active, implemented] = await Promise.all([
+    query(
+      `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE d.site_id = $1 AND d.status NOT IN ('implemented', 'abandoned') ORDER BY d.created_at DESC`,
+      [siteId]
+    ),
+    query(
+      `SELECT ${SIBLING_COUNT_SELECT} FROM drafts d WHERE d.site_id = $1 AND d.status = 'implemented' ORDER BY d.created_at DESC LIMIT $2`,
+      [siteId, implementedLimit]
+    ),
+  ]);
+  return [...active.rows, ...implemented.rows];
+}
+
+// Cheap, always-accurate counts for the Action Center's tab badges — a
+// single GROUP BY, never fetches a draft row's own content/params. Exists
+// specifically so a badge count is never wrong just because the LIST
+// underneath it (listDraftsForBoard) was capped — the two are deliberately
+// independent data sources for the same page.
+export async function countDraftsByLifecycle(siteId) {
+  const { rows } = await query(
+    `SELECT status, COUNT(*)::int AS n,
+            COUNT(*) FILTER (WHERE status = 'implemented' AND implemented_at >= now() - interval '7 days')::int AS n_this_week
+       FROM drafts WHERE site_id = $1 GROUP BY status`,
+    [siteId]
+  );
+  const byStatus = Object.fromEntries(rows.map((r) => [r.status, r.n]));
+  const implemented = byStatus.implemented || 0;
+  const abandoned = byStatus.abandoned || 0;
+  const submittedForApproval = byStatus.submitted_for_approval || 0;
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  const implementedThisWeek = rows.reduce((s, r) => s + (r.n_this_week || 0), 0);
+  return {
+    total,
+    nonImplemented: total - implemented - abandoned,
+    implemented,
+    abandoned,
+    submittedForApproval,
+    implementedThisWeek,
+  };
 }
 
 export async function getDraft(siteId, id) {

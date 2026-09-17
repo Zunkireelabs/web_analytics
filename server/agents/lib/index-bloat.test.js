@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSpamUrlPatterns, detectForeignScriptQueries } from './index-bloat.js';
+import { detectSpamUrlPatterns, detectForeignScriptQueries, isForeignPlatformSpamUrl } from './index-bloat.js';
 
 describe('detectSpamUrlPatterns', () => {
   test('groups foreign-platform-extension URLs by first path segment', () => {
@@ -37,6 +37,28 @@ describe('detectSpamUrlPatterns', () => {
 
   test('skips an unparseable URL rather than throwing', () => {
     assert.deepEqual(detectSpamUrlPatterns([{ dim_value: 'not-a-url', impressions: 1 }]), []);
+  });
+});
+
+describe('isForeignPlatformSpamUrl', () => {
+  test('flags a foreign-platform extension URL', () => {
+    assert.equal(isForeignPlatformSpamUrl('https://example.com/shop/storeSearch/KeepCriteriaInput.aspx?&transition=top1'), true);
+  });
+
+  test('flags a lone short-name/long-numeric-value query param', () => {
+    assert.equal(isForeignPlatformSpamUrl('https://example.com/?h=8020347041280'), true);
+  });
+
+  test('does not flag a real page with a normal query string', () => {
+    assert.equal(isForeignPlatformSpamUrl('https://example.com/blog/post?utm_source=newsletter'), false);
+  });
+
+  test('does not flag a real page with no query string', () => {
+    assert.equal(isForeignPlatformSpamUrl('https://example.com/pricing'), false);
+  });
+
+  test('does not throw on an unparseable URL', () => {
+    assert.equal(isForeignPlatformSpamUrl('not-a-url'), false);
   });
 });
 

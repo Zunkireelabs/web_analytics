@@ -104,16 +104,34 @@ export function sanitizeTable(table) {
   return rows.length >= 2 ? rows : undefined; // a "table" of one row isn't a comparison
 }
 
+// Safety net for SYSTEM_CITATIONS_GROUNDED's "exactly one section" instruction:
+// the model can still return one section per source instead of one section
+// covering all of them (this shipped to zunkireelabs' /about/ as three
+// separate, visually-repeated "References" <h2> headings stacked down the
+// page — a 2026-09-17 incident). Collapsing same-focus sections here means a
+// prompt slip never reaches a live page, regardless of the model's
+// compliance that run.
+export function mergeCitationSections(sections) {
+  if (sections.length <= 1) return sections;
+  return [{
+    heading: sections[0].heading,
+    body: sections.map((s) => s.body).join('\n'),
+    table: sections.find((s) => s.table)?.table,
+  }];
+}
+
 // Used when real search results are available for the external-citations focus
 // (see CITATION_SEARCH_ENABLED below) — grounded in an actual candidate list
 // the same way generators/internal-links.js grounds anchor suggestions in
 // real on-site URLs, so the model is citing real pages, not inventing them.
 const SYSTEM_CITATIONS_GROUNDED = 'You are a content strategist. Given a page\'s real body text and a list of REAL, already-verified ' +
-  'source candidates (title + URL) provided below, draft an external citations/references section. ' +
+  'source candidates (title + URL) provided below, draft ONE SINGLE external citations/references section covering ' +
+  'ALL of them — never one section per source. ' +
   'Cite ONLY sources from that candidate list, using markdown links in the exact form [Source Title](URL) with the ' +
   'exact URL given — NEVER invent a URL and NEVER cite anything not in the list. If none of the candidates are ' +
   'actually relevant to the page topic, write the section without a link rather than forcing an irrelevant citation. ' +
-  'Respond with ONLY a JSON array: [{"heading": "...", "body": "..."}, ...]';
+  'Respond with ONLY a JSON array containing EXACTLY ONE object, its "body" a markdown bullet list ("- " per line) ' +
+  'with one bullet per cited source: [{"heading": "References", "body": "- [Source Title](URL): one-sentence note\\n- ..."}]';
 
 const FOCUS_SYSTEMS = {
   'comparison-content': SYSTEM_COMPARISON,
@@ -270,6 +288,8 @@ export async function generate({ siteId, params }) {
     .filter((s) => s && typeof s.heading === 'string' && typeof s.body === 'string')
     .slice(0, 4)
     .map((s) => ({ ...s, table: sanitizeTable(s.table) }));
+
+  if (focus === 'external-citations') sections = mergeCitationSections(sections);
 
   if (!sections.length) {
     // The empty-section quality-gate check only inspects sections that

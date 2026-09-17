@@ -37,8 +37,10 @@ const BOILERPLATE_SELECTORS = 'nav, header, footer, script, style, noscript, asi
   '.nav, .navbar, .menu, .site-header, .site-footer, .cookie-banner, .cookie-consent';
 // Standard SERP-snippet-width-derived range — below this a title is usually
 // thin/generic, above it Google truncates the displayed title in results.
-const MIN_TITLE_LEN = 30;
-const MAX_TITLE_LEN = 60;
+// Exported — device-ctr-diagnosis.js reuses the exact same bar rather than
+// re-deriving its own "is this title too long" threshold.
+export const MIN_TITLE_LEN = 30;
+export const MAX_TITLE_LEN = 60;
 // Meaningfully large, not incidental — a handful of one-off inline styles is
 // normal; this flags pages where inline style="" has effectively replaced
 // shared CSS, same "several, not one-off" bar as hasFaqAccordion's >=2.
@@ -398,6 +400,16 @@ export function analyzePage(html, pageUrl) {
   // for visibility, but duplicateFaqRemovalHtml stays null so nothing gets
   // auto-deleted on a co-presence guess alone.
   const duplicateFaqRemovalHtml = duplicateFaqPair ? duplicateFaqPair.remove.html : null;
+
+  // Anchor for content-integrity-repair.js's 'faq-topic-mismatch' fix: the
+  // exact outerHTML of the page's ONE qualifying FAQ container, only when
+  // there is exactly one — with 0 or 2+ candidate containers there is no
+  // single unambiguous section to safely rewrite in place (2+ is exactly
+  // the duplicate-FAQ shape above, which has its own, separate fix). Never
+  // set from a container that doesn't independently qualify as a real
+  // accordion (>=2 real questions), same bar faqContainers itself already
+  // enforces.
+  const faqContainerHtml = faqContainers.length === 1 ? faqContainers[0].html : null;
 
   // Byline/date markup outside JSON-LD — same non-schema fallback signals
   // the audit tool's authorExpertise.js/freshnessSignals.js check.
@@ -856,7 +868,84 @@ export function analyzePage(html, pageUrl) {
     faqSchemaWithoutVisible,
     duplicateVisibleFaqSections,
     duplicateFaqRemovalHtml, // transient — exact html of the confirmed-duplicate (later) FAQ container, null unless overlap is confident
+    faqContainerHtml, // transient — exact html of the page's one unambiguous FAQ container, null unless exactly one qualifies
   };
+}
+
+// ── Safe in-place FAQ text repair helpers ──────────────────────────────────
+// Used only by generators/content-integrity-repair.js's 'faq-topic-mismatch'
+// and 'faq-cross-page-inconsistency' fixes, both of which correct existing
+// FAQ TEXT without touching the surrounding markup (CLAUDE.md: never redesign
+// existing structure to fit generated content). Deliberately a NARROWER rule
+// set than analyzePage()'s own extractAnswerFor above (which also accepts
+// <details>/<summary> and an unambiguous next-sibling) — those shapes are
+// fine to DETECT an answer from (read-only), but this is used to safely
+// MUTATE a specific element's own text in place, which only the two
+// shapes below can do without risking silently destroying real nested
+// markup (a <details> answer, for instance, can be one or several mixed
+// child nodes with no single element to safely retarget). A page whose
+// accordion uses one of the unsupported shapes still gets flagged by
+// content-integrity.js's findings; it just doesn't get an automatic fix.
+export function selectFaqQuestionElements($) {
+  return $('button, summary, dt, [role="button"]').filter((_, el) => {
+    const text = $(el).text().trim();
+    return text.length > 0 && text.length < 200 && text.endsWith('?');
+  });
+}
+
+// Returns the cheerio-wrapped element whose OWN text is the real answer for
+// `el` (a question element already matched by selectFaqQuestionElements), or
+// null when no safe target exists. Only aria-controls (the accordion's own
+// programmatic trigger->panel link) and <dt>/<dd> are supported — see the
+// block comment above.
+export function findFaqAnswerNode($, el) {
+  const $el = $(el);
+  const controls = $el.attr('aria-controls');
+  if (controls) {
+    const panel = $(`#${controls}`);
+    if (panel.length === 1 && panel.text().trim()) return panel;
+    return null;
+  }
+  if (el.tagName === 'dt') {
+    const next = $el.next('dd');
+    if (next.length && next.text().trim()) return next;
+    return null;
+  }
+  return null;
+}
+
+// Overwrites `el`'s own text content with `text`, refusing (returning false,
+// never guessing) when the element has any child elements of its own — doing
+// so would silently discard real nested markup (an inline <a>/<strong>/etc.)
+// rather than just correct the words.
+export function setPlainElementText($, el, text) {
+  if ($(el).children().length > 0) return false;
+  $(el).text(text);
+  return true;
+}
+
+// Rebuilds a captured FAQ container's markup with NEW real question/answer
+// text, changing ONLY the text of each question/answer element and leaving
+// every surrounding tag, class, and attribute exactly as detection found it.
+// Requires an exact 1:1 correspondence between the container's real question
+// elements and `newItems` (never partially rewrites a container) and refuses
+// (returns null) the moment any single item can't be safely placed — an
+// all-or-nothing guarantee, same discipline exact-match-patch.js's own
+// batch-of-edits application already follows.
+export function rebuildFaqContainerText(containerHtml, newItems) {
+  const $ = cheerio.load(containerHtml, null, false);
+  const questionEls = selectFaqQuestionElements($).get();
+  if (!questionEls.length || questionEls.length !== newItems.length) return null;
+  for (let i = 0; i < questionEls.length; i++) {
+    const el = questionEls[i];
+    const item = newItems[i];
+    if (!item || typeof item.question !== 'string' || typeof item.answer !== 'string' || !item.question.trim() || !item.answer.trim()) return null;
+    const answerNode = findFaqAnswerNode($, el);
+    if (!answerNode) return null;
+    if (!setPlainElementText($, el, item.question.trim())) return null;
+    if (!setPlainElementText($, answerNode.get(0), item.answer.trim())) return null;
+  }
+  return $.html();
 }
 
 // Real title-vs-body keyword overlap — a title can pass the length checks
@@ -1160,7 +1249,9 @@ const GENERATOR_EFFORT = {
   'blog-image': 'Low',
   'soft-404-nginx': 'Low',
   'redirect-chain-nginx': 'Low',
+  'compression-nginx': 'Low',
   'sitemap-removal': 'Low',
+  'sitemap-frontmatter-exclude': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 

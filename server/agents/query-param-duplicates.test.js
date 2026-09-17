@@ -20,6 +20,18 @@ mock.module(resolve('../store/read.js'), {
 mock.module(resolve('../store/page-inventory.js'), {
   namedExports: { listPageInventory: async () => inventory },
 });
+// Defaults to "unclassified" (null) so every pre-existing test's split-
+// traffic outcome is unaffected. Individual tests override contentTypeByPage
+// to exercise the new page-purpose escalation path.
+let contentTypeByPage = null;
+mock.module(resolve('./lib/page-content-classifier.js'), {
+  namedExports: {
+    getOrClassifyPageContentType: async (siteId, page) => {
+      const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
+      return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
+    },
+  },
+});
 
 const { run } = await import('./query-param-duplicates.js');
 
@@ -28,6 +40,7 @@ beforeEach(() => {
   inventory = [];
   perfRowsByPage = new Map();
   queryRows = [];
+  contentTypeByPage = null;
 });
 
 describe('query-param-duplicates agent', () => {
@@ -135,6 +148,40 @@ describe('query-param-duplicates agent', () => {
       const finding = result.facts.findings[0];
       assert.equal(finding.evidence.confidence, 'low');
       assert.equal(finding.recommendedAction, null);
+    });
+
+    test('split-traffic escalation: a non-tracking query parameter is decided leave-both, not punted, even without query overlap', async () => {
+      // "type" is not a known tracking parameter, so this is treated as a
+      // real functional facet (e.g. selects which resource variant loads) —
+      // never consolidated/redirected away.
+      inventory = [
+        { page: 'https://example.com/resources/?type=ebook', orphaned: false },
+        { page: 'https://example.com/resources/?type=case-study', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/resources/?type=ebook', { clicks: 10, impressions: 100 });
+      perfRowsByPage.set('https://example.com/resources/?type=case-study', { clicks: 5, impressions: 50 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /functional/);
+    });
+
+    test('split-traffic escalation: different declared page purposes across pure-tracking variants are decided leave-both', async () => {
+      // utm_source is pure tracking noise (no functional-param block), so
+      // this exercises the page-purpose signal on its own.
+      inventory = [
+        { page: 'https://example.com/resources/?utm_source=newsletter', orphaned: false },
+        { page: 'https://example.com/resources/?utm_source=social', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/resources/?utm_source=newsletter', { clicks: 10, impressions: 100 });
+      perfRowsByPage.set('https://example.com/resources/?utm_source=social', { clicks: 5, impressions: 50 });
+      contentTypeByPage = (page) => (page.includes('newsletter') ? 'blog' : 'landing');
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /different page purposes/);
     });
   });
 });

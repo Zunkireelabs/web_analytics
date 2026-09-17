@@ -4,7 +4,8 @@ import { priorityByRank, impactFromPriority, makeFinding, effortFromDifficulty }
 import { analyzePageUrl } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { updatePageContentHashBatch, listContentHashesForSite } from '../store/page-inventory.js';
-import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
+import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 import { callLLM } from '../llm.js';
 
 export const meta = {
@@ -147,7 +148,33 @@ export async function run({ siteId, start, end, pageCache, params }) {
   const decisionByHash = new Map();
   for (const g of rankedGroups) {
     const traffic = g.pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
-    decisionByHash.set(g.hash, await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd }));
+    // Split-traffic escalation signals — all reused from data this run
+    // already has in hand (analysisByPage), never a fresh fetch spent just
+    // to obtain them. Deliberately NOT wiring contentSimilarity here: every
+    // group this agent forms is already byte-hash-identical by
+    // construction, so a pairwise text-similarity score would always read
+    // as maximal and carry zero new information — using it here would
+    // silently re-introduce exactly the "consolidate on whichever page has
+    // more clicks" guess the MEDIUM tier's own doc comment (see
+    // duplicate-evidence.js) explicitly refuses to make. Canonical
+    // agreement, page purpose, and functional-param detection ARE
+    // independent of the hash match, so those are real signals here.
+    const canonicalByPage = new Map();
+    const pagePurposeByPage = new Map();
+    const internalLinkCountByPage = new Map();
+    const functionalParamPages = new Set();
+    for (const page of g.pages) {
+      const analysis = analysisByPage.get(page);
+      if (analysis?.hasCanonical && analysis.canonicalUrl) canonicalByPage.set(page, analysis.canonicalUrl);
+      if (typeof analysis?.internalLinkCount === 'number') internalLinkCountByPage.set(page, analysis.internalLinkCount);
+      if (isLikelyFunctionalQueryParam(page)) functionalParamPages.add(page);
+      const purpose = await getOrClassifyPageContentType(siteId, page).catch(() => null);
+      if (purpose?.contentType) pagePurposeByPage.set(page, purpose.contentType);
+    }
+    decisionByHash.set(g.hash, await decideWinner(traffic, {
+      siteId, start: evidenceStart, end: evidenceEnd,
+      signals: { canonicalByPage, pagePurposeByPage, internalLinkCountByPage, functionalParamPages },
+    }));
   }
 
   const findings = rankedGroups.map((g, i) => {
@@ -207,14 +234,31 @@ export async function run({ siteId, start, end, pageCache, params }) {
       // Until 2026-09-09 this finding had a null action and no reportOnly,
       // which meant buildRecommendations dropped it outright: byte-identical
       // duplicate pages were detected on every run and shown to nobody.
-      reportOnly: {
-        kind: 'duplicate-content',
-        label: `${g.pages.length} URLs serve identical content`,
-        page: [...g.pages].sort()[0],
-        whyBlocked: decision.withTraffic.length > 1
-          ? 'These URLs serve byte-identical content and more than one of them earns real search traffic with no confirmed shared search intent — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning its own real clicks, so it needs a person who knows which page is the intended one.'
-          : 'These URLs serve byte-identical content, but no real search traffic points to a clear winner yet. Consolidating them means choosing which single URL should own this content — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
-      },
+      //
+      // 'leave-both-independent-intent' is an ACTIVE autonomous decision
+      // (functional query parameter or genuinely different declared page
+      // purpose among the traffic-bearing pages), not a punt — no human
+      // decision is pending here, so this is surfaced as a decided outcome
+      // rather than a reportOnly block. Only the true "still inconclusive"
+      // case (decision === null) keeps the human-needed reportOnly copy.
+      reportOnly: decision.decision === 'leave-both-independent-intent'
+        ? {
+          kind: 'duplicate-content',
+          label: `${g.pages.length} URLs share identical content but were left independent`,
+          page: [...g.pages].sort()[0],
+          decided: true,
+          whyBlocked: decision.decisionReason === 'functional-query-parameter'
+            ? 'These URLs serve byte-identical content, but at least one variant carries a query parameter that isn\'t known tracking noise — treated as functional (may drive real visitor-facing behavior), so these are left independent rather than consolidated.'
+            : 'These URLs serve byte-identical content, but the traffic-bearing pages were classified with genuinely different page purposes — treated as independent intent, so left as separate pages rather than consolidated.',
+        }
+        : {
+          kind: 'duplicate-content',
+          label: `${g.pages.length} URLs serve identical content`,
+          page: [...g.pages].sort()[0],
+          whyBlocked: decision.withTraffic.length > 1
+            ? 'These URLs serve byte-identical content and more than one of them earns real search traffic with no confirmed shared search intent — picking one to consolidate the rest onto would risk redirecting a page that\'s still earning its own real clicks, so it needs a person who knows which page is the intended one.'
+            : 'These URLs serve byte-identical content, but no real search traffic points to a clear winner yet. Consolidating them means choosing which single URL should own this content — that decision changes which page keeps its search ranking, so it needs a person who knows which page is the intended one.',
+        },
       expectedImpact: { label: impactFromPriority(priorities[i]), basis: 'computed', value: sumImpressions(g.pages) },
     });
   });

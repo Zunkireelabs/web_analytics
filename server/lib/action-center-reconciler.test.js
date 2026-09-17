@@ -34,6 +34,7 @@ let recs;
 let recorded;
 let recheckImpl;
 let passOrder;
+let refusalOutcomes; // raw generator_outcomes rows: { recommendation_id, detail }
 
 // Delegates to the real classifier rather than hand-copying its rules here —
 // store/drafts.js's countFailedAttemptsByFinding used to carry its own
@@ -99,6 +100,24 @@ function fakeQuery(text, params = []) {
       counts.set(r.finding_id, (counts.get(r.finding_id) || 0) + 1);
     }
     return { rows: [...counts.entries()].map(([finding_id, cycles]) => ({ finding_id, cycles })) };
+  }
+  // countRefusalsByRecommendation (agents/lib/generator-learning.js) and
+  // countRefusalRecoveryCyclesByRecommendation (store/recommendation-attempts.js)
+  // — driveAutonomousRefusalRecovery's own two counts. No test in this file
+  // exercises a held refusal (that's covered separately in
+  // ship-pacing.test.js's applyRefusalCap suite), so both are unconditionally
+  // empty here — this just keeps the fake DB from throwing on the two extra
+  // queries every reconcileSite call now makes.
+  if (sql.startsWith('SELECT recommendation_id, detail FROM generator_outcomes')) {
+    return { rows: refusalOutcomes.map((r) => ({ recommendation_id: r.recommendation_id, detail: r.detail })) };
+  }
+  if (sql.startsWith('SELECT recommendation_id, COUNT(*)::int AS cycles FROM recommendation_attempts')) {
+    const counts = new Map();
+    for (const r of recorded) {
+      if (r.outcome !== 'recovered' || r.finding_id || !r.recommendation_id) continue;
+      counts.set(r.recommendation_id, (counts.get(r.recommendation_id) || 0) + 1);
+    }
+    return { rows: [...counts.entries()].map(([recommendation_id, cycles]) => ({ recommendation_id, cycles })) };
   }
   if (sql.startsWith('SELECT id, status, blocked_reason FROM recommendations')) {
     const findingId = params[1];
@@ -177,8 +196,23 @@ mock.module(resolve('./batch-pr-recovery.js'), {
     },
   },
 });
+// driveAutonomousRefusalRecovery's own three dependencies — dynamically
+// imported inside the reconciler itself (see that function's own comment
+// for why), but still interceptable by mock.module regardless of import
+// timing, same as every other mocked dependency in this file.
+let siteFixture;
+let mergeImpl;
+mock.module(resolve('../store/read.js'), {
+  namedExports: { getSiteById: async () => siteFixture },
+});
+mock.module(resolve('../implementers/backend.js'), {
+  namedExports: { computeBrokenLinkFixMerge: async (site, draft, ref) => mergeImpl(site, draft, ref) },
+});
+mock.module(resolve('../implementers/lib/github-ops.js'), {
+  namedExports: { baseBranch: () => 'main' },
+});
 const { reconcileSite } = await import('./action-center-reconciler.js');
-const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS } = await import('../agents/lib/ship-pacing.js');
+const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS, MAX_REFUSALS, MAX_REFUSAL_RECOVERY_CYCLES } = await import('../agents/lib/ship-pacing.js');
 const { NO_FILE_MAPPING_FRAGMENT } = await import('./draft-failure-phrases.js');
 
 const SITE_ID = 1;
@@ -200,6 +234,9 @@ beforeEach(() => {
   recs = [];
   recorded = [];
   passOrder = [];
+  refusalOutcomes = [];
+  siteFixture = { id: SITE_ID, repo_owner: 'acme', repo_name: 'site' };
+  mergeImpl = async () => { throw new Error('computeBrokenLinkFixMerge must not be called for this test'); };
   recheckImpl = async () => { throw new Error('recheckRecommendation must not be called for this test'); };
 });
 
@@ -368,6 +405,137 @@ describe('pass 4 (driveAutonomousRecovery) — dry run', () => {
     assert.equal(result.recovery.recommendations.length, 1);
     assert.equal(result.recovery.recovered, 0);
     assert.equal(result.recovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+});
+
+// N refused outcomes already on record for a recommendation, matching
+// countRefusalsByRecommendation's own query shape (generator_outcomes,
+// outcome='refused', detail='no-match' — the exact real detail string
+// backend.js's computeBrokenLinkFixMerge produces for the "found candidate
+// files but couldn't safely strip any of them" case).
+function priorRefusals(recommendationId, n) {
+  return Array.from({ length: n }, () => ({ recommendation_id: recommendationId, detail: 'no-match' }));
+}
+
+describe('driveAutonomousRefusalRecovery — below the cap: untouched, no re-check at all', () => {
+  test('a recommendation under MAX_REFUSALS is left alone; computeBrokenLinkFixMerge is never called', async () => {
+    refusalOutcomes = priorRefusals(70, MAX_REFUSALS - 1);
+    recs = [{ id: 70, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'p', href: 'h' } }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('only broken-link-fix is handled — a different held generator type is left exactly as before', async () => {
+    refusalOutcomes = priorRefusals(71, MAX_REFUSALS);
+    recs = [{ id: 71, recommendation_type: 'redirect-chain-nginx', status: 'open', blocked_reason: null, params: {} }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 0, 'not this pass\'s job yet — real scope limit, not a silent gap');
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — crossing the cap re-checks live instead of holding forever', () => {
+  test('confirmed-absent (stale) closes the recommendation, same as a resolved convergence-cap recheck', async () => {
+    refusalOutcomes = priorRefusals(72, MAX_REFUSALS);
+    recs = [{ id: 72, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://dead.example.com' } }];
+    mergeImpl = async () => ({ ok: false, reason: 'confirmed-absent', stale: true, error: 'gone' });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.resolved, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].status, 'superseded');
+  });
+
+  test('genuinely now fixable: records a recovery cycle (raising the cap) but does NOT ship anything itself', async () => {
+    refusalOutcomes = priorRefusals(73, MAX_REFUSALS);
+    recs = [{ id: 73, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://fixable.example.com' } }];
+    mergeImpl = async () => ({ ok: true, files: [{ filePath: 'a.njk' }] });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].status, 'open', 'still open — shipping is the next scheduled run\'s job, not this pass\'s');
+    const recovered = recorded.find((r) => r.recommendation_id === 73 && r.outcome === 'recovered');
+    assert.ok(recovered, 'a distinct "recovered" attempt is recorded so the cap rises for next time');
+    assert.equal(recovered.finding_id, null, 'refusal-recovery rows never carry a finding_id — that is what keeps them disjoint from the convergence cap\'s own counter');
+  });
+
+  test('still refuses on re-check: still spends a recovery cycle (real evidence gathered either way), not shipped, not blocked', async () => {
+    refusalOutcomes = priorRefusals(74, MAX_REFUSALS);
+    recs = [{ id: 74, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://still-stuck.example.com' } }];
+    mergeImpl = async () => ({ ok: false, reason: 'no-match', stale: false, error: 'still stuck' });
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('a transient re-check error (rate limit) is not evidence and must not consume a recovery cycle', async () => {
+    refusalOutcomes = priorRefusals(75, MAX_REFUSALS);
+    recs = [{ id: 75, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    mergeImpl = async () => { throw Object.assign(new Error('GitHub rate limit reached'), { rateLimited: true }); };
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.recovered, 0);
+    assert.equal(result.refusalRecovery.blocked, 0);
+    assert.equal(recorded.find((r) => r.recommendation_id === 75), undefined);
+  });
+
+  test('the second recovery cycle fires once the raised cap is also exhausted', async () => {
+    // One refusal-recovery cycle already used, raising the cap to 2*MAX_REFUSALS.
+    refusalOutcomes = priorRefusals(76, MAX_REFUSALS * 2);
+    recs = [{ id: 76, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    recorded.push({ recommendation_id: 76, finding_id: null, outcome: 'recovered' }); // one cycle already spent
+    let mergeCalls = 0;
+    mergeImpl = async () => { mergeCalls += 1; return { ok: false, reason: 'no-match', stale: false, error: 'still stuck' }; };
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(mergeCalls, 1, 'a second, independent refusal-recovery cycle is attempted');
+    assert.equal(result.refusalRecovery.recovered, 1);
+    assert.equal(result.refusalRecovery.blocked, 0, 'still not exhausted — MAX_REFUSAL_RECOVERY_CYCLES is 2, this is only the second');
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — NEEDS_HUMAN only once refusal-recovery is truly exhausted', () => {
+  test('blocks only after MAX_REFUSAL_RECOVERY_CYCLES independent re-checks all still refuse', async () => {
+    const cap = MAX_REFUSALS * (MAX_REFUSAL_RECOVERY_CYCLES + 1);
+    refusalOutcomes = priorRefusals(77, cap);
+    recs = [{ id: 77, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    recorded.push(
+      { recommendation_id: 77, finding_id: null, outcome: 'recovered' },
+      { recommendation_id: 77, finding_id: null, outcome: 'recovered' },
+    );
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.refusalRecovery.blocked, 1);
+    assert.equal(recs[0].status, 'open', 'blocked, not closed — a human can still generate it by hand');
+    assert.ok(recs[0].blocked_reason);
+  });
+});
+
+describe('driveAutonomousRefusalRecovery — dry run', () => {
+  test('reports what it would do without calling computeBrokenLinkFixMerge or writing anything', async () => {
+    refusalOutcomes = priorRefusals(78, MAX_REFUSALS);
+    recs = [{ id: 78, recommendation_type: 'broken-link-fix', status: 'open', blocked_reason: null, params: { page: 'https://x/a', href: 'https://x.example.com' } }];
+    mergeImpl = async () => { throw new Error('must not be called during a dry run'); };
+
+    const result = await reconcileSite(SITE_ID, { apply: false });
+
+    assert.equal(result.refusalRecovery.recommendations.length, 1);
+    assert.equal(result.refusalRecovery.recovered, 0);
+    assert.equal(result.refusalRecovery.blocked, 0);
     assert.equal(recs[0].blocked_reason, null);
   });
 });

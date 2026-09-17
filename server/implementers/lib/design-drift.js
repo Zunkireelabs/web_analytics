@@ -132,6 +132,25 @@ export function extractStylesheetHrefs(html) {
   return hrefs;
 }
 
+// A site built with page-scoped inline CSS (a <style> block per page,
+// rather than one linked global stylesheet — see Chayce's design profile)
+// legitimately defines its real, live classes nowhere a <link
+// rel="stylesheet"> fetch would ever see them. Without this,
+// checkTemplateFreshness reads that as "the live site no longer defines
+// this class" on every single page, because the only CSS it ever looked at
+// was an external file such a site may not even have — a false drift
+// verdict on unchanged, correctly-styled markup, not real evidence of
+// anything going stale.
+const STYLE_TAG_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+export function extractInlineStyleBlocks(html) {
+  const blocks = [];
+  let m;
+  while ((m = STYLE_TAG_RE.exec(html))) {
+    if (m[1]) blocks.push(m[1]);
+  }
+  return blocks;
+}
+
 // Tailwind escapes any character that isn't valid in a bare CSS identifier
 // with a backslash when it generates the selector for a class whose name
 // contains it (e.g. `md:text-2xl` -> `.md\:text-2xl`, `w-1/2` -> `.w-1\/2`,
@@ -314,14 +333,12 @@ export async function checkTemplateFreshness({ pageUrl, templateEntry, fetchPage
   if (!html) return { ok: false, error: `Could not fetch ${pageUrl} to check its current live design.` };
 
   const hrefs = extractStylesheetHrefs(html);
-  if (!hrefs.length) return { ok: false, error: `No <link rel="stylesheet"> found on ${pageUrl} — cannot verify the current design.` };
-
-  const cssParts = [];
+  const cssParts = extractInlineStyleBlocks(html);
   for (const href of hrefs) {
     const css = await fetchStylesheet(resolveUrl(pageUrl, href));
     if (css) cssParts.push(css);
   }
-  if (!cssParts.length) return { ok: false, error: `Could not fetch any stylesheet linked from ${pageUrl}.` };
+  if (!cssParts.length) return { ok: false, error: `No <link rel="stylesheet"> and no inline <style> block found on ${pageUrl} — cannot verify the current design.` };
 
   const css = cssParts.join('\n');
   const missingClasses = classes.filter((cls) => !classExistsInCss(cls, css));

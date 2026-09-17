@@ -25,6 +25,12 @@ mock.module(resolve('../store/read.js'), {
     getTopMovers: async () => ({ gainers: [], droppers: [] }),
     getCannibalizedQueries: async () => cannibalized,
     getSiteById: async () => ({ id: 1, name: 'Example' }),
+    // device-ctr-diagnosis.js's own dependencies — the mobile deficit test
+    // below is fully explained by its position gap, so diagnosis never
+    // reaches the page-level checks these back, but they still need to
+    // exist for device-intelligence.js's import chain to resolve.
+    getPagePerformanceByDevice: async () => [],
+    getQueriesForPage: async () => [],
   },
 });
 mock.module(resolve('../llm.js'), {

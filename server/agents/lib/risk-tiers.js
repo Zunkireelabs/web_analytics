@@ -200,6 +200,14 @@ const SAFE_GENERATOR_IDS = new Set([
   // observed — never trusts a stale hop, never guesses which of two
   // matching rules is "the" real one.
   'redirect-chain-nginx',
+  // Same idempotent hash-marker splice as security-headers just above (both
+  // fixed-syntax, deterministic nginx blocks spliced into their own
+  // dedicated `# SEOAI:...:START/END` marker region, no LLM, no
+  // exact-match-or-refuse complexity beyond the shared brace-balance
+  // guardrail) — technical-seo.js only ever recommends this generator when
+  // the site's own tracked nginx config exists AND a real fetched response
+  // was observed missing Content-Encoding, never guessed.
+  'compression-nginx',
   // All-or-nothing exact-match-or-refuse (implementers/lib/sitemap-removal-
   // inject.js): every requested URL must still be found as an exact
   // <url><loc>...</loc></url> entry in the LIVE sitemap at apply time, or
@@ -213,6 +221,16 @@ const SAFE_GENERATOR_IDS = new Set([
   // detection re-adds it automatically the moment the underlying signal
   // changes — no separate undo mechanism needed.
   'sitemap-removal',
+  // Added 2026-09-17: the counterpart to sitemap-removal above for a
+  // build-time-templated sitemap (see implementers/lib/sitemap-
+  // frontmatter-exclude-inject.js) — same exact-match-or-refuse shape as
+  // content-integrity-repair/schema-repair: the page's own front-matter
+  // block must already exist and not already carry the field, or the
+  // whole draft refuses rather than guessing at a new location. Only ever
+  // recommended (agents/sitemap-conflict.js) when the site's own
+  // sitemapExcludeField has been verified against its real template
+  // source, never assumed from the sitemap's engine alone.
+  'sitemap-frontmatter-exclude',
 ]);
 
 // Everything NOT in the set above is manual, and stays that way for a stated

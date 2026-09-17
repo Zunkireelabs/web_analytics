@@ -1,7 +1,7 @@
 import pLimit from 'p-limit';
 import { getSearchPerformanceForPages } from '../store/read.js';
 import { makeFinding, aggregateSystemicFinding } from './lib/findings.js';
-import { analyzePageUrl, effortForGenerator } from './lib/page-content.js';
+import { analyzePageUrl, effortForGenerator, inferSchemaType } from './lib/page-content.js';
 import { selectCandidatePages, markPagesChecked } from './lib/candidate-pages.js';
 import { callLLM } from '../llm.js';
 
@@ -20,11 +20,12 @@ import { callLLM } from '../llm.js';
 // raw-text table; an FAQPage schema block not mixed with other structured
 // data plus a fully-extractable set of real visible answers; two FAQ
 // sections with substantial (>=80%) real question-text overlap — see
-// pickSafeOrTopImpression below. A page whose defect doesn't meet that bar
-// still shows up in the finding (n of m checked pages), just without a
-// one-click fix. Cross-page FAQ inconsistency has no automatic fix at all
-// (nothing here knows which page's answer is authoritative) and is always
-// manual-only.
+// pickSafeOrTopImpression below; a page whose FAQ topically doesn't match its
+// own page, and the same FAQ question answered inconsistently across pages,
+// get the same evidence-gated treatment via findTopicallyMismatchedFaq and
+// decideCrossPageFaqAnswer respectively. A page whose defect doesn't meet the
+// relevant safety bar still shows up in the finding (n of m checked pages),
+// just without a one-click fix.
 export const meta = {
   id: 'content-integrity',
   name: 'Content Integrity Agent',
@@ -72,11 +73,11 @@ function pickSafeOrTopImpression(affected, isSafe) {
 // appearing on 2+ of this run's checked pages with a DIFFERENT real answer —
 // a common shape when a sitewide FAQ block (e.g. a shared shipping/returns
 // component) drifts on one page after an edit that didn't propagate
-// everywhere else it's reused. Unlike the within-page checks in run() below,
-// there is no safe automatic fix here: nothing in this app knows which
-// page's answer is the current/authoritative one, so this is always a
-// manual-only finding (no recommendedAction — see run()'s use of this). Only
-// ever compares pages actually present in `reachable` — a real, useful
+// everywhere else it's reused. Detection here is purely structural (which
+// question/answer pairs disagree, and where) — deciding WHICH page's answer
+// is authoritative is a separate, evidence-based step (see
+// decideCrossPageFaqAnswer below), not something this function itself
+// attempts. Only ever compares pages actually present in `reachable` — a real, useful
 // signal that grows in coverage as the page rotation (selectCandidatePages)
 // cycles through the site over time, not a full sitewide guarantee on any
 // single run. Exported as a pure function (input: [{page, analysis}]) so it
@@ -100,6 +101,76 @@ export function findInconsistentFaqQuestions(reachable) {
     .map(([question, variants]) => ({ question, variants: [...variants.values()] }));
 }
 
+// A lighter-weight, purpose-built decision for "which page's FAQ answer is
+// right" — NOT duplicate-content.js's decideWinner (lib/duplicate-evidence.js).
+// That machinery answers a structurally different question ("which of these
+// URLs is the SAME page, via traffic/query-overlap/canonical evidence") —
+// nothing there speaks to which of two DIFFERENT pages' TEXT is accurate.
+// This only ever runs for a genuine two-way split (variants.length === 2); a
+// 3+-way disagreement has no cheap, evidence-based tiebreak and is left for
+// a human. Evidence consulted, strongest first, exactly like duplicate-
+// evidence.js's own resolveWithAdditionalSignals: try the strongest signal,
+// fall through, and only return null (genuinely ambiguous, stays reportOnly)
+// once every signal has been tried and none resolved it.
+//
+//   1. Cross-check against findTopicallyMismatchedFaq's OWN independent
+//      finding: if one side's page(s) were already confirmed (by a separate
+//      self-consistency-checked LLM pass) to have an FAQ that doesn't even
+//      match THEIR OWN page's topic, that side's answer is untrustworthy
+//      regardless of its content — the other side wins.
+//   2. Real freshness signal (page-content.js's hasFreshnessSignal) — when
+//      exactly one side carries it and the other doesn't, the side with a
+//      real freshness signal is preferred as more likely current.
+//   3. Real, non-overlapping inferred/declared page purpose (inferSchemaType)
+//      between the two sides — a signal the pages genuinely serve different
+//      audiences/contexts, so BOTH answers can legitimately be correct for
+//      their own page. Decided as a real non-issue ('leave-both-independent-
+//      intent'), not silently left open — same "decide, don't just punt"
+//      standard duplicate-evidence.js's resolveWithAdditionalSignals holds
+//      itself to for the structurally similar split-traffic case.
+export function decideCrossPageFaqAnswer(entry, { topicMismatchedPages, reachableByPage }) {
+  const { variants } = entry;
+  if (variants.length !== 2) return null;
+  const [v0, v1] = variants;
+
+  const flagged = (pages) => pages.some((p) => topicMismatchedPages.has(p));
+  const v0Flagged = flagged(v0.pages);
+  const v1Flagged = flagged(v1.pages);
+  if (v0Flagged !== v1Flagged) {
+    const [winner, loser] = v0Flagged ? [v1, v0] : [v0, v1];
+    return {
+      decision: 'consolidate', correctAnswer: winner.answer, pagesToFix: loser.pages,
+      reason: 'One page\'s FAQ was independently confirmed to not even match its own page\'s topic — its answer here is untrustworthy.',
+    };
+  }
+
+  const allFresh = (pages) => pages.length > 0 && pages.every((p) => reachableByPage.get(p)?.analysis?.hasFreshnessSignal);
+  const v0Fresh = allFresh(v0.pages);
+  const v1Fresh = allFresh(v1.pages);
+  if (v0Fresh !== v1Fresh) {
+    const [winner, loser] = v0Fresh ? [v0, v1] : [v1, v0];
+    return {
+      decision: 'consolidate', correctAnswer: winner.answer, pagesToFix: loser.pages,
+      reason: 'One page carries a real freshness signal the other does not — its answer is preferred as more likely current.',
+    };
+  }
+
+  const purposesFor = (pages) => new Set(pages.map((p) => {
+    const r = reachableByPage.get(p);
+    return r ? inferSchemaType(p, r.analysis.schemaTypes, r.analysis) : null;
+  }).filter(Boolean));
+  const p0 = purposesFor(v0.pages);
+  const p1 = purposesFor(v1.pages);
+  if (p0.size && p1.size && ![...p0].some((t) => p1.has(t))) {
+    return {
+      decision: 'leave-both-independent-intent',
+      reason: 'These pages carry genuinely different declared/inferred purposes — the same question plausibly has a different, legitimately correct answer on each.',
+    };
+  }
+
+  return null;
+}
+
 // Real incident (zunkireelabs.com/careers/, 2026-09-11): a live FAQ block
 // asked "What is Zunkiree Search?" / "What is Agentic as a Service (GaaS)?"
 // — product questions — on the careers page. No draft row existed for it
@@ -114,9 +185,12 @@ export function findInconsistentFaqQuestions(reachable) {
 // export.js's ask/extract split: the model's answer is never trusted on
 // its own — only `page` values that were actually present in the input are
 // ever accepted back, so a hallucinated URL can't produce a finding for a
-// page that was never checked. Always manual-only (no recommendedAction):
-// fixing this means writing REAL page-relevant content, which this app
-// never fabricates, same rule every other content gap here follows.
+// page that was never checked. A confirmed match gets a real recommendedAction
+// (run() below) whenever content-integrity-repair.js's own safety bar is met
+// — the fix regenerates the FAQ using the exact same real-evidence-grounded
+// generation generators/faq.js already uses for a net-new FAQ (page body
+// text, real title, PAGE_PURPOSE_GUIDANCE), never invented content — and
+// falls back to reportOnly, not needsHuman, when that bar isn't met.
 const FAQ_TOPIC_SYSTEM_PROMPT = 'You check whether a page\'s visible FAQ questions actually relate to that page\'s own topic '
   + '(given by its <title>). Given a JSON array of {page, title, questions}, return ONLY a JSON array of the '
   + '"page" values (exact strings copied from the input, nothing else) whose FAQ questions are clearly about a '
@@ -152,10 +226,10 @@ async function singleFaqTopicPass(candidates, askLLM) {
 // deterministic ground truth to check against — it can't make either
 // individual pass smarter, but it does mean a one-off inconsistent flag
 // (the model agreeing with itself by chance, not because the page is
-// actually wrong) gets filtered out before it ever reaches a human as a
-// finding. This finding carries no recommendedAction (manual-only, see
-// run() below), so the cost of a false positive is a human's wasted look
-// — worth trading some recall for.
+// actually wrong) gets filtered out before it ever reaches a human — or an
+// automatic fix — as a finding. Since a confirmed match can now carry a real
+// recommendedAction (run() below), the cost of a false positive here is no
+// longer just a human's wasted look; it's worth trading some recall for.
 export async function findTopicallyMismatchedFaq(reachable, askLLM = callLLM) {
   const candidates = reachable
     .filter((r) => (r.analysis.faqVisibleItems || []).length >= 2)
@@ -300,25 +374,87 @@ export async function run({ siteId, start, end, pageCache, params }) {
     },
   });
 
-  const inconsistentFaqQuestions = findInconsistentFaqQuestions(reachable);
-  const faqCrossPageFinding = inconsistentFaqQuestions.length ? makeFinding({
-    id: 'content-integrity:faq-cross-page-inconsistency',
-    evidence: { affectedCount: inconsistentFaqQuestions.length, checkedCount: reachable.length, samples: inconsistentFaqQuestions.slice(0, 5) },
-    whyItMatters: `${inconsistentFaqQuestions.length} FAQ question(s) appear on more than one checked page with a different real answer each time — visitors get inconsistent information depending which page they land on.`,
-    priority: 'medium',
-    recommendedAction: null,
-    expectedImpact: { label: 'Medium', basis: 'computed', value: inconsistentFaqQuestions.length },
-  }) : null;
+  const reachableByPage = new Map(reachable.map((r) => [r.page, r]));
 
+  // Computed BEFORE the cross-page finding below — decideCrossPageFaqAnswer's
+  // strongest signal reuses this finding's own result (a page already
+  // confirmed off-topic for itself is untrustworthy evidence for a
+  // cross-page disagreement too), never a second, separate topic check.
   const topicMismatchedFaq = await findTopicallyMismatchedFaq(reachable);
+  const topicMismatchedPages = new Set(topicMismatchedFaq.map((c) => c.page));
+
+  // Per the platform's DISCOVER->FIX policy: a topic-mismatched page's FAQ
+  // gets a real recommendedAction whenever content-integrity-repair.js's own
+  // safety bar is met (every visible answer confidently extracted, and one
+  // single unambiguous FAQ container to rewrite in place) — the same
+  // "narrow, evidence-gated auto-fix, else stays informational" discipline
+  // every other finding in this file already follows. Picks the
+  // highest-impression eligible page as the one draftable example, same
+  // convention as pickSafeOrTopImpression above (this finding isn't built via
+  // aggregateSystemicFinding, since its evidence comes from an LLM pass, not
+  // a structural per-page fact, so the representative pick is done inline
+  // here instead).
+  const topicMismatchEligible = topicMismatchedFaq
+    .map((c) => reachableByPage.get(c.page))
+    .filter((r) => r && r.analysis.faqExtractionComplete && r.analysis.faqContainerHtml)
+    .sort((a, b) => (b.impressions || 0) - (a.impressions || 0));
+  const topicMismatchRepresentative = topicMismatchEligible[0] || null;
   const faqTopicMismatchFinding = topicMismatchedFaq.length ? makeFinding({
     id: 'content-integrity:faq-topic-mismatch',
     evidence: { affectedCount: topicMismatchedFaq.length, checkedCount: reachable.length, samples: topicMismatchedFaq.slice(0, 5).map((c) => ({ page: c.page, title: c.title, questions: c.questions })) },
     whyItMatters: `${topicMismatchedFaq.length} of ${reachable.length} checked page(s) show a visible FAQ whose questions don't match the page's own topic (e.g. product FAQs on a careers/about page) — likely leftover or copy-pasted content, not something this app's own generators produced.`,
     priority: 'medium',
-    recommendedAction: null,
+    recommendedAction: topicMismatchRepresentative ? {
+      label: 'Rewrite this page\'s FAQ to match its own topic',
+      generatorId: 'content-integrity-repair',
+      params: { page: topicMismatchRepresentative.page, fixType: 'faq-topic-mismatch' },
+      effort: effortForGenerator('content-integrity-repair'),
+    } : null,
     expectedImpact: { label: 'Medium', basis: 'estimate', value: topicMismatchedFaq.length },
   }) : null;
+
+  const inconsistentFaqQuestions = findInconsistentFaqQuestions(reachable);
+  let faqCrossPageFinding = null;
+  if (inconsistentFaqQuestions.length) {
+    const resolutions = inconsistentFaqQuestions.map((entry) => decideCrossPageFaqAnswer(entry, { topicMismatchedPages, reachableByPage }));
+    const decidedCount = resolutions.filter(Boolean).length;
+    // First confidently-resolved AND auto-fixable entry becomes this
+    // finding's one draftable action — a genuinely decided-but-unfixable
+    // entry (the losing page fails content-integrity-repair's own safety
+    // bar) still counts toward decidedCount/whyItMatters, it just doesn't
+    // supply the action, same "informational but decided" outcome every
+    // other narrow auto-fix in this file already allows.
+    let recommendedAction = null;
+    for (let i = 0; i < inconsistentFaqQuestions.length && !recommendedAction; i++) {
+      const resolved = resolutions[i];
+      if (resolved?.decision !== 'consolidate') continue;
+      const target = resolved.pagesToFix
+        .map((p) => reachableByPage.get(p))
+        .find((r) => r && r.analysis.faqExtractionComplete && r.analysis.faqContainerHtml);
+      if (!target) continue;
+      recommendedAction = {
+        label: 'Correct this page\'s FAQ answer to match its more authoritative page',
+        generatorId: 'content-integrity-repair',
+        params: {
+          page: target.page, fixType: 'faq-cross-page-inconsistency',
+          question: inconsistentFaqQuestions[i].question, correctAnswer: resolved.correctAnswer,
+        },
+        effort: effortForGenerator('content-integrity-repair'),
+      };
+    }
+    faqCrossPageFinding = makeFinding({
+      id: 'content-integrity:faq-cross-page-inconsistency',
+      evidence: {
+        affectedCount: inconsistentFaqQuestions.length, checkedCount: reachable.length,
+        samples: inconsistentFaqQuestions.slice(0, 5), decidedCount,
+      },
+      whyItMatters: `${inconsistentFaqQuestions.length} FAQ question(s) appear on more than one checked page with a different real answer each time — visitors get inconsistent information depending which page they land on.`
+        + (decidedCount ? ` ${decidedCount} of these were resolved from real evidence (an independently-confirmed off-topic FAQ, a freshness signal, or a genuinely different declared page purpose).` : ''),
+      priority: 'medium',
+      recommendedAction,
+      expectedImpact: { label: 'Medium', basis: 'computed', value: inconsistentFaqQuestions.length },
+    });
+  }
 
   const findings = [brokenTableFinding, rawTextTableFinding, faqMismatchFinding, faqSchemaWithoutVisibleFinding, duplicateFaqFinding, faqCrossPageFinding, faqTopicMismatchFinding].filter(Boolean);
 

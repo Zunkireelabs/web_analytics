@@ -23,7 +23,7 @@ let site;
 let spentToday;
 let fileEditsSpentToday; // countShippedFileEditsToday's return — the file-edits-only slice of spentToday
 let recentDraftTypes; // action_types with a draft inside the pacing window
-const calls = { generated: [], approved: [], prsOpened: [], closed: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
+const calls = { generated: [], approved: [], prsOpened: [], closed: [], blocked: [], findingOrigins: [], batchFinalizeCalls: [], abandoned: [] };
 // When set, submitDraftForApproval refuses (as it really does for any status
 // outside 'draft'/'edited') and getDraft reports this status — the shape a
 // draft left stranded by an earlier failed apply() actually has.
@@ -53,6 +53,7 @@ let onboardingPending; // two-stage onboarding: whether the whole-site analysis 
 let learnedRepairQueueItems; // rows store/shipping-queue.js's listByState(QUEUED) would return, filtered to source='learned-repair' by the code under test
 let contentRepairQueueItems; // rows store/shipping-queue.js's listByState(PREPARED) would return, filtered to source='content-repair'/kind='file-edits'
 let contentRepairPushOn; // (queueId) => boolean — simulates a specific content-repair item's pushDraftBranch call failing
+let preflightImpl; // (rec, ctx) => verification result — simulates verifyRecommendation's pre-flight "already resolved?" check
 
 function reset() {
   site = { id: 1, timezone: 'Asia/Kolkata', auto_remediation_enabled: true, auto_remediation_daily_limit: 30 };
@@ -67,6 +68,7 @@ function reset() {
   calls.approved = [];
   calls.prsOpened = [];
   calls.closed = [];
+  calls.blocked = [];
   calls.findingOrigins = [];
   calls.batchFinalizeCalls = [];
   calls.abandoned = [];
@@ -94,6 +96,7 @@ function reset() {
   calls.queueShipped = [];
   calls.queueReleased = [];
   calls.fixOutcomes = [];
+  preflightImpl = async () => ({ decision: 'still_valid', reason: 'no-verifier-available', evidence: null });
 }
 let generateAttempts;
 reset();
@@ -109,6 +112,7 @@ mock.module(resolve('../../store/recommendations.js'), {
   namedExports: {
     listOpenRecommendations: async () => recommendations,
     closeRecommendation: async (id) => { calls.closed.push(id); },
+    blockRecommendation: async (id, reason) => { calls.blocked.push({ id, reason }); },
   },
 });
 mock.module(resolve('../../store/drafts.js'), {
@@ -216,6 +220,20 @@ mock.module(resolve('../../agent-memory.js'), {
     // learned-repair.js imports it at module load time, and something in
     // this test's own graph now transitively imports learned-repair.js.
     findPortableRepairs: async () => { throw new Error('must not be reached from auto-remediation.test.js'); },
+  },
+});
+// The pre-flight "is this already resolved?" check (server/generators/lib/
+// verification-layer.js) is exercised in full, real logic elsewhere
+// (verification-layer.test.js, broken-link-fix.test.js, redirect-fix.test.js)
+// against generators that actually implement verifyCurrentState. Faked here
+// to the same default the real layer returns for any generator WITHOUT one
+// — 'meta-title' (this file's default fixture type) has none — so every
+// existing test in this file keeps its exact current behavior. The
+// already-resolved describe block below overrides this per-test.
+mock.module(resolve('../../generators/lib/verification-layer.js'), {
+  namedExports: {
+    VERIFICATION_DECISION: { ALREADY_RESOLVED: 'already_resolved', STILL_VALID: 'still_valid', CONFLICT: 'conflict' },
+    verifyRecommendation: async (rec, ctx) => preflightImpl(rec, ctx),
   },
 });
 mock.module(resolve('../../routes/action-center.js'), {
@@ -423,6 +441,81 @@ describe('auto-remediation — chain shape', () => {
     recommendations = [r];
     await autoRemediateSafeRecommendations(1);
     assert.deepEqual(calls.findingOrigins, [null]);
+  });
+});
+
+describe('auto-remediation — pre-flight verification ("is this already resolved?")', () => {
+  beforeEach(reset);
+
+  test('a generator with no verifier (verifyRecommendation\'s default) proceeds to generateDraft exactly as before', async () => {
+    recommendations = [rec(1)];
+    const result = await autoRemediateSafeRecommendations(1);
+    assert.equal(result.shipped, 1);
+    assert.equal(result.resolved, 0);
+  });
+
+  test('already_resolved closes the recommendation without ever calling generateDraft, and does not count as failed or shipped', async () => {
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'already_resolved', reason: 'confirmed-absent', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.resolved, 1);
+    assert.equal(result.shipped, 1, 'rec 2 still ships normally');
+    assert.equal(result.failed, 0);
+    assert.deepEqual(calls.closed, [1]);
+    assert.deepEqual(calls.generated, ['f2'], 'rec 1 never reached generateDraft — no LLM/GitHub call spent on it');
+  });
+
+  test('an already-resolved item frees its budget slot for backfill, same as a quarantined one', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'already_resolved', reason: 'confirmed-absent', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.resolved, 1);
+    assert.equal(result.shipped, 1, 'rec 2 backfills the slot rec 1 freed, even though the daily limit is only 1');
+  });
+
+  test('conflict blocks the recommendation for a human without ever calling generateDraft, and does not count as failed or shipped', async () => {
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'conflict', reason: 'stored-target-no-longer-matches-content', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.conflicted, 1);
+    assert.equal(result.shipped, 1, 'rec 2 still ships normally');
+    assert.equal(result.failed, 0);
+    assert.equal(result.resolved, 0, 'conflicted is disjoint from resolved — the recommendation is blocked, not closed');
+    assert.deepEqual(calls.closed, [], 'a conflict is blocked, never closed');
+    assert.equal(calls.blocked.length, 1);
+    assert.equal(calls.blocked[0].id, 1);
+    assert.match(calls.blocked[0].reason, /stored-target-no-longer-matches-content/);
+    assert.deepEqual(calls.generated, ['f2'], 'rec 1 never reached generateDraft — no LLM/GitHub call spent on it');
+  });
+
+  test('a conflicted item frees its budget slot for backfill, same as an already-resolved one', async () => {
+    site.auto_remediation_daily_limit = 1;
+    recommendations = [rec(1), rec(2)];
+    preflightImpl = async (r) => (
+      r.id === 1
+        ? { decision: 'conflict', reason: 'stored-target-no-longer-matches-content', evidence: {} }
+        : { decision: 'still_valid', reason: 'no-verifier-available', evidence: null }
+    );
+    const result = await autoRemediateSafeRecommendations(1);
+
+    assert.equal(result.conflicted, 1);
+    assert.equal(result.shipped, 1, 'rec 2 backfills the slot rec 1 freed, even though the daily limit is only 1');
   });
 });
 

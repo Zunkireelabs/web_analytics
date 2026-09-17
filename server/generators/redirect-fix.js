@@ -24,3 +24,29 @@ export async function generate({ params }) {
     summary: `${oldHref} → ${newHref}`,
   };
 }
+
+// Side-effect-free re-verification (server/generators/lib/verification-layer.js).
+// Same shape as broken-link-fix.js's own verifyCurrentState, but simpler:
+// redirect-fix targets exactly one known, mapped file (no data-source layers,
+// no repo-wide search fallback), so that file's own content is the full,
+// authoritative answer — no "coverage incomplete" ambiguity to worry about.
+// If `oldHref` is no longer in it, the source link was already changed or
+// removed by some other edit, and this recommendation's premise is gone.
+export async function verifyCurrentState(rec, { site, baseBranch: baseBranchOverride } = {}) {
+  if (!site) return { decision: 'still_valid', reason: 'no-site-context', evidence: null };
+  const { page, oldHref, newHref } = rec.params || {};
+  if (!page || !oldHref || !newHref) return { decision: 'still_valid', reason: 'missing-params', evidence: null };
+
+  const { computeRedirectFixMerge } = await import('../implementers/backend.js');
+  const { baseBranch } = await import('../implementers/lib/github-ops.js');
+  const ref = baseBranchOverride || baseBranch(site);
+
+  const merged = await computeRedirectFixMerge(site, { content: { page, oldHref, newHref } }, ref);
+  if (merged.ok) {
+    return { decision: 'still_valid', reason: 'fixable-now', evidence: { filePath: merged.filePath } };
+  }
+  if (merged.reason === 'no-match') {
+    return { decision: 'already_resolved', reason: 'no-match', evidence: { oldHref, filePath: merged.filePath ?? null } };
+  }
+  return { decision: 'still_valid', reason: merged.reason || 'unknown', evidence: { error: merged.error } };
+}

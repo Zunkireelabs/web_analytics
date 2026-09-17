@@ -3,6 +3,7 @@ import { flagLowCtr } from './lib/ctr-anomaly.js';
 import { priorityByRank, impactFromPriority, makeFinding } from './lib/findings.js';
 import { priorPeriod } from '../util/dates.js';
 import { callLLM } from '../llm.js';
+import { diagnoseDeviceCtrDeficit } from './lib/device-ctr-diagnosis.js';
 
 export const meta = {
   id: 'device-intelligence',
@@ -36,29 +37,53 @@ export async function run({ siteId, start, end }) {
   const growingDevices = delta.gainers.map((r) => ({ device: r.dim_value.toUpperCase(), recent: Number(r.recent), prior: Number(r.prior), delta: Number(r.delta) }));
   const decliningDevices = delta.droppers.map((r) => ({ device: r.dim_value.toUpperCase(), recent: Number(r.recent), prior: Number(r.prior), delta: Number(r.delta) }));
 
-  // No draft generator exists for device/UX fixes (mobile speed, responsive
-  // layout, tap targets) — recommendedAction is honestly left null rather
-  // than forced onto a content generator that doesn't fit. Findings still
-  // carry real evidence/priority/impact; they just aren't draftable today.
-  const candidates = [
-    ...lowCtrDevices.map((d) => ({
+  // Each flagged low-CTR device is diagnosed against real evidence this
+  // platform already collects elsewhere (ranking position, title length,
+  // viewport meta — see device-ctr-diagnosis.js's own header for exactly
+  // which existing capability each check reuses) before falling back to a
+  // reportOnly. A device whose deficit clears a real, evidence-backed cause
+  // gets one draftable finding per fix instead of a permanent dead end; one
+  // that doesn't still surfaces read-only, but with the SPECIFIC evidence
+  // this diagnosis actually gathered rather than a generic "look at it."
+  const lowCtrCandidates = (await Promise.all(lowCtrDevices.map(async (d) => {
+    const diagnosis = await diagnoseDeviceCtrDeficit(siteId, d, devices, { start, end });
+    const magnitude = Math.abs(d.ctrDeviationPct);
+    const baseEvidence = { device: d.device, ctr: d.ctr, ctrDeviationPct: d.ctrDeviationPct, clicks: d.clicks, impressions: d.impressions, diagnosis: diagnosis.cause };
+
+    if (diagnosis.fixes.length) {
+      return diagnosis.fixes.map((fix) => ({
+        id: `device-intelligence:low-ctr:${d.device}:${fix.scope}:${fix.page || diagnosis.cause}`,
+        evidence: { ...baseEvidence, ...diagnosis.evidence },
+        whyItMatters: `${d.device} CTR is ${Math.abs(d.ctrDeviationPct)}% below this site's own cross-device average — ${diagnosis.explanation}`,
+        magnitude,
+        recommendedAction: fix.recommendedAction,
+      }));
+    }
+
+    return [{
       id: `device-intelligence:low-ctr:${d.device}`,
-      evidence: { device: d.device, ctr: d.ctr, ctrDeviationPct: d.ctrDeviationPct, clicks: d.clicks, impressions: d.impressions },
+      evidence: { ...baseEvidence, ...diagnosis.evidence },
       whyItMatters: `${d.device} CTR is ${Math.abs(d.ctrDeviationPct)}% below this site's own cross-device average.`,
-      magnitude: Math.abs(d.ctrDeviationPct),
+      magnitude,
       // A whole device class under-performing this site's own average is a
-      // confirmed defect, not a stat: the same listings earn materially
-      // fewer clicks on one device than on the others. There is no single
-      // file to change — the cause is spread across layout, speed and
-      // how titles truncate on that device — so it surfaces read-only
-      // instead of being dropped, and points at the device to investigate.
+      // confirmed defect, not a stat. diagnosis.explanation is set only for
+      // 'position' (a real, evidence-backed cause with no single-file fix);
+      // 'undiagnosed' means position/title-length/viewport were all
+      // checked and came back clean, which is itself real information —
+      // distinguishing "investigated, no fixable technical cause found"
+      // from "never looked."
       reportOnly: {
         kind: 'device-ctr-deficit',
         label: `${d.device} click-through rate is below this site's average`,
         page: '',
-        whyBlocked: `Search listings for this site earn ${Math.abs(d.ctrDeviationPct)}% fewer clicks on ${d.device.toLowerCase()} than on this site's other devices. The cause is usually how pages look, load or truncate on that device rather than any one file, so it needs someone to look at real ${d.device.toLowerCase()} results before anything is changed.`,
+        whyBlocked: diagnosis.explanation
+          || `Checked ranking position${diagnosis.evidence.checkedTitleLength ? ', title length,' : ''}${diagnosis.evidence.checkedViewport ? ' and viewport configuration' : ''} for ${d.device.toLowerCase()} — none show a diagnosable technical cause. Search listings for this site still earn ${Math.abs(d.ctrDeviationPct)}% fewer clicks on ${d.device.toLowerCase()} than on this site's other devices, so it needs someone to look at real ${d.device.toLowerCase()} results directly.`,
       },
-    })),
+    }];
+  }))).flat();
+
+  const candidates = [
+    ...lowCtrCandidates,
     ...decliningDevices.map((d) => ({
       id: `device-intelligence:declining:${d.device}`,
       evidence: { device: d.device, recent: d.recent, prior: d.prior, delta: d.delta },
@@ -73,9 +98,12 @@ export async function run({ siteId, start, end }) {
     const priority = priorityById.get(c.id);
     return makeFinding({
       id: c.id, evidence: c.evidence, whyItMatters: c.whyItMatters, priority,
-      recommendedAction: null,
+      recommendedAction: c.recommendedAction || null,
       // Declining-sessions candidates carry no reportOnly: a device losing
-      // sessions is a trend to read, not a defect on the site.
+      // sessions is a trend to read, not a defect on the site. A low-CTR
+      // candidate with a real recommendedAction (device-ctr-diagnosis.js
+      // found an evidenced, fixable cause) carries no reportOnly either —
+      // it's draftable, not blocked.
       reportOnly: c.reportOnly || null,
       expectedImpact: { label: impactFromPriority(priority), basis: 'computed', value: c.magnitude },
     });

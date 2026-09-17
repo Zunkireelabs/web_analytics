@@ -115,6 +115,25 @@ export async function listSiblingPages(siteId, prefix, { limit = 25 } = {}) {
   return rows.map((r) => r.page);
 }
 
+// Removes specific rows outright (unlike markOrphanedPages, which only
+// flags) — used only for page_inventory rows a deterministic check has
+// confirmed never belonged to this site at all (see
+// server/scripts/purge-spam-page-inventory.js), never for a page that's
+// merely unreachable by the current crawl.
+const DELETE_CHUNK_SIZE = 100;
+export async function deletePageInventoryRows(siteId, pages) {
+  let deleted = 0;
+  for (let i = 0; i < pages.length; i += DELETE_CHUNK_SIZE) {
+    const chunk = pages.slice(i, i + DELETE_CHUNK_SIZE);
+    const { rowCount } = await query(
+      'DELETE FROM page_inventory WHERE site_id = $1 AND page = ANY($2)',
+      [siteId, chunk]
+    );
+    deleted += rowCount;
+  }
+  return deleted;
+}
+
 export async function listPageInventory(siteId, { limit = 500 } = {}) {
   const { rows } = await query(
     'SELECT page, discovered_via, orphaned, first_seen_at, last_seen_at FROM page_inventory WHERE site_id = $1 ORDER BY last_seen_at DESC LIMIT $2',

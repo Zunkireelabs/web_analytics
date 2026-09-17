@@ -12,7 +12,33 @@ import assert from 'node:assert/strict';
 const resolve = (p) => new URL(p, import.meta.url).href;
 let siteFixture;
 mock.module(resolve('../store/read.js'), {
-  namedExports: { getSiteById: async () => siteFixture },
+  // getSearchPerformanceRange is dead weight here (never called by these
+  // tests) — present only because content-integrity-repair.js now
+  // transitively imports generators/faq.js -> lib/url-file-map.js ->
+  // agents/lib/site-domain.js, which imports it at module-load time; the
+  // real store/read.js is never used (llm.js is mocked below), so this only
+  // needs to satisfy the static import, same convention content-
+  // integrity.test.js already uses for the same transitive-import reason.
+  namedExports: { getSiteById: async () => siteFixture, getSearchPerformanceRange: async () => [] },
+});
+
+// content-integrity-repair.js now imports generators/faq.js (to reuse its
+// real-evidence FAQ generation for the 'faq-topic-mismatch'/
+// 'faq-cross-page-inconsistency' fixTypes below), which imports llm.js ->
+// the real `openai` package. Mocked here for the same reason faq.test.js
+// mocks it: once mock.module() has installed its hook anywhere in this
+// process, loading `openai` (-> formdata-node -> web-streams-polyfill)
+// breaks that package's conditional-exports resolution
+// ("does not provide an export named 'ReadableStream'"), reproducible with
+// no code from this repo involved at all — see faq.test.js's own comment.
+let llmItemsResult;
+mock.module(resolve('../llm.js'), {
+  namedExports: {
+    callLLMForJson: async () => {
+      if (llmItemsResult instanceof Error) throw llmItemsResult;
+      return llmItemsResult;
+    },
+  },
 });
 
 const { generate, meta } = await import('./content-integrity-repair.js');
@@ -435,6 +461,149 @@ describe('content-integrity-repair — typography-drift-scoped (page-scoped ance
       await assert.rejects(
         () => generate({ params: { page: 'https://example.com/x', fixType: 'typography-drift-scoped', ancestorClass: 'hiw-hero', tag: 'h1', expectedFontSize: '48px' } }),
         /could not find exactly one plain-length/i,
+      );
+    } finally { restore(); }
+  });
+});
+
+describe('content-integrity-repair — faq-topic-mismatch', () => {
+  test('rewrites visible question/answer text in place, preserving the exact surrounding markup, and resyncs the schema', async () => {
+    const html = `<html><body>${GROUNDING}
+      <title>Careers | Acme</title>
+      <script type="application/ld+json">{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is Acme Search?"},{"@type":"Question","name":"How does pricing work?"}]}</script>
+      <div id="faq"><button aria-controls="a1">What is Acme Search?</button><div id="a1">It's our product.</div><button aria-controls="a2">How does pricing work?</button><div id="a2">Tiered plans.</div></div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    llmItemsResult = [
+      { question: 'How do I apply for a job at Acme?', answer: 'Submit your resume through our careers portal.' },
+      { question: 'What is Acme\'s interview process like?', answer: 'A recruiter screen, then two rounds.' },
+    ];
+    try {
+      const { content, summary } = await generate({ params: { page: 'https://example.com/careers', fixType: 'faq-topic-mismatch' } });
+      assert.equal(content.fixType, 'faq-topic-mismatch');
+      assert.match(content.anchorHtml, /id="faq"/);
+      assert.match(content.replacement, /How do I apply for a job at Acme\?/);
+      assert.match(content.replacement, /Submit your resume through our careers portal\./);
+      assert.doesNotMatch(content.replacement, /What is Acme Search\?/, 'the old, mismatched question must be gone');
+      // Surrounding structure (the exact wrapper div, button attrs) is untouched.
+      assert.match(content.replacement, /<div id="faq"><button aria-controls="a1">/);
+      assert.equal(content.jsonLd.mainEntity.length, 2);
+      assert.equal(content.jsonLd.mainEntity[0].name, 'How do I apply for a job at Acme?');
+      assert.match(content.schemaOriginalRaw, /"What is Acme Search\?"/);
+      assert.match(summary, /rewrite/i);
+    } finally { restore(); llmItemsResult = undefined; }
+  });
+
+  test('refuses when an existing answer cannot be confidently extracted for every question', async () => {
+    const html = `<html><body>${GROUNDING}
+      <title>Careers | Acme</title>
+      <button>What is Acme Search?</button>
+      <button>How does pricing work?</button>
+      <p>Some unrelated paragraph, then another question follows.</p>
+      <button>Is this a third question?</button>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/careers', fixType: 'faq-topic-mismatch' } }),
+        /could not confidently extract/i,
+      );
+    } finally { restore(); }
+  });
+
+  test('refuses when there is no single unambiguous FAQ container (two separate FAQ-marked sections)', async () => {
+    const html = `<html><body>${GROUNDING}
+      <title>Careers | Acme</title>
+      <div class="faq-a"><button aria-controls="a1">What is X?</button><div id="a1">ans</div><button aria-controls="a2">How does Y work?</button><div id="a2">ans</div></div>
+      <div id="faq-b"><button aria-controls="b1">What is Z?</button><div id="b1">ans</div><button aria-controls="b2">Who does W?</button><div id="b2">ans</div></div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/careers', fixType: 'faq-topic-mismatch' } }),
+        /single, unambiguous container/i,
+      );
+    } finally { restore(); }
+  });
+
+  test('refuses when the model does not return the exact same number of items as the page currently has', async () => {
+    const html = `<html><body>${GROUNDING}
+      <title>Careers | Acme</title>
+      <div id="faq"><button aria-controls="a1">What is Acme Search?</button><div id="a1">It's our product.</div><button aria-controls="a2">How does pricing work?</button><div id="a2">Tiered plans.</div></div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    llmItemsResult = [{ question: 'How do I apply?', answer: 'Via our careers portal.' }]; // only 1, page has 2
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/careers', fixType: 'faq-topic-mismatch' } }),
+        /could not be safely placed/i,
+      );
+    } finally { restore(); llmItemsResult = undefined; }
+  });
+});
+
+describe('content-integrity-repair — faq-cross-page-inconsistency', () => {
+  test('requires question and correctAnswer', async () => {
+    const restore = stubFetchHtml(`<html><body>${GROUNDING}</body></html>`);
+    try {
+      await assert.rejects(
+        () => generate({ params: { page: 'https://example.com/a', fixType: 'faq-cross-page-inconsistency' } }),
+        /question and correctAnswer are required/i,
+      );
+    } finally { restore(); }
+  });
+
+  test('corrects only the one matching answer in place, leaving the question and every other Q&A pair untouched, and resyncs the schema', async () => {
+    const html = `<html><body>${GROUNDING}
+      <script type="application/ld+json">{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"When do you ship?"},{"@type":"Question","name":"Do you ship internationally?"}]}</script>
+      <div id="faq">
+        <button aria-controls="a1">When do you ship?</button><div id="a1">Within 5 business days.</div>
+        <button aria-controls="a2">Do you ship internationally?</button><div id="a2">Yes, worldwide.</div>
+      </div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    try {
+      const { content, summary } = await generate({
+        params: {
+          page: 'https://example.com/b', fixType: 'faq-cross-page-inconsistency',
+          question: 'when do you ship?', correctAnswer: 'Within 2 business days.',
+        },
+      });
+      assert.equal(content.fixType, 'faq-cross-page-inconsistency');
+      assert.match(content.replacement, /Within 2 business days\./);
+      assert.doesNotMatch(content.replacement, /Within 5 business days\./);
+      assert.match(content.replacement, /Yes, worldwide\./, 'the other, unrelated Q&A pair must be untouched');
+      assert.equal(content.jsonLd.mainEntity[0].acceptedAnswer.text, 'Within 2 business days.');
+      assert.match(summary, /correct/i);
+    } finally { restore(); }
+  });
+
+  test('refuses when the target question is no longer visible on the page', async () => {
+    const html = `<html><body>${GROUNDING}
+      <div id="faq"><button aria-controls="a1">Do you ship internationally?</button><div id="a1">Yes.</div><button aria-controls="a2">Another question here?</button><div id="a2">ans</div></div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({
+          params: { page: 'https://example.com/b', fixType: 'faq-cross-page-inconsistency', question: 'when do you ship?', correctAnswer: 'Within 2 business days.' },
+        }),
+        /no longer visible/i,
+      );
+    } finally { restore(); }
+  });
+
+  test('refuses when the page\'s answer already matches the correct text — nothing to fix', async () => {
+    const html = `<html><body>${GROUNDING}
+      <div id="faq"><button aria-controls="a1">When do you ship?</button><div id="a1">Within 2 business days.</div><button aria-controls="a2">Another question here?</button><div id="a2">ans</div></div>
+    </body></html>`;
+    const restore = stubFetchHtml(html);
+    try {
+      await assert.rejects(
+        () => generate({
+          params: { page: 'https://example.com/b', fixType: 'faq-cross-page-inconsistency', question: 'when do you ship?', correctAnswer: 'Within 2 business days.' },
+        }),
+        /already matches/i,
       );
     } finally { restore(); }
   });

@@ -48,6 +48,7 @@ import { syncWatchlist } from './agents/lib/watchlist.js';
 import { discoverFromSitemaps, crawlSite } from './agents/lib/site-discovery.js';
 import { getSearchPerformanceRange } from './store/read.js';
 import { ownDomains, filterOwnDomainPages } from './agents/lib/site-domain.js';
+import { isForeignPlatformSpamUrl } from './agents/lib/index-bloat.js';
 import { upsertPageInventoryBatch, getLastDiscoveryAt, markOrphanedPages } from './store/page-inventory.js';
 import { runDueVerifications } from './agents/lib/fix-verification.js';
 import { siteHasUsableDesignProfile, sitePageUrl, getDesignProfile } from './implementers/lib/design-drift.js';
@@ -669,7 +670,13 @@ export async function runSiteDiscoveryIfDue(site, {
     getSearchPerformanceRangeFn(site.id, start, end, 'page', 200),
   ]);
   const domain = ownDomains(site);
-  const gscPages = filterOwnDomainPages(gscPagesRaw, domain);
+  // Own-domain match alone isn't enough — a prior owner's legacy platform
+  // (e.g. chayceproperties.com's old ASP.NET storefront) shares the same
+  // domain and passes that check, so it also needs the deterministic
+  // spam-URL check (index-bloat.js) that technical-seo.js's own
+  // legacy-index-spam finding already uses, applied here so those URLs
+  // never enter page_inventory as 'gsc' pages in the first place.
+  const gscPages = filterOwnDomainPages(gscPagesRaw, domain).filter((p) => !isForeignPlatformSpamUrl(p.dim_value));
 
   await upsertPageInventoryBatchFn(site.id, sitemapUrls, 'sitemap');
   await upsertPageInventoryBatchFn(site.id, crawledUrls, 'crawl');

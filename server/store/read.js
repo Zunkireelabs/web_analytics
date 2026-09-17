@@ -496,6 +496,34 @@ export async function getSearchPerformanceForPages(siteId, start, end, pages) {
   return rows;
 }
 
+// The pages actually driving one specific device's real search volume,
+// ranked by impressions — the missing piece device-ctr-diagnosis.js needs
+// to go from "this DEVICE's CTR is low" (device-intelligence.js's own
+// sitewide gsc_breakdown aggregate) to "these are the real PAGES behind it,
+// worth inspecting for a page-level cause." gsc_query_page already stores a
+// device column per row (ingest/gsc.js's 4-dim query/page/device/country
+// pull); nothing before this read it grouped by (page, device) — every
+// existing device query (getSearchPerformanceRange, getTopDeviceCountryPerQuery)
+// aggregates by query or by device alone, never surfacing which pages sit
+// behind a device's own numbers.
+export async function getPagePerformanceByDevice(siteId, start, end, device, limit = 10) {
+  const { rows } = await query(
+    `SELECT page,
+            SUM(clicks) AS clicks,
+            SUM(impressions) AS impressions,
+            CASE WHEN SUM(impressions) = 0 THEN 0
+                 ELSE ROUND(SUM(clicks)::numeric / SUM(impressions), 5) END AS ctr
+       FROM gsc_query_page
+      WHERE site_id = $1 AND device = $2 AND date BETWEEN $3 AND $4
+      GROUP BY page
+     HAVING SUM(impressions) > 0
+      ORDER BY impressions DESC
+      LIMIT $5`,
+    [siteId, device, start, end, limit]
+  );
+  return rows.map((r) => ({ page: r.page, clicks: Number(r.clicks), impressions: Number(r.impressions), ctr: Number(r.ctr) }));
+}
+
 // Top movers for a ga4_breakdown dimension (e.g. 'country'): change in
 // sessions, recent period vs an equal-length prior period. Same gainers/
 // droppers shape as getTopMovers, but against GA4 visitor data instead of

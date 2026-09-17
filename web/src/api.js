@@ -331,6 +331,11 @@ export const api = {
     generators: (siteId) => req(withSite('/action-center/generators', siteId)),
     generate: (generatorId, params, source, findingId, siteId) => req(withSite('/action-center/generate', siteId), { method: 'POST', body: JSON.stringify({ generatorId, params, source, findingId }) }),
     drafts: (filters = {}, siteId) => req(withSite(`/action-center/drafts?${new URLSearchParams(filters)}`, siteId)),
+    // Exact tab-badge counts (total/nonImplemented/implemented/abandoned/
+    // submittedForApproval/implementedThisWeek) — independent of drafts()'s
+    // own cap on the unfiltered board load, so a badge is never wrong just
+    // because the list underneath it was capped.
+    draftCounts: (siteId) => req(withSite('/action-center/drafts/counts', siteId)),
     draft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId)),
     saveDraft: (id, content, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'PUT', body: JSON.stringify({ content }) }),
     deleteDraft: (id, siteId) => req(withSite(`/action-center/drafts/${id}`, siteId), { method: 'DELETE' }),

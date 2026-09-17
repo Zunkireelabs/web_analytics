@@ -15,7 +15,7 @@ mock.module(resolve('../../store/read.js'), {
   },
 });
 
-const { decideWinner, allPairsOverlapSubstantially, fetchQuerySets } = await import('./duplicate-evidence.js');
+const { decideWinner, allPairsOverlapSubstantially, fetchQuerySets, isLikelyFunctionalQueryParam, textSimilarity } = await import('./duplicate-evidence.js');
 
 beforeEach(() => {
   perfRowsByPage = new Map();
@@ -71,6 +71,87 @@ describe('decideWinner', () => {
     assert.equal(result.winner, null);
   });
 
+  describe('split-traffic escalation signals', () => {
+    test('canonical agreement wins outright even without query overlap', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 8, impressions: 90 }];
+      const result = await decideWinner(traffic, {
+        siteId: 1, start: 's', end: 'e',
+        signals: { canonicalByPage: new Map([['/b', '/a']]) },
+      });
+      assert.equal(result.confidence, 'high');
+      assert.equal(result.winner.page, '/a');
+      assert.equal(result.decision, 'consolidate');
+      assert.equal(result.decisionReason, 'canonical-tag-agreement');
+    });
+
+    test('a functional (non-tracking) query parameter blocks consolidation and is decided leave-both, not punted', async () => {
+      const traffic = [{ page: '/a?package=gold', clicks: 10, impressions: 100 }, { page: '/b', clicks: 8, impressions: 90 }];
+      const result = await decideWinner(traffic, {
+        siteId: 1, start: 's', end: 'e',
+        signals: { functionalParamPages: new Set(['/a?package=gold']) },
+      });
+      assert.equal(result.winner, null);
+      assert.equal(result.decision, 'leave-both-independent-intent');
+      assert.equal(result.decisionReason, 'functional-query-parameter');
+    });
+
+    test('genuinely different page purposes are decided leave-both, never used to force a merge', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 8, impressions: 90 }];
+      const result = await decideWinner(traffic, {
+        siteId: 1, start: 's', end: 'e',
+        signals: { pagePurposeByPage: new Map([['/a', 'blog'], ['/b', 'product']]) },
+      });
+      assert.equal(result.winner, null);
+      assert.equal(result.decision, 'leave-both-independent-intent');
+      assert.equal(result.decisionReason, 'different-page-purpose');
+    });
+
+    test('same page purpose across candidates never blocks a later signal from deciding', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 3, impressions: 30 }];
+      const result = await decideWinner(traffic, {
+        siteId: 1, start: 's', end: 'e',
+        signals: { pagePurposeByPage: new Map([['/a', 'blog'], ['/b', 'blog']]), contentSimilarity: 0.9 },
+      });
+      assert.equal(result.decision, 'consolidate');
+      assert.equal(result.winner.page, '/a');
+    });
+
+    test('high content similarity plus a real click margin consolidates even without query overlap', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 3, impressions: 30 }];
+      const result = await decideWinner(traffic, { siteId: 1, start: 's', end: 'e', signals: { contentSimilarity: 0.85 } });
+      assert.equal(result.confidence, 'high');
+      assert.equal(result.winner.page, '/a');
+      assert.equal(result.decision, 'consolidate');
+      assert.equal(result.decisionReason, 'content-similarity-plus-click-margin');
+    });
+
+    test('high content similarity never picks a winner from a tied click margin without a real internal-link difference', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 10, impressions: 100 }];
+      const result = await decideWinner(traffic, { siteId: 1, start: 's', end: 'e', signals: { contentSimilarity: 0.9 } });
+      assert.equal(result.winner, null);
+      assert.equal(result.confidence, 'medium');
+    });
+
+    test('a tied click margin with high content similarity breaks the tie using a real internal-link count difference', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 10, impressions: 100 }];
+      const result = await decideWinner(traffic, {
+        siteId: 1, start: 's', end: 'e',
+        signals: { contentSimilarity: 0.9, internalLinkCountByPage: new Map([['/a', 12], ['/b', 2]]) },
+      });
+      assert.equal(result.winner.page, '/a');
+      assert.equal(result.decision, 'consolidate');
+      assert.equal(result.decisionReason, 'content-similarity-plus-internal-links');
+    });
+
+    test('with no additional signals available at all, split traffic still stays a human reportOnly decision', async () => {
+      const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 3, impressions: 30 }];
+      const result = await decideWinner(traffic, { siteId: 1, start: 's', end: 'e' });
+      assert.equal(result.winner, null);
+      assert.equal(result.decision, null);
+      assert.equal(result.confidence, 'medium');
+    });
+  });
+
   test('three-way group: overlap must hold for EVERY pair, not just the strongest one', async () => {
     const traffic = [
       { page: '/a', clicks: 10, impressions: 100 },
@@ -97,6 +178,41 @@ describe('allPairsOverlapSubstantially', () => {
   test('false below the minimum shared-query count even at 100% ratio of a tiny set', () => {
     const sets = new Map([['/a', new Set(['q1'])], ['/b', new Set(['q1', 'q2', 'q3', 'q4', 'q5'])]]);
     assert.equal(allPairsOverlapSubstantially(sets, ['/a', '/b']), false);
+  });
+});
+
+describe('isLikelyFunctionalQueryParam', () => {
+  test('false for no query string', () => {
+    assert.equal(isLikelyFunctionalQueryParam('https://example.com/a'), false);
+  });
+
+  test('false when every param is known tracking noise', () => {
+    assert.equal(isLikelyFunctionalQueryParam('https://example.com/a?utm_source=x&utm_medium=y&gclid=z'), false);
+  });
+
+  test('true when any param falls outside the tracking allowlist', () => {
+    assert.equal(isLikelyFunctionalQueryParam('https://example.com/a?package=gold'), true);
+    assert.equal(isLikelyFunctionalQueryParam('https://example.com/a?utm_source=x&page=2'), true);
+  });
+
+  test('false for an unparseable (non-absolute) URL — fails safe rather than assuming functional', () => {
+    assert.equal(isLikelyFunctionalQueryParam('/a?package=gold'), false);
+  });
+});
+
+describe('textSimilarity', () => {
+  test('1 for identical text', () => {
+    assert.equal(textSimilarity('hello world', 'hello world'), 1);
+  });
+
+  test('0 when either side is empty', () => {
+    assert.equal(textSimilarity('', 'hello'), 0);
+    assert.equal(textSimilarity('hello', ''), 0);
+  });
+
+  test('partial overlap is between 0 and 1', () => {
+    const sim = textSimilarity('the quick brown fox', 'the slow brown dog');
+    assert.ok(sim > 0 && sim < 1);
   });
 });
 

@@ -32,7 +32,7 @@ import { evaluateApprovalGate } from './lib/approval-gate.js';
 import { validateRendering, validateRenderingBatch, checkClientBuildStatus } from '../implementers/lib/rendering-gate.js';
 import { reviewPrChecks, generatedFilePaths, AGENT_REVIEW_STATE } from '../implementers/lib/pr-self-review.js';
 import {
-  createDraft, getDraftByFindingId, listDrafts, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
+  createDraft, getDraftByFindingId, listDrafts, listDraftsForBoard, countDraftsByLifecycle, getDraft, updateDraft, deleteDraft, submitDraftForApproval, approveDraft,
   markDraftImplemented, markDraftAbandoned, markDraftRolledBack, requestDraftRevision, markDraftBranchPushed, markDraftPrOpened, markDraftAwaitingPublish, markCmsDraftPublished, recordAgentReviewState, recordPrState, recordApplyFailure, recordMergeFailure,
   recordGscNotification, recordValidationStatus, countSiblingDraftsOnBranch, MERGE_MANDATORY_TYPES, getPendingDraftFilePaths, getDraftedFindingIds,
 } from '../store/drafts.js';
@@ -57,6 +57,7 @@ import { runSiteDiscoveryIfDue } from '../job.js';
 import { notifyOfPageChange } from '../ingest/gsc-technical.js';
 import { markQueryDrafted } from '../store/growth-queries.js';
 import { safeMessage, sanitizeForCustomer } from '../lib/errors.js';
+import { siteOriginFor } from '../agents/lib/site-domain.js';
 
 // Best-effort post-merge Search Console notification (multi-tenant
 // refactor Part 3) — never blocks or fails the caller's response, since
@@ -704,8 +705,26 @@ const ACTION_CENTER_HIDDEN_ACTION_TYPES = new Set(['geo-audit']);
 router.get('/action-center/drafts', async (req, res, next) => {
   try {
     const { actionType, status } = req.query;
-    const drafts = await listDrafts(req.siteId, { actionType, status });
+    // The unfiltered "whole board" load (neither param given — the
+    // dashboard's own default fetch) is the one that grew without bound as
+    // autonomous shipping accumulated history; see listDraftsForBoard's own
+    // comment for the real incident. Any actual filter (actionType/status)
+    // is already naturally bounded by that filter, so it keeps the exact
+    // unbounded behavior it always had — explicit history/export use is
+    // unaffected.
+    const drafts = (actionType || status)
+      ? await listDrafts(req.siteId, { actionType, status })
+      : await listDraftsForBoard(req.siteId);
     res.json(actionType ? drafts : drafts.filter((d) => !ACTION_CENTER_HIDDEN_ACTION_TYPES.has(d.action_type)));
+  } catch (e) { next(e); }
+});
+
+// Exact tab-badge counts, independent of listDraftsForBoard's own cap —
+// see countDraftsByLifecycle's own comment for why these must never be
+// derived from a possibly-capped list.
+router.get('/action-center/drafts/counts', async (req, res, next) => {
+  try {
+    res.json(await countDraftsByLifecycle(req.siteId));
   } catch (e) { next(e); }
 });
 
@@ -1828,21 +1847,6 @@ router.post('/action-center/drafts/:id/approve', async (req, res, next) => {
 // refresh (never fails the caller's response — the draft is already
 // correctly marked implemented at this point; runSiteDiscoveryIfDue is
 // already cheap/idempotent when a real discovery isn't due yet).
-// The public origin a site's live pages are served from — the anchor for
-// site-level verification targets (/llms.txt, /robots.txt, /sitemap.xml) that
-// have no per-page URL of their own. Returns null rather than guessing when a
-// site has no domain configured, which verificationMethodFor turns into an
-// explicit 'unverifiable' reason instead of a fabricated check.
-function siteOriginFor(site) {
-  const raw = site?.website_domain || site?.gsc_property?.replace(/^sc-domain:/, '') || null;
-  if (!raw) return null;
-  try {
-    return new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).origin;
-  } catch {
-    return null;
-  }
-}
-
 // Records that a human's merge happened, and what commit it produced, so the
 // question "did this actually reach the live site?" has something to hang off.
 // Deliberately NOT a claim that anything deployed: the row starts 'pending'
@@ -2036,6 +2040,12 @@ export async function pushDraftBranch(siteId, draftId, { renderMode } = {}) {
     throw httpError(422, result.error, {
       reason: result.reason, confidence: result.confidence, suggestedMode: result.suggestedMode, attempted: result.attempted,
       missingClasses: result.missingClasses, componentKey: result.componentKey, unresolved: result.unresolved,
+      // result.stale (currently only set by backend.js's confirmed-absent
+      // broken-link case) means the implementer found live evidence this
+      // recommendation's own premise no longer holds — auto-remediation.js's
+      // stale-refusal handling closes it instead of leaving it to re-refuse
+      // forever, same as a generator throwing stale:true at generate time.
+      stale: result.stale,
     });
   }
   // Provenance for the reviewer: what actually renders this page, whether

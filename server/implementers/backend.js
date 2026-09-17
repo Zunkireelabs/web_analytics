@@ -24,6 +24,7 @@ import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepa
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
 import { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } from './lib/blog-image-inject.js';
+import { computeSitemapExcludeMerge, pushSitemapExcludeBranch, previewLiveSitemapExclude } from './lib/sitemap-frontmatter-exclude-inject.js';
 import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, findScalarFieldRange, removeArrayItemByField, spliceScalarField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 
@@ -31,7 +32,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -180,6 +181,54 @@ async function previewLiveSecurityHeaders(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
   }
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', content }] };
+}
+
+// Real, hash-comment-marker splice for the nginx response-compression block
+// — same mechanism as computeSecurityHeadersMerge just above (its own
+// `# SEOAI:COMPRESSION:START/END` marker pair, splices draft.content.nginxBlock
+// verbatim, same brace-balance guardrail since there's still no way to run a
+// real `nginx -t` here). Kept as its own dedicated marker rather than reusing
+// SECURITY-HEADERS: compression and security headers are independent
+// concerns a site could onboard one without the other, and splicing two
+// unrelated features through one shared marker region would make either
+// draft silently clobber whatever the other last wrote there.
+async function computeCompressionMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const spliced = spliceHashBlock(file.content, 'COMPRESSION', draft.content.nginxBlock);
+  if (!spliced.ok) return spliced;
+  const validated = validateNginxBraces(spliced.newContent);
+  if (!validated.ok) return validated;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: spliced.newContent,
+    changedRegions: [{ field: 'nginxBlock', markerName: 'COMPRESSION', before: spliced.changedRegion.before, after: spliced.changedRegion.after }],
+  };
+}
+
+async function pushCompressionBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeCompressionMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveCompression(site, draft) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  const content = getHashMarkerContent(file.content, 'COMPRESSION');
+  if (content === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:COMPRESSION marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'COMPRESSION', content }] };
 }
 
 // Not marker-based (no human ever places a marker for this — it's a single
@@ -431,7 +480,7 @@ async function previewLiveViewport(site, draft) {
 // href match instead (see href-rewrite-inject.js). `no-match` is an honest
 // failure (link already fixed/removed since detection, or lives in a
 // shared partial outside this page's own template file) — never guessed.
-async function computeRedirectFixMerge(site, draft, beforeRef) {
+export async function computeRedirectFixMerge(site, draft, beforeRef) {
   const filePath = resolveFile(site, draft.content.page);
   if (!filePath) {
     return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches "${draft.content.page}" — add one via \`npm run connect-repo\` before this can be applied.` };
@@ -932,11 +981,31 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   // as "this href is hardcoded nowhere in the repo" — reported as its own
   // reason so it classifies as an external/coverage limitation rather than
   // a confident per-item defect (attempt-classification.js).
+  //
+  // confirmedAbsent (same condition summarizeBrokenLinkAttempts computes
+  // internally for its own trailer sentence, duplicated here because THIS
+  // caller needs the boolean itself, not just prose): a full, unbounded
+  // repo search found the href hardcoded nowhere at all. That is proof the
+  // recommendation's own premise (a link on this page still points here)
+  // is stale, not evidence of an unresolvable defect — same "the generator
+  // discovered live evidence the premise is gone" shape schema.js already
+  // uses `stale: true` for. Without this, auto-remediation.js's refusal
+  // counter only ever sees the generic 'no-match' reason code (never the
+  // descriptive sentence this flag is derived from) and can't tell "this
+  // citation is genuinely gone, close it" apart from "found candidate
+  // files but couldn't safely strip any of them, still stuck" — so a
+  // confirmed-resolved finding sat re-refusing itself forever instead of
+  // closing. Kept as a DISTINCT reason code (not the same 'no-match') so
+  // it stays gone from a link that's simply currently unresolvable.
+  const searchAttempts = attempted.filter((a) => a.matchedVia === 'repo-local-search');
+  const searchError = searchAttempts.find((a) => a.reason === 'repo-local-search-error');
+  const confirmedAbsent = !coverageIncomplete && !searchError && searchAttempts.length === 0;
   return {
     ok: false,
     reason: attempted.length && attempted.every((a) => a.reason === 'no-file-mapping')
       ? 'no-file-mapping'
-      : coverageIncomplete ? 'search-coverage-incomplete' : 'no-match',
+      : coverageIncomplete ? 'search-coverage-incomplete' : confirmedAbsent ? 'confirmed-absent' : 'no-match',
+    stale: confirmedAbsent,
     error: coverageIncomplete
       ? `${summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete)} The repository has more real candidate files than a bounded search can safely scan in one pass, and none of the scanned files matched — this could not be fully verified as absent from the repo.`
       : summarizeBrokenLinkAttempts(sourcePages, href, attempted, coverageIncomplete),
@@ -1272,6 +1341,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
   if (draft.action_type === 'sitemap-removal') return pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'compression-nginx') return pushCompressionBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return pushSoft404NginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
@@ -1281,6 +1351,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return pushContentIntegrityBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'sitemap-frontmatter-exclude') return pushSitemapExcludeBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'blog-image') return pushBlogImageBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
@@ -1326,6 +1397,7 @@ export async function preview(site, draft, opts = {}) {
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'sitemapXml', content: file?.content || '' }] };
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
+    if (draft.action_type === 'compression-nginx') return previewLiveCompression(site, draft);
     if (draft.action_type === 'sitemap-removal') return previewLiveSitemapRemoval(site, draft);
     if (draft.action_type === 'soft-404-nginx') return previewLiveSoft404Nginx(site, draft);
     if (draft.action_type === 'redirect-chain-nginx') return previewLiveRedirectChainNginx(site, draft);
@@ -1341,6 +1413,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
     if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
     if (draft.action_type === 'content-integrity-repair') return previewLiveContentIntegrity(site, draft);
+    if (draft.action_type === 'sitemap-frontmatter-exclude') return previewLiveSitemapExclude(site, draft);
     if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
     if (draft.action_type === 'blog-image') return previewLiveBlogImage(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
@@ -1366,6 +1439,7 @@ export async function preview(site, draft, opts = {}) {
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.sitemapXml };
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (draft.action_type === 'compression-nginx') return computeCompressionMerge(site, draft, beforeRef);
   if (draft.action_type === 'sitemap-removal') return computeSitemapRemovalMerge(site, draft, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return computeSoft404NginxMerge(site, draft, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return computeRedirectChainNginxMerge(site, draft, beforeRef);
@@ -1381,6 +1455,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return computeContentIntegrityMerge(site, draft, beforeRef);
+  if (draft.action_type === 'sitemap-frontmatter-exclude') return computeSitemapExcludeMerge(site, draft, beforeRef);
   if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
   if (draft.action_type === 'blog-image') return computeBlogImageMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);

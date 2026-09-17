@@ -77,14 +77,16 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
     // `layout: base.njk` on a directory whose pages declare none (or declare a
     // different one) drops the new page out of its template exactly the way it
     // did on zunkireelabs.com's blog. resolveNewContentLayout stays as the
-    // fallback for a directory with no readable siblings. No fieldNames: this
-    // renderer emits nothing but layout/permalink/title/description, none of
-    // which is aliased per site.
+    // fallback for a directory with no readable siblings. fieldNames is also
+    // threaded through now (renderLandingPageBody only ever WRITES an image
+    // field when fieldNames.featuredImage came from real sibling evidence —
+    // see its own comment — so a directory with no image convention still
+    // gets exactly today's behavior).
     const contract = await deriveNewContentContract(site, {
       ...resolveNewContentTargetConfig(site, 'landing-page'),
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'landing-page') : contract.layout;
-    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderLandingPageBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
   }
 
   if (actionType === 'blog-outline') {
@@ -172,7 +174,7 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       ...resolveNewContentTargetConfig(site, 'direct-answer'),
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
-    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout }), contentFormat: 'markdown' };
+    return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
   }
 
   // No permalink for a translation: its target is a language-suffixed sibling
