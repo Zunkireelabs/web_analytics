@@ -42,6 +42,8 @@ const SITE_LEVEL_GENERATOR_IDS = new Set([
   'llms-txt', 'security-headers', 'html-lang', 'sitemap', 'robots-fix',
   // Exactly one real nginx config per site, same as security-headers above.
   'soft-404-nginx',
+  // Same nginx config, own hash-marker region — still one row per site.
+  'compression-nginx',
   // Exactly one robots.txt per site, same as robots-fix above — a site
   // either has one or doesn't, so this can never collide across pages.
   'robots-bootstrap',
