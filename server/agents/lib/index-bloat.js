@@ -29,6 +29,19 @@ function hasJunkNumericParam(pathname, search) {
   return `${pathname}?${key}=*`;
 }
 
+// Plain boolean over a single URL, reusing the exact same two rules above —
+// for callers that just need to keep a URL out of page_inventory or an
+// agent's batch (site discovery, candidate-pages.js) rather than build a
+// grouped-by-pattern report for a finding. Never used to delete/orphan
+// anything on its own; see job.js and candidate-pages.js for how each
+// caller actually applies it.
+export function isForeignPlatformSpamUrl(pageUrl) {
+  let url;
+  try { url = new URL(pageUrl); } catch { return false; }
+  if (FOREIGN_PLATFORM_EXTENSIONS.test(url.pathname)) return true;
+  return Boolean(hasJunkNumericParam(url.pathname, url.search));
+}
+
 // pages: rows from getGscBreakdownRange(siteId, start, end, 'page', limit) —
 // { dim_value, impressions, clicks, ... }. Returns one entry per distinct
 // pattern found, each carrying real sample URLs (never fabricated) so the
