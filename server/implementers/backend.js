@@ -32,7 +32,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx', 'compression-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -181,6 +181,54 @@ async function previewLiveSecurityHeaders(site, draft) {
     return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:SECURITY-HEADERS marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
   }
   return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'SECURITY-HEADERS', content }] };
+}
+
+// Real, hash-comment-marker splice for the nginx response-compression block
+// — same mechanism as computeSecurityHeadersMerge just above (its own
+// `# SEOAI:COMPRESSION:START/END` marker pair, splices draft.content.nginxBlock
+// verbatim, same brace-balance guardrail since there's still no way to run a
+// real `nginx -t` here). Kept as its own dedicated marker rather than reusing
+// SECURITY-HEADERS: compression and security headers are independent
+// concerns a site could onboard one without the other, and splicing two
+// unrelated features through one shared marker region would make either
+// draft silently clobber whatever the other last wrote there.
+async function computeCompressionMerge(site, draft, beforeRef) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) {
+    return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured — set it via `npm run connect-repo` before this can be applied.' };
+  }
+  const file = await getFileContent(site, path, beforeRef);
+  if (!file) {
+    return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${beforeRef}" — confirm the path in url_file_map is correct.` };
+  }
+  const conflict = detectConflictMarkers(file.content);
+  if (conflict) return conflict;
+  const spliced = spliceHashBlock(file.content, 'COMPRESSION', draft.content.nginxBlock);
+  if (!spliced.ok) return spliced;
+  const validated = validateNginxBraces(spliced.newContent);
+  if (!validated.ok) return validated;
+  return {
+    ok: true, filePath: path, oldContent: file.content, newContent: spliced.newContent,
+    changedRegions: [{ field: 'nginxBlock', markerName: 'COMPRESSION', before: spliced.changedRegion.before, after: spliced.changedRegion.after }],
+  };
+}
+
+async function pushCompressionBranch(site, draft, batchInfo, beforeRef) {
+  const merged = await computeCompressionMerge(site, draft, beforeRef);
+  if (!merged.ok) return merged;
+  return pushDraftBranch(site, draft, [{ path: merged.filePath, content: merged.newContent }], batchInfo);
+}
+
+async function previewLiveCompression(site, draft) {
+  const path = resolveSiteRootFile(site, 'nginxConfig');
+  if (!path) return { ok: false, reason: 'no-file-mapping', error: 'site.url_file_map.siteRoot.nginxConfig is not configured.' };
+  const file = await getFileContent(site, path, baseBranch(site));
+  if (!file) return { ok: false, reason: 'file-not-found', error: `${path} does not exist on branch "${baseBranch(site)}".` };
+  const content = getHashMarkerContent(file.content, 'COMPRESSION');
+  if (content === null) {
+    return { ok: false, reason: 'no-insertion-marker', error: `No SEOAI:COMPRESSION marker found in ${path} — it may have been removed or overwritten since this draft was implemented.` };
+  }
+  return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'nginxBlock', markerName: 'COMPRESSION', content }] };
 }
 
 // Not marker-based (no human ever places a marker for this — it's a single
@@ -1273,6 +1321,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'sitemap') return pushSitemapBranch(site, draft, batchInfo);
   if (draft.action_type === 'sitemap-removal') return pushSitemapRemovalBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'security-headers') return pushSecurityHeadersBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'compression-nginx') return pushCompressionBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return pushSoft404NginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return pushRedirectChainNginxBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'robots-fix') return pushRobotsFixBranch(site, draft, batchInfo, beforeRef);
@@ -1328,6 +1377,7 @@ export async function preview(site, draft, opts = {}) {
       return { ok: true, filePath: path, live: true, changedRegions: [{ field: 'sitemapXml', content: file?.content || '' }] };
     }
     if (draft.action_type === 'security-headers') return previewLiveSecurityHeaders(site, draft);
+    if (draft.action_type === 'compression-nginx') return previewLiveCompression(site, draft);
     if (draft.action_type === 'sitemap-removal') return previewLiveSitemapRemoval(site, draft);
     if (draft.action_type === 'soft-404-nginx') return previewLiveSoft404Nginx(site, draft);
     if (draft.action_type === 'redirect-chain-nginx') return previewLiveRedirectChainNginx(site, draft);
@@ -1369,6 +1419,7 @@ export async function preview(site, draft, opts = {}) {
     return { ok: true, filePath: path, oldContent: file?.content || '', newContent: draft.content.sitemapXml };
   }
   if (draft.action_type === 'security-headers') return computeSecurityHeadersMerge(site, draft, beforeRef);
+  if (draft.action_type === 'compression-nginx') return computeCompressionMerge(site, draft, beforeRef);
   if (draft.action_type === 'sitemap-removal') return computeSitemapRemovalMerge(site, draft, beforeRef);
   if (draft.action_type === 'soft-404-nginx') return computeSoft404NginxMerge(site, draft, beforeRef);
   if (draft.action_type === 'redirect-chain-nginx') return computeRedirectChainNginxMerge(site, draft, beforeRef);

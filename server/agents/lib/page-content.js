@@ -1162,6 +1162,7 @@ const GENERATOR_EFFORT = {
   'blog-image': 'Low',
   'soft-404-nginx': 'Low',
   'redirect-chain-nginx': 'Low',
+  'compression-nginx': 'Low',
   'sitemap-removal': 'Low',
   'sitemap-frontmatter-exclude': 'Low',
 };

@@ -200,6 +200,14 @@ const SAFE_GENERATOR_IDS = new Set([
   // observed — never trusts a stale hop, never guesses which of two
   // matching rules is "the" real one.
   'redirect-chain-nginx',
+  // Same idempotent hash-marker splice as security-headers just above (both
+  // fixed-syntax, deterministic nginx blocks spliced into their own
+  // dedicated `# SEOAI:...:START/END` marker region, no LLM, no
+  // exact-match-or-refuse complexity beyond the shared brace-balance
+  // guardrail) — technical-seo.js only ever recommends this generator when
+  // the site's own tracked nginx config exists AND a real fetched response
+  // was observed missing Content-Encoding, never guessed.
+  'compression-nginx',
   // All-or-nothing exact-match-or-refuse (implementers/lib/sitemap-removal-
   // inject.js): every requested URL must still be found as an exact
   // <url><loc>...</loc></url> entry in the LIVE sitemap at apply time, or

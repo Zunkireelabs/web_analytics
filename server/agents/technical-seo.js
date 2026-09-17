@@ -20,7 +20,15 @@ export const meta = {
   name: 'Technical SEO Agent',
   description: 'Checks real Google index status, Core Web Vitals, technical page health, and broken links/redirects — whether Google can actually see and serve your pages well.',
   category: 'seo',
-  version: 6,
+  version: 7,
+  // v7 makes the compression finding (added in v4, see below) draftable:
+  // when the site tracks its own nginx config (url_file_map.siteRoot.
+  // nginxConfig — the same file security-headers.js/redirect-chain.js
+  // already patch), this now hands off to a real generator
+  // (compression-nginx, implementers/backend.js's computeCompressionMerge)
+  // instead of always staying recommendedAction: null. Sites that haven't
+  // onboarded that marker yet still get the real gap reported, just as
+  // reportOnly instead of a silent drop — see compressionFinding() below.
   // v6 adds two real, previously-uncovered checks: a missing robots.txt
   // (now draftable via the new robots-bootstrap generator, unlike
   // robots-fix.js which needs an existing file to splice into) and legacy
@@ -40,10 +48,14 @@ export const meta = {
   // cross-check against the sibling audit tool: per-page response
   // compression (Content-Encoding: gzip/br/deflate) and site-level
   // HTTPS/SSL enablement (does the host serve HTTPS at all, and does a
-  // plain http:// request actually redirect there). Both informational —
-  // recommendedAction stays null, since fixing either is a server/CDN/DNS
-  // infra change (enabling gzip, issuing a cert, adding a redirect rule)
-  // this tool has no safe way to draft as a PR.
+  // plain http:// request actually redirect there). Both were informational
+  // at the time — recommendedAction stayed null, since fixing either is a
+  // server/CDN/DNS infra change (enabling gzip, issuing a cert, adding a
+  // redirect rule) this tool had no safe way to draft as a PR. Compression
+  // became draftable in v7 (see above) once the same nginx-config-tracking
+  // mechanism security-headers.js already used was wired in here; HTTPS
+  // enablement (a certificate/DNS change, not a file this platform can
+  // write) is unaffected and still stays informational.
   // v3 splits layout shift (CLS) out of the generic Core Web Vitals buckets
   // into its own `technical-seo:site:layout-shift` finding — a pre-v3 row's
   // findings won't have it.
@@ -83,6 +95,47 @@ function sumImpressions(pages) {
 // generators/schema.js only validates field VALUES, never the @type, so that
 // wrong type could be drafted, approved and merged into a tenant's live site
 // with no human ever reading it.
+// Uncompressed responses are usually one shared server/CDN config gap, not
+// a per-page authoring choice, so this stays one "N of M checked pages"
+// finding, not a card per page — same shape as missingSchemaFinding above.
+//
+// Draftable exactly when this site tracks its own nginx config
+// (site.url_file_map.siteRoot.nginxConfig — the same file
+// security-headers.js/redirect-chain.js already patch): the fix reuses
+// implementers/backend.js's computeCompressionMerge, which splices a fixed
+// gzip/brotli directive block (generators/compression-nginx.js) into a
+// human-placed `# SEOAI:COMPRESSION:START/END` marker pair and never
+// guesses at a location. When the site hasn't onboarded that marker yet,
+// this still reports the real, verified gap (reportOnly), same "needs nginx
+// marker + url_file_map onboarding" gap as security-headers.js's own
+// onboarding prerequisite — never needsHuman, never an error.
+export function compressionFinding(pageResults, nginxConfigPath) {
+  const checkedCount = pageResults.filter((r) => r.compression.ok).length;
+  const affected = pageResults.filter((r) => r.compression.ok && !r.compression.compressed);
+  const canAttemptAutoFix = Boolean(nginxConfigPath);
+  const finding = aggregateSystemicFinding({
+    id: 'technical-seo:site:uncompressed',
+    affected,
+    checkedCount,
+    getPage: (r) => r.page,
+    getImpressions: (r) => r.impressions,
+    whyItMatters: (n, c) => `${n} of ${c} checked pages are served without gzip/Brotli compression — enabling it reduces transfer size and improves load time at no content cost.${canAttemptAutoFix ? ' This site tracks its own nginx config, so the platform will attempt to enable it directly.' : ''}`,
+    recommendedAction: canAttemptAutoFix
+      ? () => ({ label: 'Enable gzip/Brotli compression', generatorId: 'compression-nginx', params: {}, effort: effortForGenerator('compression-nginx') })
+      : null,
+  });
+  if (!finding) return null;
+  if (!canAttemptAutoFix) {
+    finding.reportOnly = {
+      kind: 'uncompressed-response',
+      label: 'Response compression disabled',
+      page: '',
+      whyBlocked: 'Enabling gzip/Brotli compression means editing this site\'s nginx config — this site has no tracked nginx config to check against, so there\'s nowhere safe to draft the fix yet. Add one via `npm run connect-repo` (site.url_file_map.siteRoot.nginxConfig) to unblock it.',
+    };
+  }
+  return finding;
+}
+
 export function missingSchemaFinding(pageResults) {
   const schemaTypeFor = (r) => inferSchemaType(r.page, r.analysis?.schemaTypes || [], r.analysis);
   return aggregateSystemicFinding({
@@ -113,6 +166,7 @@ export function missingSchemaFinding(pageResults) {
 
 export async function run({ siteId, start, end, pageCache, params }) {
   const site = await getSiteById(siteId);
+  const nginxConfigPath = site?.url_file_map?.siteRoot?.nginxConfig || null;
   // params.pages (from the bulk full-site-audit engine, agents/lib/bulk-audit.js)
   // bypasses the normal rotation entirely and checks exactly the given pages
   // — a full audit wants exhaustive coverage of a caller-chosen set, not this
@@ -279,24 +333,10 @@ export async function run({ siteId, start, end, pageCache, params }) {
   });
   if (layoutShiftFinding) cwvFindings.push(layoutShiftFinding);
 
-  // Response compression (Content-Encoding: gzip/br/deflate) — a real,
-  // previously-uncovered check confirmed via a cross-check against the
-  // sibling audit tool. Uncompressed responses are usually one shared
-  // server/CDN config gap, not a per-page authoring choice, so this is one
-  // "N of M checked pages" finding like the CWV/canonical/schema checks
-  // above, not a card per page.
-  const compressionCheckedCount = pageResults.filter((r) => r.compression.ok).length;
-  const uncompressedCandidates = pageResults.filter((r) => r.compression.ok && !r.compression.compressed);
-  const compressionFinding = aggregateSystemicFinding({
-    id: 'technical-seo:site:uncompressed',
-    affected: uncompressedCandidates,
-    checkedCount: compressionCheckedCount,
-    getPage: (r) => r.page,
-    getImpressions: (r) => r.impressions,
-    whyItMatters: (n, c) => `${n} of ${c} checked pages are served without gzip/Brotli compression — enabling it reduces transfer size and improves load time at no content cost.`,
-    recommendedAction: null, // a server/CDN config change, not draftable content — same reasoning as security-headers.js's per-header findings
-  });
-  const compressionFindings = compressionFinding ? [compressionFinding] : [];
+  // Response compression (Content-Encoding: gzip/br/deflate) — see
+  // compressionFinding() above for the real draftable-vs-informational gate.
+  const compressionFindingResult = compressionFinding(pageResults, nginxConfigPath);
+  const compressionFindings = compressionFindingResult ? [compressionFindingResult] : [];
 
   // Inline style="" bloat and raw HTML document size — both real page-weight
   // signals off the same fetch already done for the technical audit above
