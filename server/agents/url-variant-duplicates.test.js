@@ -20,6 +20,18 @@ mock.module(resolve('../store/read.js'), {
 mock.module(resolve('../store/page-inventory.js'), {
   namedExports: { listPageInventory: async () => inventory },
 });
+// Defaults to "unclassified" (null) so every pre-existing test's split-
+// traffic outcome is unaffected. Individual tests override contentTypeByPage
+// to exercise the new page-purpose escalation path.
+let contentTypeByPage = null;
+mock.module(resolve('./lib/page-content-classifier.js'), {
+  namedExports: {
+    getOrClassifyPageContentType: async (siteId, page) => {
+      const type = typeof contentTypeByPage === 'function' ? contentTypeByPage(page) : contentTypeByPage;
+      return type ? { contentType: type, confidence: 0.9, classifiedBy: 'path' } : null;
+    },
+  },
+});
 
 const { run } = await import('./url-variant-duplicates.js');
 
@@ -28,6 +40,7 @@ beforeEach(() => {
   inventory = [];
   perfRowsByPage = new Map();
   queryRows = [];
+  contentTypeByPage = null;
 });
 
 describe('url-variant-duplicates agent', () => {
@@ -161,6 +174,37 @@ describe('url-variant-duplicates agent', () => {
       const finding = result.facts.findings[0];
       assert.equal(finding.evidence.confidence, 'low');
       assert.equal(finding.recommendedAction, null);
+    });
+
+    test('split-traffic escalation: a functional (non-tracking) query parameter blocks consolidation and is decided leave-both', async () => {
+      // normalizeKey groups by hostname+pathname only, so a group here can
+      // include a query-string variant carrying a real functional param.
+      inventory = [
+        { page: 'https://example.com/get-started?package=gold', orphaned: false },
+        { page: 'https://example.com/get-started', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/get-started?package=gold', { clicks: 5, impressions: 50 });
+      perfRowsByPage.set('https://example.com/get-started', { clicks: 90, impressions: 900 });
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /functional/);
+    });
+
+    test('split-traffic escalation: different declared page purposes are decided leave-both', async () => {
+      inventory = [
+        { page: 'https://example.com/about', orphaned: false },
+        { page: 'https://example.com/about/', orphaned: false },
+      ];
+      perfRowsByPage.set('https://example.com/about/', { clicks: 90, impressions: 900 });
+      perfRowsByPage.set('https://example.com/about', { clicks: 5, impressions: 50 });
+      contentTypeByPage = (page) => (page.endsWith('/') ? 'landing' : 'blog');
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /different page purposes/);
     });
 
     test('a group with 3+ variants and only one bearing traffic still auto-consolidates every loser onto the same winner', async () => {

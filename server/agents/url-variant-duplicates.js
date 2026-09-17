@@ -1,7 +1,8 @@
 import { getSiteById } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
-import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
+import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 
 export const meta = {
   id: 'url-variant-duplicates',
@@ -75,7 +76,19 @@ export async function run({ siteId }) {
   for (const [key, pagesSet] of [...dupGroups].sort((a, b) => a[0].localeCompare(b[0]))) {
     const pages = [...pagesSet].sort();
     const traffic = pages.map((p) => trafficByPage.get(p) || { page: p, clicks: 0, impressions: 0 });
-    const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
+    // normalizeKey groups purely by hostname+pathname (trailing
+    // slash/case/encoding stripped) and never looks at the query string, so
+    // a group here can legitimately include query-string variants that
+    // carry a real functional parameter — same reasoning
+    // query-param-duplicates.js already documents. Page purpose is cheap/
+    // cached via the same classifier templated-duplicates.js already uses.
+    const functionalParamPages = new Set(pages.filter((p) => isLikelyFunctionalQueryParam(p)));
+    const pagePurposeByPage = new Map();
+    for (const p of pages) {
+      const purpose = await getOrClassifyPageContentType(siteId, p).catch(() => null);
+      if (purpose?.contentType) pagePurposeByPage.set(p, purpose.contentType);
+    }
+    const decision = await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd, signals: { functionalParamPages, pagePurposeByPage } });
 
     if (decision.winner) {
       const losers = pages.filter((p) => p !== decision.winner.page);
@@ -129,14 +142,27 @@ export async function run({ siteId }) {
       whyItMatters: `${pages.length} different URLs (${pages.join(', ')}) all resolve to the same page once trailing slash, case, and encoding are normalized — Google can index these as separate, competing URLs instead of recognizing them as one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants${decision.queryOverlap && !decision.queryOverlap.overlapping ? ', and their real search queries don\'t overlap substantially, so they may genuinely be serving different intents' : ' with no confirmed shared search intent'}, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
       priority: 'medium',
       recommendedAction: null,
-      reportOnly: {
-        kind: 'url-variant-duplicate',
-        label: `${pages.length} URL variants of the same page`,
-        page: pages[0],
-        whyBlocked: withTraffic.length > 1
-          ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm they compete for the same intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
-          : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm which one is intended.',
-      },
+      // 'leave-both-independent-intent' is an active, evidenced autonomous
+      // decision, not a punt — see query-param-duplicates.js's identical
+      // reasoning for the same two triggers.
+      reportOnly: decision.decision === 'leave-both-independent-intent'
+        ? {
+          kind: 'url-variant-duplicate',
+          label: `${pages.length} URL variants left independent`,
+          page: pages[0],
+          decided: true,
+          whyBlocked: decision.decisionReason === 'functional-query-parameter'
+            ? 'At least one variant\'s query parameter isn\'t known tracking noise — treated as functional (may drive real visitor-facing behavior), so these are left independent rather than consolidated/redirected.'
+            : 'The traffic-bearing variants were classified with genuinely different page purposes — treated as independent intent, so left as separate pages rather than consolidated.',
+        }
+        : {
+          kind: 'url-variant-duplicate',
+          label: `${pages.length} URL variants of the same page`,
+          page: pages[0],
+          whyBlocked: withTraffic.length > 1
+            ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm they compete for the same intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
+            : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm which one is intended.',
+        },
       expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
     }));
   }

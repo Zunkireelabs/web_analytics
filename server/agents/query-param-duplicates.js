@@ -1,7 +1,8 @@
 import { getSiteById } from '../store/read.js';
 import { listPageInventory } from '../store/page-inventory.js';
 import { makeFinding, impactFromPriority, effortFromDifficulty } from './lib/findings.js';
-import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS } from './lib/duplicate-evidence.js';
+import { evidenceWindow, fetchTraffic, decideWinner, EVIDENCE_LOOKBACK_DAYS, isLikelyFunctionalQueryParam } from './lib/duplicate-evidence.js';
+import { getOrClassifyPageContentType } from './lib/page-content-classifier.js';
 
 export const meta = {
   id: 'query-param-duplicates',
@@ -91,9 +92,20 @@ export async function run({ siteId }) {
     // was canonicalized onto "/?h=8020347041280" because that legacy
     // tracking-hash variant had the only recorded impressions).
     const bare = pages.find((p) => !hasQuery(p));
+    // Split-traffic escalation signals for this detector: functional-param
+    // detection is the natural fit here (this agent's whole job is grouping
+    // query-string variants), and page purpose is cheap/cached via the
+    // same classifier templated-duplicates.js already uses — no new fetch,
+    // no paid API call.
+    const functionalParamPages = new Set(pages.filter((p) => isLikelyFunctionalQueryParam(p)));
+    const pagePurposeByPage = new Map();
+    for (const p of pages) {
+      const purpose = await getOrClassifyPageContentType(siteId, p).catch(() => null);
+      if (purpose?.contentType) pagePurposeByPage.set(p, purpose.contentType);
+    }
     const decision = bare
-      ? { confidence: 'high', winner: trafficByPage.get(bare) || { page: bare, clicks: 0, impressions: 0 }, withTraffic: traffic.filter((t) => t.clicks > 0 || t.impressions > 0), queryOverlap: null, preferredBare: true }
-      : await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd });
+      ? { confidence: 'high', winner: trafficByPage.get(bare) || { page: bare, clicks: 0, impressions: 0 }, withTraffic: traffic.filter((t) => t.clicks > 0 || t.impressions > 0), queryOverlap: null, preferredBare: true, decision: 'consolidate', decisionReason: 'bare-url-always-wins' }
+      : await decideWinner(traffic, { siteId, start: evidenceStart, end: evidenceEnd, signals: { functionalParamPages, pagePurposeByPage } });
 
     if (decision.winner) {
       const losers = pages.filter((p) => p !== decision.winner.page);
@@ -139,14 +151,29 @@ export async function run({ siteId }) {
       whyItMatters: `${queryVariants.length} different query-string variants of the same page (${key}) are all separately known/crawlable — unless each one carries a canonical tag pointing back at the winning URL, Google can index them as separate, competing pages instead of one.${withTraffic.length > 1 ? ` Real traffic evidence is split across ${withTraffic.length} of the variants${decision.queryOverlap && !decision.queryOverlap.overlapping ? ', and their real search queries don\'t overlap substantially, so they may genuinely serve different intents' : ''}, so which one should win isn't unambiguous.` : ' No real click/impression evidence across the last 90 days points to a clear winner.'}`,
       priority: 'medium',
       recommendedAction: null,
-      reportOnly: {
-        kind: 'query-param-duplicate',
-        label: `${queryVariants.length} query-param variants of the same page`,
-        page: pages.find((p) => !hasQuery(p)) || pages[0],
-        whyBlocked: withTraffic.length > 1
-          ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm shared intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
-          : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm whether these already canonicalize correctly.',
-      },
+      // 'leave-both-independent-intent' is an active, evidenced autonomous
+      // decision (a non-tracking/functional query param, or genuinely
+      // different declared page purposes among the traffic-bearing
+      // variants) — not a punt to a human. Only the true "still
+      // inconclusive" case keeps the human-needed reportOnly copy.
+      reportOnly: decision.decision === 'leave-both-independent-intent'
+        ? {
+          kind: 'query-param-duplicate',
+          label: `${queryVariants.length} query-param variants left independent`,
+          page: pages.find((p) => !hasQuery(p)) || pages[0],
+          decided: true,
+          whyBlocked: decision.decisionReason === 'functional-query-parameter'
+            ? 'At least one variant\'s query parameter isn\'t known tracking noise — treated as functional (may drive real visitor-facing behavior, e.g. pagination or a selection state), so these are left independent rather than consolidated/redirected.'
+            : 'The traffic-bearing variants were classified with genuinely different page purposes — treated as independent intent, so left as separate pages rather than consolidated.',
+        }
+        : {
+          kind: 'query-param-duplicate',
+          label: `${queryVariants.length} query-param variants of the same page`,
+          page: pages.find((p) => !hasQuery(p)) || pages[0],
+          whyBlocked: withTraffic.length > 1
+            ? 'More than one variant has real search traffic and their query overlap doesn\'t confirm shared intent — picking a winner here would risk redirecting a URL that\'s still earning its own real clicks, so it needs a person to confirm which one is intended.'
+            : 'No real traffic signal exists for any variant yet, so there\'s no evidence to pick a winner from — needs a person to confirm whether these already canonicalize correctly.',
+        },
       expectedImpact: { label: impactFromPriority('medium'), basis: 'computed', value: 0 },
     }));
   }
