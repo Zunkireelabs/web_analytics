@@ -37,8 +37,10 @@ const BOILERPLATE_SELECTORS = 'nav, header, footer, script, style, noscript, asi
   '.nav, .navbar, .menu, .site-header, .site-footer, .cookie-banner, .cookie-consent';
 // Standard SERP-snippet-width-derived range — below this a title is usually
 // thin/generic, above it Google truncates the displayed title in results.
-const MIN_TITLE_LEN = 30;
-const MAX_TITLE_LEN = 60;
+// Exported — device-ctr-diagnosis.js reuses the exact same bar rather than
+// re-deriving its own "is this title too long" threshold.
+export const MIN_TITLE_LEN = 30;
+export const MAX_TITLE_LEN = 60;
 // Meaningfully large, not incidental — a handful of one-off inline styles is
 // normal; this flags pages where inline style="" has effectively replaced
 // shared CSS, same "several, not one-off" bar as hasFaqAccordion's >=2.
