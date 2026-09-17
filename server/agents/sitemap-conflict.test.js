@@ -190,6 +190,35 @@ describe('sitemap-conflict agent', () => {
     assert.equal(finding.reportOnly, null);
   });
 
+  test('sitemapExcludeField verified for this site -> routes to sitemap-frontmatter-exclude instead of sitemap-removal', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemap: 'src/sitemap.njk', sitemapExcludeField: 'excludeFromSitemap' } } };
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'DISALLOWED', indexingState: 'INDEXING_ALLOWED', googleCanonical: null },
+    });
+    robotsTxtText = 'User-agent: *\nDisallow: /somewhere-else/'; // doesn't confirm /a/
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'sitemap-frontmatter-exclude');
+    assert.deepEqual(finding.recommendedAction.params, { page: 'https://example.com/a/', field: 'excludeFromSitemap' });
+    assert.equal(finding.reportOnly, null);
+  });
+
+  test('sitemapExcludeField alone (no static sitemap.siteRoot.sitemap at all) is still enough to auto-resolve', async () => {
+    site = { id: 1, url_file_map: { siteRoot: { sitemapExcludeField: 'excludeFromSitemap' } } };
+    sitemapEntries = [{ loc: 'https://example.com/a/' }];
+    signalsByPage.set('https://example.com/a/', {
+      page: 'https://example.com/a/',
+      index_status: { robotsTxtState: 'ALLOWED', indexingState: 'INDEXING_ALLOWED', googleCanonical: 'https://example.com/canonical-a/' },
+      has_canonical: true,
+    });
+    const result = await run({ siteId: 1 });
+    const finding = result.facts.findings[0];
+    assert.equal(finding.recommendedAction.generatorId, 'sitemap-frontmatter-exclude');
+    assert.equal(finding.reportOnly, null);
+  });
+
   test('no finding when robots/indexing are fine and the google canonical matches the URL itself', async () => {
     sitemapEntries = [{ loc: 'https://example.com/a/' }];
     signalsByPage.set('https://example.com/a/', {

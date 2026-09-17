@@ -134,6 +134,72 @@ describe('stripLink', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'no-match');
   });
+
+  // Real shape found on Admizz's Footer.tsx 2026-09-17: an icon-only social
+  // link with no visible text to preserve — the href lives on a `field:
+  // "url"` property of one array element, not an <a> tag at all. The whole
+  // object (icon JSX included) must go, not just the href field.
+  test('data-array object shape: removes the WHOLE array element (icon JSX and all), not just the href field', () => {
+    const file = 'const socialLinks = [\n' +
+      '  { name: "Facebook", href: "https://facebook.com/x", icon: (<svg><path d="M1 1" /></svg>) },\n' +
+      '  { name: "Instagram", href: "https://instagram.com/dead", icon: (<svg><path d="M2 2" /></svg>) },\n' +
+      '  { name: "TikTok", href: "https://tiktok.com/x", icon: (<svg><path d="M3 3" /></svg>) },\n' +
+      '];\n';
+    const result = stripLink(file, 'https://instagram.com/dead');
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.newContent, /Instagram/);
+    assert.match(result.newContent, /Facebook/);
+    assert.match(result.newContent, /TikTok/);
+  });
+
+  test('data-array object shape: removing the LAST element leaves no dangling comma', () => {
+    const file = 'const links = [\n  { href: "https://a.example.com" },\n  { href: "https://dead.example.com" },\n];\n';
+    const result = stripLink(file, 'https://dead.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.newContent, 'const links = [\n  { href: "https://a.example.com" },\n];\n');
+  });
+
+  test('data-array object shape: nested braces inside the object (a JSX expression in the icon) do not confuse the object boundary', () => {
+    const file = 'const links = [\n' +
+      '  { href: "https://dead.example.com", icon: (<Icon size={24} color={theme.primary} />) },\n' +
+      '  { href: "https://a.example.com" },\n' +
+      '];\n';
+    const result = stripLink(file, 'https://dead.example.com');
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.newContent, /theme\.primary/);
+    assert.match(result.newContent, /a\.example\.com/);
+  });
+
+  // Real shape found on Admizz's layout.tsx JSON-LD `sameAs` block
+  // 2026-09-17: a bare quoted URL inside an array, no object at all.
+  test('data-array string shape: removes one bare quoted URL from an array of strings', () => {
+    const file = 'sameAs: [\n  "https://facebook.com/x",\n  "https://instagram.com/dead",\n  "https://tiktok.com/x",\n],\n';
+    const result = stripLink(file, 'https://instagram.com/dead');
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.newContent, /instagram/);
+    assert.match(result.newContent, /facebook/);
+    assert.match(result.newContent, /tiktok/);
+  });
+
+  test('object-field shape is tried before the bare-string shape, so an unrelated field with the same text as a label never false-matches', () => {
+    // Only the href field's value should ever be treated as the link — a
+    // `name` field that happened to equal a URL-shaped string must never
+    // be matched by the fallback string strategy once the object strategy
+    // already found and handled the real href.
+    const file = 'const links = [{ name: "https://dead.example.com", href: "https://dead.example.com" }];\n';
+    const result = stripLink(file, 'https://dead.example.com');
+    assert.equal(result.ok, true);
+    // The whole object is gone (object strategy fired) — not just one
+    // field's value replaced in place.
+    assert.doesNotMatch(result.newContent, /https:\/\/dead\.example\.com/);
+  });
+
+  test('still an honest no-match when the href is genuinely absent from either data-array shape', () => {
+    const file = 'const links = [{ href: "https://other.example.com" }];\nsameAs: ["https://other.example.com"],\n';
+    const result = stripLink(file, 'https://dead.example.com');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-match');
+  });
 });
 
 describe('getAnchorsForHref', () => {

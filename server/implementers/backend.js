@@ -24,6 +24,7 @@ import { computeSchemaRepairMerge, pushSchemaRepairBranch, previewLiveSchemaRepa
 import { computeContentIntegrityMerge, pushContentIntegrityBranch, previewLiveContentIntegrity } from './lib/content-integrity-inject.js';
 import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './lib/alt-text-inject.js';
 import { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } from './lib/blog-image-inject.js';
+import { computeSitemapExcludeMerge, pushSitemapExcludeBranch, previewLiveSitemapExclude } from './lib/sitemap-frontmatter-exclude-inject.js';
 import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, findScalarFieldRange, removeArrayItemByField, spliceScalarField, assertValidContent } from './adapters/lib/js-data-splice.js';
 
 
@@ -31,7 +32,7 @@ export const meta = {
   id: 'backend',
   name: 'Backend/SEO Implementer',
   description: 'Applies machine-readable draft content (schema markup, meta tags, FAQ schema, internal links, llms.txt/robots.txt, security headers, html lang, sitemap additions) as a real pull request.',
-  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
+  handles: ['schema', 'meta-title', 'faq', 'internal-links', 'llms-txt', 'security-headers', 'html-lang', 'viewport', 'robots-fix', 'robots-bootstrap', 'redirect-fix', 'broken-link-fix', 'canonical', 'open-graph', 'expand-content', 'refresh-content', 'qa-content', 'sitemap', 'sitemap-removal', 'sitemap-frontmatter-exclude', 'analytics-install', 'duplicate-id-fix', 'breadcrumbs', 'schema-repair', 'alt-text', 'content-integrity-repair', 'blog-image', 'soft-404-nginx', 'redirect-chain-nginx'],
 };
 
 // Every backend.js type with a real merge strategy — see lib/marker-merge.js
@@ -1281,6 +1282,7 @@ export async function apply(site, draft, opts = {}) {
   if (draft.action_type === 'duplicate-id-fix') return pushDuplicateIdFixBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'schema-repair') return pushSchemaRepairBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return pushContentIntegrityBranch(site, draft, batchInfo, beforeRef);
+  if (draft.action_type === 'sitemap-frontmatter-exclude') return pushSitemapExcludeBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'alt-text') return pushAltTextBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'blog-image') return pushBlogImageBranch(site, draft, batchInfo, beforeRef);
   if (draft.action_type === 'html-lang') return pushHtmlLangBranch(site, draft, batchInfo, beforeRef);
@@ -1341,6 +1343,7 @@ export async function preview(site, draft, opts = {}) {
     if (draft.action_type === 'duplicate-id-fix') return previewLiveDuplicateIdFix(site, draft);
     if (draft.action_type === 'schema-repair') return previewLiveSchemaRepair(site, draft);
     if (draft.action_type === 'content-integrity-repair') return previewLiveContentIntegrity(site, draft);
+    if (draft.action_type === 'sitemap-frontmatter-exclude') return previewLiveSitemapExclude(site, draft);
     if (draft.action_type === 'alt-text') return previewLiveAltText(site, draft);
     if (draft.action_type === 'blog-image') return previewLiveBlogImage(site, draft);
     if (draft.action_type === 'html-lang') return previewLiveHtmlLang(site, draft);
@@ -1381,6 +1384,7 @@ export async function preview(site, draft, opts = {}) {
   if (draft.action_type === 'duplicate-id-fix') return computeDuplicateIdFixMerge(site, draft, beforeRef);
   if (draft.action_type === 'schema-repair') return computeSchemaRepairMerge(site, draft, beforeRef);
   if (draft.action_type === 'content-integrity-repair') return computeContentIntegrityMerge(site, draft, beforeRef);
+  if (draft.action_type === 'sitemap-frontmatter-exclude') return computeSitemapExcludeMerge(site, draft, beforeRef);
   if (draft.action_type === 'alt-text') return computeAltTextMerge(site, draft, beforeRef);
   if (draft.action_type === 'blog-image') return computeBlogImageMerge(site, draft, beforeRef);
   if (draft.action_type === 'html-lang') return computeHtmlLangMerge(site, draft, beforeRef);

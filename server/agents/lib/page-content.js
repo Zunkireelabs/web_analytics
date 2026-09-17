@@ -1163,6 +1163,7 @@ const GENERATOR_EFFORT = {
   'soft-404-nginx': 'Low',
   'redirect-chain-nginx': 'Low',
   'sitemap-removal': 'Low',
+  'sitemap-frontmatter-exclude': 'Low',
 };
 export const effortForGenerator = (generatorId) => GENERATOR_EFFORT[generatorId] || 'Medium';
 
