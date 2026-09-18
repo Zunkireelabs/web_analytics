@@ -161,3 +161,66 @@ describe('repairSiteMarkerStyling — retroactively grounds EXPANDEDCONTENT pros
     }
   });
 });
+
+// Confirmed live on site 1 (2026-09-18): src/pages/privacy-policy-
+// zunkiree-labs.njk's EXPANDEDCONTENT wrapper still carried `py-12
+// md:py-20` section-scale spacing. The old hostIsProse check was
+// file.endsWith('.md') only, so a legal page (.njk, not .md) always fell
+// through to the site's raw page-section template — the same defect the
+// 2026-09-09 FAQ fix above exists to prevent, just for a page TYPE the
+// check never recognised rather than a marker TYPE it never recognised.
+const FULL_SECTION_EXPAND_TEMPLATES = {
+  expandContent: {
+    wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+    row: '  <section class="gap-3">\n    <h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">{{HEADING}}</h2>\n    <div class="text-gray-600 leading-relaxed">{{BODY}}</div>\n  </section>',
+  },
+};
+
+describe('repairSiteMarkerStyling — a legal (.njk) page gets the same bare prose treatment as a blog post', () => {
+  const legalExpandedContentRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START -->',
+    '<section class="py-12 md:py-20">',
+    '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">Data Retention</h2>',
+    '<p>We retain your data only as long as necessary.</p>',
+    '</section>',
+    '<!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  test('a privacy-policy.njk page is re-rendered bare, with no page-section sizing classes', async () => {
+    const dir = await writeRepo({ 'pages/privacy-policy-zunkiree-labs.njk': `---\npermalink: /privacy/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'privacy-policy-zunkiree-labs.njk'), 'utf8');
+      assert.doesNotMatch(out, /py-12 md:py-20/);
+      assert.doesNotMatch(out, /container-custom/);
+      assert.match(out, /<h2>Data Retention<\/h2>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a terms-of-service page is also recognised as a prose host', async () => {
+    const dir = await writeRepo({ 'pages/zunkiree-labs-terms-of-service.njk': `---\npermalink: /terms/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'zunkiree-labs-terms-of-service.njk'), 'utf8');
+      assert.doesNotMatch(out, /py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a non-legal, non-blog .njk page still gets the full raw section template', async () => {
+    const dir = await writeRepo({ 'pages/about.njk': `---\npermalink: /about/\n---\n\n${legalExpandedContentRegion}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, FULL_SECTION_EXPAND_TEMPLATES, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'pages', 'about.njk'), 'utf8');
+      assert.match(out, /container-custom py-12 md:py-20/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
