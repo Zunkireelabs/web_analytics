@@ -204,8 +204,8 @@ function scoreCandidate(photo, queryTerms) {
   return score;
 }
 
-async function fetchCandidates(query, perPage) {
-  const url = `${BASE}/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape`;
+async function fetchCandidates(query, perPage, page = 1) {
+  const url = `${BASE}/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=landscape&page=${page}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -268,6 +268,19 @@ export function pexelsPhotoIdFromUrl(url) {
 // `excludePhotoIds`: photo ids (see pexelsPhotoIdFromUrl) already in use
 // elsewhere on this site — skipped even if they'd otherwise win, so a new or
 // repaired post never lands on an image another post is already using.
+// A query only ever advances past page 1 when page 1's best candidate
+// didn't clear MIN_RELEVANCE_SCORE — confirmed live on site 1 (2026-09-18):
+// with 81 photo ids already excluded (site-wide usedPhotoIds, growing as the
+// site publishes more posts), the fallback query's page-1 best scored 0.30
+// (just under the 0.34 bar), while page 2 of that SAME query had a clean
+// 0.55 match. A mature site's exclusion set eventually shadows enough of
+// page 1's results that a real, on-topic, unused photo can sit just one page
+// further down — a query this generator would otherwise give up on entirely.
+// Bounded to 2 pages per query (not unbounded) since this only fires on a
+// query that already failed once, and each extra page is a real Pexels API
+// call.
+const MAX_PEXELS_PAGES = 2;
+
 export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}) {
   const list = (Array.isArray(queries) ? queries : [queries]).filter(Boolean);
   if (!configured() || !list.length) return null;
@@ -279,19 +292,23 @@ export async function searchImage(queries, { perPage = 5, excludePhotoIds } = {}
     // from scoring — otherwise a location word in the title (see
     // LOCATION_TERMS) still floods the candidate pool with travel photos
     // before relevance scoring ever gets a say.
-    // eslint-disable-next-line no-await-in-loop
-    const photos = await fetchCandidates(stripLocationWords(query), perPage);
-    let best = null;
-    let bestScore = -Infinity;
-    for (const photo of photos) {
-      if (excludePhotoIds?.has(photo.id)) continue;
-      if (hasSensitiveContent(photo.alt)) continue;
-      if (hasBrandMention(photo.alt)) continue;
-      if (isOffTopicCliche(photo.alt)) continue;
-      const score = scoreCandidate(photo, terms);
-      if (score > bestScore) { bestScore = score; best = photo; }
+    const strippedQuery = stripLocationWords(query);
+    for (let page = 1; page <= MAX_PEXELS_PAGES; page++) {
+      // eslint-disable-next-line no-await-in-loop
+      const photos = await fetchCandidates(strippedQuery, perPage, page);
+      let best = null;
+      let bestScore = -Infinity;
+      for (const photo of photos) {
+        if (excludePhotoIds?.has(photo.id)) continue;
+        if (hasSensitiveContent(photo.alt)) continue;
+        if (hasBrandMention(photo.alt)) continue;
+        if (isOffTopicCliche(photo.alt)) continue;
+        const score = scoreCandidate(photo, terms);
+        if (score > bestScore) { bestScore = score; best = photo; }
+      }
+      if (best && bestScore >= MIN_RELEVANCE_SCORE) return toResult(best);
+      if (photos.length < perPage) break; // no further pages exist
     }
-    if (best && bestScore >= MIN_RELEVANCE_SCORE) return toResult(best);
   }
   return null;
 }

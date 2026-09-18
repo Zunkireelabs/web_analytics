@@ -40,6 +40,23 @@ describe('decideWinner', () => {
     assert.equal(result.winner, null);
   });
 
+  // Regression, confirmed live on Chayce Properties (2026-09-18): 5 real,
+  // distinct `/get-started/index.html?package=...` pricing-tier pages with
+  // zero traffic yet (a brand-new page) fell straight through to LOW/
+  // undecided, leaving the finding permanently blocked on a human "pick a
+  // winner" decision — but a functional query parameter answers that on its
+  // own, with or without any traffic evidence at all.
+  test('a functional query parameter decides leave-both even with zero traffic on every candidate', async () => {
+    const traffic = [{ page: '/a?package=gold', clicks: 0, impressions: 0 }, { page: '/a?package=silver', clicks: 0, impressions: 0 }];
+    const result = await decideWinner(traffic, {
+      siteId: 1, start: 's', end: 'e',
+      signals: { functionalParamPages: new Set(['/a?package=gold', '/a?package=silver']) },
+    });
+    assert.equal(result.winner, null);
+    assert.equal(result.decision, 'leave-both-independent-intent');
+    assert.equal(result.decisionReason, 'functional-query-parameter');
+  });
+
   test('MEDIUM stays MEDIUM when two traffic-bearing pages share no real queries', async () => {
     const traffic = [{ page: '/a', clicks: 10, impressions: 100 }, { page: '/b', clicks: 3, impressions: 40 }];
     queryRows = [

@@ -18,14 +18,23 @@ import { getSiteProfile } from '../../store/data-analyst.js';
 // default rather than inventing an industry for a tenant nothing is known
 // about — the same honest-absence rule the image search itself follows.
 
-// Pexels caps per_page at 80. 40 comfortably covers a full day's batch (the
-// largest observed was 39 posts in one Action Center run) in a single request
-// per query. The pool has to exceed the batch size: every already-claimed
-// photo is skipped, so with the old default of 5 a run of N > 5 posts sharing
-// a query exhausts its candidates and every post after the fifth fails as
-// "no relevant image found". Widening the pool is what makes de-duplication
-// usable rather than self-defeating.
-export const IMAGE_CANDIDATE_POOL = 40;
+// Pexels caps per_page at 80, so this uses the real cap rather than a
+// smaller number sized only to a single day's batch. The pool has to exceed
+// the SITE-WIDE exclusion set, not just one run's batch size: every already-
+// claimed photo (usedPhotoIds — every featuredImage across the whole site,
+// not just today's posts) is skipped, so a mature site's own exclusion set
+// eventually outgrows a smaller pool regardless of how many posts are in the
+// current run. Confirmed live on site 1 (2026-09-18): 80 already-used photo
+// ids, a candidate pool of 40, and two brand-new posts ("Pixverse AI", "Top
+// IT Companies Based in Nepal") that both failed with "no relevant image
+// found" — every one of the top-40 Pexels results for their fallback/topic
+// query was already excluded. Raising the pool to Pexels' actual max found a
+// real, on-topic, unused match for both on the very next search. This isn't
+// a one-off gap either: the exclusion set only grows as the site publishes
+// more posts, so a pool sized below Pexels' cap gets less and less headroom
+// over time — the old 40 comfortably covered a single day's batch size when
+// this was written, but never accounted for the site's cumulative total.
+export const IMAGE_CANDIDATE_POOL = 80;
 
 export async function imageQueryContextFor(site) {
   let profile = null;

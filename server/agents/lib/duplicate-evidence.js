@@ -319,5 +319,29 @@ export async function decideWinner(traffic, { siteId, start, end, signals } = {}
     return { confidence: 'medium', winner: null, withTraffic, queryOverlap, decision: null, decisionReason: null };
   }
 
+  // No traffic evidence to work with at all (the common case for a just-
+  // published page) — but a functional (non-tracking) query parameter is a
+  // structural fact about the URLs, not something traffic evidence could
+  // ever supply, so it doesn't need any to decide. Previously this signal
+  // was only ever consulted from resolveWithAdditionalSignals above, itself
+  // reached only once a 2+-traffic-candidate group's query overlap left it
+  // at MEDIUM — so a group with ZERO traffic on every variant fell straight
+  // through to the generic "needs a person" block below it instead.
+  // Confirmed live on Chayce Properties, 2026-09-18: 5
+  // `/get-started/index.html?package=...` pricing-tier URLs, each a real,
+  // distinct service tier with no traffic yet, blocked pending a human
+  // "pick a winner" decision that this signal already answers on its own —
+  // there is no winner to pick. Scoped to this zero/no-siteId fallback only:
+  // every traffic-bearing path above already runs this same check (as
+  // resolveWithAdditionalSignals' own priority #2) in its correct place,
+  // after query-overlap-plus-click-margin gets first chance to resolve it.
+  if (signals?.functionalParamPages) {
+    const { functionalParamPages } = signals;
+    const anyFunctional = traffic.some((t) => (functionalParamPages instanceof Set ? functionalParamPages.has(t.page) : functionalParamPages[t.page]));
+    if (anyFunctional) {
+      return { confidence: 'medium', winner: null, withTraffic, queryOverlap: null, decision: 'leave-both-independent-intent', decisionReason: 'functional-query-parameter' };
+    }
+  }
+
   return { confidence: withTraffic.length > 1 ? 'medium' : 'low', winner: null, withTraffic, queryOverlap: null, decision: null, decisionReason: null };
 }
