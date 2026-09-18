@@ -1,12 +1,37 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseRobotsDisallowRules, parseUrlsetXml } from './site-discovery.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+mock.module(resolve('./page-content.js'), {
+  namedExports: {
+    fetchTextIfExists: async () => ({ ok: false, text: '' }),
+    isPrivateOrLocalHost: () => false,
+    analyzePageUrl: async () => ({ ok: true, analysis: { internalLinks: [] } }),
+  },
+});
+
+const { crawlSite } = await import('./site-discovery.js');
 
 const ROBOTS_TXT = [
   'User-agent: *',
   'Disallow: /blog',
   'Allow: /blog/featured',
 ].join('\n');
+
+describe('crawlSite — homepage URL', () => {
+  // Regression, confirmed live on Chayce Properties (2026-09-18): `origin`
+  // (new URL(...).origin) never carries a trailing slash by definition, but
+  // every other discovered URL comes from a real `<a href="...">` on the
+  // page, which this site writes WITH one. Seeding the crawl with the bare
+  // origin recorded the homepage as its own separate page_inventory row
+  // from "/", both for the exact same page.
+  test('the homepage is discovered WITH a trailing slash, matching every other page\'s own URL convention', async () => {
+    const site = { gsc_property: 'https://example.com' };
+    const discovered = await crawlSite(site);
+    assert.deepEqual(discovered, ['https://example.com/']);
+  });
+});
 
 describe('parseRobotsDisallowRules — matchingDisallow', () => {
   test('returns the winning Disallow pattern for a blocked path', () => {

@@ -187,9 +187,19 @@ export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = M
   const robotsFetch = await fetchTextIfExists(`${origin}/robots.txt`);
   const robots = parseRobotsDisallowRules(robotsFetch.ok ? robotsFetch.text : '');
 
+  // `origin` (new URL(...).origin) never carries a trailing slash by
+  // definition — but every OTHER URL this crawl discovers comes from a real
+  // `<a href="...">` on the page, which this site (like most) writes WITH
+  // one for a directory-style path. Seeding the crawl with the bare origin
+  // meant the homepage was the one page_inventory entry recorded without a
+  // trailing slash, so it landed as its own separate row from "/" instead
+  // of the same page — confirmed live on Chayce Properties (2026-09-18):
+  // both "https://chayceproperties.com" and ".../" in page_inventory for
+  // the same homepage.
+  const rootUrl = `${origin}/`;
   const discovered = new Set();
-  const visited = new Set([origin]);
-  let frontier = [{ url: origin, depth: 0 }];
+  const visited = new Set([rootUrl]);
+  let frontier = [{ url: rootUrl, depth: 0 }];
 
   while (frontier.length && discovered.size < maxPages) {
     const batch = frontier.splice(0, concurrency);
