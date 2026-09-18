@@ -234,11 +234,14 @@ function duplicateIdsIn(html) {
   return [...dupes];
 }
 
-async function checkPagePattern(row) {
-  const fetched = await fetchHtml(row.page_url);
-  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
-  const html = fetched.html;
-  switch (row.expected?.check) {
+// Pure — the actual pattern logic, extracted so a caller with html already
+// in hand (a pre-ship draft's own about-to-publish content, see
+// checkContentAgainstExpectation below) can run the identical check a live
+// re-fetch would run post-ship, instead of a second hand-maintained copy of
+// these regexes that could silently drift from what actually gets verified
+// later.
+function matchPagePattern(html, expected) {
+  switch (expected?.check) {
     case 'html-lang-present': {
       const present = /<html[^>]*\slang=["'][^"']+["']/i.test(html);
       return { present, evidence: { check: 'html-lang-present' } };
@@ -249,22 +252,33 @@ async function checkPagePattern(row) {
     }
     case 'no-duplicate-ids': {
       const dupes = duplicateIdsIn(html);
-      const target = row.expected?.id;
+      const target = expected?.id;
       const present = target ? !dupes.includes(target) : dupes.length === 0;
       return { present, evidence: { check: 'no-duplicate-ids', duplicatesFound: dupes.slice(0, 10), target: target ?? null } };
     }
     default:
-      return { present: null, evidence: { error: `unknown pattern check "${row.expected?.check}"` } };
+      return { present: null, evidence: { error: `unknown pattern check "${expected?.check}"` } };
   }
+}
+
+async function checkPagePattern(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  return matchPagePattern(fetched.html, row.expected);
+}
+
+// Pure, same reason as matchPagePattern above.
+function matchPageAbsence(html, expected) {
+  const absentTarget = expected?.absent;
+  if (!absentTarget) return { present: null, evidence: { error: 'nothing was recorded as needing to be absent' } };
+  const stillThere = html.includes(absentTarget);
+  return { present: !stillThere, evidence: { mustBeAbsent: absentTarget, stillPresent: stillThere } };
 }
 
 async function checkPageAbsence(row) {
   const fetched = await fetchHtml(row.page_url);
   if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
-  const absentTarget = row.expected?.absent;
-  if (!absentTarget) return { present: null, evidence: { error: 'nothing was recorded as needing to be absent' } };
-  const stillThere = fetched.html.includes(absentTarget);
-  return { present: !stillThere, evidence: { mustBeAbsent: absentTarget, stillPresent: stillThere } };
+  return matchPageAbsence(fetched.html, row.expected);
 }
 
 async function checkRedirect(row) {
@@ -278,10 +292,9 @@ async function checkRedirect(row) {
   return { present: landedElsewhere, evidence: { requested: row.page_url, landedOn: fetched.url ?? null, expected: row.expected?.to ?? null } };
 }
 
-async function checkPageContent(row) {
-  const fetched = await fetchHtml(row.page_url);
-  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
-  const needle = row.expected?.needle;
+// Pure, same reason as matchPagePattern above.
+function matchPageContent(html, expected, pageUrl = null) {
+  const needle = expected?.needle;
   if (!needle) return { present: null, evidence: { error: 'no excerpt was recorded to look for' } };
   const wanted = needle.replace(/\s+/g, ' ').trim().toLowerCase();
   // Checked against BOTH the visible text and the raw markup: plenty of real
@@ -289,16 +302,33 @@ async function checkPageContent(row) {
   // <script type="application/ld+json">, an alt attribute, an OG meta tag —
   // and tag-stripping alone would report those as missing when they are
   // sitting right there.
-  const visibleText = stripHtmlToText(fetched.html).toLowerCase();
-  const rawMarkup = fetched.html.replace(/\s+/g, ' ').toLowerCase();
+  const visibleText = stripHtmlToText(html).toLowerCase();
+  const rawMarkup = html.replace(/\s+/g, ' ').toLowerCase();
   const present = visibleText.includes(wanted) || rawMarkup.includes(wanted);
-  return { present, evidence: { needle, page: row.page_url, foundIn: present ? (visibleText.includes(wanted) ? 'text' : 'markup') : null } };
+  return { present, evidence: { needle, page: pageUrl, foundIn: present ? (visibleText.includes(wanted) ? 'text' : 'markup') : null } };
+}
+
+async function checkPageContent(row) {
+  const fetched = await fetchHtml(row.page_url);
+  if (!fetched.ok) return { present: null, evidence: { error: fetched.error } };
+  return matchPageContent(fetched.html, row.expected, row.page_url);
 }
 
 // The merged branch is the evidence for changes with no public URL (a blog
 // image swap, a new file whose route this app cannot resolve). It proves the
 // change landed, and deliberately claims nothing about it being live — which
 // is exactly why the deployment record is tracked separately.
+// Pure, same reason as matchPagePattern above — the one-file needle check
+// checkRepoFile runs against a merged-branch fetch, usable just as well
+// against content that hasn't been committed yet at all.
+function matchRepoFileNeedle(content, needle, path) {
+  if (!content) return { present: false, evidence: { path, reason: 'file is absent or empty' } };
+  if (needle && !content.replace(/\s+/g, ' ').toLowerCase().includes(needle.replace(/\s+/g, ' ').trim().toLowerCase())) {
+    return { present: false, evidence: { path, reason: 'file exists but no longer contains the shipped content' } };
+  }
+  return { present: true, evidence: { path } };
+}
+
 async function checkRepoFile(row, site) {
   const files = row.expected?.files || [];
   if (!site?.repo_owner || !files.length) {
@@ -309,12 +339,40 @@ async function checkRepoFile(row, site) {
     const file = await getFileContent(site, path).catch((err) => ({ error: err.message }));
     if (file?.error) return { present: null, evidence: { error: file.error, path } };
     const content = typeof file === 'string' ? file : file?.content ?? '';
-    if (!content) return { present: false, evidence: { path, reason: 'file is absent or empty in the merged branch' } };
-    if (needle && !content.replace(/\s+/g, ' ').toLowerCase().includes(needle.replace(/\s+/g, ' ').trim().toLowerCase())) {
-      return { present: false, evidence: { path, reason: 'file exists but no longer contains the shipped content' } };
-    }
+    const result = matchRepoFileNeedle(content, needle, path);
+    if (!result.present) return result;
   }
   return { present: true, evidence: { files } };
+}
+
+// PRE-SHIP SEO/TECH VALIDATE — the counterpart to runMethodCheck above, for
+// a draft that hasn't shipped yet. Dispatches only the methods that are
+// checkable WITHOUT a live HTTP round trip (PAGE_PATTERN/PAGE_ABSENCE/
+// PAGE_CONTENT/REPO_FILE — see this module's matchX pure functions, each
+// shared verbatim with the post-ship path so the two can never quietly drift
+// apart on what counts as "present"). RESPONSE_HEADER/REDIRECT/SITE_ASSET are
+// deploy-time-only properties (a header or a redirect only exists once a real
+// server answers a real request) and TAG_RECHECK/TRACKING_ID need a live
+// agent re-run or a tracking pixel firing — none of those can be answered
+// from content alone, so this returns { checkable: false } for them and the
+// caller leaves that class of verification to fix-verification.js's existing
+// post-deploy pass, unchanged.
+export function checkContentAgainstExpectation(method, expected, content, pageUrl = null) {
+  switch (method) {
+    case VERIFICATION_METHOD.PAGE_PATTERN: return { checkable: true, ...matchPagePattern(content, expected) };
+    case VERIFICATION_METHOD.PAGE_ABSENCE: return { checkable: true, ...matchPageAbsence(content, expected) };
+    case VERIFICATION_METHOD.PAGE_CONTENT: return { checkable: true, ...matchPageContent(content, expected, pageUrl) };
+    case VERIFICATION_METHOD.REPO_FILE: {
+      const files = expected?.files || [];
+      if (!files.length) return { checkable: true, present: null, evidence: { error: 'no file path recorded for this change' } };
+      // Pre-ship there is exactly one candidate file — the one this draft is
+      // about to write — so `content` is checked directly rather than
+      // fetched per path the way the post-ship, possibly-multi-file version
+      // above does.
+      return { checkable: true, ...matchRepoFileNeedle(content, expected?.needle, files[0]) };
+    }
+    default: return { checkable: false };
+  }
 }
 
 async function runMethodCheck(row, site) {

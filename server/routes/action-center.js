@@ -25,7 +25,8 @@ import { listGeneratorMeta, getGenerator } from '../generators/registry.js';
 import { runQualityGate } from '../generators/lib/quality-gate.js';
 import { extractEditLesson } from '../agents/lib/draft-lesson-extraction.js';
 import { recordFixOutcome, findRelevantMemory, getActiveAutoMemories } from '../agent-memory.js';
-import { VERIFIABLE_GENERATOR_IDS, scheduleVerificationForDraft, attachDeploymentToDraftVerifications } from '../store/fix-verifications.js';
+import { VERIFIABLE_GENERATOR_IDS, scheduleVerificationForDraft, attachDeploymentToDraftVerifications, verificationMethodFor } from '../store/fix-verifications.js';
+import { checkContentAgainstExpectation } from '../agents/lib/fix-verification.js';
 import { recordDeploymentObserved } from '../store/deployments.js';
 import { categoryForPattern, rootCauseForPattern, fixDirectiveForPattern, topLevelCategoryForGenerator } from '../generators/lib/pattern-categories.js';
 import { evaluateApprovalGate } from './lib/approval-gate.js';
@@ -40,6 +41,7 @@ import { countCurrentlyVisibleFaqPages } from '../implementers/lib/faq-render-mo
 import { resolveOrCreateComponentTemplate, componentTemplateVerification, componentTemplateActionTypeFor } from '../implementers/lib/design-drift.js';
 import { resolveOrCreateCanonicalPageTemplate, PAGE_TEMPLATE_TYPES_FOR_GENERATOR } from '../design-agent/lib/page-templates.js';
 import { buildCorrectionFeedback, canonicalTemplateForFeedback } from '../generators/lib/design-repair-feedback.js';
+import { describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { hasProfileLevelMismatch, repairProfileLevelMismatch } from '../generators/lib/design-mismatch-repair.js';
 import { repairDesignProfileRolesForSites } from '../scripts/repair-design-profile-roles.js';
 import { FRONTEND_ACTION_TYPES, resolveTargetAndBody } from '../implementers/frontend.js';
@@ -362,17 +364,39 @@ export async function generateDraft(siteId, { generatorId, params, source, findi
       };
     }
 
-    // Informational only, deliberately NOT a gate. Design Context (verified
-    // template / v2 profile) shapes what gets generated below when it's
-    // available; when it isn't (new site, context still queued, a stale
-    // background rescan) the generator's own zero-config fallback renders
-    // instead — see marker-merge.js/newpage-render.js. A missing or
-    // not-yet-derived Design Context must never stop an unrelated draft from
-    // shipping: that hard-422 used to block every faq/expand-content/
-    // internal-links/qa-content/net-new-page draft on a site any time the
-    // analysis job failed, which is exactly the stuck-Action-Center failure
-    // mode this replaces. 'no-concept' action types (meta-title, schema,
-    // canonical, sitemap, robots-fix, ...) were never affected either way.
+    // Informational only, deliberately NOT a gate, for every reason EXCEPT
+    // one. Design Context (verified template / v2 profile) shapes what gets
+    // generated below when it's available; when it isn't (new site, context
+    // still queued, a stale background rescan) the generator's own
+    // zero-config fallback renders instead — see marker-merge.js/
+    // newpage-render.js. A missing or not-yet-derived Design Context must
+    // never stop an unrelated draft from shipping: that hard-422 used to
+    // block every faq/expand-content/internal-links/qa-content/net-new-page
+    // draft on a site any time the analysis job failed, which is exactly the
+    // stuck-Action-Center failure mode this replaces. 'no-concept' action
+    // types (meta-title, schema, canonical, sitemap, robots-fix, ...) were
+    // never affected either way.
+    //
+    // 'body-slot-is-label' is the one templateResult reason that IS a gate
+    // (see design-drift.js's own comment on that branch): every other reason
+    // here means "we could not yet confirm a template," which is recoverable
+    // by shipping the safe zero-config fallback. That one means the design
+    // profile WAS checked against the live site and found wrong — the body
+    // slot carries label/eyebrow styling, so generated prose would render as
+    // a caption. Falling through there doesn't degrade gracefully, it ships
+    // visibly broken styled content, which is precisely what "no
+    // design-unverified generation" exists to prevent. The Design Agent is
+    // already queued to re-derive the profile (design-drift.js does that
+    // before returning), so this is retried automatically, not a dead end.
+    if (templateResult && templateResult.ok === false && templateResult.reason === 'body-slot-is-label') {
+      throw httpError(
+        422,
+        `${generatorId} is blocked: the site's design profile describes its body text with a class the live CSS `
+        + `defines as a label, so generated content would render as a caption instead of prose.`,
+        { reason: 'design-unverified', detail: templateResult.detail },
+      );
+    }
+
     const verification = componentTemplateVerification(effectiveSite, componentTemplateActionTypeFor(generatorId));
     if (!verification.ok) {
       console.warn(`[action-center] ${generatorId} has no verified Design Context yet (${verification.reason}) — generating with the default fallback template.`);
@@ -922,12 +946,71 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
     }
     if (resolved.error) throw httpError(400, resolved.error);
     if (typeof resolved.implementer.preview === 'function') {
-      const previewResult = await resolved.implementer.preview(site, draft, { renderModeOverride: renderMode });
+      // DESIGN-VALIDATE + FIX/RETRY, stage — backend.js's computeMarkerMerge
+      // already renders the EXACT content this draft is about to publish
+      // into a live copy of the real target page (responsive-preview-gate.js's
+      // checkResponsivePreview) and diffs it against that same page's own
+      // unmodified baseline, so a pre-existing site defect this draft didn't
+      // cause is never blamed on it. That check alone isn't the fix/retry
+      // rule, though: a real regression must not simply dead-end the draft
+      // here and wait on a human, same as the Quality Gate loop in
+      // generateDraft above already refuses to do for content issues. So a
+      // 'responsive-regression' verdict gets a bounded number of automatic
+      // repair attempts — regenerate with the concrete measured regression
+      // as correction feedback, re-validate through the Quality Gate (a
+      // repair the LLM writes is new content, not a human edit, so it must
+      // clear the same bar generation always does), then re-check the real
+      // browser render again — before this ever becomes the human's problem.
+      // Any other preview failure (render-mode-uncertain, missing classes,
+      // ...) isn't something a content regeneration can fix, so it still
+      // fails immediately, unchanged from before.
+      const MAX_DESIGN_VALIDATE_ATTEMPTS = 3; // 1 real check + 2 repair retries
+      let previewResult = null;
+      let activeContent = draft.content;
+      for (let attempt = 1; attempt <= MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
+        previewResult = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
+        if (previewResult.ok || previewResult.reason !== 'responsive-regression' || attempt === MAX_DESIGN_VALIDATE_ATTEMPTS) break;
+
+        const regressionSummary = describeResponsiveRegressions(previewResult.regressions);
+        console.warn(`[action-center] draft ${draft.id} broke the page's real layout on approval preview (attempt ${attempt}), attempting repair: ${regressionSummary}`);
+        // eslint-disable-next-line no-await-in-loop
+        const generator = await getGenerator(draft.action_type);
+        if (!generator) break; // nothing that can regenerate this action type — fall through to the honest failure below
+        const repaired = await generator.generate({
+          siteId,
+          params: {
+            ...(draft.input || {}),
+            designCorrections: `CORRECTION REQUIRED — the previous version of this content was checked in a real browser at real `
+              + `device widths against the actual live page it publishes to, and it broke the layout: ${regressionSummary}. Fix `
+              + 'exactly this problem (the content itself, not the page around it) and keep everything else you already wrote.',
+          },
+        }).catch((err) => { console.error(`[action-center] design-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        if (!repaired?.content) break;
+
+        // The repaired content is a fresh, machine-written attempt — it must
+        // clear the same Quality Gate any other generation does before it's
+        // trusted enough to even re-check visually. A repair that fixes the
+        // layout by breaking the content (truncating it into invalid JSON-LD,
+        // say) must not quietly become this draft's new content.
+        // eslint-disable-next-line no-await-in-loop
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s design-validate repair failed the Quality Gate, abandoning repair`); break; }
+
+        activeContent = repaired.content;
+      }
       if (!previewResult.ok) {
         throw httpError(422, previewResult.error, {
           reason: previewResult.reason, confidence: previewResult.confidence, suggestedMode: previewResult.suggestedMode,
           missingClasses: previewResult.missingClasses, componentKey: previewResult.componentKey,
         });
+      }
+      // A repair attempt above changed the content that will actually ship —
+      // persist it onto the real draft row so approveDraft()/apply() below
+      // (and anything a human looks at afterwards) see the content that was
+      // actually validated, not the original that failed.
+      if (activeContent !== draft.content) {
+        const updated = await updateDraft(siteId, draft.id, { content: activeContent });
+        if (updated) draft.content = updated.content;
       }
 
       // Approval Gate, Phase 1 (implementers/lib/rendering-gate.js) — the
@@ -948,6 +1031,58 @@ export async function approveAndPublishDraft(siteId, draftId, { userId, renderMo
       const renderingGate = evaluateApprovalGate({ renderingConfig: renderingCheck });
       if (!renderingGate.ok) {
         throw httpError(422, `This draft can't be approved yet — ${renderingGate.blockingError}`, { reason: renderingCheck.reason });
+      }
+
+      // SEO/TECH VALIDATE, stage — fix-verification.js's real re-check
+      // methods (does the shipped page actually have the html-lang attribute
+      // it claims, is the broken link actually gone, is the excerpt actually
+      // present) used to only ever run AFTER merge/deploy, on a delay —
+      // meaning a generator whose splice logic silently failed to do what it
+      // claimed shipped anyway and only got caught days later. The four
+      // methods that are pure content checks (verificationMethodFor's
+      // PAGE_PATTERN/PAGE_ABSENCE/PAGE_CONTENT/REPO_FILE — see
+      // checkContentAgainstExpectation's own comment for why the other
+      // methods need a live deploy and stay post-ship-only) need nothing but
+      // the exact content this draft is about to publish, which is already
+      // sitting right here as previewResult.newContent. Same bounded
+      // repair-and-recheck posture as DESIGN-VALIDATE above, reusing the
+      // same MAX_DESIGN_VALIDATE_ATTEMPTS budget rather than opening a
+      // second, uncoordinated retry budget for what is really one
+      // "does this draft's real output do what it claims" gate.
+      const verificationSpec = verificationMethodFor({ ...draft, content: activeContent }, { siteOrigin: siteOriginFor(site) });
+      let techCheck = checkContentAgainstExpectation(verificationSpec.method, verificationSpec.expected, previewResult.newContent, verificationSpec.target);
+      for (let attempt = 1; techCheck.checkable && techCheck.present === false && attempt < MAX_DESIGN_VALIDATE_ATTEMPTS; attempt++) {
+        console.warn(`[action-center] draft ${draft.id}'s own final content does not satisfy what it claims to fix (${JSON.stringify(techCheck.evidence)}), attempting repair`);
+        // eslint-disable-next-line no-await-in-loop
+        const generator = await getGenerator(draft.action_type);
+        if (!generator) break;
+        const repaired = await generator.generate({
+          siteId,
+          params: {
+            ...(draft.input || {}),
+            designCorrections: `CORRECTION REQUIRED — the previous version of this content was checked against its own final `
+              + `output and does not actually do what it claims to fix: ${JSON.stringify(techCheck.evidence)}. Fix exactly this `
+              + 'problem and keep everything else you already wrote.',
+          },
+        }).catch((err) => { console.error(`[action-center] seo/tech-validate repair regeneration failed for draft ${draft.id}:`, err.message); return null; });
+        if (!repaired?.content) break;
+        // eslint-disable-next-line no-await-in-loop
+        const repairGate = await runQualityGate(repaired.content, draft.action_type, siteId, { site });
+        if (!repairGate.clean) { console.warn(`[action-center] draft ${draft.id}'s seo/tech-validate repair failed the Quality Gate, abandoning repair`); break; }
+        activeContent = repaired.content;
+        // eslint-disable-next-line no-await-in-loop
+        const repairedPreview = await resolved.implementer.preview(site, { ...draft, content: activeContent }, { renderModeOverride: renderMode });
+        if (!repairedPreview.ok) break; // let the DESIGN-VALIDATE-shaped failure above have already been the honest error in that case
+        previewResult = repairedPreview;
+        techCheck = checkContentAgainstExpectation(verificationSpec.method, verificationSpec.expected, previewResult.newContent, verificationSpec.target);
+      }
+      if (techCheck.checkable && techCheck.present === false) {
+        throw httpError(422, `This draft can't be approved yet — its own final content does not do what it claims to fix `
+          + `(${verificationSpec.method}: ${JSON.stringify(techCheck.evidence)}).`, { reason: 'seo-tech-validation-failed', evidence: techCheck.evidence });
+      }
+      if (activeContent !== draft.content) {
+        const updated = await updateDraft(siteId, draft.id, { content: activeContent });
+        if (updated) draft.content = updated.content;
       }
     }
   }

@@ -1258,11 +1258,17 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // as the freshness check above (design-sensitive types, visible mode only)
   // — a schema-only/meta-title splice has nothing rendered to check.
   //
-  // Informational by default (RESPONSIVE_GATE_ENFORCE), the same rollout
-  // posture checkDesignIntegrityGate used before it started refusing drafts:
-  // this needs a real headless-browser round trip against the live site —
-  // slower and less battle-tested in production than every static check
-  // above it — so it ships watching first, blocking once that's proven out.
+  // Enforced by default (RESPONSIVE_GATE_ENFORCE=false opts back out). This
+  // used to be informational-only, the same rollout posture
+  // checkDesignIntegrityGate used before it started refusing drafts — but
+  // "informational" on its own is exactly what CLAUDE.md's design-preservation
+  // rule forbids: a real, measured layout regression must never ship
+  // silently. What makes turning this into a real gate safe now is that it
+  // is no longer a dead end when it fires — routes/action-center.js's
+  // approveAndPublishDraft calls preview() (which reaches this same check)
+  // inside a bounded repair-and-recheck loop before a human ever sees a
+  // failure, so a real regression gets an automatic chance to self-correct
+  // first, same as every other gate in this pipeline.
   let responsivePreview = null;
   const componentField = MARKER_FIELD_BY_ACTION_TYPE[draft.action_type];
   const marker = componentField && markerMap[componentField];
@@ -1271,7 +1277,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
       pageUrl: page, marker, newContentHtml: built.values[componentField],
     }).catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
 
-    if (responsivePreview.ok && responsivePreview.broken && process.env.RESPONSIVE_GATE_ENFORCE === 'true') {
+    if (responsivePreview.ok && responsivePreview.broken && process.env.RESPONSIVE_GATE_ENFORCE !== 'false') {
       return {
         ok: false, reason: 'responsive-regression',
         error: `This content breaks the page's layout at a real device width: ${describeResponsiveRegressions(responsivePreview.regressions)}.`,
