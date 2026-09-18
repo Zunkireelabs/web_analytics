@@ -9,8 +9,9 @@ import { createComponentTemplateJob, getQueuedComponentTemplateJob, createDesign
 import { getSiteById } from '../../store/read.js';
 import {
   projectAllComponentTemplates, projectComponentTemplate, stampDesignProfile,
-  isProfileUsable, isProjectable,
+  isProfileUsable, isProjectable, DESIGN_PROFILE_VERSION,
 } from '../../design-agent/lib/design-profile.js';
+import { resolveFile } from './url-file-map.js';
 
 // The generatorId every componentTemplate-derivation lesson (see
 // recordRejectedTemplateLesson below) is filed under in agent_fix_memory —
@@ -1054,6 +1055,361 @@ export function contentWrapperAvailability(site) {
     detail: "This site's Design Context hasn't been derived yet — analysis of the live site has been queued. No action needed; this generator's default fallback template renders in the meantime.",
     componentKey,
     actionType: 'content-wrapper',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PAGE-SCOPED COMPONENT TEMPLATES
+//
+// Everything above this point treats a componentTemplates[key] entry as ONE
+// global template per site, captured/verified against a single reference
+// page (sitePageUrl(site) — the homepage) and then applied to whatever page
+// a draft happens to target. That is a correct model for a site with a real
+// shared design system (one Tailwind build, one CSS bundle, every page draws
+// from the same class vocabulary) — checkTemplateFreshness's own
+// class-existence check is meaningful on ANY page of such a site, by design.
+//
+// It silently stops being true for a site with NO shared design system at
+// all: page-scoped inline CSS, a different <style> block per page, classes
+// like `.home-h2`/`.home-section`/`.body-copy` that are only ever DEFINED on
+// the homepage. Confirmed live on chayceproperties.com (site #8864): its
+// expandContent/faq componentTemplates entries were captured with
+// `verifiedRef` pointing at the homepage and hardcode exactly those three
+// classes, which genuinely do not exist on /faq/, /news/, /about-chayce/,
+// etc. — not a "went stale since capture", a "was never true of this page in
+// the first place". Every draft targeting a non-homepage page correctly
+// failed checkTemplateFreshness and was abandoned to human review — the
+// check was doing its job, but the underlying model had no way to represent
+// "this site has no shared design system, this page is its own source of
+// truth."
+//
+// The fix is not to weaken the check (a homepage class genuinely missing
+// from /faq/'s CSS is real evidence, not a false positive) — it is to stop
+// assuming there is only ever ONE template to check, and to give a target
+// page's OWN evidence somewhere to live when it turns out to disagree with
+// the site-level one.
+//
+// Three tiers, most specific first, mirroring exactly what
+// COMPONENT_TEMPLATE_KEY already models one level up:
+//   - PAGE:      site.url_file_map.siteRoot.pageComponentTemplates[key].byUrl[pageUrl]
+//                — captured and verified against exactly this URL.
+//   - PAGE_TYPE: .byFile[filePath] — filePath is resolveFile(site, pageUrl),
+//                the SAME "which repo file renders this page" signal
+//                url-file-map.js already uses for everything else. Two URLs
+//                that resolve to the same file (every /blog/:slug post
+//                through one pattern-matched template, say) are the same
+//                page type BY CONSTRUCTION — reusing that existing signal
+//                instead of inventing a second, parallel page-type taxonomy
+//                is what makes a genuinely shared template still get reused
+//                across pages of the same type, rather than re-captured
+//                once per URL for a site that DOES share a template family.
+//   - SITE:      site.url_file_map.siteRoot.componentTemplates[key] — today's
+//                shape, completely unchanged, and still the right answer
+//                whenever it's actually verified against the shared-design
+//                sites this was always correct for (Zunkireelabs, Admizz).
+//
+// resolvePageComponentTemplate below is the one entry point that walks all
+// three tiers against the REAL target page and, only if none of them verify,
+// derives a brand-new page-specific template straight from that page's own
+// live markup (buildPageEvidenceComponentTemplate) — autonomously, so a page
+// simply having its own valid, different design is never treated as a
+// failure requiring a human, only a genuine incident (unreachable page, or a
+// page with no real styled structure to derive anything from) still is.
+
+// The file this URL maps to, per url_file_map — the existing, authoritative
+// "which template renders this page" signal (used everywhere else a page's
+// identity as a TYPE matters: resolveAdapter, checkSharedTemplateWrite).
+// Returns null exactly when resolveFile itself would (no url_file_map entry
+// matches), which every caller here treats as "no page-type grouping
+// available, fall back to page-specific only" — never as an error.
+export function pageTemplateFileKey(site, pageUrl) {
+  if (!pageUrl) return null;
+  return resolveFile(site, pageUrl) || null;
+}
+
+function pageComponentTemplateSlots(site, componentKey) {
+  return site?.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey] || {};
+}
+
+export const PAGE_COMPONENT_TEMPLATE_TIER = Object.freeze({
+  PAGE: 'page',
+  PAGE_TYPE: 'page-type',
+  SITE: 'site',
+});
+
+// Landmarks stripped before hunting for a representative heading/paragraph —
+// a nav link or a footer legal blurb is real text on the page, but neither
+// is evidence of how this site presents an FAQ answer or an expanded-content
+// paragraph. Best-effort (a plain regex, not a DOM parse — same tool this
+// whole module already uses for classExistsInCss/extractLiteralClassNames),
+// not a claim of perfect landmark detection.
+function stripLandmarks(html) {
+  return html
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, '')
+    .replace(/<header\b[\s\S]*?<\/header>/gi, '')
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, '');
+}
+
+const HEADING_RE = /<h([1-3])\b[^>]*\bclass="([^"]*)"[^>]*>([\s\S]*?)<\/h\1>/gi;
+const PARAGRAPH_RE = /<p\b[^>]*\bclass="([^"]*)"[^>]*>([\s\S]*?)<\/p>/gi;
+const STRIP_TAGS_RE = /<[^>]+>/g;
+// A heading/paragraph below this length is more likely an eyebrow, a badge,
+// or a UI label than the section's real title/prose — the same "long enough
+// to be a judgment call, not a guess" bar bodySlotLooksLikeLabel's own
+// font-size heuristic exists for, just on text length instead of CSS.
+// "New", "Sale", "Featured" are all real badge/eyebrow text under this
+// length; a genuine section heading ("Frequently Asked Questions", "Our
+// Services") is essentially never this short.
+const MIN_HEADING_TEXT_LENGTH = 10;
+const MIN_BODY_TEXT_LENGTH = 30;
+// How far back from a found heading/paragraph to look for the section/div
+// that visually wraps it. A plain nearest-preceding-opening-tag scan, not a
+// real DOM ancestor walk (this module has no HTML parser, deliberately —
+// see classExistsInCss's own comment on why a substring/regex approach is
+// the house style here) — it can occasionally attribute a SIBLING's wrapper
+// to the match instead of its true parent. That is an acceptable, bounded
+// imprecision for an optional field (layout.container is CSS classes only,
+// never structural claims validated elsewhere), not for the heading/body
+// classes themselves, which this never guesses at.
+const CONTAINER_SEARCH_WINDOW = 1500;
+const CONTAINER_TAG_RE = /<(?:section|div|article)\b[^>]*\bclass="([^"]*)"/gi;
+
+function nearestPrecedingContainerClass(html, matchIndex) {
+  const before = html.slice(Math.max(0, matchIndex - CONTAINER_SEARCH_WINDOW), matchIndex);
+  let found = null;
+  let m;
+  CONTAINER_TAG_RE.lastIndex = 0;
+  while ((m = CONTAINER_TAG_RE.exec(before))) found = m[1].trim();
+  return found || null;
+}
+
+// The page-specific counterpart to what a full design-profile CAPTURE
+// (Playwright, geometry, computed styles — server/design-agent/live-analysis/
+// capture.js) does at the whole-site level, scaled down to "find one real
+// heading and one real paragraph on THIS page and read their literal class
+// attributes" — no browser, just the same fetched HTML checkTemplateFreshness
+// already has in hand. Returns null (never a partial/invented guess) when
+// either slot can't be found with real evidence — a page built with zero
+// class hooks on its text (rare, but real: some pages style purely via tag
+// selectors) has nothing this can safely derive a template from, and the
+// honest answer is to say so, not to fabricate a class string.
+export function extractPageTypographyEvidence(html) {
+  if (!html) return null;
+  const body = stripLandmarks(html);
+
+  let headingClass = null;
+  HEADING_RE.lastIndex = 0;
+  let m;
+  while ((m = HEADING_RE.exec(body))) {
+    const text = m[3].replace(STRIP_TAGS_RE, '').trim();
+    const cls = m[2].trim();
+    if (cls && text.length >= MIN_HEADING_TEXT_LENGTH) { headingClass = cls; m.headingIndex = m.index; break; }
+  }
+  if (!headingClass) return null;
+  const headingIndex = m.index;
+
+  let bodyClass = null;
+  let bodyIndex = null;
+  PARAGRAPH_RE.lastIndex = 0;
+  while ((m = PARAGRAPH_RE.exec(body))) {
+    const text = m[2].replace(STRIP_TAGS_RE, '').trim();
+    const cls = m[1].trim();
+    if (cls && text.length >= MIN_BODY_TEXT_LENGTH) { bodyClass = cls; bodyIndex = m.index; break; }
+  }
+  if (!bodyClass) return null;
+
+  const containerClass = nearestPrecedingContainerClass(body, Math.min(headingIndex, bodyIndex))
+    || nearestPrecedingContainerClass(body, headingIndex)
+    || null;
+
+  return { headingClass, bodyClass, containerClass };
+}
+
+// Turns page evidence into a real componentTemplate by reusing
+// design-profile.js's own PROJECTORS (projectComponentTemplate) against a
+// minimal, honest "profile" built from ONLY this one page's real classes —
+// never the site's aggregated designProfile, which is exactly the thing
+// that's wrong for a page-scoped-CSS site. Deliberately does not duplicate
+// projectFaq/projectExpandContent/etc.'s markup shapes here: reusing the
+// same, already-tested composition logic means a page-evidence-derived
+// template and a profile-derived one are indistinguishable in shape, differ
+// only in WHICH real classes they carry, and any future improvement to a
+// projector's markup benefits both without a second edit.
+//
+// layout.container falls back to the empty string (never undefined) when no
+// wrapping element was found — cx() already drops empty/falsy fragments
+// cleanly, so the projected wrapper simply carries no extra container class
+// rather than one invented from nothing. validateDesignProfile requires
+// layout.container OR layout.prose to be truthy, so a page with no
+// discoverable container still needs a non-empty value here; falling back to
+// the body's own class (real, non-invented — it is the innermost real
+// wrapper this evidence found) rather than failing the whole derivation over
+// a missing outer <div> is the same "don't let cosmetic markup shallowness
+// block a real, otherwise-good capture" call filterTemplateToLiveClasses
+// makes elsewhere in this file.
+export function buildPageEvidenceComponentTemplate(actionType, evidence) {
+  if (!isProjectable(actionType) || !evidence?.headingClass || !evidence?.bodyClass) return null;
+  const pseudoProfile = {
+    version: DESIGN_PROFILE_VERSION,
+    typography: {
+      body: evidence.bodyClass,
+      heading: { item: evidence.headingClass, section: evidence.headingClass },
+    },
+    layout: { container: evidence.containerClass || evidence.bodyClass },
+    spacing: {},
+    components: {},
+  };
+  if (!isProfileUsable(pseudoProfile)) return null;
+  return projectComponentTemplate(pseudoProfile, actionType);
+}
+
+// The one entry point every apply-time caller should use instead of reading
+// componentTemplates[key] directly (backend.js previously did exactly that,
+// unconditionally checking the SITE tier against whatever page a draft
+// happened to target — see this section's header for why that's wrong for a
+// page-scoped-CSS site). Walks PAGE -> PAGE_TYPE -> SITE, most specific
+// first, using checkTemplateFreshness's plain class-existence check — the
+// SAME check and the SAME semantics backend.js's apply-time gate always used
+// (never checkTemplateStructuralMatch/verifyTemplateAgainstLiveSite's full
+// contract here: the target page legitimately doesn't have this component
+// yet, which is the entire reason the draft exists — see
+// checkTemplateStructuralMatch's own header for why that check is only ever
+// meaningful against a page already expected to contain the real thing).
+//
+// Only when NONE of the three tiers verify does this fall through to
+// deriving a brand-new page-specific template from the target page's own
+// live markup and VERIFYING that (verifyTemplateAgainstLiveSite,
+// expectsLiveExample: false — same contract the site-level design-profile
+// projection path already uses in resolveOrCreateComponentTemplate, since
+// this is also a projection, not a claimed-to-already-exist capture). A
+// successful derivation is persisted so every later draft against this same
+// URL — and, via the PAGE_TYPE tier, every other URL this site's own
+// url_file_map says shares the same template file — reuses it instead of
+// re-deriving from scratch.
+export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
+  fetchPage = fetchText,
+  fetchStylesheet = fetchText,
+  saveConfig = updateSiteRepoConfig,
+  recordAudit = recordAuditEvent,
+} = {}) {
+  const componentKey = COMPONENT_TEMPLATE_KEY[actionType];
+  if (!componentKey) return { ok: true, reason: 'no-concept', template: null, tier: null, componentKey: null };
+  if (!pageUrl) return { ok: true, reason: 'no-page', template: site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null, tier: PAGE_COMPONENT_TEMPLATE_TIER.SITE, componentKey };
+
+  const fileKey = pageTemplateFileKey(site, pageUrl);
+  const slots = pageComponentTemplateSlots(site, componentKey);
+  const candidates = [
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.PAGE, template: slots.byUrl?.[pageUrl] || null },
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE, template: fileKey ? slots.byFile?.[fileKey] || null : null },
+    { tier: PAGE_COMPONENT_TEMPLATE_TIER.SITE, template: site?.url_file_map?.siteRoot?.componentTemplates?.[componentKey] || null },
+  ];
+
+  // Reused for the recapture step below when every tier turns out stale —
+  // checkTemplateFreshness already fetched this exact page and returns the
+  // HTML it fetched, so the recapture derivation doesn't need a second round
+  // trip to the same URL for the common case (every tier genuinely stale,
+  // page reachable). Only ever set from a successful (ok: true) check.
+  let fetchedHtml = null;
+  for (const candidate of candidates) {
+    if (!candidate.template?.wrapper) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const freshness = await checkTemplateFreshness({ pageUrl, templateEntry: candidate.template, fetchPage, fetchStylesheet })
+      .catch((err) => ({ ok: false, error: err.message }));
+    if (!freshness.ok) {
+      // Infra failure reaching the live page at all — fails OPEN exactly like
+      // checkTemplateFreshness's own contract always has (a network blip is
+      // not evidence a template is bad), so this tries the candidate as-is
+      // rather than burning an auto-recapture attempt on a page we could not
+      // even fetch. Every candidate below this one would fail the same
+      // fetch, so returning here rather than looping is not a missed check.
+      return { ok: true, template: candidate.template, tier: candidate.tier, source: 'existing-unverified-infra', componentKey };
+    }
+    if (!freshness.stale) {
+      return { ok: true, template: candidate.template, tier: candidate.tier, source: 'existing', componentKey };
+    }
+    fetchedHtml = freshness.html || fetchedHtml;
+    // stale: a MORE SPECIFIC tier being wrong (e.g. a page-specific template
+    // whose page has since been redesigned) must not stop a still-good, more
+    // general tier from being tried — only exhausting every tier justifies
+    // recapture.
+  }
+
+  // AUTO-RECAPTURE — no existing tier verifies against this exact page. This
+  // is the autonomous-reconciliation path point 6/7 of the fix ask for:
+  // derive fresh evidence from the real target page and retry, rather than
+  // abandoning the draft to human review just because one page's design
+  // legitimately differs from (or has drifted from) what was captured
+  // elsewhere.
+  const html = fetchedHtml || await fetchPage(pageUrl);
+  if (!html) {
+    return {
+      ok: false, reason: 'unreachable', componentKey,
+      error: `Could not fetch ${pageUrl} to derive or verify a "${componentKey}" component template for it.`,
+    };
+  }
+
+  const evidence = extractPageTypographyEvidence(html);
+  const derived = evidence && buildPageEvidenceComponentTemplate(actionType, evidence);
+  if (!derived) {
+    return {
+      ok: false, reason: 'no-page-evidence', componentKey,
+      error: `Could not find a real, styled heading and paragraph on ${pageUrl} to derive a "${componentKey}" `
+        + 'component template from — this page may not carry enough of its own markup structure to safely generate '
+        + 'this content onto it. This needs a human to add real, styled markup this page can be grounded in.',
+    };
+  }
+
+  const verified = await verifyTemplateAgainstLiveSite(actionType, derived, { pageUrl, fetchPage, fetchStylesheet, expectsLiveExample: false })
+    .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
+  if (!verified.ok) {
+    return {
+      ok: false, componentKey,
+      reason: verified.reason || 'derivation-failed',
+      error: verified.error || `A component template derived from ${pageUrl}'s own real markup did not verify against the page's own live design.`,
+    };
+  }
+
+  const stamped = { ...verified.stamped, tier: fileKey ? PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE : PAGE_COMPONENT_TEMPLATE_TIER.PAGE, sourcePage: pageUrl };
+  const existingStore = site?.url_file_map?.siteRoot?.pageComponentTemplates || {};
+  const existingForKey = existingStore[componentKey] || {};
+  const urlFileMap = {
+    ...site.url_file_map,
+    siteRoot: {
+      ...site.url_file_map?.siteRoot,
+      pageComponentTemplates: {
+        ...existingStore,
+        [componentKey]: {
+          byUrl: { ...existingForKey.byUrl, [pageUrl]: stamped },
+          // Promoted to the PAGE_TYPE slot too whenever this page maps to a
+          // known repo file, so every OTHER url_file_map-mapped URL sharing
+          // that same file (a blog-post pattern, a location-page pattern)
+          // benefits from this capture immediately rather than each needing
+          // its own draft to hit this same fallback path once independently.
+          ...(fileKey ? { byFile: { ...existingForKey.byFile, [fileKey]: stamped } } : (existingForKey.byFile ? { byFile: existingForKey.byFile } : {})),
+        },
+      },
+    },
+  };
+  await saveConfig({ siteId: site.id, urlFileMap }).catch((err) => {
+    console.error(`[design-drift] could not persist page-specific "${componentKey}" template for site ${site.id} / ${pageUrl}:`, err.message);
+  });
+  await recordAudit(systemActorReq(site.id), {
+    action: 'tenant.page_component_template_captured',
+    targetType: 'site',
+    targetId: String(site.id),
+    tenantSiteId: site.id,
+    tenantName: site.name,
+    metadata: { actionType, componentKey, pageUrl, fileKey, checkedClasses: verified.checkedClasses?.length ?? 0 },
+    success: true,
+  }).catch(() => {});
+
+  return {
+    ok: true,
+    template: stamped,
+    tier: fileKey ? PAGE_COMPONENT_TEMPLATE_TIER.PAGE_TYPE : PAGE_COMPONENT_TEMPLATE_TIER.PAGE,
+    source: 'captured-from-page',
+    componentKey,
+    justCaptured: true,
   };
 }
 

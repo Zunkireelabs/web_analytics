@@ -13,7 +13,7 @@ import { setViewportMeta, getViewportMeta } from './lib/viewport-inject.js';
 import { rewriteHref, stripLink, getAnchorsForHref, hrefVariants } from './lib/href-rewrite-inject.js';
 import { inspectRenderMode, hasExistingFaqSchema, CONFIDENCE_THRESHOLD, INSPECTABLE_ACTION_TYPES } from './lib/render-inspector.js';
 import { decideFaqRenderMode } from './lib/faq-render-mode.js';
-import { checkTemplateFreshness, COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
+import { COMPONENT_TEMPLATE_KEY, siteHasUsableDesignProfile, checkDesignIntegrityGate, resolvePageComponentTemplate } from './lib/design-drift.js';
 import { checkResponsivePreview, describeResponsiveRegressions } from '../generators/lib/responsive-preview-gate.js';
 import { discoverPaginationRoutes, matchPaginationRoute } from './lib/pagination-routes.js';
 import { checkSharedTemplateWrite } from './lib/action-scope.js';
@@ -1165,22 +1165,50 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
     mode = inspection.mode;
   }
 
-  // Checked only when this action type has a REAL configured componentTemplates
-  // entry (the zero-config DEFAULT_* fallback in marker-merge.js makes no
-  // claim to match the site's real design, so there's nothing to go stale)
-  // and only in 'visible' mode (schema-only publishes no styled markup at
-  // all). A failed check (network/infra) fails OPEN — see design-drift.js's
-  // own comment on why that's not treated the same as confirmed staleness.
+  // Checked only when this action type has SOME real design claim to verify
+  // — a configured site-level componentTemplates entry, a previously
+  // page-captured one, or a usable design profile buildMergeValues would
+  // otherwise project from unchecked (the zero-config DEFAULT_* fallback in
+  // marker-merge.js makes no claim to match the site's real design, so
+  // there's nothing to go stale) — and only in 'visible' mode (schema-only
+  // publishes no styled markup at all).
+  //
+  // resolvePageComponentTemplate (design-drift.js) is what actually decides
+  // WHICH template — site-level, page-type, or this exact page's own —
+  // verifies against the REAL target page, and autonomously derives/persists
+  // a fresh page-specific one when none of the existing tiers do (see that
+  // function's own header for the chayceproperties.com incident this
+  // replaces: a homepage-captured template's classes genuinely not existing
+  // on /faq/, /news/, etc., which used to abandon every such draft to human
+  // review instead of recognizing "this page just has its own real design").
+  // Only when that derivation itself genuinely fails (page unreachable, or
+  // no real styled structure to derive from) does this still refuse — the
+  // same honest, recoverable failure the old flat check always had, just no
+  // longer conflated with "this page has a different (but perfectly valid)
+  // design than the one page a template happened to be captured from".
   const componentKey = COMPONENT_TEMPLATE_KEY[draft.action_type];
-  const templateEntry = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
-  if (mode === 'visible' && templateEntry) {
-    const freshness = await checkTemplateFreshness({ pageUrl: page, templateEntry });
-    if (freshness.ok && freshness.stale) {
+  const siteLevelTemplate = componentKey && site.url_file_map?.siteRoot?.componentTemplates?.[componentKey];
+  const hasPageCaptures = componentKey && site.url_file_map?.siteRoot?.pageComponentTemplates?.[componentKey];
+  let componentTemplatesForMerge = site.url_file_map?.siteRoot?.componentTemplates;
+  if (mode === 'visible' && componentKey && (siteLevelTemplate || hasPageCaptures || siteHasUsableDesignProfile(site))) {
+    const resolved = await resolvePageComponentTemplate(site, draft.action_type, page);
+    if (!resolved.ok) {
       return {
         ok: false, reason: 'template-stale',
-        error: `This page's live site no longer defines the CSS classes this template expects (${freshness.missingClasses.join(', ')}) — the site's design may have changed since "${componentKey}" was configured. Regenerate it from the site's current design before applying.`,
-        missingClasses: freshness.missingClasses, componentKey, actionType: draft.action_type,
+        error: `This page's live site no longer defines the CSS classes this template expects, and an automatic `
+          + `attempt to derive a fresh "${componentKey}" template from ${page}'s own real design also failed: ${resolved.error}`,
+        componentKey, actionType: draft.action_type,
       };
+    }
+    // Only override buildMergeValues' own componentTemplates lookup when
+    // resolution actually picked something OTHER than the site-level entry
+    // it would already read — a page-type/page-specific template, or a
+    // freshly page-captured one. Passing the untouched map through the rest
+    // of the time keeps this byte-for-byte identical to the old behavior for
+    // every shared-design-system site, where the site tier is (correctly)
+    // what always wins.
+    if (resolved.tier && resolved.tier !== 'site' && resolved.template) {
+      componentTemplatesForMerge = { ...site.url_file_map?.siteRoot?.componentTemplates, [componentKey]: resolved.template };
     }
   }
 
@@ -1219,7 +1247,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // file.content already fetched above (known engineering issue: validate a
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
-  const built = buildMergeValues(draft.action_type, draft.content, mode, site.url_file_map?.siteRoot?.componentTemplates, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page });
+  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Responsive preview (generators/lib/responsive-preview-gate.js) — every
