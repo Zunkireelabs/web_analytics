@@ -242,6 +242,24 @@ const PROSE_TEMPLATES = {
   FAQ: { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt>\n<dd>{{ANSWER}}</dd>' },
 };
 
+// hostIsProse (below) used to be file.endsWith('.md') alone — a proxy for
+// "is this page a blog-article, the one page type PROSE_TEMPLATES was built
+// for". That proxy misses every OTHER prose-flow page type marker-merge.js's
+// own isInlineContentPage protects live (a 'legal' page — privacy/terms/
+// cookie policy — gets the same "small addition inside body copy" treatment
+// there, and on this site those pages are .njk, not .md). Confirmed live on
+// site 1 (2026-09-18): src/pages/privacy-policy-zunkiree-labs.njk's
+// EXPANDEDCONTENT wrapper still carried `py-12 md:py-20` section-scale
+// spacing — the exact defect this table exists to prevent — because the old
+// `.md`-only check never classified it as a prose host at all, so a repair
+// run would have kept re-applying `handler.template`'s full section styling
+// forever instead of ever converging on the bare, prose-inherited shape.
+// Matches classifyPageType's own 'legal' regex (design-agent/live-analysis/
+// schema.js) against the file's basename — the closest available signal to
+// a URL path here, since this script repairs a materialized file tree, not
+// live pages with known URLs.
+const LEGAL_FILE_RE = /\b(terms|privacy|cookies?|legal)\b/i;
+
 // The site's own comparison-table convention (src/pages/agentic-as-a-service.njk).
 // Generated tables shipped as a bare <table> with no classes at all, or with a
 // different one-off class list each time — nine distinct shapes across the site.
@@ -373,9 +391,10 @@ export async function repairSiteMarkerStyling(repoDir, templates, { write = fals
           return whole;
         }
 
-        // A markdown post is hosted inside the layout's prose wrapper; a .njk
-        // page template is not, and needs the full standalone component.
-        const hostIsProse = file.endsWith('.md');
+        // A markdown post (or a legal page — see LEGAL_FILE_RE above) is
+        // hosted inside the layout's prose wrapper; any other .njk page
+        // template is not, and needs the full standalone component.
+        const hostIsProse = file.endsWith('.md') || LEGAL_FILE_RE.test(path.basename(file));
         const template = (hostIsProse && PROSE_TEMPLATES[name]) || handler.template;
         const rendered = `${handler.render(items, template)}${scripts.join('')}`;
         if (rendered.trim() === inner) return whole;
