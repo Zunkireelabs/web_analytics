@@ -21,17 +21,6 @@ mock.module(resolve('./page-content.js'), {
 
 const { parseRobotsDisallowRules, parseUrlsetXml, crawlSite } = await import('./site-discovery.js');
 
-const resolve = (p) => new URL(p, import.meta.url).href;
-mock.module(resolve('./page-content.js'), {
-  namedExports: {
-    fetchTextIfExists: async () => ({ ok: false, text: '' }),
-    isPrivateOrLocalHost: () => false,
-    analyzePageUrl: async () => ({ ok: true, analysis: { internalLinks: [] } }),
-  },
-});
-
-const { crawlSite } = await import('./site-discovery.js');
-
 const ROBOTS_TXT = [
   'User-agent: *',
   'Disallow: /blog',
@@ -140,7 +129,7 @@ describe('parseUrlsetXml', () => {
 describe('crawlSite — never follows a link off the site\'s own hostname(s)', () => {
   test('a link to a different hostname is discovered but never crawled further', async () => {
     pageGraph = {
-      'https://example.com': {
+      'https://example.com/': {
         internalLinks: ['https://example.com/about/', 'https://dev-web.example.com/leaked/'],
       },
       'https://example.com/about/': { internalLinks: [] },
@@ -161,7 +150,7 @@ describe('crawlSite — never follows a link off the site\'s own hostname(s)', (
 
   test('a legitimate additional own domain (e.g. a product subdomain) is still crawled', async () => {
     pageGraph = {
-      'https://example.com': {
+      'https://example.com/': {
         internalLinks: ['https://booking.example.com/'],
       },
       'https://booking.example.com/': { internalLinks: ['https://booking.example.com/pricing/'] },
