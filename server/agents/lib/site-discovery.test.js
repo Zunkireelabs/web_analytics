@@ -1,6 +1,25 @@
 import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRobotsDisallowRules, parseUrlsetXml } from './site-discovery.js';
+
+const resolve = (p) => new URL(p, import.meta.url).href;
+
+// Fetched per-URL by the mocked analyzePageUrl below — keyed by URL so a
+// test can hand crawlSite a real link graph without a network call.
+let pageGraph;
+
+mock.module(resolve('./page-content.js'), {
+  namedExports: {
+    fetchTextIfExists: async () => ({ ok: false, text: '' }), // no robots.txt restrictions in these tests
+    isPrivateOrLocalHost: () => false,
+    analyzePageUrl: async (url) => {
+      const page = pageGraph?.[url];
+      if (!page) return { ok: false };
+      return { ok: true, analysis: { internalLinks: page.internalLinks || [] } };
+    },
+  },
+});
+
+const { parseRobotsDisallowRules, parseUrlsetXml, crawlSite } = await import('./site-discovery.js');
 
 const resolve = (p) => new URL(p, import.meta.url).href;
 mock.module(resolve('./page-content.js'), {
@@ -107,5 +126,54 @@ describe('parseUrlsetXml', () => {
     </urlset>`;
     const entries = parseUrlsetXml(xml);
     assert.deepEqual(entries.map((e) => e.loc), ['https://example.com/real/']);
+  });
+});
+
+// Regression for the 2026-09-18 incident: a link anywhere in the crawl
+// pointing at a different hostname (site 1's own staging subdomain,
+// dev-web.zunkireelabs.com) got followed, and — because page-content.js's
+// internalLinks is scoped to "same host as the page it was found on", not
+// "same host as the site's real origin" — every link found ON that
+// staging page was then ALSO treated as internal, letting the crawl wander
+// through an entire subdomain that was never the site's real public
+// surface and generate real recommendations for it.
+describe('crawlSite — never follows a link off the site\'s own hostname(s)', () => {
+  test('a link to a different hostname is discovered but never crawled further', async () => {
+    pageGraph = {
+      'https://example.com': {
+        internalLinks: ['https://example.com/about/', 'https://dev-web.example.com/leaked/'],
+      },
+      'https://example.com/about/': { internalLinks: [] },
+      // Deliberately no entry for the staging URL — if crawlSite ever
+      // fetches it, analyzePageUrl returns { ok: false } and the test
+      // would still pass, so the real assertion below checks the staging
+      // page's OWN links never entered the frontier at all.
+      'https://dev-web.example.com/leaked/': {
+        internalLinks: ['https://dev-web.example.com/should-never-appear/'],
+      },
+    };
+    const site = { gsc_property: 'sc-domain:example.com' };
+    const pages = await crawlSite(site, { maxPages: 10, maxDepth: 4, concurrency: 5 });
+
+    assert.ok(pages.includes('https://example.com/about/'));
+    assert.ok(!pages.includes('https://dev-web.example.com/should-never-appear/'));
+  });
+
+  test('a legitimate additional own domain (e.g. a product subdomain) is still crawled', async () => {
+    pageGraph = {
+      'https://example.com': {
+        internalLinks: ['https://booking.example.com/'],
+      },
+      'https://booking.example.com/': { internalLinks: ['https://booking.example.com/pricing/'] },
+      'https://booking.example.com/pricing/': { internalLinks: [] },
+    };
+    const site = {
+      gsc_property: 'sc-domain:example.com',
+      website_domain: 'example.com',
+      additional_own_domains: ['booking.example.com'],
+    };
+    const pages = await crawlSite(site, { maxPages: 10, maxDepth: 4, concurrency: 5 });
+
+    assert.ok(pages.includes('https://booking.example.com/pricing/'));
   });
 });

@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import { fetchTextIfExists, isPrivateOrLocalHost, analyzePageUrl } from './page-content.js';
 import { listSitemaps } from '../../ingest/gsc-technical.js';
+import { ownDomains } from './site-domain.js';
 
 // Real site-wide page discovery — so ai-visibility/content-gap/technical-seo
 // aren't limited to only pages that already have GSC search traffic. Two
@@ -197,6 +198,25 @@ export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = M
   // both "https://chayceproperties.com" and ".../" in page_inventory for
   // the same homepage.
   const rootUrl = `${origin}/`;
+
+  // page-content.js's internalLinks is "same host as the page it was found
+  // ON", not "same host as this site's real origin" — correct for that
+  // function's own callers, but wrong to trust blindly here: if the frontier
+  // ever follows ONE link to a different hostname (a staging/dev subdomain
+  // accidentally referenced somewhere), analyzePageUrl treats THAT page's
+  // own outbound links as "internal" too, and the crawl silently wanders
+  // into — and starts generating real Action Center recommendations for —
+  // an entire subdomain that was never this site's real, public surface.
+  // Confirmed live on site 1: dev-web.zunkireelabs.com (the site's own
+  // staging environment) got crawled and audited as if it were production.
+  // Restricting every frontier push to a hostname this site actually claims
+  // as its own — ownDomains(site) when configured (a legitimate product
+  // subdomain, e.g. a booking engine on its own hostname, still gets
+  // followed), falling back to just the origin's own hostname otherwise —
+  // is the single choke point that keeps the crawl inside the site's real,
+  // intended surface regardless of what an arbitrary page happens to link to.
+  const allowedHosts = new Set(ownDomains(site) || [new URL(origin).hostname]);
+
   const discovered = new Set();
   const visited = new Set([rootUrl]);
   let frontier = [{ url: rootUrl, depth: 0 }];
@@ -216,6 +236,9 @@ export async function crawlSite(site, { maxPages = MAX_CRAWL_PAGES, maxDepth = M
 
       for (const href of fetched.analysis.internalLinks || []) {
         if (visited.has(href) || visited.size >= maxPages) continue;
+        let hostname;
+        try { hostname = new URL(href).hostname; } catch { continue; }
+        if (!allowedHosts.has(hostname)) continue;
         visited.add(href);
         nextFrontier.push({ url: href, depth: depth + 1 });
       }
