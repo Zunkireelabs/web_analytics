@@ -26,12 +26,20 @@
 //   node server/scripts/capture-component-template.js --site 1 \
 //     --repo <path> --file src/pages/products/search.njk --marker FAQ --type faq
 //   ... --commit
+//
+// Pass --page <url> to capture/verify against a SPECIFIC live page instead of
+// the site's homepage, and store it in the page-scoped tier
+// (pageComponentTemplates[key]) instead of overwriting the site-level
+// componentTemplates[key] entry — for a site with no shared design system
+// (page-scoped inline CSS, a different <style> block per page — see
+// design-drift.js's PAGE-SCOPED COMPONENT TEMPLATES section), the homepage's
+// classes are not evidence of what any other page actually uses.
 
 import 'dotenv/config';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { query } from '../db.js';
-import { validatePlaceholders, verifyTemplateAgainstLiveSite, sitePageUrl } from '../implementers/lib/design-drift.js';
+import { validatePlaceholders, verifyTemplateAgainstLiveSite, sitePageUrl, pageTemplateFileKey } from '../implementers/lib/design-drift.js';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -44,10 +52,19 @@ const file = arg('file');
 const marker = arg('marker');
 const type = arg('type');
 const key = arg('key') || type;
+// A specific live URL to capture/verify this template against, instead of
+// the site's homepage — for a site with no shared design system (see
+// design-drift.js's PAGE-SCOPED COMPONENT TEMPLATES section), the homepage
+// is not a valid stand-in for every other page's own real design. Given,
+// this stores into the page-specific/page-type tier
+// (pageComponentTemplates[key]) rather than overwriting the single
+// site-level componentTemplates[key] entry, which stays reserved for a
+// genuinely shared, sitewide template.
+const page = arg('page');
 const commit = process.argv.includes('--commit');
 
 if (!siteId || !repo || !file || !marker || !type) {
-  console.error('Usage: capture-component-template.js --site <id> --repo <path> --file <src/...> --marker FAQ --type faq [--key faq] [--commit]');
+  console.error('Usage: capture-component-template.js --site <id> --repo <path> --file <src/...> --marker FAQ --type faq [--key faq] [--page <url>] [--commit]');
   process.exit(1);
 }
 
@@ -164,9 +181,10 @@ console.log(template.row);
 
 const { rows: siteRows } = await query('select * from sites where id = $1', [siteId]);
 const site = siteRows[0];
-const verified = await verifyTemplateAgainstLiveSite(type, template, { pageUrl: sitePageUrl(site) })
+const pageUrl = page || sitePageUrl(site);
+const verified = await verifyTemplateAgainstLiveSite(type, template, { pageUrl })
   .catch((err) => ({ ok: false, reason: 'unreachable', error: err.message }));
-console.log(`\nverification: ${verified.ok ? 'PASSED' : `FAILED (${verified.reason}${verified.error ? `: ${verified.error}` : ''})`}`);
+console.log(`\nverification (against ${pageUrl}): ${verified.ok ? 'PASSED' : `FAILED (${verified.reason}${verified.error ? `: ${verified.error}` : ''})`}`);
 if (!verified.ok) process.exit(1);
 
 if (!commit) {
@@ -176,6 +194,33 @@ if (!commit) {
 
 const urlFileMap = site.url_file_map || {};
 const siteRoot = urlFileMap.siteRoot || {};
+
+if (page) {
+  // Explicit --page: this is a claim about ONE real page, not the whole
+  // site, so it is stored in the page-scoped tier design-drift.js's
+  // resolvePageComponentTemplate reads FIRST (more specific than the
+  // site-level entry) — never overwrites componentTemplates[key], which
+  // stays reserved for a template genuinely verified as shared.
+  const fileKey = pageTemplateFileKey(site, page);
+  const existingStore = siteRoot.pageComponentTemplates || {};
+  const existingForKey = existingStore[key] || {};
+  await query('update sites set url_file_map = $1 where id = $2', [{
+    ...urlFileMap,
+    siteRoot: {
+      ...siteRoot,
+      pageComponentTemplates: {
+        ...existingStore,
+        [key]: {
+          byUrl: { ...existingForKey.byUrl, [page]: verified.stamped },
+          ...(fileKey ? { byFile: { ...existingForKey.byFile, [fileKey]: verified.stamped } } : (existingForKey.byFile ? { byFile: existingForKey.byFile } : {})),
+        },
+      },
+    },
+  }, siteId]);
+  console.log(`\nStored as pageComponentTemplates.${key}.byUrl["${page}"]${fileKey ? ` (and .byFile["${fileKey}"])` : ''} for site ${siteId}.`);
+  process.exit(0);
+}
+
 await query('update sites set url_file_map = $1 where id = $2', [{
   ...urlFileMap,
   siteRoot: {

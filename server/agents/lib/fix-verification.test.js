@@ -84,7 +84,8 @@ mock.module(resolve('../../github/client.js'), {
   namedExports: { ...realGithub, getFileContent: async (s, path) => repoFiles[path] ?? null },
 });
 
-const { runDueVerifications } = await import(resolve('./fix-verification.js'));
+const { runDueVerifications, checkContentAgainstExpectation } = await import(resolve('./fix-verification.js'));
+const { VERIFICATION_METHOD } = realFixVerifications;
 
 function verificationRow(overrides = {}) {
   return {
@@ -348,5 +349,48 @@ describe('reconciliation on the tag-recheck path', () => {
     assert.deepEqual(reopenedIds, [9]);
     assert.match(attempts[0].reason, /^verification-found-issue-still-present/);
     assert.equal(attempts[0].retryPolicy, 'item_defect', 'a live change that did not fix the issue IS an item defect and should count toward the cap');
+  });
+});
+
+describe('checkContentAgainstExpectation — pre-ship SEO/tech validate', () => {
+  test('PAGE_PATTERN: html-lang-present matches the same regex the post-ship check uses', () => {
+    const missing = checkContentAgainstExpectation(VERIFICATION_METHOD.PAGE_PATTERN, { check: 'html-lang-present' }, '<html><head></head></html>');
+    assert.equal(missing.checkable, true);
+    assert.equal(missing.present, false);
+    const present = checkContentAgainstExpectation(VERIFICATION_METHOD.PAGE_PATTERN, { check: 'html-lang-present' }, '<html lang="en"><head></head></html>');
+    assert.equal(present.present, true);
+  });
+
+  test('PAGE_ABSENCE: a link that is still in the about-to-ship content is not yet fixed', () => {
+    const result = checkContentAgainstExpectation(
+      VERIFICATION_METHOD.PAGE_ABSENCE, { absent: '/broken-page' }, '<a href="/broken-page">old link</a>',
+    );
+    assert.equal(result.checkable, true);
+    assert.equal(result.present, false);
+    assert.equal(result.evidence.stillPresent, true);
+  });
+
+  test('PAGE_CONTENT: the excerpt is found in the draft\'s own final content', () => {
+    const result = checkContentAgainstExpectation(
+      VERIFICATION_METHOD.PAGE_CONTENT, { needle: 'Book your stay today' }, '<p>Book your stay today</p>',
+    );
+    assert.equal(result.checkable, true);
+    assert.equal(result.present, true);
+    assert.equal(result.evidence.foundIn, 'text');
+  });
+
+  test('REPO_FILE: checks the pending content directly, not a repo fetch', () => {
+    const result = checkContentAgainstExpectation(
+      VERIFICATION_METHOD.REPO_FILE, { files: ['content/page.md'], needle: 'new paragraph' }, 'front matter\nnew paragraph here',
+    );
+    assert.equal(result.checkable, true);
+    assert.equal(result.present, true);
+  });
+
+  test('a method that requires a live deploy (RESPONSE_HEADER, REDIRECT, SITE_ASSET, TAG_RECHECK) is reported as not checkable pre-ship, not as failing', () => {
+    for (const method of [VERIFICATION_METHOD.RESPONSE_HEADER, VERIFICATION_METHOD.REDIRECT, VERIFICATION_METHOD.SITE_ASSET, VERIFICATION_METHOD.TAG_RECHECK]) {
+      const result = checkContentAgainstExpectation(method, {}, '<html></html>');
+      assert.equal(result.checkable, false, `${method} should not be treated as a pre-ship-checkable method`);
+    }
   });
 });

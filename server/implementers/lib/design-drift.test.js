@@ -24,6 +24,9 @@ const {
   bodySlotLooksLikeLabel, captureClassRules, checkClassRuleDrift,
   observedClassesByRole, checkTypographyRole, verifyProfileRoles,
   designReviewFingerprint, designReviewState, checkDesignIntegrityGate,
+  extractPageTypographyEvidence, buildPageEvidenceComponentTemplate,
+  resolvePageComponentTemplate, pageTemplateFileKey, PAGE_COMPONENT_TEMPLATE_TIER,
+  validatePlaceholders,
 } = await import('./design-drift.js');
 const { DESIGN_PROFILE_VERSION } = await import('../../design-agent/lib/design-profile.js');
 
@@ -923,6 +926,355 @@ describe('checkTemplateFreshness', () => {
     });
     assert.equal(result.ok, false);
     assert.ok(result.error);
+  });
+});
+
+describe('extractPageTypographyEvidence', () => {
+  test('finds the real heading and body classes on a page, ignoring nav/header/footer', () => {
+    const html = '<html><body>'
+      + '<nav><h2 class="nav-h2">Menu</h2></nav>'
+      + '<header><p class="header-p">A header blurb long enough to look like real body copy at first glance.</p></header>'
+      + '<section class="content-section"><h2 class="real-heading">A Real Section Heading</h2>'
+      + '<p class="real-body">This is the real paragraph of body copy on this page, long enough to count.</p></section>'
+      + '<footer><p class="footer-p">Copyright footer text that is also long enough to otherwise look like body copy.</p></footer>'
+      + '</body></html>';
+    const evidence = extractPageTypographyEvidence(html);
+    assert.equal(evidence.headingClass, 'real-heading');
+    assert.equal(evidence.bodyClass, 'real-body');
+    assert.equal(evidence.containerClass, 'content-section');
+  });
+
+  test('returns null when the page has no classed heading at all — never invents one', () => {
+    const html = '<html><body><h2>No class here</h2><p class="some-body">Long enough real paragraph text right here.</p></body></html>';
+    assert.equal(extractPageTypographyEvidence(html), null);
+  });
+
+  test('returns null when the page has no classed paragraph long enough to count as body copy', () => {
+    const html = '<html><body><h2 class="heading">A Real Heading Here</h2><p class="tiny">Too short</p></body></html>';
+    assert.equal(extractPageTypographyEvidence(html), null);
+  });
+
+  test('skips a short heading/paragraph (likely a label/eyebrow) in favor of a later, real one', () => {
+    const html = '<html><body>'
+      + '<h3 class="eyebrow">New</h3>'
+      + '<h2 class="real-heading">A Proper Section Heading</h2>'
+      + '<p class="real-body">A real, sufficiently long paragraph of body copy for this page.</p>'
+      + '</body></html>';
+    const evidence = extractPageTypographyEvidence(html);
+    assert.equal(evidence.headingClass, 'real-heading');
+  });
+});
+
+// Real incident, Chayce Properties (site 8864), fetched live 2026-09-18:
+// /get-started/index.html?package=... styles its hero heading and lead
+// paragraph via container-scoped descendant selectors in its own inline
+// <style> block, with ZERO class on the tags themselves.
+const GS_HTML = '<html><head><style>'
+  + '.gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}'
+  + '</style></head><body>'
+  + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+  + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+  + '</body></html>';
+const GS_CSS = ".gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}";
+
+describe('extractPageTypographyEvidence — bare-tag-via-container fallback (Chayce /get-started/ incident)', () => {
+  test('with no css given, a class-less heading/paragraph still returns null — unchanged, backward-compatible default', () => {
+    assert.equal(extractPageTypographyEvidence(GS_HTML), null);
+  });
+
+  test('with the real live css, finds tag-based evidence for a heading and paragraph that carry no class of their own', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML, GS_CSS);
+    assert.ok(evidence, 'must find usable evidence now that css is available to confirm it');
+    assert.equal(evidence.headingClass, null);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, null);
+    assert.equal(evidence.bodyTag, 'p');
+    assert.equal(evidence.bodyContainerClass, 'gs-hero');
+  });
+
+  test('a selector whose real target is a DIFFERENT tag does not count as evidence — .gs-hero h1 em styles em, not h1', () => {
+    // Isolate: css defines .gs-hero ONLY via the em-targeting rule, never a
+    // real h1-targeting rule, so the ONLY honest answer is "no evidence".
+    const emOnlyCss = ".gs-hero h1 em{font-style:italic}";
+    const html = '<html><head><style>' + emOnlyCss + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A heading with <em>emphasis</em> inside, long enough to count.</h1>'
+      + '<p class="gs-lead">A real classed paragraph, long enough to count as body copy here.</p></div>'
+      + '</body></html>';
+    assert.equal(extractPageTypographyEvidence(html, emOnlyCss), null, 'h1 must not be credited from a rule that really targets em');
+  });
+
+  test('a mixed page — bare tag-styled heading, but a real classed paragraph — resolves both slots independently', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML.replace(
+      '<p>Answer a few simple questions',
+      '<p class="gs-lead">Answer a few simple questions',
+    ), GS_CSS);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, 'gs-lead');
+    assert.equal(evidence.bodyTag, null, 'a slot resolved via a literal class must not also carry tag evidence');
+  });
+});
+
+describe('buildPageEvidenceComponentTemplate', () => {
+  test('composes a real template using ONLY the classes found in the page evidence — nothing invented', () => {
+    const evidence = { headingClass: 'faqp-question', bodyClass: 'faqp-answer', containerClass: 'faqp-section' };
+    const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+    assert.match(template.row, /faqp-question/);
+    assert.match(template.row, /faqp-answer/);
+    assert.match(template.wrapper, /faqp-section/);
+    assert.doesNotMatch(template.wrapper + template.row, /home-|shared-/, 'must carry only this page\'s own real classes');
+  });
+
+  test('falls back to the body class for the wrapper when no container was found, rather than failing outright', () => {
+    const evidence = { headingClass: 'h', bodyClass: 'b', containerClass: null };
+    const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+    assert.ok(template, 'a missing container must not block a derivation that otherwise has real heading/body evidence');
+  });
+
+  test('returns null for non-projectable action types and for missing evidence', () => {
+    assert.equal(buildPageEvidenceComponentTemplate('meta-title', { headingClass: 'h', bodyClass: 'b' }), null);
+    assert.equal(buildPageEvidenceComponentTemplate('expand-content', null), null);
+    assert.equal(buildPageEvidenceComponentTemplate('expand-content', { headingClass: 'h' }), null);
+  });
+
+  describe('bare-tag-via-container evidence (Chayce /get-started/ incident)', () => {
+    test('puts the real container class on the wrapper and NO class on the bare heading/body tags', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero', containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.wrapper, /class="gs-hero"/);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/, 'the real h1 tag, no class attribute at all');
+      assert.match(template.row, /<p>\{\{BODY\}\}<\/p>/, 'the real p tag, no class attribute at all');
+      const check = validatePlaceholders('expand-content', template);
+      assert.equal(check.ok, true, check.error);
+    });
+
+    test('a mixed slot (tag-based heading, classed body) renders each slot per its own evidence kind', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: 'gs-lead', bodyTag: null, bodyContainerClass: null, containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+      assert.match(template.row, /<div class="gs-lead">\{\{BODY\}\}<\/div>/);
+      assert.match(template.wrapper, /class="gs-hero"/, 'the confirmed container class still grounds the wrapper');
+    });
+
+    test('only expand-content is supported for the bare-tag shape — faq gets a clean refusal, not a guess', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('faq', evidence), null);
+    });
+
+    test('a slot with a tag but no confirmed container (should never happen from real extraction, but must not fabricate one) refuses', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: null, bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('expand-content', evidence), null);
+    });
+  });
+});
+
+describe('resolvePageComponentTemplate — page-scoped component templates (Chayce-shaped fixtures)', () => {
+  // Real shape: chayceproperties.com has NO shared design system — every
+  // page ships its own inline <style> block, and classes like home-h2/
+  // home-section/body-copy are only ever DEFINED on the homepage. /faq/ and
+  // /news/ each define their own, completely disjoint class vocabulary. This
+  // is exactly the incident resolvePageComponentTemplate exists to fix: a
+  // componentTemplates.expandContent entry captured from the homepage must
+  // never ship those classes onto a page that never had them.
+  const HOME_URL = 'https://chayce.example/';
+  const FAQ_URL = 'https://chayce.example/faq/';
+  const NEWS_URL = 'https://chayce.example/news/';
+
+  const HOME_HTML = '<html><head><style>'
+    + ".home-h2{font-family:'Playfair',serif;font-size:34px}.home-section{padding:80px 0}.body-copy{color:#555;font-size:16.5px}"
+    + '</style></head><body>'
+    + '<section class="home-section"><h2 class="home-h2">Welcome to Chayce Properties</h2>'
+    + '<p class="body-copy">Real homepage body copy, long enough to count as prose for the extraction heuristic.</p></section>'
+    + '</body></html>';
+
+  const FAQ_HTML = '<html><head><style>'
+    + '.faqp-section{padding:56px 0}.faqp-question{font-size:20px}.faqp-answer{color:#666;font-size:15px}'
+    + '</style></head><body>'
+    + '<section class="faqp-section"><h2 class="faqp-question">Frequently Asked Questions</h2>'
+    + '<p class="faqp-answer">A real FAQ answer, long enough in length to count as this page\'s own body copy.</p></section>'
+    + '</body></html>';
+
+  const NEWS_HTML = '<html><head><style>'
+    + '.news-section{padding:64px 0}.news-h3{font-size:24px}.news-body{color:#444;font-size:15px}'
+    + '</style></head><body>'
+    + '<div class="news-section"><h3 class="news-h3">Latest Chayce Properties News Update</h3>'
+    + '<p class="news-body">A real news blurb, long enough to be picked up as this page\'s own body copy.</p></div>'
+    + '</body></html>';
+
+  const fetchPageFor = (map) => async (url) => map[url] ?? null;
+  const noStylesheet = async () => { throw new Error('page-scoped inline-CSS sites have no linked stylesheet to fetch'); };
+
+  const homeExpandContentTemplate = {
+    wrapper: '<div class="home-section">\n{{ROWS}}\n</div>',
+    row: '  <section>\n    <h2 class="home-h2">{{HEADING}}</h2>\n    <div class="body-copy">{{BODY}}</div>\n  </section>',
+    verifiedAt: '2026-09-16T01:49:50.097Z', verifiedBy: 'freshness-check', verifiedRef: HOME_URL,
+  };
+
+  function chayceSite(extraSiteRoot = {}) {
+    return {
+      id: 8864,
+      name: 'Chayceproperties',
+      url_file_map: {
+        pages: { '/': { file: 'src/index.njk' }, '/faq/': { file: 'src/faq.njk' }, '/news/': { file: 'src/news.njk' } },
+        siteRoot: { componentTemplates: { expandContent: homeExpandContentTemplate }, ...extraSiteRoot },
+      },
+    };
+  }
+  const noopDeps = () => ({ saveConfig: async ({ urlFileMap }) => ({ id: 8864, url_file_map: urlFileMap }), recordAudit: async () => {} });
+
+  test('a homepage-captured template is never silently applied to /faq/', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, 'a page with its own real design must not be treated as a failure');
+    assert.notEqual(result.tier, PAGE_COMPONENT_TEMPLATE_TIER.SITE, 'must not silently reuse the homepage-captured template');
+    assert.doesNotMatch(
+      `${result.template.wrapper}${result.template.row}`,
+      /home-h2|home-section|body-copy/,
+      'the homepage-only classes must never ship onto /faq/',
+    );
+  });
+
+  test('/faq/ ends up using its own, independently-verified design', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.template.row, /faqp-question/);
+    assert.match(result.template.row, /faqp-answer/);
+    assert.equal(result.source, 'captured-from-page');
+  });
+
+  test('/news/ likewise uses its own design, not the homepage\'s or /faq/\'s', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', NEWS_URL, {
+      fetchPage: fetchPageFor({ [NEWS_URL]: NEWS_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.template.row, /news-h3/);
+    assert.match(result.template.row, /news-body/);
+    assert.doesNotMatch(result.template.row, /faqp-|home-h2/);
+  });
+
+  test('a genuinely SHARED template (one global stylesheet, same classes everywhere) is reused, not re-captured per page', async () => {
+    const sharedTemplate = {
+      wrapper: '<div class="shared-section">\n{{ROWS}}\n</div>',
+      row: '<section><h2 class="shared-h2">{{HEADING}}</h2><div class="shared-body">{{BODY}}</div></section>',
+      verifiedAt: '2026-09-01T00:00:00.000Z', verifiedBy: 'freshness-check', verifiedRef: HOME_URL,
+    };
+    const sharedCss = '.shared-h2{font-size:32px}.shared-body{font-size:16px}.shared-section{padding:64px 0}';
+    const linkedPageHtml = '<html><head><link rel="stylesheet" href="/main.css"></head><body><p>irrelevant</p></body></html>';
+    const site = { id: 1, name: 'Shared Design Site', url_file_map: { siteRoot: { componentTemplates: { expandContent: sharedTemplate } } } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', 'https://shared.example/some-other-page/', {
+      fetchPage: async () => linkedPageHtml,
+      fetchStylesheet: async () => sharedCss,
+      ...noopDeps(),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.tier, PAGE_COMPONENT_TEMPLATE_TIER.SITE, 'a genuinely shared template must be reused, not re-derived per page');
+    assert.equal(result.source, 'existing');
+    assert.deepEqual(result.template, sharedTemplate);
+  });
+
+  test('a stale template is automatically recaptured and the draft proceeds — never abandoned to human review for a page with its own valid design', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, 'must not fall through to an abandon/human-review outcome');
+    assert.equal(result.justCaptured, true);
+    assert.notEqual(result.reason, 'template-stale');
+  });
+
+  test('persists the freshly captured template so a later draft for the same page/file reuses it without re-deriving', async () => {
+    let savedUrlFileMap = null;
+    await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: FAQ_HTML }),
+      fetchStylesheet: noStylesheet,
+      saveConfig: async ({ urlFileMap }) => { savedUrlFileMap = urlFileMap; return { id: 8864, url_file_map: urlFileMap }; },
+      recordAudit: async () => {},
+    });
+    assert.ok(savedUrlFileMap.siteRoot.pageComponentTemplates.expandContent.byUrl[FAQ_URL], 'page-specific slot persisted');
+    assert.ok(savedUrlFileMap.siteRoot.pageComponentTemplates.expandContent.byFile['src/faq.njk'], 'promoted to the page-type (file) slot too');
+
+    const siteAfterCapture = chayceSite({ pageComponentTemplates: savedUrlFileMap.siteRoot.pageComponentTemplates });
+    let fetchCount = 0;
+    const second = await resolvePageComponentTemplate(siteAfterCapture, 'expand-content', FAQ_URL, {
+      fetchPage: async (url) => { fetchCount += 1; return url === FAQ_URL ? FAQ_HTML : null; },
+      fetchStylesheet: noStylesheet,
+      ...noopDeps(),
+    });
+    assert.equal(second.ok, true);
+    assert.equal(second.tier, PAGE_COMPONENT_TEMPLATE_TIER.PAGE);
+    assert.equal(second.source, 'existing');
+    assert.equal(fetchCount, 1, 'reuses the persisted template via an ordinary freshness check — no re-derivation fetch');
+  });
+
+  test('recapture succeeds end-to-end via the bare-tag-via-container fallback when the page has real evidence but no class on its heading/body', async () => {
+    // Real shape (Chayce Properties /get-started/, fetched live 2026-09-18):
+    // no class on <h1>/<p> at all, styled only through the page's own
+    // .gs-hero h1 / .gs-hero p descendant rules — this is the exact page
+    // shape resolvePageComponentTemplate previously refused with
+    // "no-page-evidence" even though the page visibly has real, styled,
+    // expandable content. `site` here has NO existing tier at any level,
+    // so this exercises extraction -> build -> the REAL
+    // verifyTemplateAgainstLiveSite (not a mocked bypass) end to end.
+    const GS_URL = 'https://chayce.example/get-started/index.html?package=Silver';
+    const GS_PAGE_HTML = '<html><head><style>'
+      + '.gs-hero h1{font-family:\'Playfair\',serif;font-size:48px}.gs-hero h1 em{font-style:italic}'
+      + '.gs-hero p{color:#555;font-size:17px}'
+      + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+      + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+      + '</body></html>';
+    const site = { id: 8864, name: 'Chayceproperties', url_file_map: { pages: {}, siteRoot: {} } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', GS_URL, {
+      fetchPage: fetchPageFor({ [GS_URL]: GS_PAGE_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.notEqual(result.reason, 'no-page-evidence');
+    assert.match(result.template.wrapper, /class="gs-hero"/);
+    assert.match(result.template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+    assert.match(result.template.row, /<p>\{\{BODY\}\}<\/p>/);
+    // Confirms this real path is NOT rejected via verifyTemplateAgainstLiveSite's
+    // 'no-design-claims' branch — the derived template is not fully classless
+    // (the wrapper carries the real, confirmed 'gs-hero' class), so
+    // freshness.checkedClasses is non-empty and stamping proceeds normally.
+    assert.equal(result.template.verifiedBy, 'freshness-check');
+    assert.ok(result.template.verifiedAt);
+  });
+
+  test('when recapture genuinely cannot succeed (the page is reachable but has no real styled heading/body), it fails safely instead of shipping broken classes', async () => {
+    // A real, fetchable page with its OWN CSS (so the SITE-tier freshness
+    // check can positively confirm staleness rather than merely failing to
+    // check at all) that simply has no classed heading/paragraph for the
+    // recapture step to derive anything real from.
+    const bareHtml = '<html><head><style>.unrelated{color:red}</style></head><body><h2>Untitled</h2><p>short</p></body></html>';
+    const result = await resolvePageComponentTemplate(chayceSite(), 'expand-content', FAQ_URL, {
+      fetchPage: fetchPageFor({ [FAQ_URL]: bareHtml }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-page-evidence');
+    assert.ok(result.error);
+  });
+
+  test('when there is no existing template at all and the target page is genuinely unreachable, fails safely rather than guessing', async () => {
+    // No componentTemplates configured for this action type at all — the
+    // tier loop has nothing to check (and therefore never even calls
+    // fetchPage), so this exercises the recapture step's OWN fetch failing
+    // on the very first attempt, distinct from a tier check merely being
+    // unable to verify an existing template (which fails open by design).
+    const site = { id: 8864, name: 'Chayceproperties', url_file_map: { pages: chayceSite().url_file_map.pages, siteRoot: {} } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', FAQ_URL, {
+      fetchPage: async () => null, fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'unreachable');
+  });
+
+  test('a componentTemplateKey with no concept (e.g. a page-scoped action type with no COMPONENT_TEMPLATE_KEY entry) is a clean passthrough', async () => {
+    const result = await resolvePageComponentTemplate(chayceSite(), 'meta-title', FAQ_URL, noopDeps());
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, 'no-concept');
   });
 });
 

@@ -11,6 +11,16 @@ import { daysAgoInTz } from '../../util/dates.js';
 import { runAgent } from '../runner.js';
 import { safeMessage } from '../../lib/errors.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
+import { recordAuditEvent } from '../../store/admin/audit-log.js';
+
+// A pseudo-req for audit writes made from background/cron code with no real
+// HTTP request behind them — same pattern design-drift.js/webhooks.js/
+// connect-repo.js each already use their own copy of, rather than a shared
+// export, since audit-log.js's recordActor only reads req.userId/req.siteId/
+// req.ip/req.get and none of these callers has a real req to begin with.
+function systemActorReq(siteId) {
+  return { userId: null, siteId, ip: null, get: () => null };
+}
 
 // The Recommendation Coordinator (Phase 4 M1). This is the ONLY component
 // allowed to create or update rows in the `recommendations` table, which is
@@ -322,12 +332,32 @@ export async function syncFromGrounded(siteId, grounded) {
         riskTier: blockedRiskTier(item),
       });
     } else {
-      await insertRecommendation(siteId, {
+      const riskTier = blockedRiskTier(item);
+      const created = await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
-        priority: item.priority, expectedImpact: item.expectedImpact, riskTier: blockedRiskTier(item),
+        priority: item.priority, expectedImpact: item.expectedImpact, riskTier,
         blockedReason: item.blockedReason ?? null,
       });
+      // DECIDE, audit trail only — this does not gate or change anything;
+      // the actual decision (page key, risk tier, blockedReason) is already
+      // final by the time this runs, computed by the same distributed checks
+      // as always (recommendationPageKey, blockedRiskTier/riskTierForGenerator,
+      // each detecting agent's own evidence). This just answers "why was this
+      // recommendation decided the way it was" after the fact, in one place,
+      // without moving or consolidating any of that logic — see this
+      // session's note on why the checks stay intentionally duplicated.
+      await recordAuditEvent(systemActorReq(siteId), {
+        action: 'recommendation.decided',
+        targetType: 'recommendation',
+        targetId: created?.id != null ? String(created.id) : null,
+        tenantSiteId: siteId,
+        metadata: {
+          generatorId: item.generatorId, page, findingId: item.id, detectingAgent: item.source,
+          riskTier, blockedReason: item.blockedReason ?? null, reason: item.reason ?? null,
+        },
+        success: true,
+      }).catch(() => {}); // recordAuditEvent already never throws; belt-and-suspenders against a future change to that contract
     }
   }
   if (grounded.detectedKeys) {

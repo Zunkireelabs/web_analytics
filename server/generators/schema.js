@@ -85,7 +85,7 @@ async function draftJsonLd(schemaType, title, bodyText, siteId) {
     '"@context": "https://schema.org" and the correct "@type").';
   const user = `Page title: ${title}\nPage text: ${bodyText.slice(0, 3000)}`;
   try {
-    return await callLLMForJson(system, user, { maxTokens: 700, generatorId: meta.id, siteId });
+    return await callLLMForJson(system, user, { maxTokens: 800, generatorId: meta.id, siteId });
   } catch {
     throw Object.assign(new Error('Schema generation failed: model did not return valid JSON'), { status: 400 });
   }
