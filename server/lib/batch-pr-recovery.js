@@ -86,9 +86,41 @@ async function recoverBranch(site, branchName, drafts, { apply, log, openPr }) {
   }
 
   const landed = [];
-  const missing = [];
+  let missing = [];
   for (const draft of drafts) {
     (subjects.some((s) => commitSubjectMatchesDraft(s, draft.id)) ? landed : missing).push(draft);
+  }
+
+  // Verified live on site 1, 2026-09-18: a branch with 11 real, pushed
+  // commits (confirmed against GitHub directly, well after the fact) was
+  // read as having ZERO of them by this exact compare call, and all 11
+  // drafts were abandoned on that single read — a proven false negative,
+  // not a real missing push. GitHub's compare endpoint can serve a
+  // momentarily stale result right after a rapid burst of pushes to the
+  // same ref (11 pushes in ~2 minutes here). A single read is cheap to get
+  // wrong and expensive to act on — it throws away real work and silently
+  // reopens the recommendation for full regeneration — so anything this
+  // first read calls "missing" gets one re-check against a fresh compare
+  // call before it is trusted. Only re-confirmed misses are abandoned;
+  // anything found on the second read is real and proceeds to landed.
+  if (missing.length) {
+    let recheck;
+    try {
+      recheck = await listCommitSubjectsAheadOfBase(site, branchName);
+    } catch {
+      recheck = null; // Transient failure on the recheck itself — treat as unconfirmed, not missing.
+    }
+    if (recheck) {
+      const stillMissing = [];
+      for (const draft of missing) {
+        (recheck.some((s) => commitSubjectMatchesDraft(s, draft.id)) ? landed : stillMissing).push(draft);
+      }
+      missing = stillMissing;
+    } else {
+      log?.(`[pr-recovery] site ${siteId}: branch ${branchName} recheck failed — leaving ${missing.length} unconfirmed draft(s) for the next run`);
+      summary.skipped += missing.length;
+      missing = [];
+    }
   }
 
   // A draft whose commit is NOT on the branch was stranded by a failed push,

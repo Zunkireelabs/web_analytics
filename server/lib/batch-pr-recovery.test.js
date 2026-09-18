@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 let draftRows = [];
 let commitSubjects = [];   // null = branch gone (404)
+let compareSequence = null; // optional queue of results, one per call, overrides commitSubjects while non-empty
 let openPrs = [];
 let compareThrows = null;
 let budgetLow = false;
@@ -36,7 +37,11 @@ mock.module(resolve('../store/recommendation-attempts.js'), {
 });
 mock.module(resolve('../github/client.js'), {
   namedExports: {
-    listCommitSubjectsAheadOfBase: async () => { if (compareThrows) throw compareThrows; return commitSubjects; },
+    listCommitSubjectsAheadOfBase: async () => {
+      if (compareThrows) throw compareThrows;
+      if (compareSequence && compareSequence.length) return compareSequence.shift();
+      return commitSubjects;
+    },
     listOpenPullRequestsForBranch: async () => openPrs,
     getLastKnownRateLimit: () => ({ low: budgetLow, remaining: budgetLow ? 5 : 4000, reset: null, at: null }),
   },
@@ -55,6 +60,7 @@ const run = (opts = {}) => recoverUnopenedBatchPrs(1, { apply: true, log: null, 
 beforeEach(() => {
   calls = { abandoned: [], prOpened: [], cleared: [], attempts: [], openedFor: [] };
   compareThrows = null;
+  compareSequence = null;
   openPrThrows = null;
   budgetLow = false;
   openPrs = [];
@@ -105,6 +111,37 @@ describe('recoverUnopenedBatchPrs', () => {
     assert.equal(calls.prOpened.length, 0);
     assert.equal(result.abandoned, 1);
     assert.deepEqual(calls.cleared, [101], 'only the confirmed commit gets its error cleared');
+  });
+
+  // The live 2026-09-18 case: site 1's branch had 11 real commits (confirmed
+  // directly against GitHub afterward), but the FIRST compare read came back
+  // empty for all of them, and every draft was abandoned on that single read.
+  // A rechecked "missing" must be given one more read before being trusted —
+  // this locks that in: first read says gone, second (recheck) says present,
+  // the draft must land, not abandon.
+  test('a commit missing on the first read but present on a recheck is treated as landed, not abandoned', async () => {
+    compareSequence = [
+      [], // first read: neither commit visible yet
+      [   // recheck: both actually there
+        'Action Center: apply qa-content draft #101',
+        'Action Center: apply expand-content draft #102',
+      ],
+    ];
+    const result = await run();
+    assert.equal(calls.abandoned.length, 0, 'a transient false negative must not throw away real work');
+    assert.equal(result.opened + result.adopted, 2);
+  });
+
+  // A commit still missing on the recheck too is the real thing this file
+  // exists to catch — the second read must not soften that into a pass.
+  test('a commit missing on both the first read and the recheck is still abandoned', async () => {
+    compareSequence = [
+      ['Action Center: apply qa-content draft #101'],
+      ['Action Center: apply qa-content draft #101'],
+    ];
+    const result = await run();
+    assert.deepEqual(calls.abandoned.map((a) => a.id), [102]);
+    assert.equal(result.abandoned, 1);
   });
 
   // #10 must not satisfy a search for draft #1.
