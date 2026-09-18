@@ -691,10 +691,24 @@ const BLOG_UNSAFE_SECTION_SPACING_RE = /^(?:[\w-]+:)?(?:py|my)-(?:1[0-9]|[2-9][0
 // FAQ/CTA block as part of the page's normal design (the 2026-09-09 fix's
 // own regression coverage treats a /services/ page's real section sizing as
 // correct, not a defect to strip). 'blog-article' and 'legal' are pure prose
-// flow with no section-building convention at all; 'other' is genuinely
-// unclassified — safest to treat as inline (strip the unsafe classes) than
-// to assume unknown page structure can host a full-bleed section.
-const INLINE_CONTENT_PAGE_TYPES = new Set(['blog-article', 'legal', 'other']);
+// flow with no section-building convention at all.
+//
+// 'other' is NOT included, even though it's unclassified — confirmed live on
+// site 1 (2026-09-17, PR #103): classifyPageType has no dedicated case for
+// /about/ (or /team/, /contact/, /careers/, /customers/, /pricing/, a
+// products index, ...), so every one of those genuinely full-section pages
+// fell into 'other' and got treated as inline prose. expand-content's
+// external-citations draft then had its wrapper's `container-custom py-12
+// md:py-20` stripped to nothing and its heading shrunk from
+// `text-3xl md:text-4xl lg:text-5xl` to `text-2xl`, breaking the entire
+// About page's layout (no container = no width constraint, no padding) on
+// a page that was never inline prose to begin with. Treating a genuinely
+// unknown page type as "assume the riskier of the two guesses" was the
+// wrong default — a false-narrow classification (missing the strip on a
+// truly inline unclassified page) just means captured section markup keeps
+// its normal section scale, which still looks like it belongs on the site;
+// a false-wide one (this incident) breaks the page outright.
+const INLINE_CONTENT_PAGE_TYPES = new Set(['blog-article', 'legal']);
 
 function isInlineContentPage(pageUrl) {
   if (typeof pageUrl !== 'string' || !pageUrl) return false;
