@@ -317,6 +317,28 @@ export function filterTemplateToLiveClasses(template, css) {
   return { template: filtered, dropped: [...dropped] };
 }
 
+// The exact CSS a real browser would load for this page — every linked
+// stylesheet plus every inline <style> block, in the same order
+// checkTemplateFreshness has always gathered them in. Factored out so there
+// is exactly ONE implementation of "get this page's real CSS": the
+// page-evidence auto-recapture path below (extractPageTypographyEvidence's
+// bare-tag-via-container fallback) also needs the live CSS, and may run with
+// no prior candidate template at all (a brand-new page with no tier
+// verified yet), so it cannot always reuse a freshness check's own `css`
+// return value — it needs to be able to gather it from scratch too, and a
+// second, slightly-different copy of this gathering logic is exactly how
+// the two would eventually drift.
+async function gatherPageCss(pageUrl, html, fetchStylesheet) {
+  const hrefs = extractStylesheetHrefs(html);
+  const cssParts = extractInlineStyleBlocks(html);
+  for (const href of hrefs) {
+    // eslint-disable-next-line no-await-in-loop
+    const css = await fetchStylesheet(resolveUrl(pageUrl, href));
+    if (css) cssParts.push(css);
+  }
+  return cssParts.join('\n');
+}
+
 // Single source of truth for "is this stored template still real" — fetches
 // the exact live page this draft is about to publish to (not some other
 // reference page), so the check reflects the exact CSS that page will
@@ -333,15 +355,9 @@ export async function checkTemplateFreshness({ pageUrl, templateEntry, fetchPage
   const html = await fetchPage(pageUrl);
   if (!html) return { ok: false, error: `Could not fetch ${pageUrl} to check its current live design.` };
 
-  const hrefs = extractStylesheetHrefs(html);
-  const cssParts = extractInlineStyleBlocks(html);
-  for (const href of hrefs) {
-    const css = await fetchStylesheet(resolveUrl(pageUrl, href));
-    if (css) cssParts.push(css);
-  }
-  if (!cssParts.length) return { ok: false, error: `No <link rel="stylesheet"> and no inline <style> block found on ${pageUrl} — cannot verify the current design.` };
+  const css = await gatherPageCss(pageUrl, html, fetchStylesheet);
+  if (!css) return { ok: false, error: `No <link rel="stylesheet"> and no inline <style> block found on ${pageUrl} — cannot verify the current design.` };
 
-  const css = cssParts.join('\n');
   const missingClasses = classes.filter((cls) => !classExistsInCss(cls, css));
   // `css` is included so a caller with a stale result can filter the template
   // down to what actually ships (filterTemplateToLiveClasses) without a
@@ -1150,8 +1166,14 @@ function stripLandmarks(html) {
     .replace(/<footer\b[\s\S]*?<\/footer>/gi, '');
 }
 
-const HEADING_RE = /<h([1-3])\b[^>]*\bclass="([^"]*)"[^>]*>([\s\S]*?)<\/h\1>/gi;
-const PARAGRAPH_RE = /<p\b[^>]*\bclass="([^"]*)"[^>]*>([\s\S]*?)<\/p>/gi;
+// Attrs captured separately from the class check below (rather than
+// requiring \bclass="..." in the regex itself, as this file's earlier
+// version of these did) so a REAL, sufficiently-long heading/paragraph with
+// NO class of its own can still reach resolveElementEvidence's bare-tag
+// fallback below, instead of being invisible to this scan entirely.
+const HEADING_ANY_RE = /<h([1-3])\b([^>]*)>([\s\S]*?)<\/h\1>/gi;
+const PARAGRAPH_ANY_RE = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+const CLASS_ATTR_VALUE_RE = /\bclass="([^"]*)"/;
 const STRIP_TAGS_RE = /<[^>]+>/g;
 // A heading/paragraph below this length is more likely an eyebrow, a badge,
 // or a UI label than the section's real title/prose — the same "long enough
@@ -1183,84 +1205,236 @@ function nearestPrecedingContainerClass(html, matchIndex) {
   return found || null;
 }
 
+// Whether the page's real CSS confirms that `.containerClass` genuinely
+// styles `tag` via a descendant/compound selector chain — the bare-tag-
+// selector counterpart to classExistsInCss's real-selector-boundary
+// discipline above. Real, live incident this exists for: Chayce Properties'
+// /get-started/index.html?package=... pages (fetched live 2026-09-18) style
+// their hero heading and lead paragraph with ZERO classes on the tags
+// themselves — `<h1>...</h1>`, bare `<p>...</p>` — entirely via container-
+// scoped rules in the page's own inline <style> block: `.gs-hero h1{...}`,
+// `.gs-rec p{...}`. classExistsInCss alone can never confirm this (there is
+// no class on the element to look up), and extractPageTypographyEvidence's
+// class-only search returned null for the WHOLE page as a result, even
+// though real, verifiably-styled prose was sitting right there.
+//
+// Deliberately requires TAG to be the RIGHTMOST simple selector in the
+// chain, not merely present anywhere in it — `.gs-hero h1 em` is a real
+// rule in that same stylesheet, and it styles `em`, not `h1`; `h1` there is
+// only an ANCESTOR of the actual target. Crediting that as evidence that
+// `.gs-hero` styles `h1` directly would be an unverified inference, exactly
+// the kind of guess this module's "real or nothing" discipline throughout
+// (see classExistsInCss's, extractCssRuleBody's own comments) refuses to
+// make. A bare regex split on whitespace, not a real CSS selector parser —
+// same accepted "no real parser, a real boundary check instead" trade this
+// file already makes everywhere else — so a combinator written without
+// surrounding whitespace (`.gs-hero>h1`) or a selector inside an at-rule
+// this simple brace-matching regex mishandles is a known, bounded gap, not
+// a silent wrong answer: worst case this returns false (no evidence found)
+// on a real rule it couldn't parse, never true for one that isn't there.
+const CSS_RULE_RE = /([^{}]+)\{[^{}]*\}/g;
+function tagStyledViaContainer(tag, containerClass, css) {
+  if (!tag || !containerClass || !css) return false;
+  const containerNeedle = `.${escapeForCssSelector(containerClass)}`;
+  CSS_RULE_RE.lastIndex = 0;
+  let m;
+  while ((m = CSS_RULE_RE.exec(css))) {
+    for (const rawSelector of m[1].split(',')) {
+      const parts = rawSelector.trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) continue;
+      const last = parts[parts.length - 1];
+      if (last.toLowerCase() !== tag.toLowerCase()) continue; // this rule's real target isn't `tag`
+      const ancestorChain = parts.slice(0, -1).join(' ');
+      let idx = ancestorChain.indexOf(containerNeedle);
+      while (idx !== -1) {
+        const after = ancestorChain[idx + containerNeedle.length];
+        if (after === undefined || !IDENT_CONTINUATION.test(after)) return true;
+        idx = ancestorChain.indexOf(containerNeedle, idx + 1);
+      }
+    }
+  }
+  return false;
+}
+
+function classOf(attrs) {
+  const m = CLASS_ATTR_VALUE_RE.exec(attrs);
+  return m ? m[1].trim() : null;
+}
+
+// Resolves real evidence for ONE candidate element the caller has already
+// confirmed is real, sufficiently long text (see MIN_HEADING_TEXT_LENGTH/
+// MIN_BODY_TEXT_LENGTH at the call sites). A literal class is the existing,
+// highest-confidence evidence and needs no CSS lookup at all. Failing that,
+// and only when `css` is available to actually confirm it, falls back to
+// tagStyledViaContainer above — never a guess: a class-less candidate with
+// no confirmable container evidence returns null, and the caller's scan
+// continues to the next real candidate on the page rather than giving up at
+// the first one that doesn't pan out.
+function resolveElementEvidence({ attrs, tag, index, body, css }) {
+  const cls = classOf(attrs);
+  if (cls) return { class: cls };
+  if (!css) return null;
+  const containerClass = nearestPrecedingContainerClass(body, index);
+  if (!containerClass) return null;
+  return tagStyledViaContainer(tag, containerClass, css) ? { tag, containerClass } : null;
+}
+
 // The page-specific counterpart to what a full design-profile CAPTURE
 // (Playwright, geometry, computed styles — server/design-agent/live-analysis/
 // capture.js) does at the whole-site level, scaled down to "find one real
-// heading and one real paragraph on THIS page and read their literal class
-// attributes" — no browser, just the same fetched HTML checkTemplateFreshness
-// already has in hand. Returns null (never a partial/invented guess) when
-// either slot can't be found with real evidence — a page built with zero
-// class hooks on its text (rare, but real: some pages style purely via tag
-// selectors) has nothing this can safely derive a template from, and the
-// honest answer is to say so, not to fabricate a class string.
-export function extractPageTypographyEvidence(html) {
+// heading and one real paragraph on THIS page and read real evidence of how
+// they're styled" — no browser, just the fetched HTML (and, when available,
+// the real live CSS) checkTemplateFreshness/gatherPageCss already work with.
+// Returns null (never a partial/invented guess) when either slot can't be
+// found with real evidence of ANY kind.
+//
+// `css` is optional (defaults to null) purely for backward compatibility —
+// every existing caller/test that only ever passed `html` keeps working
+// exactly as before, just without the bare-tag fallback below (which needs
+// real CSS to confirm anything). resolvePageComponentTemplate, the one real
+// caller, always has CSS in hand (gatherPageCss) by the time it calls this.
+export function extractPageTypographyEvidence(html, css = null) {
   if (!html) return null;
   const body = stripLandmarks(html);
 
-  let headingClass = null;
-  HEADING_RE.lastIndex = 0;
+  let headingEvidence = null;
+  let headingIndex = null;
+  HEADING_ANY_RE.lastIndex = 0;
   let m;
-  while ((m = HEADING_RE.exec(body))) {
+  while ((m = HEADING_ANY_RE.exec(body))) {
     const text = m[3].replace(STRIP_TAGS_RE, '').trim();
-    const cls = m[2].trim();
-    if (cls && text.length >= MIN_HEADING_TEXT_LENGTH) { headingClass = cls; m.headingIndex = m.index; break; }
+    if (text.length < MIN_HEADING_TEXT_LENGTH) continue;
+    const evidence = resolveElementEvidence({ attrs: m[2], tag: `h${m[1]}`, index: m.index, body, css });
+    if (evidence) { headingEvidence = evidence; headingIndex = m.index; break; }
   }
-  if (!headingClass) return null;
-  const headingIndex = m.index;
+  if (!headingEvidence) return null;
 
-  let bodyClass = null;
+  let bodyEvidence = null;
   let bodyIndex = null;
-  PARAGRAPH_RE.lastIndex = 0;
-  while ((m = PARAGRAPH_RE.exec(body))) {
+  PARAGRAPH_ANY_RE.lastIndex = 0;
+  while ((m = PARAGRAPH_ANY_RE.exec(body))) {
     const text = m[2].replace(STRIP_TAGS_RE, '').trim();
-    const cls = m[1].trim();
-    if (cls && text.length >= MIN_BODY_TEXT_LENGTH) { bodyClass = cls; bodyIndex = m.index; break; }
+    if (text.length < MIN_BODY_TEXT_LENGTH) continue;
+    const evidence = resolveElementEvidence({ attrs: m[1], tag: 'p', index: m.index, body, css });
+    if (evidence) { bodyEvidence = evidence; bodyIndex = m.index; break; }
   }
-  if (!bodyClass) return null;
+  if (!bodyEvidence) return null;
 
+  // The legacy, class-scoped container reading — kept exactly as before
+  // (used by buildPageEvidenceComponentTemplate's existing both-classed
+  // path below) even when one or both slots resolved via the new bare-tag
+  // fallback instead: still real, non-invented evidence (the nearest real
+  // wrapper either match sits inside), just not always the field that
+  // fallback path actually needs (headingContainerClass/bodyContainerClass
+  // below carry that).
   const containerClass = nearestPrecedingContainerClass(body, Math.min(headingIndex, bodyIndex))
     || nearestPrecedingContainerClass(body, headingIndex)
     || null;
 
-  return { headingClass, bodyClass, containerClass };
+  return {
+    headingClass: headingEvidence.class || null,
+    bodyClass: bodyEvidence.class || null,
+    containerClass,
+    // Set only when this slot resolved via the bare-tag/container fallback
+    // (never both a .class and a .tag on the same evidence object) — see
+    // buildPageEvidenceComponentTemplate for how each combination renders.
+    headingTag: headingEvidence.tag || null,
+    headingContainerClass: headingEvidence.tag ? headingEvidence.containerClass : null,
+    bodyTag: bodyEvidence.tag || null,
+    bodyContainerClass: bodyEvidence.tag ? bodyEvidence.containerClass : null,
+  };
 }
 
-// Turns page evidence into a real componentTemplate by reusing
-// design-profile.js's own PROJECTORS (projectComponentTemplate) against a
-// minimal, honest "profile" built from ONLY this one page's real classes —
-// never the site's aggregated designProfile, which is exactly the thing
-// that's wrong for a page-scoped-CSS site. Deliberately does not duplicate
-// projectFaq/projectExpandContent/etc.'s markup shapes here: reusing the
-// same, already-tested composition logic means a page-evidence-derived
-// template and a profile-derived one are indistinguishable in shape, differ
-// only in WHICH real classes they carry, and any future improvement to a
-// projector's markup benefits both without a second edit.
+// Turns page evidence into a real componentTemplate. Two distinct paths:
 //
-// layout.container falls back to the empty string (never undefined) when no
-// wrapping element was found — cx() already drops empty/falsy fragments
-// cleanly, so the projected wrapper simply carries no extra container class
-// rather than one invented from nothing. validateDesignProfile requires
-// layout.container OR layout.prose to be truthy, so a page with no
-// discoverable container still needs a non-empty value here; falling back to
-// the body's own class (real, non-invented — it is the innermost real
-// wrapper this evidence found) rather than failing the whole derivation over
-// a missing outer <div> is the same "don't let cosmetic markup shallowness
-// block a real, otherwise-good capture" call filterTemplateToLiveClasses
-// makes elsewhere in this file.
+// 1. BOTH slots carry a literal class (the original, highest-confidence
+//    shape) — reuses design-profile.js's own PROJECTORS (projectComponentTemplate)
+//    against a minimal, honest "profile" built from ONLY this one page's
+//    real classes, never the site's aggregated designProfile, which is
+//    exactly the thing that's wrong for a page-scoped-CSS site. Unchanged
+//    from before this function also handled bare-tag evidence, byte-for-byte.
+//
+//    layout.container falls back to the empty string (never undefined) when
+//    no wrapping element was found — cx() already drops empty/falsy
+//    fragments cleanly, so the projected wrapper simply carries no extra
+//    container class rather than one invented from nothing.
+//    validateDesignProfile requires layout.container OR layout.prose to be
+//    truthy, so a page with no discoverable container still needs a
+//    non-empty value here; falling back to the body's own class (real,
+//    non-invented — it is the innermost real wrapper this evidence found)
+//    rather than failing the whole derivation over a missing outer <div> is
+//    the same "don't let cosmetic markup shallowness block a real,
+//    otherwise-good capture" call filterTemplateToLiveClasses makes
+//    elsewhere in this file.
+//
+// 2. Either slot resolved via the bare-tag/container fallback instead (see
+//    extractPageTypographyEvidence) — CANNOT route through path 1's
+//    pseudoProfile/PROJECTORS machinery: validateDesignProfile requires
+//    typography.body and typography.heading.item to be TRUTHY, non-empty
+//    strings, and a class-less slot's honest value is an empty string,
+//    which that check correctly rejects as "no design language to project."
+//    Weakening validateDesignProfile itself to accept an empty string would
+//    also let a genuinely BROKEN class-based profile (a rebrand that
+//    silently dropped a real class down to "") through unnoticed at every
+//    other call site that check protects — not an acceptable trade for this
+//    one caller. So this composes the markup DIRECTLY instead, mirroring
+//    the exact same tag/nesting SHAPE projectExpandContent already produces
+//    (a <section> row inside a classed wrapper <div>) — just preserving the
+//    REAL tag literally wherever there is no class (a bare-tag CSS rule is
+//    tag-SPECIFIC: `.gs-hero h1` will never match an emitted `<h2>` the way
+//    a literal class matches on any tag), and emitting no class attribute
+//    at all on a slot this evidence confirmed genuinely has none of its own.
+//    Only 'expand-content' is supported so far — faq's/qa-content's row
+//    shapes (an Alpine accordion trigger/panel, a native <details>/
+//    <summary>) don't reduce to "one bare tag inside one container" the way
+//    expand-content's plain heading+paragraph row does, and forcing them
+//    through this same shape would be a guess about structure this
+//    evidence never actually observed, not a derivation from it.
 export function buildPageEvidenceComponentTemplate(actionType, evidence) {
-  if (!isProjectable(actionType) || !evidence?.headingClass || !evidence?.bodyClass) return null;
-  const pseudoProfile = {
-    version: DESIGN_PROFILE_VERSION,
-    typography: {
-      body: evidence.bodyClass,
-      heading: { item: evidence.headingClass, section: evidence.headingClass },
-    },
-    layout: { container: evidence.containerClass || evidence.bodyClass },
-    spacing: {},
-    components: {},
+  if (!isProjectable(actionType) || !evidence) return null;
+
+  if (evidence.headingClass && evidence.bodyClass) {
+    const pseudoProfile = {
+      version: DESIGN_PROFILE_VERSION,
+      typography: {
+        body: evidence.bodyClass,
+        heading: { item: evidence.headingClass, section: evidence.headingClass },
+      },
+      layout: { container: evidence.containerClass || evidence.bodyClass },
+      spacing: {},
+      components: {},
+    };
+    if (!isProfileUsable(pseudoProfile)) return null;
+    return projectComponentTemplate(pseudoProfile, actionType);
+  }
+
+  if (actionType !== 'expand-content') return null;
+  const headingUsable = evidence.headingClass || (evidence.headingTag && evidence.headingContainerClass);
+  const bodyUsable = evidence.bodyClass || (evidence.bodyTag && evidence.bodyContainerClass);
+  if (!headingUsable || !bodyUsable) return null;
+
+  // The one real, confirmed container class this row's markup must be
+  // nested inside for a bare-tag descendant-selector rule (`.gs-hero h1`)
+  // to actually match once this row is spliced elsewhere on the page — CSS
+  // descendant selectors match by ancestry anywhere in the DOM, never by
+  // original page position, so reusing this real class on a brand-new
+  // wrapper elsewhere on the page is exactly as valid as the class-based
+  // path above already assumes for a literal class. Prefers whichever slot
+  // actually NEEDS a container (a class-based slot needs none at all), then
+  // falls back to the same generic reading path 1 already accepts.
+  const wrapperClass = evidence.bodyContainerClass || evidence.headingContainerClass
+    || evidence.containerClass || evidence.bodyClass || evidence.headingClass || '';
+  if (!wrapperClass) return null; // no real class anywhere to ground this markup in — nothing safe to derive
+
+  const headingTag = evidence.headingClass ? 'h2' : evidence.headingTag;
+  const headingAttr = evidence.headingClass ? ` class="${evidence.headingClass}"` : '';
+  const bodyTag = evidence.bodyClass ? 'div' : evidence.bodyTag;
+  const bodyAttr = evidence.bodyClass ? ` class="${evidence.bodyClass}"` : '';
+
+  return {
+    wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
+    row: `  <section>\n    <${headingTag}${headingAttr}>{{HEADING}}</${headingTag}>\n    <${bodyTag}${bodyAttr}>{{BODY}}</${bodyTag}>\n  </section>`,
   };
-  if (!isProfileUsable(pseudoProfile)) return null;
-  return projectComponentTemplate(pseudoProfile, actionType);
 }
 
 // The one entry point every apply-time caller should use instead of reading
@@ -1305,11 +1479,14 @@ export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
   ];
 
   // Reused for the recapture step below when every tier turns out stale —
-  // checkTemplateFreshness already fetched this exact page and returns the
-  // HTML it fetched, so the recapture derivation doesn't need a second round
-  // trip to the same URL for the common case (every tier genuinely stale,
-  // page reachable). Only ever set from a successful (ok: true) check.
+  // checkTemplateFreshness already fetched this exact page (and its real
+  // CSS) and returns both, so the recapture derivation doesn't need a
+  // second round trip to the same URL/stylesheets for the common case
+  // (every tier genuinely stale, page reachable). Only ever set from a
+  // successful (ok: true) check, and always set together — both come from
+  // the same single checkTemplateFreshness call each iteration.
   let fetchedHtml = null;
+  let fetchedCss = null;
   for (const candidate of candidates) {
     if (!candidate.template?.wrapper) continue;
     // eslint-disable-next-line no-await-in-loop
@@ -1328,6 +1505,7 @@ export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
       return { ok: true, template: candidate.template, tier: candidate.tier, source: 'existing', componentKey };
     }
     fetchedHtml = freshness.html || fetchedHtml;
+    fetchedCss = freshness.css || fetchedCss;
     // stale: a MORE SPECIFIC tier being wrong (e.g. a page-specific template
     // whose page has since been redesigned) must not stop a still-good, more
     // general tier from being tried — only exhausting every tier justifies
@@ -1347,8 +1525,14 @@ export async function resolvePageComponentTemplate(site, actionType, pageUrl, {
       error: `Could not fetch ${pageUrl} to derive or verify a "${componentKey}" component template for it.`,
     };
   }
+  // Needed for extractPageTypographyEvidence's bare-tag-via-container
+  // fallback below (see its own comment) — gathered fresh via the same
+  // single implementation checkTemplateFreshness itself uses (gatherPageCss)
+  // when no candidate loop iteration already supplied it (a page with no
+  // existing template at ANY tier never enters that loop's body at all).
+  const css = fetchedCss || await gatherPageCss(pageUrl, html, fetchStylesheet);
 
-  const evidence = extractPageTypographyEvidence(html);
+  const evidence = extractPageTypographyEvidence(html, css);
   const derived = evidence && buildPageEvidenceComponentTemplate(actionType, evidence);
   if (!derived) {
     return {

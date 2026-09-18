@@ -26,6 +26,7 @@ const {
   designReviewFingerprint, designReviewState, checkDesignIntegrityGate,
   extractPageTypographyEvidence, buildPageEvidenceComponentTemplate,
   resolvePageComponentTemplate, pageTemplateFileKey, PAGE_COMPONENT_TEMPLATE_TIER,
+  validatePlaceholders,
 } = await import('./design-drift.js');
 const { DESIGN_PROFILE_VERSION } = await import('../../design-agent/lib/design-profile.js');
 
@@ -964,6 +965,57 @@ describe('extractPageTypographyEvidence', () => {
   });
 });
 
+// Real incident, Chayce Properties (site 8864), fetched live 2026-09-18:
+// /get-started/index.html?package=... styles its hero heading and lead
+// paragraph via container-scoped descendant selectors in its own inline
+// <style> block, with ZERO class on the tags themselves.
+const GS_HTML = '<html><head><style>'
+  + '.gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}'
+  + '</style></head><body>'
+  + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+  + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+  + '</body></html>';
+const GS_CSS = ".gs-hero h1{font-size:48px}.gs-hero h1 em{font-style:italic}.gs-hero p{color:#555;font-size:17px}";
+
+describe('extractPageTypographyEvidence — bare-tag-via-container fallback (Chayce /get-started/ incident)', () => {
+  test('with no css given, a class-less heading/paragraph still returns null — unchanged, backward-compatible default', () => {
+    assert.equal(extractPageTypographyEvidence(GS_HTML), null);
+  });
+
+  test('with the real live css, finds tag-based evidence for a heading and paragraph that carry no class of their own', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML, GS_CSS);
+    assert.ok(evidence, 'must find usable evidence now that css is available to confirm it');
+    assert.equal(evidence.headingClass, null);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, null);
+    assert.equal(evidence.bodyTag, 'p');
+    assert.equal(evidence.bodyContainerClass, 'gs-hero');
+  });
+
+  test('a selector whose real target is a DIFFERENT tag does not count as evidence — .gs-hero h1 em styles em, not h1', () => {
+    // Isolate: css defines .gs-hero ONLY via the em-targeting rule, never a
+    // real h1-targeting rule, so the ONLY honest answer is "no evidence".
+    const emOnlyCss = ".gs-hero h1 em{font-style:italic}";
+    const html = '<html><head><style>' + emOnlyCss + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A heading with <em>emphasis</em> inside, long enough to count.</h1>'
+      + '<p class="gs-lead">A real classed paragraph, long enough to count as body copy here.</p></div>'
+      + '</body></html>';
+    assert.equal(extractPageTypographyEvidence(html, emOnlyCss), null, 'h1 must not be credited from a rule that really targets em');
+  });
+
+  test('a mixed page — bare tag-styled heading, but a real classed paragraph — resolves both slots independently', () => {
+    const evidence = extractPageTypographyEvidence(GS_HTML.replace(
+      '<p>Answer a few simple questions',
+      '<p class="gs-lead">Answer a few simple questions',
+    ), GS_CSS);
+    assert.equal(evidence.headingTag, 'h1');
+    assert.equal(evidence.headingContainerClass, 'gs-hero');
+    assert.equal(evidence.bodyClass, 'gs-lead');
+    assert.equal(evidence.bodyTag, null, 'a slot resolved via a literal class must not also carry tag evidence');
+  });
+});
+
 describe('buildPageEvidenceComponentTemplate', () => {
   test('composes a real template using ONLY the classes found in the page evidence — nothing invented', () => {
     const evidence = { headingClass: 'faqp-question', bodyClass: 'faqp-answer', containerClass: 'faqp-section' };
@@ -984,6 +1036,36 @@ describe('buildPageEvidenceComponentTemplate', () => {
     assert.equal(buildPageEvidenceComponentTemplate('meta-title', { headingClass: 'h', bodyClass: 'b' }), null);
     assert.equal(buildPageEvidenceComponentTemplate('expand-content', null), null);
     assert.equal(buildPageEvidenceComponentTemplate('expand-content', { headingClass: 'h' }), null);
+  });
+
+  describe('bare-tag-via-container evidence (Chayce /get-started/ incident)', () => {
+    test('puts the real container class on the wrapper and NO class on the bare heading/body tags', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero', containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.wrapper, /class="gs-hero"/);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/, 'the real h1 tag, no class attribute at all');
+      assert.match(template.row, /<p>\{\{BODY\}\}<\/p>/, 'the real p tag, no class attribute at all');
+      const check = validatePlaceholders('expand-content', template);
+      assert.equal(check.ok, true, check.error);
+    });
+
+    test('a mixed slot (tag-based heading, classed body) renders each slot per its own evidence kind', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: 'gs-lead', bodyTag: null, bodyContainerClass: null, containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('expand-content', evidence);
+      assert.match(template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+      assert.match(template.row, /<div class="gs-lead">\{\{BODY\}\}<\/div>/);
+      assert.match(template.wrapper, /class="gs-hero"/, 'the confirmed container class still grounds the wrapper');
+    });
+
+    test('only expand-content is supported for the bare-tag shape — faq gets a clean refusal, not a guess', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('faq', evidence), null);
+    });
+
+    test('a slot with a tag but no confirmed container (should never happen from real extraction, but must not fabricate one) refuses', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: null, bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
+      assert.equal(buildPageEvidenceComponentTemplate('expand-content', evidence), null);
+    });
   });
 });
 
@@ -1125,6 +1207,40 @@ describe('resolvePageComponentTemplate — page-scoped component templates (Chay
     assert.equal(second.tier, PAGE_COMPONENT_TEMPLATE_TIER.PAGE);
     assert.equal(second.source, 'existing');
     assert.equal(fetchCount, 1, 'reuses the persisted template via an ordinary freshness check — no re-derivation fetch');
+  });
+
+  test('recapture succeeds end-to-end via the bare-tag-via-container fallback when the page has real evidence but no class on its heading/body', async () => {
+    // Real shape (Chayce Properties /get-started/, fetched live 2026-09-18):
+    // no class on <h1>/<p> at all, styled only through the page's own
+    // .gs-hero h1 / .gs-hero p descendant rules — this is the exact page
+    // shape resolvePageComponentTemplate previously refused with
+    // "no-page-evidence" even though the page visibly has real, styled,
+    // expandable content. `site` here has NO existing tier at any level,
+    // so this exercises extraction -> build -> the REAL
+    // verifyTemplateAgainstLiveSite (not a mocked bypass) end to end.
+    const GS_URL = 'https://chayce.example/get-started/index.html?package=Silver';
+    const GS_PAGE_HTML = '<html><head><style>'
+      + '.gs-hero h1{font-family:\'Playfair\',serif;font-size:48px}.gs-hero h1 em{font-style:italic}'
+      + '.gs-hero p{color:#555;font-size:17px}'
+      + '</style></head><body>'
+      + '<div class="gs-hero"><h1>A guided <em>conversation,</em> at your own pace.</h1>'
+      + '<p>Answer a few simple questions and we\'ll point you to the right support and next steps for your situation.</p></div>'
+      + '</body></html>';
+    const site = { id: 8864, name: 'Chayceproperties', url_file_map: { pages: {}, siteRoot: {} } };
+    const result = await resolvePageComponentTemplate(site, 'expand-content', GS_URL, {
+      fetchPage: fetchPageFor({ [GS_URL]: GS_PAGE_HTML }), fetchStylesheet: noStylesheet, ...noopDeps(),
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.notEqual(result.reason, 'no-page-evidence');
+    assert.match(result.template.wrapper, /class="gs-hero"/);
+    assert.match(result.template.row, /<h1>\{\{HEADING\}\}<\/h1>/);
+    assert.match(result.template.row, /<p>\{\{BODY\}\}<\/p>/);
+    // Confirms this real path is NOT rejected via verifyTemplateAgainstLiveSite's
+    // 'no-design-claims' branch — the derived template is not fully classless
+    // (the wrapper carries the real, confirmed 'gs-hero' class), so
+    // freshness.checkedClasses is non-empty and stamping proceeds normally.
+    assert.equal(result.template.verifiedBy, 'freshness-check');
+    assert.ok(result.template.verifiedAt);
   });
 
   test('when recapture genuinely cannot succeed (the page is reachable but has no real styled heading/body), it fails safely instead of shipping broken classes', async () => {
