@@ -181,6 +181,19 @@ describe('stripLink', () => {
     assert.match(result.newContent, /tiktok/);
   });
 
+  // Real shape found on zunkireelabs-web's src/_data/authors.js: a named
+  // key (not literally "href") inside a nested object, where the key
+  // identifies the link TYPE (twitter/linkedin/github) rather than being
+  // the whole link. Unlike the href-object case, only this one property
+  // should be removed — the rest of the author record must survive intact.
+  test('named-key object property shape: removes only that one property, keeping the rest of the enclosing object', () => {
+    const file = 'social: {\n  twitter: "https://twitter.com/dead",\n  linkedin: "https://linkedin.com/x"\n}\n';
+    const result = stripLink(file, 'https://twitter.com/dead');
+    assert.equal(result.ok, true);
+    assert.doesNotMatch(result.newContent, /twitter/);
+    assert.match(result.newContent, /linkedin/);
+  });
+
   test('object-field shape is tried before the bare-string shape, so an unrelated field with the same text as a label never false-matches', () => {
     // Only the href field's value should ever be treated as the link — a
     // `name` field that happened to equal a URL-shaped string must never
