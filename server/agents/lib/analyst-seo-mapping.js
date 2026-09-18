@@ -978,6 +978,15 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
   // collector again. A same-week gap must be unshippable because of what it
   // is, not because of which job won a race.
   const currentWeek = isoWeekStart(now);
+  // Gather window is 2 full weeks, not 1: a gap must have survived two
+  // week-boundary crossings of evidence-gathering before it can ship, not
+  // just one. Computed as the week-start 14 days before this week's own
+  // Monday, so a gap first discovered any day in "two weeks ago"'s ISO week
+  // or earlier is eligible; anything discovered in the week right before
+  // this one still has to wait one more Monday.
+  const twoWeeksAgo = new Date(now);
+  twoWeeksAgo.setUTCDate(twoWeeksAgo.getUTCDate() - 14);
+  const gatherCutoffWeek = isoWeekStart(twoWeeksAgo);
 
   const candidates = gaps.filter((gap) =>
     (gap.observation_count || 1) >= 2 &&
@@ -990,9 +999,9 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     // this column as ::text precisely so this comparison can't be knocked a day
     // (and therefore a week) out by node-postgres parsing a DATE to local
     // midnight. Both sides are already Monday-normalized, so a plain
-    // lexicographic < is the whole test.
+    // lexicographic <= is the whole test.
     gap.first_discovery_week != null &&
-    gap.first_discovery_week < currentWeek &&
+    gap.first_discovery_week <= gatherCutoffWeek &&
     hasStableOrGrowingDemand(gap)
   );
 

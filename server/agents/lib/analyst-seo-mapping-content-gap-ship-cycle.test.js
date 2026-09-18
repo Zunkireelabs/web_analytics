@@ -63,7 +63,10 @@ const { qualifyAndShipContentGaps, hasStableOrGrowingDemand, isoWeekStart } = aw
 // an EARLIER week by default, i.e. the previous week's discovery cycle — the
 // only cohort a Monday ship pass is ever allowed to act on.
 const THIS_MONDAY = new Date('2026-08-31T00:00:00Z');
-const LAST_WEEK = '2026-08-24';
+// Old enough to clear the 2-week gather window (qualifyAndShipContentGaps
+// requires first_discovery_week to be at least 2 full weeks before `now`) —
+// named LAST_WEEK for historical reasons but no longer literally last week.
+const LAST_WEEK = '2026-08-17';
 
 function baseGap(overrides = {}) {
   return {
@@ -202,13 +205,20 @@ describe('qualifyAndShipContentGaps — weekly cycle boundary', () => {
     assert.equal(result.shipped, 0);
   });
 
-  test('last week\'s discovery is exactly the cohort this Monday ships', async () => {
+  test('last week\'s discovery has only survived one week-boundary crossing — still held', async () => {
+    // The gather window is 2 full weeks: one boundary crossing alone is not enough.
     pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-08-24' })];
+    const result = await dry();
+    assert.equal(result.candidates, 0);
+  });
+
+  test('a gap discovered exactly 2 weeks ago is the cohort this Monday ships', async () => {
+    pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-08-17' })];
     const result = await dry();
     assert.equal(result.candidates, 1);
   });
 
-  test('an older backlog gap from several weeks ago still qualifies — the rule is "not this week", not "exactly last week"', async () => {
+  test('an older backlog gap from several weeks ago still qualifies — the rule is "at least 2 weeks", not "exactly 2 weeks"', async () => {
     pendingGaps = [baseGap({ search_intent: 'informational', first_discovery_week: '2026-06-01' })];
     const result = await dry();
     assert.equal(result.candidates, 1);
@@ -223,10 +233,10 @@ describe('qualifyAndShipContentGaps — weekly cycle boundary', () => {
     assert.equal(result.candidates, 0);
   });
 
-  test('the same-week exclusion is applied per gap, not to the whole batch', async () => {
+  test('the 2-week gather window is applied per gap, not to the whole batch', async () => {
     pendingGaps = [
-      baseGap({ id: 10, search_intent: 'informational', first_discovery_week: '2026-08-31' }), // this week — held
-      baseGap({ id: 11, search_intent: 'informational', first_discovery_week: '2026-08-24' }), // last week — ships
+      baseGap({ id: 10, search_intent: 'informational', first_discovery_week: '2026-08-24' }), // only 1 week old — held
+      baseGap({ id: 11, search_intent: 'informational', first_discovery_week: '2026-08-17' }), // 2 weeks old — ships
     ];
     const result = await dry();
     assert.equal(result.candidates, 1);
