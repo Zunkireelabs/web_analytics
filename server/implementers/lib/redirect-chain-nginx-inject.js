@@ -59,6 +59,33 @@ function locateRule(content, sourcePath) {
   return { ok: true, rule: matches[0] };
 }
 
+// The most common real cause of this exact chain shape (confirmed live on
+// zunkireelabs-web, 2026-09-18): nginx's OWN built-in "URI resolves to a
+// directory, not a file" behavior auto-redirects a no-trailing-slash request
+// to add one — e.g. `try_files $uri $uri/ $uri.html =404` serving a static
+// site's `page/index.html`. That auto-redirect is core nginx behavior, not a
+// line anywhere in the config, so locateRule above correctly finds nothing
+// to patch. It's still fixable, safely: an exact `location = <path>` block
+// always wins nginx's location-matching over any prefix/regex block
+// (including the catch-all `location /`), regardless of where in the file
+// it's placed — so ADDING one that redirects straight to finalTarget
+// short-circuits the chain without touching the existing directory-redirect
+// behavior or any other rule. This is an ADD only: there is nothing to
+// disambiguate (unlike locateRule's ambiguous-match case above), since no
+// rule for this exact path exists yet.
+function insertNewRule(content, sourcePath, finalTarget) {
+  // Anchored on the first `location` block in the file (any shape) so the
+  // new rule sits inside the same `server {}` this site's other location
+  // rules live in, and reads naturally alongside them — never at raw EOF,
+  // which could land outside the server block entirely on a multi-server
+  // config and silently never take effect.
+  const anchor = /^([ \t]*)location\b/m.exec(content);
+  if (!anchor) return null;
+  const indent = anchor[1] || '    ';
+  const rule = `${indent}location = ${sourcePath} {\n${indent}    return 301 ${finalTarget};\n${indent}}\n\n`;
+  return content.slice(0, anchor.index) + rule + content.slice(anchor.index);
+}
+
 // currentHopTarget: the actual next hop this platform OBSERVED via a real
 // redirect walk (agents/redirect-chain.js) — the patch only proceeds if the
 // live config's target still matches that observation, otherwise the
@@ -67,12 +94,22 @@ function locateRule(content, sourcePath) {
 export function patchRedirectChain(content, sourcePath, currentHopTarget, finalTarget) {
   const located = locateRule(content, sourcePath);
   if (!located.ok) {
+    if (located.reason === 'no-match') {
+      const newContent = insertNewRule(content, sourcePath, finalTarget);
+      if (newContent) {
+        return {
+          ok: true, newContent, before: null,
+          after: `location = ${sourcePath} { return 301 ${finalTarget}; }`,
+          rule: 'inserted',
+        };
+      }
+    }
     return {
       ok: false,
       reason: located.reason,
       error: located.reason === 'ambiguous-match'
         ? `Found more than one redirect rule for "${sourcePath}" — refusing to guess which one is the real chain.`
-        : `Could not find an exact "location = ${sourcePath} { return ...; }" or "rewrite ${sourcePath} ...;" rule for this path — the redirect may be defined elsewhere (a CDN, a CMS, DNS), which this platform can't see or edit.`,
+        : `Could not find an exact "location = ${sourcePath} { return ...; }" or "rewrite ${sourcePath} ...;" rule for this path, and no location block exists in this file to add one next to — the redirect may be defined elsewhere (a CDN, a CMS, DNS), which this platform can't see or edit.`,
     };
   }
 

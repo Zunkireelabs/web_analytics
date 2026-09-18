@@ -60,15 +60,40 @@ describe('patchRedirectChain — rewrite shape', () => {
 });
 
 describe('patchRedirectChain — refuses rather than guesses', () => {
-  test('no match for a path with no rule at all', () => {
-    const result = patchRedirectChain(LOCATION_RETURN_FIXTURE, '/never-configured/', '/mid-path/', '/final-path/');
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, 'no-match');
-  });
-
   test('ambiguous when the same source path is handled by two different rule shapes', () => {
     const result = patchRedirectChain(AMBIGUOUS_FIXTURE, '/old-path/', '/mid-path/', '/final-path/');
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'ambiguous-match');
+  });
+
+  test('refuses when the file has no location block at all to anchor a new rule to', () => {
+    const result = patchRedirectChain('server {\n    listen 80;\n}\n', '/never-configured/', '/mid-path/', '/final-path/');
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'no-match');
+  });
+});
+
+describe('patchRedirectChain — adds a new rule when none exists yet', () => {
+  // The common real cause (confirmed live on zunkireelabs-web, 2026-09-18):
+  // the intermediate hop is nginx's own built-in directory-redirect
+  // behavior, not a config line — there's nothing to locate/patch, but an
+  // exact `location =` block always wins nginx's matching regardless of
+  // where it's placed, so ADDING one collapses the chain without touching
+  // any existing rule.
+  test('inserts a brand-new exact-match rule for a path with no existing rule', () => {
+    const result = patchRedirectChain(LOCATION_RETURN_FIXTURE, '/never-configured/', '/mid-path/', '/final-path/');
+    assert.equal(result.ok, true);
+    assert.equal(result.rule, 'inserted');
+    assert.match(result.newContent, /location = \/never-configured\/ \{\s*\n\s*return 301 \/final-path\/;\s*\n\s*\}/);
+    // Every existing rule must survive untouched — this is an ADD, never a
+    // replace, matching CLAUDE.md §2's "add, never take away" discipline.
+    assert.match(result.newContent, /location = \/old-path\/ \{\s*\n\s*return 301 \/mid-path\/;/);
+    assert.match(result.newContent, /location \/ \{\s*\n\s*try_files \$uri \$uri\/ \$uri\.html =404;/);
+  });
+
+  test('the inserted rule sits inside the server block, indented alongside the site\'s other location rules', () => {
+    const result = patchRedirectChain(LOCATION_RETURN_FIXTURE, '/never-configured/', '/mid-path/', '/final-path/');
+    assert.equal(result.ok, true);
+    assert.match(result.newContent, /^server \{\n {4}listen 80;\n\n {4}location = \/never-configured\//);
   });
 });

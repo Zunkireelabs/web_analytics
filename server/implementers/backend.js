@@ -1247,7 +1247,7 @@ async function computeMarkerMerge(site, draft, renderModeOverride, beforeRef = b
   // file.content already fetched above (known engineering issue: validate a
   // schema type doesn't already exist before inserting one).
   const suppressSchema = INSPECTABLE_ACTION_TYPES.includes(draft.action_type) && hasExistingFaqSchema(file.content);
-  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page });
+  const built = buildMergeValues(draft.action_type, draft.content, mode, componentTemplatesForMerge, site.url_file_map?.siteRoot?.designProfile, { suppressSchema, page, fileContent: file.content });
   if (!built.ok) return { ok: false, reason: 'draft-not-ready', error: built.error };
 
   // Responsive preview (generators/lib/responsive-preview-gate.js) — every
