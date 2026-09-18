@@ -271,6 +271,11 @@ export async function run({ siteId, start, end }) {
   // breaker either.
   const trackerFindings = (trackerAbsenceIsProvable(trackerFacts) ? TRACKER_CHECKS : [])
     .filter((t) => !trackerFacts.trackersDetected.includes(t.label))
+    // A tenant with no real ID to ever supply (site.facebook_pixel_not_applicable,
+    // migration 165) would otherwise re-file this same unresolvable finding
+    // every detection pass forever — not a false positive, a real business
+    // fact ("we don't run Facebook/Instagram ads") that no draft can fix.
+    .filter((t) => !(t.id === 'facebook-pixel' && site.facebook_pixel_not_applicable))
     .map((t) => makeFinding({
     id: `trust-compliance:${t.id}:missing`,
     evidence: { page: homepageUrl, trackersDetected: trackerFacts.trackersDetected },
