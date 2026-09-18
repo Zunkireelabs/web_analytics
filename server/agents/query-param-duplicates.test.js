@@ -139,15 +139,38 @@ describe('query-param-duplicates agent', () => {
       assert.equal(result.facts.autoConsolidated, 1);
     });
 
-    test('LOW confidence: no real traffic for any variant -> stays reportOnly', async () => {
+    test('LOW confidence: no real traffic for any variant, no functional param -> stays reportOnly, undecided', async () => {
+      // utm_source is pure tracking noise, so this exercises the true
+      // "genuinely no evidence at all" LOW-confidence path, distinct from
+      // the functional-param case below.
+      inventory = [
+        { page: 'https://example.com/resources/?utm_source=newsletter', orphaned: false },
+        { page: 'https://example.com/resources/?utm_source=social', orphaned: false },
+      ];
+      const result = await run({ siteId: 1 });
+      const finding = result.facts.findings[0];
+      assert.equal(finding.evidence.confidence, 'low');
+      assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, undefined);
+    });
+
+    // Regression, confirmed live on Chayce Properties (2026-09-18): 5
+    // `/get-started/index.html?package=...` pricing-tier URLs, each a real,
+    // distinct service package with no traffic yet (a brand-new page), sat
+    // blocked pending a human "pick a winner" decision — but a functional
+    // query parameter answers that on its own, with or without traffic; it
+    // shouldn't need any to decide "never redirect these away from each
+    // other."
+    test('a functional query parameter with NO traffic on any variant is still decided leave-both, not left generically blocked', async () => {
       inventory = [
         { page: 'https://example.com/resources/?type=ebook', orphaned: false },
         { page: 'https://example.com/resources/?type=case-study', orphaned: false },
       ];
       const result = await run({ siteId: 1 });
       const finding = result.facts.findings[0];
-      assert.equal(finding.evidence.confidence, 'low');
       assert.equal(finding.recommendedAction, null);
+      assert.equal(finding.reportOnly.decided, true);
+      assert.match(finding.reportOnly.whyBlocked, /functional/);
     });
 
     test('split-traffic escalation: a non-tracking query parameter is decided leave-both, not punted, even without query overlap', async () => {
