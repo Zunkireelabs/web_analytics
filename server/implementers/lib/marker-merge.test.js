@@ -360,6 +360,41 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
   });
 
+  // Regression, measured live on site 1 (2026-09-18): expand-content's
+  // marker is shared across every FOCUS on a page (comparison-content,
+  // author-byline, freshness-date, external-citations, ... — each its own
+  // recommendation/draft). Without `fileContent`, a later draft for a
+  // DIFFERENT focus on the same page wholesale-replaced the marker with
+  // only its own section, silently deleting an earlier focus's already-
+  // shipped content — caught live by section-preservation-gate.js when it
+  // deleted a <table>, but only after burning a full ship attempt.
+  test('expand-content PRESERVES a different focus\'s already-shipped section instead of replacing it', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><div><section><h2>Old Focus</h2><p>Old body.</p><table><tr><td>data</td></tr></table></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'New Focus', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /Old Focus/, 'the earlier focus\'s heading must survive');
+    assert.match(result.values.expandedContent, /<table>/, 'the earlier focus\'s table must survive');
+    assert.match(result.values.expandedContent, /New Focus/, 'the new focus\'s own section is still added');
+  });
+
+  test('expand-content does not duplicate a focus retried against its own already-shipped section', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><div><section><h2>Same Focus</h2><p>Old body.</p></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      sections: [{ heading: 'Same Focus', body: 'Updated body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    const occurrences = result.values.expandedContent.match(/Same Focus/g) || [];
+    assert.equal(occurrences.length, 1, 'retrying the same focus must not stack a second copy of its heading');
+  });
+
+  test('expand-content with no fileContent given (preview/schema-probe callers) still works exactly as before', () => {
+    const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] }, 'visible', {}, null, {});
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<h2>H1<\/h2>/);
+  });
+
   // The real defect this closes: even with NO configured componentTemplates
   // at all, a site with a real design profile still has real typography
   // evidence. Previously that evidence was only ever applied to the row's

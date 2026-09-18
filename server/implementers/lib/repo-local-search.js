@@ -49,12 +49,16 @@ import { getRepoTree, getRepoTarball } from '../../github/client.js';
 
 const execFileAsync = promisify(execFile);
 
-// An href can only be hardcoded in one of these; anything else (a data file,
-// an image, a lockfile, ...) is either handled elsewhere or cannot contain
-// a rendered link at all.
+// An href can only be hardcoded in one of these; anything else (an image, a
+// lockfile, ...) is either handled elsewhere or cannot contain a rendered
+// link at all. .js/.mjs/.ts are included because Eleventy-style `_data/*.js`
+// files (e.g. zunkireelabs-web's src/_data/authors.js, holding each author's
+// social links) render straight into pages without ever containing markup —
+// excluding them made "not found in any file" wrong for a link that plainly
+// exists in the repo, just not in a template file.
 const CONTENT_EXTENSIONS = new Set([
   '.njk', '.html', '.htm', '.md', '.mdx', '.astro', '.vue', '.jsx', '.tsx',
-  '.liquid', '.hbs', '.handlebars', '.pug', '.ejs',
+  '.liquid', '.hbs', '.handlebars', '.pug', '.ejs', '.js', '.mjs', '.ts',
 ]);
 
 // Vendor/build-output directories a tenant's own content never lives in —

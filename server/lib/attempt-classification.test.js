@@ -268,3 +268,32 @@ test('a genuinely item-specific reason CODE still counts against the item', () =
     assert.equal(classifyAbandonReason(code).retryPolicy, RETRY_POLICY.ITEM_DEFECT, code);
   }
 });
+
+test('a redirect rule this platform can\'t see waits on a human, and stops retrying', () => {
+  // Regression, measured live on site 1 (2026-09-18): this message had no
+  // matching rule and fell through to the ITEM_DEFECT default — but
+  // ship-pacing's recovery-cycle logic resets the attempt count on
+  // ITEM_DEFECT findings whenever fresh evidence re-confirms the same
+  // issue, so two redirect-chain findings retried 8 times each, still
+  // open, never blocked for a human to actually resolve.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'Auto-ship failed: Could not find an exact "location = /resources/khushbu-nirman-case-study { return ...; }" or "rewrite /resources/khushbu-nirman-case-study ...;" rule for this path — the redirect may be defined elsewhere (a CDN, a CMS, DNS), which this platform can\'t see or edit.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.CLIENT_REPO);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});
+
+test('a CLAUDE.md §2 section-removal refusal waits on a human, and stops retrying', () => {
+  // Regression, measured live on site 1 (2026-09-18): same ITEM_DEFECT-
+  // fallthrough problem as the redirect rule above — the safety gate
+  // refuses identically every time, so retrying can never succeed, but
+  // nothing marked it NEEDS_HUMAN, so it kept re-attempting instead of
+  // surfacing to a person for a real decision.
+  const { retryPolicy, failureClass } = classifyAbandonReason(
+    'This change would remove existing structure from src/pages/services/saas-development.njk that is live on the site today: 1 <table> element(s) removed (1 → 0). An SEO/content change must add to or update a page, never take away a section the client already has (CLAUDE.md §2). The draft was not applied.',
+  );
+  assert.equal(retryPolicy, RETRY_POLICY.NEEDS_HUMAN);
+  assert.equal(failureClass, FAILURE_CLASS.AGENT_LOGIC);
+  assert.equal(isAutoRetryable(retryPolicy), false);
+});

@@ -1232,7 +1232,7 @@ export function proseStyleFor(designProfile) {
   };
 }
 
-export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null } = {}) {
+export function buildMergeValues(actionType, content, mode = 'visible', componentTemplates = {}, designProfile = null, { suppressSchema = false, page = null, fileContent = null } = {}) {
   // Resolved per call rather than precomputed: only the branch that actually
   // renders visible HTML for this action type ever needs one.
   // sanitizeCapturedTemplate runs here, once, for every actionType that
@@ -1383,16 +1383,33 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     // 'expandedContent' marker/template — see refresh-content.js's own
     // comment: a second marker would need every onboarded site re-onboarded
     // before this could ever ship.
-    return {
-      ok: true,
-      values: {
-        expandedContent: renderExpandedHtml(
-          content.sections,
-          expandContentTemplate(),
-          { ...tableStyleFor(componentTemplates, designProfile), ...proseStyleFor(designProfile) },
-        ),
-      },
-    };
+    const newHtml = renderExpandedHtml(
+      content.sections,
+      expandContentTemplate(),
+      { ...tableStyleFor(componentTemplates, designProfile), ...proseStyleFor(designProfile) },
+    );
+    // A different FOCUS (comparison-content, author-byline, freshness-date,
+    // external-citations, ...) is each its own recommendation/draft, but
+    // they all share this one marker. Blindly overwriting it with only this
+    // draft's own section(s) silently deleted whatever an earlier,
+    // different-focus draft had already shipped there — confirmed live on
+    // site 1 (2026-09-18): an author-byline/freshness-date draft for
+    // src/pages/services/saas-development.njk would have deleted an already
+    // -shipped comparison-content section's <table>, correctly caught by
+    // section-preservation-gate.js. Preserving the marker's current content
+    // ahead of the new render means the gate sees an ADD, not a swap.
+    // Skipped when a section's own heading is already present, so retrying
+    // the SAME focus replaces its own prior render rather than stacking a
+    // duplicate copy of it every attempt.
+    // The marker's real on-file name is 'EXPANDEDCONTENT' (url-file-map.js's
+    // MARKER_NAME_BY_ACTION_TYPE), not the 'expandedContent' field name used
+    // everywhere else in this function.
+    const existing = fileContent ? getMarkerContent(fileContent, 'EXPANDEDCONTENT') : null;
+    const alreadyPresent = existing && content.sections.some((s) => existing.includes(escapeHtml(s.heading)));
+    const html = (existing && existing.trim() && !alreadyPresent)
+      ? `${existing.trim()}\n${newHtml}`
+      : newHtml;
+    return { ok: true, values: { expandedContent: html } };
   }
 
   if (actionType === 'qa-content') {

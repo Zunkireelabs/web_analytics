@@ -29,6 +29,8 @@ import {
   DESIGN_NOT_REVIEWED_FRAGMENT,
   LINK_TARGET_UNRESOLVABLE_FRAGMENT,
   LINK_CONFIRMED_ABSENT_FRAGMENT,
+  REDIRECT_RULE_NOT_FOUND_FRAGMENT,
+  SECTION_REMOVAL_REFUSED_FRAGMENT,
 } from './draft-failure-phrases.js';
 
 // What the pipeline should DO. Kept separate from FAILURE_CLASS because
@@ -339,6 +341,27 @@ const RULES = [
     failureClass: FAILURE_CLASS.CLIENT_REPO,
     policy: RETRY_POLICY.NEEDS_HUMAN,
     summary: 'The file containing this link could not be located in the site’s repository — it likely lives in a shared header/footer that needs a url_file_map entry, or code search needs enabling.',
+  },
+  {
+    // The redirect is real (observed live), but no nginx rule for it exists
+    // in any file this platform can see — retrying can never find one that
+    // isn't there. Needs a human to add the rule (or confirm it lives at a
+    // CDN/DNS layer this platform can't touch) rather than keep re-checking
+    // identical evidence forever.
+    match: (r) => r.includes(REDIRECT_RULE_NOT_FOUND_FRAGMENT),
+    failureClass: FAILURE_CLASS.CLIENT_REPO,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'No nginx rule for this redirect exists in the repository — it may be defined at a CDN/DNS layer this platform can\'t see or edit.',
+  },
+  {
+    // section-preservation-gate.js's CLAUDE.md §2 refusal — a deliberate,
+    // permanent safety block, not an agent defect. It will refuse identically
+    // every time; a human must accept the removal by hand or dismiss the
+    // finding, so this needs a person's decision rather than another attempt.
+    match: (r) => r.includes(SECTION_REMOVAL_REFUSED_FRAGMENT),
+    failureClass: FAILURE_CLASS.AGENT_LOGIC,
+    policy: RETRY_POLICY.NEEDS_HUMAN,
+    summary: 'This fix would remove an existing section from the live page — needs a human decision, not another attempt.',
   },
   {
     // A REMOVED gate (commit 8a32037). Nothing produces this any more, but

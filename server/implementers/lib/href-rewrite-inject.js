@@ -130,6 +130,31 @@ function hrefFieldRegex(href) {
   return new RegExp(`href\\s*:\\s*(["'])${escaped}\\1`, 'g');
 }
 
+// A named-key object property whose value is the href — `twitter: "url"`
+// inside a `social: {...}` block (found on zunkireelabs-web's
+// src/_data/authors.js), distinct from stripDataArrayObject's `href:` case
+// above: there the whole {href, icon} object IS the link, so it's deleted
+// entirely; here the key names a specific link TYPE inside a larger record
+// (an author), so only that one `key: "value"` pair is removed, leaving the
+// rest of the object (name, other social links, ...) intact. Tried before
+// stripDataArrayString below, since that function's bare-string match would
+// otherwise strip just the quoted literal and leave a dangling `twitter:`
+// with no value.
+function objectPropertyRegex(href) {
+  const escaped = escapeRegExp(href);
+  return new RegExp(`\\b\\w+\\s*:\\s*(["'])${escaped}\\1`, 'g');
+}
+
+function stripObjectProperty(fileContent, href) {
+  for (const variant of hrefVariants(href)) {
+    const matches = [...fileContent.matchAll(objectPropertyRegex(variant))];
+    if (matches.length !== 1) continue;
+    const m = matches[0];
+    return { ok: true, newContent: removeArrayElementSpan(fileContent, m.index, m.index + m[0].length), replaced: 1 };
+  }
+  return null;
+}
+
 function stripDataArrayObject(fileContent, href) {
   for (const variant of hrefVariants(href)) {
     const matches = [...fileContent.matchAll(hrefFieldRegex(variant))];
@@ -206,6 +231,8 @@ export function stripLink(fileContent, href) {
   // specific object-field shape is always tried first.
   const objectResult = stripDataArrayObject(fileContent, href);
   if (objectResult) return objectResult;
+  const propertyResult = stripObjectProperty(fileContent, href);
+  if (propertyResult) return propertyResult;
   const stringResult = stripDataArrayString(fileContent, href);
   if (stringResult) return stringResult;
   return { ok: false, reason: 'no-match', error: `No <a href="${href}"> or markdown link to "${href}" found in this file.` };

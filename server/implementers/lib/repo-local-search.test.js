@@ -125,6 +125,18 @@ describe('searchRepoLocalForStrings — what gets scanned', () => {
     assert.deepEqual(result.matches, ['src/pages/real.njk'], 'only real rendered content is editable candidate material');
   });
 
+  // Eleventy-style _data/*.js files render straight into pages without ever
+  // containing markup — excluding .js entirely made a link that plainly
+  // exists in the repo (e.g. zunkireelabs-web's src/_data/authors.js) come
+  // back as "not found in any file".
+  test('treats a non-vendor .js data file as a real candidate', async () => {
+    repoFiles = {
+      'src/_data/authors.js': 'export default { social: { twitter: "https://twitter.com/zunkiree" } };',
+    };
+    const result = await searchRepoLocalForStrings(site, 'main', ['https://twitter.com/zunkiree']);
+    assert.deepEqual(result.matches, ['src/_data/authors.js']);
+  });
+
   test('finds a file that hardcodes any of the given literal variants', async () => {
     repoFiles = { 'src/pages/a.njk': 'nothing relevant', 'src/pages/b.njk': '<a href="/old-page">x</a>' };
     const result = await searchRepoLocalForStrings(site, 'main', ['https://example.com/old-page', '/old-page']);
