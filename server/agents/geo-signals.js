@@ -31,11 +31,22 @@ const GEO_SIGNAL_RULES = [
     effort: 'Low',
   },
   {
+    // Routed to 'schema' (datePublished/dateModified JSON-LD), NOT
+    // expand-content's 'freshness-date' focus — that focus drafts a VISIBLE
+    // "Last Updated" heading + sentence as its own EXPANDEDCONTENT section.
+    // AI engines and Google both read dateModified from structured data or a
+    // real <time>/meta tag just as well as visible prose, so a stray
+    // "Last Updated" block bolted onto the page (confirmed live on site 8864,
+    // chayceproperties.com, 2026-09-20 — shipped on 6+ pages, several with no
+    // styling at all) bought no real GEO/SEO benefit for a very visible cost.
+    // schema.js's DATE_FIELD_RE already auto-fills datePublished/dateModified
+    // with today's real date on every schema draft, so this loses nothing —
+    // it's the same real fact, invisible.
     test: (analysis) => !analysis.hasFreshnessSignal,
-    label: 'Add publish or last-updated date (datePublished/dateModified schema, article meta tag, or visible <time> element).',
-    generatorId: 'expand-content',
-    params: (page, query, schemaTypes) => ({ page, query, focus: 'freshness-date' }),
-    effort: 'Low',
+    label: 'Add publish or last-updated date via schema (datePublished/dateModified JSON-LD) — invisible structured data, not a visible on-page block.',
+    generatorId: 'schema',
+    params: (page, query, schemaTypes) => ({ page, schemaType: inferSchemaType(page, schemaTypes) }),
+    effort: effortForGenerator('schema'),
   },
   {
     test: (analysis) => !analysis.hasComparisonContent,
@@ -53,9 +64,9 @@ const GEO_SIGNAL_RULES = [
   },
   {
     // Deliberately informational (generatorId: null), unlike the other four
-    // rules above — those route to expand-content with a `focus` schema.js
-    // can always honestly satisfy (a real date, the site's own configured
-    // author, a grounded external source). Review schema has no equivalent
+    // rules above — those route to 'schema' or expand-content with a `focus`
+    // that generator can always honestly satisfy (a real date, the site's own
+    // configured author, a grounded external source). Review schema has no equivalent
     // safe default: schema.js's Review type needs real ratingValue/
     // reviewCount data that most pages simply never have (a blog post, a
     // careers page), so it can't fill this gap without fabricating and

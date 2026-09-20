@@ -65,12 +65,15 @@ export async function generate({ siteId, params }) {
     throw Object.assign(new Error('Content refresh produced no usable section — the model returned an empty result or nothing matched the expected shape.'), { status: 400, userFacing: true, refusal: true, reason: 'refresh-content-empty-sections' });
   }
 
-  // Deterministic freshness stamp appended alongside the real update — same
-  // "today's actual date is the true, honest last-updated date" convention
-  // expand-content.js's freshness-date focus already uses, no LLM involved.
-  const today = new Date().toISOString().slice(0, 10);
-  sections.push({ heading: 'Last Updated', body: `This page was last updated on ${today}.` });
-
+  // No appended visible "Last Updated" section: that stamp used to be tacked
+  // on here alongside the real update, but a bolted-on "Last Updated: <date>"
+  // heading is exactly the kind of unstyled, bolted-on-looking block CLAUDE.md's
+  // design-preservation rule exists to prevent — confirmed live on site 8864
+  // (chayceproperties.com, 2026-09-20), where it shipped as an unclassed <h1>
+  // on 6+ pages alongside real comparison content. The real, honest freshness
+  // fact (today's date) belongs in dateModified schema (see geo-signals.js's
+  // freshness-date rule, now routed to the 'schema' generator), not as a
+  // second visible section a human never asked to see on the page.
   const content = { page, sections, focus: 'content-refresh' };
   return { content, summary: `Refreshed 1 section for ${page} (real click/position decline)` };
 }
