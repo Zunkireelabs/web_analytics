@@ -84,6 +84,78 @@ describe('findBareMarkupIssues', () => {
     assert.equal(issues.length, 0);
   });
 
+  // The fallback path — fires even with NO typography evidence at all,
+  // because it only needs the render to be internally inconsistent with
+  // itself (a bare heading next to the template's own classed wrapper), not
+  // external evidence of what the class SHOULD be. Confirmed live on site
+  // 8864 (chayceproperties.com, 2026-09-20): exactly this shape shipped
+  // because the profile's typography.body hadn't been derived yet, so the
+  // evidence-based check above silently skipped every bare tag.
+  test('with NO typography evidence, still flags a bare heading sitting inside an otherwise-classed template', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<section><h1>{{HEADING}}</h1><div>{{BODY}}</div></section>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/bronze-essentials/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    // The row's bare <p> body picks up the same finding now that the
+    // fallback isn't heading-only — see the broadened-coverage tests below.
+    // What this test locks in is specifically the <h1>.
+    const h1Issue = issues.find((i) => /<h1>/.test(i.snippet));
+    assert.ok(h1Issue, 'expected a finding for the bare <h1>');
+    assert.equal(h1Issue.patternId, 'bare-tag-inconsistent-styling');
+    assert.equal(h1Issue.blocking, true);
+  });
+
+  test('with NO typography evidence, a UNIFORMLY bare render (nothing classed anywhere) is not flagged — nothing to contrast against', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h1>{{HEADING}}</h1><div>{{BODY}}</div>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/bronze-essentials/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    assert.equal(issues.length, 0);
+  });
+
+  test('with NO typography evidence, a bare heading on a blog/legal (inline) page is never flagged — inheriting the article\'s own prose is the correct shape there', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<section><h1>{{HEADING}}</h1><div>{{BODY}}</div></section>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/blog/some-post/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    assert.equal(issues.length, 0);
+  });
+
+  // The fallback is not heading-only: a comparison table rendered bare next
+  // to a classed heading/wrapper is the same "internally inconsistent"
+  // shape, and this platform's own comparison-content focus (expand-
+  // content.js) can produce a table on any section.
+  test('with NO typography evidence, a bare comparison table sitting next to a classed heading is also flagged', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<h2 class="home-h2">{{HEADING}}</h2><div>{{BODY}}</div>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/packages/',
+      sections: [{ heading: 'H', body: 'Body text.', table: [{ feature: 'Support', alternative: 'Basic', thisOption: 'Full' }] }],
+    }, componentTemplates, null);
+    assert.ok(issues.some((i) => i.patternId === 'bare-tag-inconsistent-styling' && /<table/.test(i.snippet)));
+  });
+
+  // Even on an inline (blog/legal) page, a bare table is still flagged —
+  // only bare HEADING tags get the inline exemption there (they legitimately
+  // inherit the article's own prose styling); a bare table never does.
+  test('the inline exemption is heading-only — a bare table on a blog page is still flagged', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<h2 class="home-h2">{{HEADING}}</h2><div>{{BODY}}</div>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/blog/some-post/',
+      sections: [{ heading: 'H', body: 'Body text.', table: [{ feature: 'Support', alternative: 'Basic', thisOption: 'Full' }] }],
+    }, componentTemplates, null);
+    assert.ok(issues.some((i) => i.patternId === 'bare-tag-inconsistent-styling' && /<table/.test(i.snippet)));
+  });
+
   test('one finding per distinct bare tag type per field, not one per occurrence', () => {
     const componentTemplates = {
       expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2><div>{{BODY}}</div>' },

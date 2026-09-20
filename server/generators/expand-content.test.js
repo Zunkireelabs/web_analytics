@@ -188,34 +188,29 @@ describe('expand-content generator — author-byline with no configured author p
   });
 });
 
-// Real incident (2026-08-10): the old freshness-date prompt told the LLM to
-// write a placeholder date, which content-scaffolding-guard.js's
-// placeholder-bracket pattern then rejected on every attempt — a guaranteed
-// failure, same bug class as the author-byline case above. Fixed by making
-// freshness-date deterministic (today's real date, no LLM call) instead.
-describe('expand-content generator — freshness-date', () => {
-  test('drafts a deterministic Last Updated section with today\'s real date, without calling the LLM, and passes the Quality Gate', async () => {
+// RETIRED 2026-09-20. This focus used to draft a deterministic VISIBLE
+// "Last Updated" section — see expand-content.js's own comment on the
+// 'freshness-date' branch for why: it shipped as an unclassed, unstyled
+// <h1> live on site 8864 (chayceproperties.com). It now refuses outright
+// instead, for every caller, so a visible "Last Updated" block can never
+// ship from this generator again — the same freshness fact belongs in
+// schema.js's datePublished/dateModified JSON-LD instead.
+describe('expand-content generator — freshness-date (retired)', () => {
+  test('refuses outright — never drafts a visible "Last Updated" section', async () => {
     const original = globalThis.fetch;
-    let llmWasCalled = false;
-    globalThis.fetch = async (url) => {
-      if (String(url).includes('anthropic') || String(url).includes('openai')) llmWasCalled = true;
-      return {
-        ok: true,
-        headers: { get: () => 'text/html; charset=utf-8' },
-        text: async () => '<html><head><title>Real Page</title></head><body><main><p>'
-          + 'Real, substantial page body content about a product. '.repeat(10)
-          + '</p></main></body></html>',
-        url,
-      };
-    };
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      headers: { get: () => 'text/html; charset=utf-8' },
+      text: async () => '<html><head><title>Real Page</title></head><body><main><p>'
+        + 'Real, substantial page body content about a product. '.repeat(10)
+        + '</p></main></body></html>',
+      url,
+    });
     try {
-      const { content } = await generate({ siteId: 1, params: { page: 'https://example.com/real-page', focus: 'freshness-date' } });
-      assert.equal(llmWasCalled, false);
-      const today = new Date().toISOString().slice(0, 10);
-      assert.match(content.sections[0].body, new RegExp(today));
-      const gate = await runQualityGate(content, meta.id);
-      assert.deepEqual(gate.issues, []);
-      assert.equal(gate.clean, true);
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: 'https://example.com/real-page', focus: 'freshness-date' } }),
+        /retired/i,
+      );
     } finally { globalThis.fetch = original; }
   });
 });

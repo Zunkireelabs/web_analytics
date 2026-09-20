@@ -224,3 +224,44 @@ describe('repairSiteMarkerStyling — a legal (.njk) page gets the same bare pro
     }
   });
 });
+
+// Confirmed live on site 8864 (chayceproperties.com, 2026-09-20): several
+// Action Center batches spliced EXPANDEDCONTENT regions using a stale
+// componentTemplates.expandContent row that was itself a bare, unclassed
+// `<h1>` (fixed going forward by freshness-check, but that fix never touches
+// content already shipped). The EXPANDEDCONTENT parser only matched h2/h3,
+// so these regions came back `null` from parse() and were skipped every
+// time this repair ran — the site's own daily auto-remediation cron
+// (repair-site-content-live.js) could never heal them even after the
+// template was corrected.
+describe('repairSiteMarkerStyling — EXPANDEDCONTENT shipped with a bare <h1> heading still gets repaired', () => {
+  const h1Region = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START --><div class="container">',
+    '  <section>',
+    '    <h1>Comparison of Moving Services</h1>',
+    '    <div><p>Some comparison copy.</p></div>',
+    '  </section>',
+    '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+
+  const CORRECTED_TEMPLATES = {
+    expandContent: {
+      wrapper: '<div class="container">\n{{ROWS}}\n</div>',
+      row: '  <section>\n    <h2 class="home-h2">{{HEADING}}</h2>\n    <div class="body-copy">{{BODY}}</div>\n  </section>',
+    },
+  };
+
+  test('the h1 region is re-rendered through the corrected h2 template, not skipped', async () => {
+    const dir = await writeRepo({ 'bronze-essentials.njk': `---\npermalink: /bronze-essentials/\n---\n\n${h1Region}\n` });
+    try {
+      const result = await repairSiteMarkerStyling(dir, CORRECTED_TEMPLATES, { write: true });
+      assert.equal(result.skipped, 0);
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(path.join(dir, 'src', 'bronze-essentials.njk'), 'utf8');
+      assert.match(out, /<h2 class="home-h2">Comparison of Moving Services<\/h2>/);
+      assert.doesNotMatch(out, /<h1>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

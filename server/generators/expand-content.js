@@ -26,8 +26,8 @@ const CITATION_FETCH_COUNT = 8;
 export const meta = {
   id: 'expand-content',
   name: 'Content Expansion Generator',
-  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: author-byline, freshness-date, comparison-content, external-citations.',
-  recommendationTags: ['author-byline', 'freshness-date', 'comparison-content', 'external-citations'],
+  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: author-byline, comparison-content, external-citations. (freshness-date is retired — see the schema generator instead.)',
+  recommendationTags: ['author-byline', 'comparison-content', 'external-citations'],
 };
 
 const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body text and (if available) its target query, draft ' +
@@ -187,22 +187,24 @@ export async function generate({ siteId, params }) {
   }
 
   if (focus === 'freshness-date') {
-    // The section body IS the published page copy (see renderExpandedHtml
-    // in marker-merge.js) — it must read as a real sentence a visitor would
-    // see, not implementer instructions to whoever applies this draft. This
-    // used to append "Add a visible <time> element... set datePublished/
-    // dateModified..." as if that were prose; it shipped verbatim to a live
-    // page (careers.njk, PR #50) instead of being read as a to-do.
-    const today = new Date().toISOString().slice(0, 10);
-    const content = {
-      page,
-      sections: [{
-        heading: 'Last Updated',
-        body: `This page was last updated on ${today}.`,
-      }],
-      focus,
-    };
-    return { content, summary: `Freshness-date section for ${page}: dateModified ${today}` };
+    // RETIRED 2026-09-20. This used to draft a VISIBLE "Last Updated"
+    // heading + sentence as its own on-page EXPANDEDCONTENT section.
+    // Confirmed live on site 8864 (chayceproperties.com, 2026-09-20): that
+    // section shipped as an unclassed, unstyled <h1> on 6+ pages — exactly
+    // the "flat, bolted-on generated content" failure CLAUDE.md's design-
+    // preservation rule exists to prevent, on top of being a block nobody
+    // asked to see on the page. The same real, honest freshness fact
+    // (today's date) still reaches AI engines/Google via the 'schema'
+    // generator's datePublished/dateModified JSON-LD (see geo-signals.js's
+    // freshness-date rule, now routed there) — invisible structured data,
+    // never visible prose. This focus refuses outright rather than drafting
+    // anything, so no caller (manual UI, MCP tool, or an unattended chain)
+    // can ever produce a visible "Last Updated" block again.
+    throw Object.assign(
+      new Error('The "freshness-date" focus is retired — it used to draft a VISIBLE "Last Updated" section, which broke design on ' +
+        'live sites. Use the "schema" generator instead (datePublished/dateModified JSON-LD, invisible structured data).'),
+      { status: 400, userFacing: true },
+    );
   }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;

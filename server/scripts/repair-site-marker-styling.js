@@ -99,8 +99,20 @@ function buildHandlers(templates, proseStyle = {}) {
       // Heading + the markup that follows it, at whatever nesting depth the
       // template that produced this used. Anchoring on the heading rather than
       // on a wrapper class is what makes this work across every template
-      // generation this site has shipped.
-      $('h2, h3').each((i, h) => {
+      // generation this site has shipped. h1 is included alongside h2/h3:
+      // confirmed live on site 8864 (chayceproperties.com, 2026-09-20) —
+      // buildMergeValues spliced these regions using a stale
+      // componentTemplates.expandContent row that was itself a bare,
+      // unclassed `<h1>` (since corrected by freshness-check, but not
+      // retroactively). Since this parser only ever runs on the isolated
+      // text BETWEEN a marker's own START/END comments — never the host
+      // page's real markup outside it — any heading tag found here was
+      // written by this platform's own template, so matching h1 can never
+      // misparse the page's own real <h1>. Excluding it silently left every
+      // such region unrecognised ("unrecognised shape, left as-is") forever,
+      // even after the template that produced it was fixed and the daily
+      // repair cron (repair-site-content-live.js) ran again.
+      $('h1, h2, h3').each((i, h) => {
         const heading = $(h).text().trim();
         const body = unwrapSlot($, $(h).nextAll());
         if (heading && body) items.push({ heading, body });

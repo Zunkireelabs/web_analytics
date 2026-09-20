@@ -1,4 +1,4 @@
-import { buildMergeValues } from '../../implementers/lib/marker-merge.js';
+import { buildMergeValues, isInlineContentPage } from '../../implementers/lib/marker-merge.js';
 import {
   renderLandingPageBody, renderBlogOutlineBody, renderDirectAnswerBody,
   renderTranslationBody, renderCompliancePageBody, renderMissingPageBody,
@@ -34,9 +34,12 @@ const RENDERED_ACTION_TYPES = new Set(['faq', 'expand-content', 'refresh-content
 // positive on a site with nothing wrong at all.
 const BARE_TAG_RE = /<(h[1-6]|p|ul|ol|li|table|th|td)\b(?:(?!class=)[^>])*>/gi;
 
+// Evidence for the fallback check below: does this render contain ANY real
+// classed element at all? Cheap existence test, not a parse.
+const CLASSED_TAG_RE = /<[a-z][a-z0-9]*\b[^>]*\bclass="[^"]+"/i;
+
 export function findBareMarkupIssues(actionType, content, componentTemplates, designProfile) {
   if (!RENDERED_ACTION_TYPES.has(actionType) || !content) return { issues: [] };
-  if (!designProfile?.typography?.body) return { issues: [] };
 
   let result;
   try {
@@ -49,6 +52,13 @@ export function findBareMarkupIssues(actionType, content, componentTemplates, de
   }
   if (!result.ok) return { issues: [] };
 
+  const hasTypographyEvidence = Boolean(designProfile?.typography?.body);
+  // A bare heading inheriting its host's own prose styling is the
+  // deliberately correct shape on a blog/legal page (marker-merge.js's
+  // groundedInlineHeadingClass) — never a defect there, so the fallback
+  // check below must not fire on one.
+  const inline = isInlineContentPage(content?.page);
+
   const issues = [];
   for (const [field, html] of Object.entries(result.values || {})) {
     if (typeof html !== 'string') continue;
@@ -57,14 +67,49 @@ export function findBareMarkupIssues(actionType, content, componentTemplates, de
       const tag = match[1].toLowerCase();
       if (seenTags.has(tag)) continue; // one finding per tag type per field is enough signal to act on
       seenTags.add(tag);
-      issues.push({
-        path: field,
-        patternId: 'bare-unstyled-markup',
-        snippet: match[0].slice(0, 120),
-        detail: `This site has real typography evidence, but the rendered <${tag}> carries no class at all — `
-          + `it would render as unstyled browser-default text next to the site's own real design.`,
-        blocking: true,
-      });
+      if (hasTypographyEvidence) {
+        issues.push({
+          path: field,
+          patternId: 'bare-unstyled-markup',
+          snippet: match[0].slice(0, 120),
+          detail: `This site has real typography evidence, but the rendered <${tag}> carries no class at all — `
+            + `it would render as unstyled browser-default text next to the site's own real design.`,
+          blocking: true,
+        });
+        continue;
+      }
+      // FALLBACK — fires even with no typography.body evidence yet (a site
+      // whose broader design profile hasn't been derived, or was derived
+      // AFTER this specific componentTemplate was captured). Covers every
+      // BARE_TAG_RE tag type — a heading, a table/th/td, a p/ul/li — not
+      // just headings: the same reasoning applies equally to a comparison
+      // table left bare next to a classed wrapper as to a bare heading.
+      // Only fires when this SAME render also contains some other classed
+      // element (e.g. the template's own wrapper div) — a genuinely
+      // classless site has nothing classed anywhere to contrast against, so
+      // this can never false-positive there; it only fires when a render is
+      // internally inconsistent with itself. `inline` (blog/legal pages)
+      // still exempts headings specifically, since a bare heading
+      // inheriting the article's own prose is the deliberately correct
+      // shape there (marker-merge.js's groundedInlineHeadingClass) — a bare
+      // table/list on an inline page is never that kind of intentional, so
+      // only the heading tags are skipped for `inline`. Confirmed live on
+      // site 8864 (chayceproperties.com, 2026-09-20):
+      // componentTemplates.expandContent's own captured row carried a bare
+      // <h1> inside a classed `<div class="container">` wrapper, and it
+      // shipped on 6+ pages because the check above (which requires
+      // typography.body evidence) never even ran for this site at the time.
+      if (!(inline && /^h[1-6]$/.test(tag)) && CLASSED_TAG_RE.test(html)) {
+        issues.push({
+          path: field,
+          patternId: 'bare-tag-inconsistent-styling',
+          snippet: match[0].slice(0, 120),
+          detail: `The rendered <${tag}> carries no class at all, but this same block contains other classed `
+            + `elements — an internally inconsistent render regardless of whether this site's full typography `
+            + `profile has been derived yet.`,
+          blocking: true,
+        });
+      }
     }
   }
   return { issues };

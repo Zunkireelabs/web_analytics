@@ -92,7 +92,10 @@ mock.module(resolve('./recommendation-gates.js'), {
 const { qualifyAndShipContentGaps } = await import('./analyst-seo-mapping.js');
 
 const THIS_MONDAY = new Date('2026-08-31T00:00:00Z');
-const LAST_WEEK = '2026-08-24';
+// Old enough to clear the 2-week gather window (qualifyAndShipContentGaps
+// requires first_discovery_week to be at least 2 full weeks before `now`) —
+// named LAST_WEEK for historical reasons but no longer literally last week.
+const LAST_WEEK = '2026-08-17';
 
 // faq: true routes gapDraftEligibility to the 'faq' generator (an
 // existing-page match on a question-shaped topic) instead of 'blog-outline'.

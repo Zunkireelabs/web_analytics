@@ -28,7 +28,10 @@ describe('geo-signals — recommendationsFor', () => {
   test('the other four GEO signals still route to a real generator', () => {
     const cases = [
       { key: 'hasAuthorSignal', generatorId: 'expand-content' },
-      { key: 'hasFreshnessSignal', generatorId: 'expand-content' },
+      // Routed to 'schema' (dateModified/datePublished JSON-LD), not
+      // expand-content's 'freshness-date' focus — that focus drafts a
+      // VISIBLE "Last Updated" section. See geo-signals.js's own comment.
+      { key: 'hasFreshnessSignal', generatorId: 'schema' },
       { key: 'hasComparisonContent', generatorId: 'expand-content' },
       { key: 'hasExternalCitations', generatorId: 'expand-content' },
     ];
