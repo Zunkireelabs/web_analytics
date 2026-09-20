@@ -389,6 +389,44 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(occurrences.length, 1, 'retrying the same focus must not stack a second copy of its heading');
   });
 
+  // Real incident, site 8864 (chayceproperties.com, 2026-09-20): two
+  // separate comparison-content drafts for /our-services/, three days
+  // apart, both passed the old heading-text check because their LLM-written
+  // headings genuinely differed ("Comparison of Moving Services" vs
+  // "Comparison of Home Moving Services") — the text check never recognised
+  // the second as a repeat of the same focus, so it appended a visible
+  // duplicate section instead of replacing the first.
+  test('a SAME focus retried with DIFFERENT LLM-written heading text still replaces, not stacks (via the focus marker)', () => {
+    const first = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Home Moving Services', body: 'Old body.' }],
+    }, 'visible', {}, null, {});
+    const fileContent = `<!-- SEOAI:EXPANDEDCONTENT:START -->${first.values.expandedContent}<!-- SEOAI:EXPANDEDCONTENT:END -->`;
+
+    const second = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Moving Services', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+
+    assert.equal(second.ok, true);
+    assert.doesNotMatch(second.values.expandedContent, /Comparison of Home Moving Services/,
+      'the earlier draft\'s different-wording heading must not survive alongside the new one');
+    assert.match(second.values.expandedContent, /Comparison of Moving Services/);
+    const occurrences = (second.values.expandedContent.match(/Comparison of/g) || []).length;
+    assert.equal(occurrences, 1, 'only one comparison-content section should remain, not two stacked');
+  });
+
+  test('the focus marker still preserves a DIFFERENT focus\'s section, even when one of them carries no marker at all', () => {
+    const fileContent = '<!-- SEOAI:EXPANDEDCONTENT:START --><!-- SEOAI:FOCUS:author-byline --><div><section><h2>About the Author</h2><p>By the Team.</p></section></div><!-- SEOAI:EXPANDEDCONTENT:END -->';
+    const result = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison of Services', body: 'New body.' }],
+    }, 'visible', {}, null, { fileContent });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /About the Author/);
+    assert.match(result.values.expandedContent, /Comparison of Services/);
+  });
+
   test('expand-content with no fileContent given (preview/schema-probe callers) still works exactly as before', () => {
     const result = buildMergeValues('expand-content', { sections: [{ heading: 'H1', body: 'Body text' }] }, 'visible', {}, null, {});
     assert.equal(result.ok, true);

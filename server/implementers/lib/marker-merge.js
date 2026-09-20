@@ -1412,17 +1412,53 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     // -shipped comparison-content section's <table>, correctly caught by
     // section-preservation-gate.js. Preserving the marker's current content
     // ahead of the new render means the gate sees an ADD, not a swap.
-    // Skipped when a section's own heading is already present, so retrying
-    // the SAME focus replaces its own prior render rather than stacking a
-    // duplicate copy of it every attempt.
     // The marker's real on-file name is 'EXPANDEDCONTENT' (url-file-map.js's
     // MARKER_NAME_BY_ACTION_TYPE), not the 'expandedContent' field name used
     // everywhere else in this function.
+    //
+    // Every block is tagged with an invisible `<!-- SEOAI:FOCUS:x --> `
+    // comment naming which focus produced it — the ONLY reliable way to
+    // recognise "this focus already has a section here" on a retry. The old
+    // dedup signal was matching the NEW draft's heading TEXT against the
+    // existing HTML, which only works when a retry reproduces the exact same
+    // wording. comparison-content's heading is LLM-written and varies draft
+    // to draft ("Comparison of Moving Services" one day, "Comparison of Home
+    // Moving Services" the next) — confirmed live on site 8864
+    // (chayceproperties.com, 2026-09-20): two separate comparison-content
+    // drafts for /our-services/, three days apart, both had genuinely
+    // different heading text, so the text check never recognised the second
+    // as a repeat and appended it alongside the first instead of replacing
+    // it. The focus marker sidesteps wording entirely.
     const existing = fileContent ? getMarkerContent(fileContent, 'EXPANDEDCONTENT') : null;
-    const alreadyPresent = existing && content.sections.some((s) => existing.includes(escapeHtml(s.heading)));
-    const html = (existing && existing.trim() && !alreadyPresent)
-      ? `${existing.trim()}\n${newHtml}`
-      : newHtml;
+    const focusMarker = content.focus ? `<!-- SEOAI:FOCUS:${content.focus} -->` : null;
+    const taggedHtml = focusMarker ? `${focusMarker}${newHtml}` : newHtml;
+
+    let html;
+    if (!existing || !existing.trim()) {
+      html = taggedHtml;
+    } else if (focusMarker && existing.includes(focusMarker)) {
+      // A genuine retry of the SAME focus — replace only ITS OWN previously
+      // tagged block (up to the next focus marker, or the end of the
+      // region), leaving every OTHER focus's already-shipped content
+      // untouched. Unlike the old text-based check, this never wipes a
+      // sibling focus's section just because this retry's own heading text
+      // happens to also appear somewhere in the marker.
+      const startIdx = existing.indexOf(focusMarker);
+      const nextIdx = existing.indexOf('<!-- SEOAI:FOCUS:', startIdx + focusMarker.length);
+      const before = existing.slice(0, startIdx);
+      const after = nextIdx === -1 ? '' : existing.slice(nextIdx);
+      html = `${before}${taggedHtml}${after}`.trim();
+    } else if (content.sections.some((s) => existing.includes(escapeHtml(s.heading)))) {
+      // Fallback for content that shipped before focus markers existed (no
+      // tag to match against yet) — the old exact-heading-text signal still
+      // catches an identical-wording retry and replaces the whole marker,
+      // same as before this fix.
+      html = taggedHtml;
+    } else {
+      // A genuinely new, not-yet-seen focus (or an unmarked legacy focus
+      // whose wording changed) — add alongside what's already there.
+      html = `${existing.trim()}\n${taggedHtml}`;
+    }
     return { ok: true, values: { expandedContent: html } };
   }
 
