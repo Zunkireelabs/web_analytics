@@ -84,6 +84,46 @@ describe('findBareMarkupIssues', () => {
     assert.equal(issues.length, 0);
   });
 
+  // The fallback path — fires even with NO typography evidence at all,
+  // because it only needs the render to be internally inconsistent with
+  // itself (a bare heading next to the template's own classed wrapper), not
+  // external evidence of what the class SHOULD be. Confirmed live on site
+  // 8864 (chayceproperties.com, 2026-09-20): exactly this shape shipped
+  // because the profile's typography.body hadn't been derived yet, so the
+  // evidence-based check above silently skipped every bare tag.
+  test('with NO typography evidence, still flags a bare heading sitting inside an otherwise-classed template', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<section><h1>{{HEADING}}</h1><div>{{BODY}}</div></section>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/bronze-essentials/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].patternId, 'bare-heading-inconsistent-styling');
+    assert.equal(issues[0].blocking, true);
+    assert.match(issues[0].snippet, /<h1>/);
+  });
+
+  test('with NO typography evidence, a UNIFORMLY bare render (nothing classed anywhere) is not flagged — nothing to contrast against', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h1>{{HEADING}}</h1><div>{{BODY}}</div>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/bronze-essentials/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    assert.equal(issues.length, 0);
+  });
+
+  test('with NO typography evidence, a bare heading on a blog/legal (inline) page is never flagged — inheriting the article\'s own prose is the correct shape there', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container">\n{{ROWS}}\n</div>', row: '<section><h1>{{HEADING}}</h1><div>{{BODY}}</div></section>' },
+    };
+    const { issues } = findBareMarkupIssues('expand-content', {
+      page: 'https://chayceproperties.com/blog/some-post/', sections: [{ heading: 'H', body: 'Body text.' }],
+    }, componentTemplates, null);
+    assert.equal(issues.length, 0);
+  });
+
   test('one finding per distinct bare tag type per field, not one per occurrence', () => {
     const componentTemplates = {
       expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2><div>{{BODY}}</div>' },

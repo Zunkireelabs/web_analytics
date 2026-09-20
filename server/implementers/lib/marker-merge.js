@@ -710,7 +710,7 @@ const BLOG_UNSAFE_SECTION_SPACING_RE = /^(?:[\w-]+:)?(?:py|my)-(?:1[0-9]|[2-9][0
 // a false-wide one (this incident) breaks the page outright.
 const INLINE_CONTENT_PAGE_TYPES = new Set(['blog-article', 'legal']);
 
-function isInlineContentPage(pageUrl) {
+export function isInlineContentPage(pageUrl) {
   if (typeof pageUrl !== 'string' || !pageUrl) return false;
   return INLINE_CONTENT_PAGE_TYPES.has(classifyPageType(pageUrl));
 }
