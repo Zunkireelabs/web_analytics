@@ -5,7 +5,7 @@ import { resolveFile } from '../../implementers/lib/url-file-map.js';
 import { generateDraft, approveAndPublishDraftUnattended, autoSelectMetaTitle, finalizeBatchPr, pushDraftBranch, openDraftPr } from '../../routes/action-center.js';
 import { batchBranchName, beginBatchPush, pushDraftBranch as pushFileEditsOntoBatch } from '../../implementers/lib/github-ops.js';
 import { classifyRecommendation, AUTONOMY_DECISION } from './autonomy-decision.js';
-import { getLearnedConfidenceMap, recordOutcome } from './generator-learning.js';
+import { getLearnedConfidenceMap, recordOutcome, PROBATION_COOLDOWN_MS } from './generator-learning.js';
 import { maybeEscalateToCodeRepair } from './code-self-repair.js';
 import { isOnboardingAnalysisPending } from '../../implementers/lib/onboarding-readiness.js';
 import { applyPacing, applyConvergenceCap, applyRefusalCap } from './ship-pacing.js';
@@ -234,9 +234,38 @@ export async function autoRemediateSafeRecommendations(siteId, {
   // branch every day regardless of whether yesterday's PR merged, so without
   // this a second day's run silently regenerates the same file from stale
   // content and clobbers/reverts the first day's still-pending draft).
-  const eligible = rows.filter((r) => classifyRecommendation(r, learnedMap).decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE
-    && r.finding_ids.every((fid) => !draftedFindingIds.has(fid))
-    && !pendingDraftFilePaths.has(resolveFile(site, r.page)));
+  // Probation: a demoted generator is excluded from SAFE_TO_AUTO_EXECUTE
+  // above, which means nothing here ever attempts it again — the exact
+  // deadlock that left site 8864's schema/qa-content generators demoted for
+  // three days on evidence from BEFORE their real bug fix landed, because
+  // being demoted is what stopped them from ever re-proving themselves. See
+  // generator-learning.js's PROBATION_COOLDOWN_MS doc comment for the full
+  // incident. One recommendation per idle-long-enough demoted generator is
+  // let through per run — enough for a real fix to clear itself the moment
+  // it's tried again, capped at one so a still-genuinely-broken generator
+  // costs at most one wasted attempt per cooldown, not a renewed flood.
+  const now = Date.now();
+  const probedGeneratorIds = new Set();
+  const isProbationProbe = (r) => {
+    const learned = learnedMap.get(r.recommendation_type);
+    if (!learned?.demote) return false;
+    if (probedGeneratorIds.has(r.recommendation_type)) return false;
+    const idleMs = learned.lastAttemptAt ? now - new Date(learned.lastAttemptAt).getTime() : Infinity;
+    if (idleMs < PROBATION_COOLDOWN_MS) return false;
+    probedGeneratorIds.add(r.recommendation_type);
+    return true;
+  };
+
+  const eligible = rows.filter((r) => {
+    if (r.finding_ids.some((fid) => draftedFindingIds.has(fid))) return false;
+    if (pendingDraftFilePaths.has(resolveFile(site, r.page))) return false;
+    const decision = classifyRecommendation(r, learnedMap).decision;
+    if (decision === AUTONOMY_DECISION.SAFE_TO_AUTO_EXECUTE) return true;
+    return isProbationProbe(r);
+  });
+  for (const generatorId of probedGeneratorIds) {
+    console.log(`[auto-remediation] ${clientLabel}: ${generatorId} is demoted with no attempt in ${(PROBATION_COOLDOWN_MS / 3600000).toFixed(0)}h — granting one probation probe this run.`);
+  }
 
   // Publishing cadence, applied BEFORE the daily budget so a paced generator
   // can't consume budget slots it isn't due for.
