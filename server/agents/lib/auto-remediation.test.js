@@ -154,6 +154,10 @@ mock.module(resolve('./generator-learning.js'), {
     // other two exports above. generator-learning.test.js covers the real
     // query/classification logic against a real database.
     countRefusalsByRecommendation: async () => new Map(),
+    // Real value, not mocked away: the probation-probe tests below set a
+    // learned map with an old/null lastAttemptAt and rely on the real
+    // cooldown threshold to decide whether a probe fires.
+    PROBATION_COOLDOWN_MS: 24 * 60 * 60 * 1000,
   },
 });
 // The real implementation (implementers/lib/onboarding-readiness.js) hits a
@@ -1576,13 +1580,32 @@ describe('Phase 5 — learning actually changes what the loop does, not just wha
   beforeEach(reset);
 
   test('a generator the learned map has demoted is excluded from this run, and a still-healthy one still ships', async () => {
-    learnedMap = new Map([['meta-title', { demote: true, reason: '3 of 4 recent attempts failed or were rejected — held for review until this improves' }]]);
+    // lastAttemptAt is recent (just demoted) — still inside the probation
+    // cooldown, so no probe fires and this stays a plain exclusion. A
+    // real demoted generator always carries a lastAttemptAt (demote requires
+    // MIN_SAMPLES real attempts) — this fixture matches that.
+    learnedMap = new Map([['meta-title', { demote: true, lastAttemptAt: new Date(), reason: '3 of 4 recent attempts failed or were rejected — held for review until this improves' }]]);
     recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'faq' })];
 
     const result = await autoRemediateSafeRecommendations(1);
 
     assert.equal(result.shipped, 1, 'only the non-demoted generator ships');
     assert.deepEqual(calls.generated, ['f2']);
+  });
+
+  test('a generator demoted with no attempt since past the probation cooldown gets exactly one probe', async () => {
+    // lastAttemptAt is well past PROBATION_COOLDOWN_MS (24h) with no new
+    // attempt since — the exact deadlock (demoted -> never re-attempted ->
+    // never re-scored) this probation mechanism exists to break.
+    learnedMap = new Map([['meta-title', { demote: true, lastAttemptAt: new Date(Date.now() - 48 * 60 * 60 * 1000), reason: 'stale' }]]);
+    recommendations = [rec(1, { type: 'meta-title' }), rec(2, { type: 'meta-title' }), rec(3, { type: 'faq' })];
+
+    const result = await autoRemediateSafeRecommendations(1);
+
+    // Both the healthy generator AND exactly one probation probe on the
+    // idle-demoted one — never both of its candidates at once.
+    assert.equal(result.shipped, 2, 'the healthy generator ships, plus exactly one probe on the idle demoted one');
+    assert.deepEqual(calls.generated.sort(), ['f1', 'f3'].sort());
   });
 
   test('every shipped item records a "shipped" outcome for its own generator', async () => {

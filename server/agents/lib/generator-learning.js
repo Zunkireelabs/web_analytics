@@ -149,6 +149,25 @@ const DEMOTE_FAILURE_RATIO = 0.4;
 // unbounded query cost grows with the site's whole lifetime otherwise.
 const WINDOW_SIZE = 30;
 
+// A demoted generator is excluded from auto-remediation's own eligible set
+// (autonomy-decision.js), which means nothing ever attempts it again to
+// produce the fresh evidence that could clear the demotion — a real,
+// observed deadlock on site 8864 (2026-09-21): schema/qa-content were
+// demoted entirely on failures from BEFORE a real token-limit bug fix
+// (33501c7/139a55c) landed, and sat demoted for three full days afterward
+// with zero attempts, because demoted is exactly what stopped them from
+// being attempted. A human had to manually re-run one item on each to prove
+// the fix and clear it.
+//
+// PROBATION_COOLDOWN_MS is how long a demoted generator may sit with no new
+// attempt before auto-remediation.js grants it exactly one probation probe
+// per run (see PROBATION_PROBE_LIMIT there) instead of skipping it outright
+// — enough to let a real fix prove itself without a human noticing and
+// intervening, while still bounded to one item so a genuinely still-broken
+// generator costs at most one wasted attempt per cooldown period, not a
+// renewed flood.
+export const PROBATION_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
 // One row per generator this site has real history for, in one query — the
 // shape autonomy-decision.js's classifyRecommendation and summarizeAutonomy
 // take as an optional parameter, so a caller acting on many recommendations
@@ -169,10 +188,17 @@ export async function getLearnedConfidenceMap(siteId) {
       byGenerator.set(row.generator_id, {
         successes: 0, failures: 0, refused: 0, infra: 0, total: 0,
         impactPositive: 0, impactNegative: 0, impactNeutral: 0,
+        lastAttemptAt: null,
       });
     }
     const bucket = byGenerator.get(row.generator_id);
     bucket.total++;
+    // Tracked regardless of outcome type — a probation probe (auto-
+    // remediation.js) needs to know when this generator was LAST tried at
+    // all, not just when it last scored, so an all-refusal or all-infra
+    // stretch still counts as "still being exercised" and never falsely
+    // looks idle.
+    if (!bucket.lastAttemptAt || row.created_at > bucket.lastAttemptAt) bucket.lastAttemptAt = row.created_at;
     if (POSITIVE.has(row.outcome)) bucket.successes++;
     else if (NEGATIVE.has(row.outcome)) bucket.failures++;
     else if (IMPACT_POSITIVE.has(row.outcome)) bucket.impactPositive++;
