@@ -34,7 +34,10 @@ describe('resolveMarkers — every marker-merge action type has a built-in platf
       analyticsScriptGa4: 'ANALYTICSSCRIPTGA4',
       analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL',
     });
-    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'meta-title'), { title: 'TITLE' });
+    // meta-title has two real fields, not one — see PLATFORM_DEFAULT_MARKERS'
+    // own comment for the bug this fixed (description silently had no
+    // default marker at all, so it could never be written).
+    assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'meta-title'), { title: 'TITLE', description: 'METADESCRIPTION' });
     assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'faq'), { faq: 'FAQ' });
     assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'schema'), { schema: 'SCHEMA' });
     assert.deepEqual(resolveMarkers(site, 'https://example.com/', 'internal-links'), { links: 'INTERNALLINKS' });
