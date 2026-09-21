@@ -146,3 +146,73 @@ describe('syncFromGrounded — repeat-finding params refresh (tracking-ID stalen
     assert.equal(merged[0].findingId, 'expand-content:/blog/a/:thin-v2');
   });
 });
+
+// Regression coverage for a real report on site 1 (recommendations #42 and
+// #5994): recommendation-gates.js's evaluate() deliberately never rules on
+// broken-link-fix (computeBrokenLinkFixMerge has its own code-search
+// fallback instead), so item.blockedReason is always null for it, no matter
+// what happened at ship time. Before this fix, syncFromGrounded's "refresh
+// the block both directions every sync" rule (correct for every OTHER
+// generator, whose blockedReason IS a live gate re-check) treated that null
+// as "verified clear" and silently wiped out the real needs_human block
+// action-center.js had set after a genuine failed ship attempt — the
+// recommendation flapped blocked -> unblocked -> retried -> failed
+// identically -> blocked again, forever, and never converged.
+describe('syncFromGrounded — broken-link-fix preserves a ship-time block (gates has no opinion on it)', () => {
+  test('an existing needs_human block survives a re-detection with no gate signal', async () => {
+    openRecommendation = {
+      id: 5994,
+      finding_ids: ['technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree'],
+      detecting_agents: ['technical-seo'],
+      supporting_agents: [],
+      blocked_reason: 'The file containing this link could not be located in the site’s repository.',
+      risk_tier: 'manual',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree',
+        generatorId: 'broken-link-fix',
+        source: 'technical-seo',
+        reason: 'A cited external source (https://twitter.com/zunkiree, on 1 page(s)) now returns HTTP 404 — the citation is dead.',
+        // technical-seo.js never sets blockedReason for this finding type —
+        // this is the realistic shape of every nightly re-detection.
+        params: { href: 'https://twitter.com/zunkiree', page: 'https://zunkireelabs.com/contact/?source=newsletter' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['technical-seo:invalid-citation:https://zunkireelabs.com/contact/?source=newsletter:https://twitter.com/zunkiree']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].id, 5994);
+    assert.equal(merged[0].blockedReason, 'The file containing this link could not be located in the site’s repository.');
+    assert.equal(merged[0].riskTier, 'manual');
+  });
+
+  test('a broken-link-fix recommendation with no prior block still opens unblocked (unchanged behavior)', async () => {
+    openRecommendation = {
+      id: 6001,
+      finding_ids: ['technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com'],
+      detecting_agents: ['technical-seo'],
+      supporting_agents: [],
+      blocked_reason: null,
+      risk_tier: 'safe',
+    };
+
+    await syncFromGrounded(1, {
+      items: [{
+        id: 'technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com',
+        generatorId: 'broken-link-fix',
+        source: 'technical-seo',
+        reason: 'A cited external source (https://example.com, on 1 page(s)) now returns HTTP 404 — the citation is dead.',
+        params: { href: 'https://example.com', page: 'https://zunkireelabs.com/' },
+        priority: 'medium',
+      }],
+      detectedKeys: new Set(['technical-seo:invalid-citation:https://zunkireelabs.com/:https://example.com']),
+    });
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].blockedReason, null);
+    assert.equal(merged[0].riskTier, 'safe');
+  });
+});
