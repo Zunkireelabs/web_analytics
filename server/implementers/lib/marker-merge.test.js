@@ -1385,3 +1385,78 @@ describe('inline inserts must not break the article they land in', () => {
     assert.match(html, /text-3xl/, 'and its own headline scale');
   });
 });
+
+// Regression coverage for a real report on site 1 (zunkireelabs): ~10
+// meta-title recommendations kept re-drafting forever because a shipped
+// fix's meta description never actually landed on the live page, even
+// though the title did. Root cause was two layers deep:
+//   1. PLATFORM_DEFAULT_MARKERS['meta-title'] (url-file-map.js) had only a
+//      `title` field — description had no default marker at all, so
+//      spliceMarkers (which iterates markerMap's own keys, never values')
+//      never even looked at a drafted description.
+//   2. Even with a marker configured, ensureMarkers only knows how to
+//      auto-insert a LINE marker for a field in LINE_CONVENTION_FIELDS,
+//      which was `title`-only — description would have fallen through to
+//      the BLOCK/EOF default and been spliced as VISIBLE body text at the
+//      end of the file, not into the front-matter field.
+// buildMergeValues intentionally maps the generator's own `metaDescription`
+// content field onto a marker-map field named `description` — matching the
+// real Eleventy/Jekyll/Hugo front-matter key, not the generator's internal
+// name — so ensureMarkers' front-matter LINE search actually finds it.
+describe('meta-title — description gets a real marker, not just title (regression)', () => {
+  test('buildMergeValues maps content.metaDescription onto the `description` field, not `metaDescription`', () => {
+    const r = buildMergeValues('meta-title', {
+      selectedTitle: 'A Correct, Grounded Title Tag Under Sixty Characters',
+      metaDescription: 'A grounded meta description between one-fifty and one-sixty characters long, written for this exact page and query, no more and no less than that.',
+    }, 'visible');
+    assert.equal(r.ok, true);
+    assert.deepEqual(Object.keys(r.values).sort(), ['description', 'title']);
+    assert.equal(r.values.title, 'A Correct, Grounded Title Tag Under Sixty Characters');
+  });
+
+  test('no metaDescription on the draft — only title is set, same as before', () => {
+    const r = buildMergeValues('meta-title', { selectedTitle: 'Just A Title, No Description Drafted Yet' }, 'visible');
+    assert.equal(r.ok, true);
+    assert.deepEqual(Object.keys(r.values), ['title']);
+  });
+
+  test('ensureMarkers auto-inserts a LINE marker onto an existing, unmarked `description:` front-matter field', () => {
+    const fileContent = [
+      '---',
+      'layout: post.njk',
+      'title: "Old Title" # SEOAI:TITLE',
+      'description: "An old, unmarked meta description nobody ever wired a marker onto."',
+      '---',
+      'Body content.',
+    ].join('\n');
+    const markerMap = { title: 'TITLE', description: 'METADESCRIPTION' };
+    const { content, inserted } = ensureMarkers(fileContent, markerMap, 'src/blog/post.md');
+    assert.ok(inserted.includes('METADESCRIPTION'), 'the description marker must be auto-inserted');
+    assert.match(content, /description: "An old, unmarked meta description nobody ever wired a marker onto\." # SEOAI:METADESCRIPTION/);
+    // The critical assertion: it must NOT fall through to a BLOCK/EOF
+    // marker, which would splice future content as visible text at the end
+    // of the file instead of into the front-matter field.
+    assert.doesNotMatch(content, /<!-- SEOAI:METADESCRIPTION:START -->/);
+  });
+
+  test('end to end: spliceMarkers actually rewrites BOTH title and description in front matter', () => {
+    const fileContent = [
+      '---',
+      'layout: post.njk',
+      'title: "Old Title" # SEOAI:TITLE',
+      'description: "Old description."',
+      '---',
+      'Body content.',
+    ].join('\n');
+    const markerMap = { title: 'TITLE', description: 'METADESCRIPTION' };
+    const { content: ensured } = ensureMarkers(fileContent, markerMap, 'src/blog/post.md');
+    const built = buildMergeValues('meta-title', {
+      selectedTitle: 'A New, Correctly Sized Title Tag For This Page',
+      metaDescription: 'A new, correctly sized meta description for this exact page, long enough to clear the minimum recommended character count for search snippets.',
+    }, 'visible');
+    const spliced = spliceMarkers(ensured, markerMap, built.values);
+    assert.equal(spliced.ok, true);
+    assert.match(spliced.newContent, /title: "A New, Correctly Sized Title Tag For This Page" # SEOAI:TITLE/);
+    assert.match(spliced.newContent, /description: "A new, correctly sized meta description for this exact page, long enough to clear the minimum recommended character count for search snippets\." # SEOAI:METADESCRIPTION/);
+  });
+});

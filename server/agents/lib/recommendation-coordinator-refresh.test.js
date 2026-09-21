@@ -159,3 +159,30 @@ describe('refreshBlockedRecommendations — a reportOnly-kind row (no real gener
     assert.equal(evaluateCalls.length, 0);
   });
 });
+
+// Regression coverage for a real report on site 1 (recommendations #42 and
+// #5994): recommendation-gates.js's evaluate() explicitly excludes
+// broken-link-fix from every page gate it runs, so gate.blockedReason is
+// unconditionally null for it. Before this fix, this refresh pass read that
+// as "verified clear" and wiped out the real needs_human block
+// action-center.js had set hours earlier after a genuine failed ship
+// attempt — the recommendation flapped blocked -> unblocked -> retried ->
+// failed identically -> blocked again, forever, and the Action Center card
+// never settled into a stable blocked state.
+describe('refreshBlockedRecommendations — a broken-link-fix row (gates has no opinion on it)', () => {
+  test('never reaches gates.evaluate and is left exactly as the ship-time block set it', async () => {
+    blockedRows = [{
+      id: 5994, recommendation_type: 'broken-link-fix',
+      params: { page: 'https://zunkireelabs.com/contact/?source=newsletter', href: 'https://twitter.com/zunkiree' },
+      detecting_agents: ['technical-seo'],
+    }];
+    evaluateImpl = () => { throw new Error('must not be reached — broken-link-fix skips gates entirely'); };
+
+    const result = await refreshBlockedRecommendations(1);
+
+    assert.equal(result.checked, 1);
+    assert.equal(result.updated, 0);
+    assert.equal(refreshed.length, 0);
+    assert.equal(evaluateCalls.length, 0);
+  });
+});

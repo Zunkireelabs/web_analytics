@@ -209,6 +209,36 @@ const PLATFORM_DEFAULT_MARKERS = {
     Object.entries(MARKER_FIELD_BY_ACTION_TYPE).map(([actionType, field]) => [actionType, { [field]: MARKER_NAME_BY_ACTION_TYPE[actionType] }])
   ),
   'analytics-install': { analyticsScriptGa4: 'ANALYTICSSCRIPTGA4', analyticsScriptFacebookPixel: 'ANALYTICSSCRIPTFACEBOOKPIXEL' },
+  // meta-title is the one marker-merge action type with TWO real fields, not
+  // one — marker-merge.js's buildMergeValues sets both `title` and (when the
+  // draft has one) a meta-description value on `values`. The generic
+  // single-field derivation above (MARKER_FIELD_BY_ACTION_TYPE has exactly
+  // one field per actionType, for every OTHER action type here) silently
+  // dropped the description field from this map entirely, so spliceMarkers —
+  // which only ever iterates markerMap's OWN keys, never values' — never
+  // even looked at the drafted description, regardless of retries. Confirmed
+  // live on site 1: title updated correctly (its "TITLE" marker exists and
+  // matches the shipped draft) on every one of ~10 meta-title
+  // recommendations, but each page's `description:` front-matter field
+  // carried no marker at all and a value matching neither draft ever
+  // generated — the field was never once written, so every post-ship
+  // verification pass re-found "Meta description length" still broken and
+  // kept re-drafting forever.
+  //
+  // The field key here is `description`, not `metaDescription` (the
+  // generator's own draft.content field name) — deliberately, to match
+  // `title`'s own precedent: LINE_CONVENTION_FIELDS/insertLineMarker find an
+  // existing front-matter field by searching for a literal `${field}:` line,
+  // and every SSG convention this platform targets (Eleventy/Jekyll/Hugo/
+  // 11ty) names that field `description:`, never `metaDescription:`. Using
+  // the generator's internal name here would search for a front-matter key
+  // that never exists, failing exactly the same way this bug already did.
+  // buildMergeValues maps the generator's `metaDescription` onto this
+  // `description` marker field for exactly this reason — see its own
+  // comment. A site that wants a different name for this marker can still
+  // override it via `defaults.placements['meta-title'].markers`, same as any
+  // other field.
+  'meta-title': { title: 'TITLE', description: 'METADESCRIPTION' },
 };
 
 // Single source of truth for "where does this (page, action type) land."

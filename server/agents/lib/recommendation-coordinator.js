@@ -287,8 +287,43 @@ export function hasDeclaredDedupIdentity(generatorId, pageKeyedIds) {
 // setting item.blockedReason, rather than each one inventing its own way to
 // stay out of the autonomous path — which is exactly how one of them would
 // eventually forget to.
-function blockedRiskTier(item) {
-  return item.blockedReason ? 'manual' : riskTierForGenerator(item.generatorId);
+function blockedRiskTier(blockedReason, generatorId) {
+  return blockedReason ? 'manual' : riskTierForGenerator(generatorId);
+}
+
+// recommendation-gates.js's evaluate() deliberately never rules on
+// broken-link-fix (its own comment: "excluded from every page gate below" —
+// computeBrokenLinkFixMerge has its own code-search fallback instead), so
+// item.blockedReason is always null for this generator no matter what
+// happened at ship time. The ONLY place that ever learns "this citation's
+// href can't be located anywhere in the repo" is action-center.js's
+// executeRecommendation, via attempt-classification.js's NEEDS_HUMAN verdict
+// — a completely different pass that runs hours earlier, after a real ship
+// attempt, and calls blockRecommendation() directly on the row.
+//
+// Every other generator's blockedReason IS the gate system's own live
+// re-check, so refreshing it unconditionally on each sync (the comment two
+// lines below this function) is correct: a cleared gate must un-block, a
+// regressed one must re-block, with no manual step either way. But applying
+// that same "the detecting agent is the last word" rule to broken-link-fix
+// means the detecting agent (technical-seo.js) has literally no opinion on
+// blocking at all — so every nightly re-detection of the still-dead citation
+// passed blockedReason: null and silently wiped out that same night's (or
+// yesterday's) ship-time block. Confirmed live on site 1: recommendations
+// #42 and #5994 both carried a real `needs_human` verdict after a failed
+// attempt, then showed up unblocked and "safe" again by the next sync,
+// re-shipped, failed identically, and never converged — a permanent
+// RETRY/blocked flap instead of a stable blocked card.
+//
+// Preserving the existing block here (rather than trusting item.blockedReason)
+// is scoped to exactly this one generator/condition, not a general "existing
+// wins" rule, so every other generator's real un-block/re-block behavior is
+// unaffected.
+function resolveBlockedReason(existing, item) {
+  if (item.generatorId === 'broken-link-fix' && !item.blockedReason) {
+    return existing?.blocked_reason ?? null;
+  }
+  return item.blockedReason ?? null;
 }
 
 export async function syncFromGrounded(siteId, grounded) {
@@ -321,6 +356,7 @@ export async function syncFromGrounded(siteId, grounded) {
       // from what was just re-detected" — never a data loss, since a
       // detecting agent that found nothing new about params still passes its
       // current, correct params, not a blank.
+      const mergedBlockedReason = resolveBlockedReason(existing, item);
       await mergeIntoRecommendation(existing.id, {
         findingId: item.id, agentId: item.source, reason: item.reason,
         params: item.params, priority: item.priority, expectedImpact: item.expectedImpact,
@@ -328,16 +364,22 @@ export async function syncFromGrounded(siteId, grounded) {
         // been verified clears the block automatically (back to its real risk
         // tier), and one that regresses re-blocks — no manual unblock step,
         // and no stale "blocked" banner outliving the thing that caused it.
-        blockedReason: item.blockedReason ?? null,
-        riskTier: blockedRiskTier(item),
+        // (broken-link-fix is the one documented exception — see
+        // resolveBlockedReason above.)
+        blockedReason: mergedBlockedReason,
+        riskTier: blockedRiskTier(mergedBlockedReason, item.generatorId),
       });
     } else {
-      const riskTier = blockedRiskTier(item);
+      // No existing row yet, so there is nothing ship-time could have
+      // blocked — item.blockedReason (the gate system's own verdict, null
+      // for broken-link-fix) is the whole story on first insert either way.
+      const insertBlockedReason = item.blockedReason ?? null;
+      const riskTier = blockedRiskTier(insertBlockedReason, item.generatorId);
       const created = await insertRecommendation(siteId, {
         page, recommendationType: item.generatorId, issue: item.tag, reason: item.reason,
         params: item.params, findingId: item.id, detectingAgent: item.source,
         priority: item.priority, expectedImpact: item.expectedImpact, riskTier,
-        blockedReason: item.blockedReason ?? null,
+        blockedReason: insertBlockedReason,
       });
       // DECIDE, audit trail only — this does not gate or change anything;
       // the actual decision (page key, risk tier, blockedReason) is already
@@ -441,6 +483,21 @@ export async function refreshBlockedRecommendations(siteId, { onlyDetectingAgent
     // before gates ever sees it, is the fix — leaving the row exactly as
     // syncFromGrounded's own inline refresh already set it.
     if (REPORT_ONLY_KINDS.has(rec.recommendation_type)) continue;
+    // Same shape of bug as the query-cannibalization one above, on a second
+    // generator: recommendation-gates.js's evaluate() explicitly excludes
+    // broken-link-fix from every page gate it runs (its own comment —
+    // computeBrokenLinkFixMerge has its own code-search fallback instead),
+    // so gate.blockedReason is unconditionally null for it. This pass would
+    // read that as "verified clear" and wipe out a real needs_human block
+    // action-center.js set after an actual failed ship attempt — confirmed
+    // live: recommendations #42 and #5994 on site 1 both flapped
+    // blocked -> unblocked -> retried -> failed identically -> blocked again,
+    // forever, because this refresh (and syncFromGrounded's own inline one —
+    // see resolveBlockedReason) kept re-clearing a block gates.evaluate has
+    // no way to earn or confirm for this generator. Skipped here for the
+    // same reason REPORT_ONLY_KINDS is: nothing about the row changes
+    // because a pass with no real opinion asked it to.
+    if (rec.recommendation_type === 'broken-link-fix') continue;
     const gate = await gates.evaluate(rec.recommendation_type, rec.params || {}).catch(() => null);
     if (!gate) continue; // could not verify this run — leave the row untouched
     // gate.drop (page proven gone) is deliberately not acted on here: closing

@@ -142,7 +142,18 @@ export function findMarkerCorruption(fileContent) {
 // Fields using the LINE convention (a single quoted front-matter value) —
 // established by this codebase's only real precedent, meta-title's `title`
 // field (see module comment above). Everything else is a BLOCK marker.
-const LINE_CONVENTION_FIELDS = new Set(['title']);
+//
+// `description` (meta-title's other real field) belongs here too, not in
+// HEAD_SCOPED_FIELDS below: this platform's target SSGs (Eleventy/Jekyll/
+// Hugo/11ty) render meta description from a front-matter LINE field, the
+// same as title, never from a nested <head> region a page template embeds
+// directly — see url-file-map.js's PLATFORM_DEFAULT_MARKERS['meta-title']
+// for the full history of what went wrong before this field was wired in at
+// all (it fell through every branch below to the BLOCK/EOF default, which
+// would have spliced the description as VISIBLE body text at the end of the
+// file — worse than canonical/open-graph's merely SEO-invisible failure mode
+// that HEAD_SCOPED_FIELDS exists to prevent).
+const LINE_CONVENTION_FIELDS = new Set(['title', 'description']);
 
 // Fields whose real HTML context is <head> specifically (canonical, Open
 // Graph tags, and any future head-metadata generator — meta description,
@@ -1285,7 +1296,12 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
       return { ok: false, error: 'No title selected yet — pick one of the candidate titles (Draft Preview → "Use this") before this can be applied.' };
     }
     const values = { title: content.selectedTitle };
-    if (content.metaDescription) values.metaDescription = content.metaDescription;
+    // Marker-map field is `description` (matching the real front-matter key
+    // this platform's target SSGs use), not the generator's own
+    // `metaDescription` content field name — see LINE_CONVENTION_FIELDS'
+    // and PLATFORM_DEFAULT_MARKERS['meta-title']'s comments for why the
+    // names must differ here.
+    if (content.metaDescription) values.description = content.metaDescription;
     return { ok: true, values };
   }
 
