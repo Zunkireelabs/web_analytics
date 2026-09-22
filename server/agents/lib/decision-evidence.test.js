@@ -9,21 +9,32 @@ function neutralDeps(overrides = {}) {
     listOpenRecommendationsFn: async () => [],
     findRelevantMemoryFn: async () => [],
     fetchInvestigationEvidenceFn: async () => [],
+    listFindingsFn: async () => [],
     ...overrides,
   };
 }
 
 describe('gatherCorrelatedEvidence — source selection', () => {
-  test('queries all three sources for a keyword_opportunity situation', async () => {
-    const calls = { recs: 0, memory: 0, investigations: 0 };
+  test('queries all four sources for a keyword_opportunity situation', async () => {
+    const calls = { recs: 0, memory: 0, investigations: 0, siteUnderstanding: 0 };
     const gatherer = createEvidenceGatherer(neutralDeps({
       listOpenRecommendationsFn: async () => { calls.recs++; return []; },
       findRelevantMemoryFn: async () => { calls.memory++; return []; },
       fetchInvestigationEvidenceFn: async () => { calls.investigations++; return []; },
+      listFindingsFn: async () => { calls.siteUnderstanding++; return []; },
     }));
 
     await gatherer.gatherCorrelatedEvidence('keyword_opportunity', 1);
-    assert.deepEqual(calls, { recs: 1, memory: 1, investigations: 1 });
+    assert.deepEqual(calls, { recs: 1, memory: 1, investigations: 1, siteUnderstanding: 1 });
+  });
+
+  test('technical_issue does not query siteUnderstanding', async () => {
+    let calls = 0;
+    const gatherer = createEvidenceGatherer(neutralDeps({
+      listFindingsFn: async () => { calls++; return []; },
+    }));
+    await gatherer.gatherCorrelatedEvidence('technical_issue', 1);
+    assert.equal(calls, 0);
   });
 
   test('falls back to the generic source set for an unknown situation type', async () => {
@@ -73,6 +84,20 @@ describe('gatherCorrelatedEvidence — mapping and isolation', () => {
     const evidence = await gatherer.gatherCorrelatedEvidence('technical_issue', 1);
     assert.equal(evidence.length, 1);
     assert.equal(evidence[0].source, 'agent-memory');
+  });
+
+  test('maps site-understanding findings into Evidence shape, excluding unconfirmed ones', async () => {
+    const gatherer = createEvidenceGatherer(neutralDeps({
+      listFindingsFn: async () => [
+        { id: 1, category: 'templates', subject: 'comparison-page', finding: { exists: false }, confidence: 0.9, risk: 'low', status: 'confirmed' },
+        { id: 2, category: 'templates', subject: 'blog-post', finding: { exists: true }, confidence: 0.4, risk: 'medium', status: 'needs_confirmation' },
+      ],
+    }));
+    const evidence = await gatherer.gatherCorrelatedEvidence('keyword_opportunity', 1);
+    const siteEvidence = evidence.filter((e) => e.source === 'site-understanding');
+    assert.equal(siteEvidence.length, 1);
+    assert.equal(siteEvidence[0].ref, 'site_understanding:1');
+    assert.match(siteEvidence[0].summary, /comparison-page/);
   });
 });
 

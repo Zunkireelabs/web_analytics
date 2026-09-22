@@ -1,6 +1,7 @@
 import { listOpenRecommendations } from '../../store/recommendations.js';
 import { findRelevantMemory } from '../../agent-memory.js';
 import { fetchInvestigationEvidence } from './investigation-evidence.js';
+import { listFindings } from '../../store/site-understanding.js';
 
 // Phase 2 of the "one intelligence" consolidation plan (fix/system) —
 // proactive cross-domain evidence gathering for decision-engine.js. This is
@@ -31,10 +32,20 @@ export const SITUATION_TYPES = Object.freeze([
 // live competitor re-crawl) plugs into without becoming a tax on every
 // situation type that doesn't need it.
 const SOURCES_BY_SITUATION = {
-  keyword_opportunity: ['recommendations', 'memory', 'investigations'],
+  // siteUnderstanding added for keyword_opportunity/generic specifically:
+  // whether a comparison-page template, a location x service route
+  // pattern, or a given technology/CMS already exists on this site
+  // (server/store/site-understanding.js, populated at onboarding by
+  // discovery/run-discovery.js and re-confirmed incrementally — Phase 6's
+  // "understand this site once, then maintain incrementally" requirement,
+  // confirmed already built rather than missing) is directly relevant to
+  // "does a relevant existing page/template already exist" reasoning.
+  // Left out of technical_issue/traffic_decline: those situations are
+  // about what's currently WRONG, not what the site's structure IS.
+  keyword_opportunity: ['recommendations', 'memory', 'investigations', 'siteUnderstanding'],
   traffic_decline: ['investigations', 'recommendations', 'memory'],
   technical_issue: ['recommendations', 'memory'],
-  generic: ['recommendations', 'memory', 'investigations'],
+  generic: ['recommendations', 'memory', 'investigations', 'siteUnderstanding'],
 };
 
 function recommendationsToEvidence(rows) {
@@ -63,6 +74,22 @@ function memoryToEvidence(rows) {
   }));
 }
 
+// Only 'confirmed'/'auto_configured'/'validated' findings are worth citing
+// as evidence — 'needs_confirmation' is an open question a human hasn't
+// answered yet, not a fact about the site decision-engine can reason from.
+const SITE_UNDERSTANDING_USABLE_STATUSES = new Set(['confirmed', 'auto_configured', 'validated']);
+
+function siteUnderstandingToEvidence(rows) {
+  return rows
+    .filter((r) => SITE_UNDERSTANDING_USABLE_STATUSES.has(r.status))
+    .map((r) => ({
+      source: 'site-understanding',
+      summary: `${r.category}/${r.subject}: ${JSON.stringify(r.finding)}`,
+      ref: `site_understanding:${r.id}`,
+      meta: { category: r.category, subject: r.subject, confidence: Number(r.confidence), risk: r.risk, status: r.status },
+    }));
+}
+
 // `deps` is injectable (same createX(deps) shape as recommendation-gates.js
 // and decision-engine.js) so this is unit-testable without a real DB or a
 // real Data Analyst call.
@@ -70,6 +97,7 @@ export function createEvidenceGatherer({
   listOpenRecommendationsFn = listOpenRecommendations,
   findRelevantMemoryFn = findRelevantMemory,
   fetchInvestigationEvidenceFn = fetchInvestigationEvidence,
+  listFindingsFn = listFindings,
 } = {}) {
   async function gatherCorrelatedEvidence(situationType, siteId, { symptoms = null, problemSignature = null } = {}) {
     const sources = SOURCES_BY_SITUATION[situationType] || SOURCES_BY_SITUATION.generic;
@@ -106,6 +134,15 @@ export function createEvidenceGatherer({
         evidence.push(...rows);
       } catch (err) {
         console.warn(`[decision-evidence] investigations source failed for site ${siteId}: ${err.message}`);
+      }
+    }
+
+    if (sources.includes('siteUnderstanding')) {
+      try {
+        const rows = await listFindingsFn(siteId);
+        evidence.push(...siteUnderstandingToEvidence(rows));
+      } catch (err) {
+        console.warn(`[decision-evidence] site-understanding source failed for site ${siteId}: ${err.message}`);
       }
     }
 
