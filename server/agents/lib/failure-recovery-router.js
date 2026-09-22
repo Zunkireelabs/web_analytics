@@ -43,8 +43,8 @@ export function createFailureRecoveryRouter({
       return { route: 'capability-gap', classification, capabilityGap: matchingGap, decision: null };
     }
 
-    const situation = `Generator "${generatorId}" failed on site ${siteId} (${classification.errorCode}: ` +
-      `${classification.message}) and is neither auto-retryable nor part of a detected same-site failure cluster.`;
+    const situation = `Generator "${generatorId}" failed on site ${siteId} (${classification.errorCode}) ` +
+      'and is neither auto-retryable nor part of a detected same-site failure cluster.';
     const decision = await decisionEngineFn.decide(siteId, situation, [
       { source: 'failure-classification', summary: classification.message, ref: `failure:${classification.errorCode}` },
     ]);
