@@ -351,6 +351,35 @@ export async function updateSiteAutoRemediation({ siteId, enabled, dailyLimit })
   return rows[0];
 }
 
+// Time-boxed pause (migration 167): disables the site same as
+// updateSiteAutoRemediation({enabled: false}) above, but also records when
+// it should come back on by itself, via resumeDueAutoRemediationPauses
+// below. `resumeAt` is a Date/ISO timestamp; pass null for an indefinite
+// pause with no auto-resume (equivalent to the plain disable).
+export async function pauseSiteAutoRemediation(siteId, resumeAt) {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = false, auto_remediation_resume_at = $1 WHERE id = $2 RETURNING *`,
+    [resumeAt, siteId]
+  );
+  if (!rows.length) throw new Error(`No site found with id ${siteId}.`);
+  return rows[0];
+}
+
+// Re-enables every site whose time-boxed pause has come due. Called once at
+// the top of each auto-remediation run (job.js) — that pass is itself the
+// server's own reliable, always-on trigger (see runAutoRemediationCatchupFor
+// AllSites's comment on cron alone not being trustworthy on a machine that
+// sleeps), so this needs no scheduling of its own to be dependable. Clears
+// resume_at back to NULL on resume so a stale timestamp can never re-fire.
+export async function resumeDueAutoRemediationPauses() {
+  const { rows } = await query(
+    `UPDATE sites SET auto_remediation_enabled = true, auto_remediation_resume_at = NULL
+     WHERE auto_remediation_enabled = false AND auto_remediation_resume_at IS NOT NULL AND auto_remediation_resume_at <= now()
+     RETURNING id, name`
+  );
+  return rows;
+}
+
 // Records staff sign-off on a site's design profile (migration 132) — pinned
 // to `fingerprint` (design-integrity-gate's designReviewFingerprint), so a
 // later re-derivation that actually changes what will ship can be told apart

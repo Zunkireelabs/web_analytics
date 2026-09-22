@@ -10,6 +10,7 @@ import { checkPlaceholders } from './placeholder-guard.js';
 import { findCompetitorLinks } from './outbound-link-guard.js';
 import { findCompetitorProminenceIssues } from './competitor-prominence.js';
 import { findDesignIntegrityIssues } from './design-integrity-guard.js';
+import { findBlogImageIssues } from './blog-image-guard.js';
 import { findBareMarkupIssues, findBareNewPageMarkupIssues } from './rendered-markup-guard.js';
 import { checkStructureConformance } from './structure-conformance.js';
 import { DESIGN_CONTEXT_GENERATOR_IDS, NO_MARKUP_GENERATOR_IDS } from '../../implementers/lib/design-drift.js';
@@ -151,6 +152,12 @@ export async function runQualityGate(content, generatorId, siteId, { site = null
       ? (await findDesignIntegrityIssues(generatorId, siteId,
         enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity })).issues
       : []),
+    // A blog post generated with no featured image at all — see
+    // blog-image-guard.js. Same enforceDesignIntegrity split as above: an
+    // unattended/autonomous generation run should not ship one silently, a
+    // human waiting on the Generate button should still see the draft.
+    ...findBlogImageIssues(generatorId, content,
+      enforceDesignIntegrity === undefined ? {} : { enforce: enforceDesignIntegrity }).issues,
     // Did the generator actually FOLLOW the structural guidance it was
     // given? Everything above checks the content in isolation; this is the
     // only check that compares it against this site's own canonical page

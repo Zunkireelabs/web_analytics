@@ -230,46 +230,64 @@ async function needsFamilyWriteMarker(site, draft, files, target) {
 // Deferred-push registry (Action Center same-day batching) — see
 // beginBatchPush/endBatchPush below. Keyed by branch name (already
 // per-site-per-day unique, see batchBranchName). While a branch has an
-// entry here, pushDraftBranch chains its commit onto `headSha` instead of
-// moving the branch ref immediately; endBatchPush moves it once, for
-// everything queued since beginBatchPush.
-const activeBatches = new Map(); // branchName -> { headSha: string|null, count: number }
+// entry here, pushDraftBranch accumulates its files/message into this state
+// instead of creating a commit or moving the branch ref at all; endBatchPush
+// builds ONE commit from everything queued since beginBatchPush and moves
+// the ref once. `files` is keyed by path so a later draft's write to a path
+// an earlier draft in the same run already touched simply replaces it —
+// safe because that later draft computed its content by reading through the
+// overlay below, which already reflects the earlier draft's write.
+const activeBatches = new Map(); // branchName -> { baseSha: string|null, files: Map<path, {path, content}>, entries: string[] }
 
 // Call once before looping through a batch run (routes/action-center.js's
 // executeSafeFixes, auto-remediation.js's per-run loop) so every
-// pushDraftBranch call for this branch during the run creates its commit
-// WITHOUT moving the branch ref — GitHub (and therefore Vercel's per-push
-// preview build) only sees the branch move once, at endBatchPush, instead
-// of once per successfully shipped recommendation. A run that ships up to
-// 60 items used to trigger up to 60 separate preview builds on the SAME
-// PR; this collapses that to one. Also opens the matching file-read overlay
-// (github/client.js) so a later item in the same run sees an earlier item's
-// write immediately, instead of the stale pre-batch content the real
-// (not-yet-moved) branch ref would otherwise return.
+// pushDraftBranch call for this branch during the run only stages its
+// files/message in memory — no commit, no branch move — until endBatchPush
+// builds and pushes the single commit for the whole run. GitHub (and
+// therefore Vercel's per-push preview build) only sees the branch move once,
+// at endBatchPush, instead of once per successfully shipped recommendation,
+// and the batch's whole day of work lands as ONE commit instead of one per
+// item. Also opens the matching file-read overlay (github/client.js) so a
+// later item in the same run sees an earlier item's write immediately,
+// instead of the stale pre-batch content the real (not-yet-moved) branch ref
+// would otherwise return.
 //
 // Idempotent: a re-entrant call for a branch already batching is a no-op,
-// so a nested/accidental double-call can't clobber an in-progress chain.
+// so a nested/accidental double-call can't clobber an in-progress batch.
 export function beginBatchPush(site, branchName) {
   if (!activeBatches.has(branchName)) {
-    activeBatches.set(branchName, { headSha: null, count: 0 });
+    activeBatches.set(branchName, { baseSha: null, files: new Map(), entries: [] });
     beginFileOverlay(site, branchName);
   }
 }
 
-// Pushes every commit accumulated since beginBatchPush as ONE ref update —
-// the one real "push" for the whole run — and always clears the batch
-// state (ref-chain AND file overlay) afterward, even on failure, so a
-// failed run doesn't leave pushDraftBranch silently deferring forever.
-// Returns { ok: true, pushed: 0 } when there was nothing to push (e.g.
-// every item in the run failed before it could commit).
+// batch-pr-recovery.js's commitSubjectMatchesDraft attributes a landed draft
+// by grepping "draft #<id>" against the commit's SUBJECT line alone
+// (listCommitSubjectsAheadOfBase splits on the first '\n') — so every
+// draft's reference has to survive as a substring of ONE single-line
+// subject, not a multi-line body. Deliberately no newline in the message
+// this returns.
+function buildBatchCommitMessage(entries) {
+  return `Action Center: batch — ${entries.join('; ')}`;
+}
+
+// Builds and pushes the ONE commit accumulated since beginBatchPush as ONE
+// ref update — the one real "push" for the whole run — and always clears
+// the batch state (staged files/entries AND file overlay) afterward, even
+// on failure, so a failed run doesn't leave pushDraftBranch silently
+// deferring forever. Returns { ok: true, pushed: 0 } when there was nothing
+// to push (e.g. every item in the run failed before it could stage a file).
 export async function endBatchPush(site, branchName) {
   const state = activeBatches.get(branchName);
   activeBatches.delete(branchName);
   endFileOverlay(site, branchName);
-  if (!state || state.headSha == null) return { ok: true, pushed: 0 };
+  if (!state || state.baseSha == null || state.files.size === 0) return { ok: true, pushed: 0 };
   try {
-    await updateRef(site, branchName, state.headSha);
-    return { ok: true, pushed: state.count };
+    const files = Array.from(state.files.values());
+    const message = buildBatchCommitMessage(state.entries);
+    const newSha = await createCommitObject(site, state.baseSha, files, message);
+    await updateRef(site, branchName, newSha);
+    return { ok: true, pushed: state.entries.length };
   } catch (err) {
     return persistedFailure('github-ops.endBatchPush', err, 'This batch of changes could not be pushed to GitHub right now — our team has been notified.');
   }
@@ -326,13 +344,13 @@ export async function pushDraftBranch(site, draft, files, target) {
 
     const batch = activeBatches.get(branchName);
     if (batch) {
-      // Deferred mode: chain this commit off the last one queued so far
-      // this run (or the branch's real current tip/just-created sha, for
-      // the first commit of the run) — but don't move the ref. endBatchPush
-      // does that once, for the whole run.
-      if (batch.headSha == null) batch.headSha = freshBranchSha ?? await getBranchSha(site, branchName);
-      batch.headSha = await createCommitObject(site, batch.headSha, files, message);
-      batch.count += 1;
+      // Deferred mode: stage this draft's files and commit-message line into
+      // the run's in-memory batch instead of creating a commit — no commit
+      // object, no ref move. endBatchPush builds the single commit for the
+      // whole run from everything staged here.
+      if (batch.baseSha == null) batch.baseSha = freshBranchSha ?? await getBranchSha(site, branchName);
+      for (const f of files) batch.files.set(f.path, f);
+      batch.entries.push(`apply ${draft.action_type} draft #${draft.id}${marker}`);
       recordFileOverlayWrites(site, branchName, files);
     } else {
       await commitFilesAtomic(site, branchName, files, message);

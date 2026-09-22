@@ -279,10 +279,23 @@ export async function generate({ siteId, params }) {
   // Best-effort, same reasoning as the homepage-grounding fetch above: a
   // failed/disabled/no-result image search must never block an otherwise
   // complete blog draft — see lib/pexels-client.js's searchImage. Title first
-  // (most specific), then this post's own topic, then the TENANT'S industry,
-  // tried in order until one clears the relevance bar; excludePhotoIds keeps
-  // this post off every photo another post on the site already uses,
-  // including photos claimed by other drafts in the same batch.
+  // (most specific), then this post's own topic, then each SECTION's own
+  // heading, then the TENANT'S industry last (broadest), tried in order
+  // until one clears the relevance bar; excludePhotoIds keeps this post off
+  // every photo another post on the site already uses, including photos
+  // claimed by other drafts in the same batch.
+  //
+  // Section headings were added 2026-09-22 after a real miss: on a mature
+  // site (94 already-used photos), a generic post ("Exploring AI Innovations
+  // Across Diverse Industries") found nothing — title/topic/industry queries
+  // for "AI" are dominated on Pexels by robot-cliché photography, which
+  // scoreCandidate's GENERIC_STOCK_TERMS penalty correctly excludes (that
+  // penalty is the deliberate fix for an earlier toy-robot-photo bug, not
+  // something to loosen). The post's own sections are narrower and more
+  // concrete ("AI Development in Finance", "Retail Revolution: AI's Impact
+  // on Customer Experience") and reach different, non-generic corners of
+  // Pexels' catalog — confirmed live: this exact post found a real match on
+  // its own section headings after title/topic/industry all came back empty.
   //
   // The last-resort query is the site's own industry rather than
   // buildImageQueries' hardcoded 'artificial intelligence technology'
@@ -290,8 +303,9 @@ export async function generate({ siteId, params }) {
   // every non-AI tenant's weak-title posts converge on AI stock photos.
   const excludePhotoIds = imagesConfigured() ? await usedPhotoIds(site) : undefined;
   const { fallback } = await imageQueryContextFor(site);
+  const sectionHeadings = sections.map((s) => s.heading).filter(Boolean);
   const featuredImage = await searchImage(
-    buildImageQueries({ title: parsed.title, topic, fallback }),
+    [...buildImageQueries({ title: parsed.title, topic }), ...sectionHeadings, fallback].filter(Boolean),
     { excludePhotoIds, perPage: IMAGE_CANDIDATE_POOL },
   );
 

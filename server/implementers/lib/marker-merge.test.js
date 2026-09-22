@@ -360,6 +360,38 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /<p>Body text<\/p>/);
   });
 
+  // Real defect, chayceproperties.com (2026-09-22): a one-sentence
+  // author-byline section shares the same wrapper template as a full
+  // comparison-content section, so it renders with identical full
+  // section-level padding — a whole page-section's worth of whitespace
+  // around one line of text. The wrapper's own class is preserved (never
+  // replaced) and this modifier is only ever meaningful to a site that
+  // defines it in its own stylesheet — inert everywhere else.
+  test('author-byline gets a compact-modifier class appended to the wrapper, alongside the site\'s own classes', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container seoai-content-section">\n{{ROWS}}\n</div>', row: '  <section><h2>{{HEADING}}</h2><p>{{BODY}}</p></section>' },
+    };
+    const result = buildMergeValues('expand-content', {
+      focus: 'author-byline',
+      sections: [{ heading: 'About the Author', body: 'By the Team.' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /class="container seoai-content-section seoai-content-section--compact"/);
+  });
+
+  test('a non-byline focus (e.g. comparison-content) keeps the plain wrapper, no compact modifier', () => {
+    const componentTemplates = {
+      expandContent: { wrapper: '<div class="container seoai-content-section">\n{{ROWS}}\n</div>', row: '  <section><h2>{{HEADING}}</h2><p>{{BODY}}</p></section>' },
+    };
+    const result = buildMergeValues('expand-content', {
+      focus: 'comparison-content',
+      sections: [{ heading: 'Comparison', body: 'Real content.' }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /class="container seoai-content-section"/);
+    assert.doesNotMatch(result.values.expandedContent, /seoai-content-section--compact/);
+  });
+
   // Regression, measured live on site 1 (2026-09-18): expand-content's
   // marker is shared across every FOCUS on a page (comparison-content,
   // author-byline, freshness-date, external-citations, ... — each its own

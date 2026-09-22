@@ -6,6 +6,7 @@ import { getSiteById } from '../store/read.js';
 import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
 import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
+import { checkExpandContentStructuralFit } from './lib/expand-content-structural-fit.js';
 
 // Real citation search is opt-in, separate from TAVILY_API_KEY simply being
 // set — citation search would silently start spending Tavily's quota the
@@ -205,6 +206,22 @@ export async function generate({ siteId, params }) {
         'live sites. Use the "schema" generator instead (datePublished/dateModified JSON-LD, invisible structured data).'),
       { status: 400, userFacing: true },
     );
+  }
+
+  // Structural pre-check BEFORE any LLM call — see expand-content-structural
+  // -fit.js's header for the real incident this closes (116 abandoned drafts
+  // on one site alone, each paying for a generation that could never be
+  // inserted). Placed after the author-byline/freshness-date branches
+  // above, which either need no repo access at all (freshness-date) or
+  // already do their own site fetch (author-byline) — this only runs on the
+  // path that actually needs to write free-form prose into the page. A null
+  // result means the check itself couldn't run (no repo, no file mapping,
+  // fetch failed) — proceeds unchanged, same as findRealFaqDataSource's
+  // contract, so this never blocks a site this check simply cannot reach.
+  const siteForStructuralCheck = await getSiteById(siteId);
+  const structuralFit = await checkExpandContentStructuralFit(siteForStructuralCheck, page);
+  if (structuralFit && !structuralFit.ok) {
+    throw Object.assign(new Error(structuralFit.detail), { status: 400, userFacing: true });
   }
 
   let system = focus && FOCUS_SYSTEMS[focus] ? FOCUS_SYSTEMS[focus] : SYSTEM_GENERAL;

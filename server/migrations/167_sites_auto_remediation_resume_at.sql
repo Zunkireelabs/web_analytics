@@ -1,0 +1,12 @@
+-- Time-boxed pause for auto-remediation (migration 089's
+-- auto_remediation_enabled), so a "stop shipping for now, resume
+-- automatically on/after a given time" request doesn't need a human to
+-- remember to flip the switch back. NULL means no pause is pending — either
+-- the site was never paused this way, or a previous pause already resumed.
+--
+-- Only meaningful while auto_remediation_enabled = false; a currently-
+-- enabled site never reads this column. Cleared back to NULL the moment the
+-- pause resumes (job.js's resumeDueAutoRemediationPauses), so it can never
+-- linger and silently re-fire a stale resume on a site someone re-paused by
+-- hand in between.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS auto_remediation_resume_at TIMESTAMPTZ;

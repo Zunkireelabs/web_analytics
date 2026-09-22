@@ -502,7 +502,21 @@ export function analyzePage(html, pageUrl) {
   const wordCount = bodyText ? bodyText.split(' ').filter(Boolean).length : 0;
 
   const images = $('img');
-  const imagesWithoutAlt = images.filter((_, el) => !($(el).attr('alt') || '').trim()).length;
+  // Real bug, confirmed on Zunkiree Labs (2026-09-22, drafts 1608/2387/2422/
+  // 2950, all for the same decorative /assets/data-systems-hero-*.webp image
+  // reused as background art across multiple service pages): an image with
+  // `alt=""` AND `aria-hidden="true"` is not missing alt text — that pairing
+  // IS the correct, complete accessibility treatment for a purely decorative
+  // image (assistive tech already skips it). Counting/drafting for it was
+  // never right: alt-text.js kept drafting real captions for this
+  // permanently-decorative image, and implementers/lib/alt-text-inject.js's
+  // safety check (correctly) kept refusing to write a caption for an image
+  // that isn't this page's own hero — the SAME false finding every time,
+  // never fixed at its actual source until now. Was previously misdiagnosed
+  // as an upstream "finder/generator pairing bug" (see that file's own
+  // now-stale 2026-09-11 comment on draft #1608) without ever finding this.
+  const isDecorative = (el) => ($(el).attr('aria-hidden') || '').trim().toLowerCase() === 'true';
+  const imagesWithoutAlt = images.filter((_, el) => !isDecorative(el) && !($(el).attr('alt') || '').trim()).length;
   // Real grounding for alt-text.js — the filename alone is often enough to
   // draft an honest, generic caption ("Blue running shoes" from
   // "blue-running-shoes.jpg"), but nearby real page text (a figcaption, or
@@ -513,7 +527,7 @@ export function analyzePage(html, pageUrl) {
   // draft; alt-text.js can be re-run for the rest.
   const MAX_IMAGES_MISSING_ALT = 15;
   const imagesMissingAlt = images
-    .filter((_, el) => !($(el).attr('alt') || '').trim())
+    .filter((_, el) => !isDecorative(el) && !($(el).attr('alt') || '').trim())
     .slice(0, MAX_IMAGES_MISSING_ALT)
     .map((_, el) => {
       const $el = $(el);

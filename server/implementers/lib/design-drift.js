@@ -861,12 +861,18 @@ export function designReviewState(site) {
 // demonstrably used for a different role) fails; a profile with no observed
 // mismatch, or no usable profile at all, passes.
 //
-// Every call is logged to design_integrity_verdicts regardless of mode, so
-// the false-positive rate can be checked against real profiles before
-// DESIGN_INTEGRITY_ENFORCE is turned on. In log-only mode (the default) a
-// failing verdict is still recorded but never blocks — see that env var's
-// own comment for why enforcement is a separate, later flip rather than
-// bundled into this same change.
+// Every call is logged to design_integrity_verdicts regardless of mode.
+// Enforcement is ON by default — matching generators/lib/design-integrity-
+// guard.js's designIntegrityEnforced(), the sibling gate on the manual-
+// generate path, which has run this way safely since it was wired in.
+// This is the ship-time twin of that gate (frontend.js/backend.js's apply,
+// the unattended path a live customer site actually depends on to catch a
+// real mismatch), so it must not default to the weaker mode: a verdict
+// proven trustworthy on the manual path is exactly as trustworthy here,
+// the same verifyProfileRoles call against the same stored profile.
+// DESIGN_INTEGRITY_ENFORCE=false remains as the escape hatch — set it if a
+// thin design-profile capture ever produces a false positive against
+// genuinely fine content; the issue stays recorded and visible either way.
 //
 // Deliberately scoped to ONE recommendation's apply call, not the whole
 // site: unlike the human sign-off it replaces, a failure here quarantines
@@ -879,7 +885,7 @@ export async function checkDesignIntegrityGate(site, { actionType = null, findin
   if (!isProfileUsable(profile)) return { ok: true, reason: 'no-profile' };
 
   const verdict = verifyProfileRoles(profile);
-  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE !== 'false';
 
   await recordDesignIntegrityVerdict({ siteId: site.id, findingId, actionType, verdict, enforced });
 
@@ -1384,12 +1390,28 @@ export function extractPageTypographyEvidence(html, css = null) {
 //    tag-SPECIFIC: `.gs-hero h1` will never match an emitted `<h2>` the way
 //    a literal class matches on any tag), and emitting no class attribute
 //    at all on a slot this evidence confirmed genuinely has none of its own.
-//    Only 'expand-content' is supported so far — faq's/qa-content's row
-//    shapes (an Alpine accordion trigger/panel, a native <details>/
-//    <summary>) don't reduce to "one bare tag inside one container" the way
-//    expand-content's plain heading+paragraph row does, and forcing them
-//    through this same shape would be a guess about structure this
-//    evidence never actually observed, not a derivation from it.
+//    'expand-content' and 'qa-content' are supported — faq's row shape (an
+//    Alpine accordion trigger/panel) doesn't reduce to "one bare tag inside
+//    one container" the way expand-content's plain heading+paragraph row
+//    does, and forcing it through this same shape would be a guess about
+//    structure this evidence never actually observed, not a derivation from
+//    it. qa-content's native shape (a <details>/<summary> disclosure, see
+//    marker-merge.js's DEFAULT_QA_TEMPLATE) DOES reduce to exactly this —
+//    one heading-ish tag (the summary's question) and one body tag (the
+//    answer) — so it reuses the same bare-tag evidence, just wrapped in its
+//    own real markup shape. Added 2026-09-22: real incident, Chayce
+//    Properties (site 8864) — every SITE-tier qaContent template captured
+//    from the homepage fails checkTemplateFreshness on every other page
+//    (Chayce's CSS classes are page-scoped, see the classOf/PAGE-SCOPED
+//    comments elsewhere in this file), forcing recapture on every qa-content
+//    draft; recapture found real, confirmed bare-tag evidence
+//    (`.container h1`/`.container p` selectors) but this function refused it
+//    solely because actionType was 'qa-content', not because the evidence
+//    itself was any less real than what expand-content already accepts —
+//    154 abandoned drafts, ~40 of them this exact cause, confirmed still
+//    firing daily before this fix.
+const BARE_TAG_ACTION_TYPES = new Set(['expand-content', 'qa-content']);
+
 export function buildPageEvidenceComponentTemplate(actionType, evidence) {
   if (!isProjectable(actionType) || !evidence) return null;
 
@@ -1408,7 +1430,7 @@ export function buildPageEvidenceComponentTemplate(actionType, evidence) {
     return projectComponentTemplate(pseudoProfile, actionType);
   }
 
-  if (actionType !== 'expand-content') return null;
+  if (!BARE_TAG_ACTION_TYPES.has(actionType)) return null;
   const headingUsable = evidence.headingClass || (evidence.headingTag && evidence.headingContainerClass);
   const bodyUsable = evidence.bodyClass || (evidence.bodyTag && evidence.bodyContainerClass);
   if (!headingUsable || !bodyUsable) return null;
@@ -1430,6 +1452,17 @@ export function buildPageEvidenceComponentTemplate(actionType, evidence) {
   const headingAttr = evidence.headingClass ? ` class="${evidence.headingClass}"` : '';
   const bodyTag = evidence.bodyClass ? 'div' : evidence.bodyTag;
   const bodyAttr = evidence.bodyClass ? ` class="${evidence.bodyClass}"` : '';
+
+  // qa-content's real, native shape is a <details>/<summary> disclosure (see
+  // DEFAULT_QA_TEMPLATE, marker-merge.js) — not expand-content's flat
+  // <section>. The heading tag becomes the question label inside <summary>,
+  // the body tag becomes the answer panel, same real evidence either way.
+  if (actionType === 'qa-content') {
+    return {
+      wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
+      row: `  <details>\n    <summary>\n      <${headingTag}${headingAttr}>{{QUESTION}}</${headingTag}>\n    </summary>\n    <${bodyTag}${bodyAttr}>{{ANSWER}}</${bodyTag}>\n  </details>`,
+    };
+  }
 
   return {
     wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
