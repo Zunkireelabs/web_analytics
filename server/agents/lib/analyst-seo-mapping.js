@@ -16,7 +16,16 @@ import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
 import { PACED_GENERATORS } from './ship-pacing.js';
-import { gapActionResolver } from './gap-action-resolver.js';
+// gap-action-resolver.js is intentionally NOT a static import here — it
+// pulls in decision-engine.js's/decision-evidence.js's full dependency
+// chain (llm.js, store/recommendations.js's listOpenRecommendations,
+// agent-memory.js, the Data Analyst client), which several existing tests
+// for THIS file mock only a narrow subset of via mock.module. A static
+// import made those tests fail at module-load time even though
+// DECISION_ENGINE_GAP_ANNOTATIONS defaults off and nothing in this file
+// would have actually called it. Loaded lazily in decisionEngineAnnotation
+// below instead, so "the flag is off" means zero import cost too, not just
+// zero call cost.
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -938,6 +947,7 @@ const DECISION_ENGINE_GAP_ANNOTATIONS = process.env.DECISION_ENGINE_GAP_ANNOTATI
 async function decisionEngineAnnotation(gap, siteId) {
   if (!DECISION_ENGINE_GAP_ANNOTATIONS) return null;
   try {
+    const { gapActionResolver } = await import('./gap-action-resolver.js');
     const { decision } = await gapActionResolver.resolveGapAction(gap, siteId);
     return decision;
   } catch (err) {
