@@ -1057,7 +1057,7 @@ describe('buildPageEvidenceComponentTemplate', () => {
       assert.match(template.wrapper, /class="gs-hero"/, 'the confirmed container class still grounds the wrapper');
     });
 
-    test('only expand-content is supported for the bare-tag shape — faq gets a clean refusal, not a guess', () => {
+    test('faq is not supported for the bare-tag shape — clean refusal, not a guess', () => {
       const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'gs-hero', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
       assert.equal(buildPageEvidenceComponentTemplate('faq', evidence), null);
     });
@@ -1065,6 +1065,33 @@ describe('buildPageEvidenceComponentTemplate', () => {
     test('a slot with a tag but no confirmed container (should never happen from real extraction, but must not fabricate one) refuses', () => {
       const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: null, bodyClass: null, bodyTag: 'p', bodyContainerClass: 'gs-hero' };
       assert.equal(buildPageEvidenceComponentTemplate('expand-content', evidence), null);
+    });
+
+    // Real incident, Chayce Properties (site 8864), confirmed live 2026-09-22:
+    // every qa-content draft against silver-comfort/bronze-essentials/
+    // discovery/news/platinum-bespoke/about-chayce abandoned with
+    // "no-page-evidence" because the site's SITE-tier qaContent template
+    // (captured from the homepage's own classes) never verifies fresh
+    // against any other page — Chayce's CSS is page-scoped — forcing
+    // recapture on every draft, and recapture's real, confirmed evidence for
+    // these pages' bare <h1>/<p style="..."> tags was a bare-tag-via-
+    // container match, previously refused for qa-content specifically.
+    test('qa-content gets its own real <details>/<summary> shape from bare-tag evidence, not a refusal', () => {
+      const evidence = { headingClass: null, headingTag: 'h1', headingContainerClass: 'container', bodyClass: null, bodyTag: 'p', bodyContainerClass: 'container', containerClass: 'container' };
+      const template = buildPageEvidenceComponentTemplate('qa-content', evidence);
+      assert.match(template.wrapper, /class="container"/);
+      assert.match(template.row, /<details>/);
+      assert.match(template.row, /<summary>\s*<h1>\{\{QUESTION\}\}<\/h1>\s*<\/summary>/);
+      assert.match(template.row, /<p>\{\{ANSWER\}\}<\/p>/);
+      const check = validatePlaceholders('qa-content', template);
+      assert.equal(check.ok, true, check.error);
+    });
+
+    test('qa-content bare-tag shape also honors a classed slot mixed with a tag-based one', () => {
+      const evidence = { headingClass: null, headingTag: 'h2', headingContainerClass: 'htxt', bodyClass: 'lede', bodyTag: null, bodyContainerClass: null, containerClass: null };
+      const template = buildPageEvidenceComponentTemplate('qa-content', evidence);
+      assert.match(template.row, /<summary>\s*<h2>\{\{QUESTION\}\}<\/h2>\s*<\/summary>/);
+      assert.match(template.row, /<div class="lede">\{\{ANSWER\}\}<\/div>/);
     });
   });
 });

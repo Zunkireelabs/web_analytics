@@ -1384,12 +1384,28 @@ export function extractPageTypographyEvidence(html, css = null) {
 //    tag-SPECIFIC: `.gs-hero h1` will never match an emitted `<h2>` the way
 //    a literal class matches on any tag), and emitting no class attribute
 //    at all on a slot this evidence confirmed genuinely has none of its own.
-//    Only 'expand-content' is supported so far — faq's/qa-content's row
-//    shapes (an Alpine accordion trigger/panel, a native <details>/
-//    <summary>) don't reduce to "one bare tag inside one container" the way
-//    expand-content's plain heading+paragraph row does, and forcing them
-//    through this same shape would be a guess about structure this
-//    evidence never actually observed, not a derivation from it.
+//    'expand-content' and 'qa-content' are supported — faq's row shape (an
+//    Alpine accordion trigger/panel) doesn't reduce to "one bare tag inside
+//    one container" the way expand-content's plain heading+paragraph row
+//    does, and forcing it through this same shape would be a guess about
+//    structure this evidence never actually observed, not a derivation from
+//    it. qa-content's native shape (a <details>/<summary> disclosure, see
+//    marker-merge.js's DEFAULT_QA_TEMPLATE) DOES reduce to exactly this —
+//    one heading-ish tag (the summary's question) and one body tag (the
+//    answer) — so it reuses the same bare-tag evidence, just wrapped in its
+//    own real markup shape. Added 2026-09-22: real incident, Chayce
+//    Properties (site 8864) — every SITE-tier qaContent template captured
+//    from the homepage fails checkTemplateFreshness on every other page
+//    (Chayce's CSS classes are page-scoped, see the classOf/PAGE-SCOPED
+//    comments elsewhere in this file), forcing recapture on every qa-content
+//    draft; recapture found real, confirmed bare-tag evidence
+//    (`.container h1`/`.container p` selectors) but this function refused it
+//    solely because actionType was 'qa-content', not because the evidence
+//    itself was any less real than what expand-content already accepts —
+//    154 abandoned drafts, ~40 of them this exact cause, confirmed still
+//    firing daily before this fix.
+const BARE_TAG_ACTION_TYPES = new Set(['expand-content', 'qa-content']);
+
 export function buildPageEvidenceComponentTemplate(actionType, evidence) {
   if (!isProjectable(actionType) || !evidence) return null;
 
@@ -1408,7 +1424,7 @@ export function buildPageEvidenceComponentTemplate(actionType, evidence) {
     return projectComponentTemplate(pseudoProfile, actionType);
   }
 
-  if (actionType !== 'expand-content') return null;
+  if (!BARE_TAG_ACTION_TYPES.has(actionType)) return null;
   const headingUsable = evidence.headingClass || (evidence.headingTag && evidence.headingContainerClass);
   const bodyUsable = evidence.bodyClass || (evidence.bodyTag && evidence.bodyContainerClass);
   if (!headingUsable || !bodyUsable) return null;
@@ -1430,6 +1446,17 @@ export function buildPageEvidenceComponentTemplate(actionType, evidence) {
   const headingAttr = evidence.headingClass ? ` class="${evidence.headingClass}"` : '';
   const bodyTag = evidence.bodyClass ? 'div' : evidence.bodyTag;
   const bodyAttr = evidence.bodyClass ? ` class="${evidence.bodyClass}"` : '';
+
+  // qa-content's real, native shape is a <details>/<summary> disclosure (see
+  // DEFAULT_QA_TEMPLATE, marker-merge.js) — not expand-content's flat
+  // <section>. The heading tag becomes the question label inside <summary>,
+  // the body tag becomes the answer panel, same real evidence either way.
+  if (actionType === 'qa-content') {
+    return {
+      wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
+      row: `  <details>\n    <summary>\n      <${headingTag}${headingAttr}>{{QUESTION}}</${headingTag}>\n    </summary>\n    <${bodyTag}${bodyAttr}>{{ANSWER}}</${bodyTag}>\n  </details>`,
+    };
+  }
 
   return {
     wrapper: `<div class="${wrapperClass}">\n{{ROWS}}\n</div>`,
