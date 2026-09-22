@@ -1,4 +1,4 @@
-import { getOrCreateSite, query } from './db.js';
+import { getOrCreateSite, query, resumeDueAutoRemediationPauses } from './db.js';
 import { safeMessage } from './lib/errors.js';
 import { callDataAnalystAgent } from './lib/data-analyst-client.js';
 import { fetchGscForDate } from './ingest/gsc.js';
@@ -1336,6 +1336,7 @@ async function alertIfShipStalled(site, shipped) {
 }
 
 export async function runAutoRemediationForAllSites() {
+  await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
   const sites = (await listSites()).filter(isShippable);
   const results = [];
   let globalRemaining = await globalRemainingSeed();
@@ -1394,6 +1395,7 @@ export async function runAutoRemediationForAllSites() {
 // recommendation detected later in the day still ships the same day, onto the
 // same batch branch/PR.
 export async function runAutoRemediationCatchupForAllSites(tz) {
+  await resumeDueAutoRemediationPauses().catch((err) => console.error('[job] resumeDueAutoRemediationPauses failed:', err.message));
   const sites = (await listSites()).filter(isShippable);
   let globalRemaining = await globalRemainingSeed();
   for (const site of sites) {
