@@ -861,12 +861,18 @@ export function designReviewState(site) {
 // demonstrably used for a different role) fails; a profile with no observed
 // mismatch, or no usable profile at all, passes.
 //
-// Every call is logged to design_integrity_verdicts regardless of mode, so
-// the false-positive rate can be checked against real profiles before
-// DESIGN_INTEGRITY_ENFORCE is turned on. In log-only mode (the default) a
-// failing verdict is still recorded but never blocks — see that env var's
-// own comment for why enforcement is a separate, later flip rather than
-// bundled into this same change.
+// Every call is logged to design_integrity_verdicts regardless of mode.
+// Enforcement is ON by default — matching generators/lib/design-integrity-
+// guard.js's designIntegrityEnforced(), the sibling gate on the manual-
+// generate path, which has run this way safely since it was wired in.
+// This is the ship-time twin of that gate (frontend.js/backend.js's apply,
+// the unattended path a live customer site actually depends on to catch a
+// real mismatch), so it must not default to the weaker mode: a verdict
+// proven trustworthy on the manual path is exactly as trustworthy here,
+// the same verifyProfileRoles call against the same stored profile.
+// DESIGN_INTEGRITY_ENFORCE=false remains as the escape hatch — set it if a
+// thin design-profile capture ever produces a false positive against
+// genuinely fine content; the issue stays recorded and visible either way.
 //
 // Deliberately scoped to ONE recommendation's apply call, not the whole
 // site: unlike the human sign-off it replaces, a failure here quarantines
@@ -879,7 +885,7 @@ export async function checkDesignIntegrityGate(site, { actionType = null, findin
   if (!isProfileUsable(profile)) return { ok: true, reason: 'no-profile' };
 
   const verdict = verifyProfileRoles(profile);
-  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE === 'true';
+  const enforced = process.env.DESIGN_INTEGRITY_ENFORCE !== 'false';
 
   await recordDesignIntegrityVerdict({ siteId: site.id, findingId, actionType, verdict, enforced });
 

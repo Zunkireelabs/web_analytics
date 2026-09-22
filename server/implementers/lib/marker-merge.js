@@ -1169,6 +1169,34 @@ function blockSafeRow(rowTemplate, body, slot) {
   return rowTemplate.replace(re, (m, attrs, inner) => `<div${attrs || ''}>${inner}</div>`);
 }
 
+// A focus whose content is a single short line (author-byline: "By the X
+// Team") gets the exact same full section-level padding as a multi-row
+// comparison table when both are wrapped with the plain expand-content
+// template — confirmed live on chayceproperties.com, where the wrapper's
+// own .seoai-content-section rule (56px vertical padding, added so an
+// injected section reads as a real page section rather than flat text —
+// see that site's src/css/seoai-content.css) gives a one-sentence byline the
+// same footprint as a whole comparison block. Appending this modifier class
+// alongside — never replacing — the wrapper's own classes lets a site opt
+// into a lighter treatment for exactly this case by defining
+// `.seoai-content-section--compact` in its own stylesheet; a site with no
+// such rule (i.e. every site but the ones that need it) gets an inert,
+// unused class name and nothing else changes.
+const COMPACT_EXPAND_FOCUSES = new Set(['author-byline']);
+
+function appendWrapperClass(wrapperTemplate, extraClass) {
+  if (!wrapperTemplate) return wrapperTemplate;
+  const classAttr = wrapperTemplate.match(/^(<div\s+class=")([^"]*)("[^>]*>)/);
+  if (classAttr) {
+    return `${classAttr[1]}${classAttr[2]} ${extraClass}${classAttr[3]}${wrapperTemplate.slice(classAttr[0].length)}`;
+  }
+  const bareDiv = wrapperTemplate.match(/^(<div)(\s|>)/);
+  if (bareDiv) {
+    return `${bareDiv[1]} class="${extraClass}"${bareDiv[2]}${wrapperTemplate.slice(bareDiv[0].length)}`;
+  }
+  return wrapperTemplate;
+}
+
 export function renderExpandedHtml(sections, template = DEFAULT_EXPAND_TEMPLATE, style = {}) {
   const rows = sections.map((s) => {
     const body = markdownToHtml(s.body, style) + renderComparisonTable(s.table, style);
@@ -1413,9 +1441,13 @@ export function buildMergeValues(actionType, content, mode = 'visible', componen
     // 'expandedContent' marker/template — see refresh-content.js's own
     // comment: a second marker would need every onboarded site re-onboarded
     // before this could ever ship.
+    const baseTemplate = expandContentTemplate();
+    const template = COMPACT_EXPAND_FOCUSES.has(content.focus)
+      ? { ...baseTemplate, wrapper: appendWrapperClass(baseTemplate.wrapper, 'seoai-content-section--compact') }
+      : baseTemplate;
     const newHtml = renderExpandedHtml(
       content.sections,
-      expandContentTemplate(),
+      template,
       { ...tableStyleFor(componentTemplates, designProfile), ...proseStyleFor(designProfile) },
     );
     // A different FOCUS (comparison-content, author-byline, freshness-date,

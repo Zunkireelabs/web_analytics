@@ -1747,7 +1747,8 @@ describe('checkDesignIntegrityGate', () => {
     assert.equal(recordedVerdicts.length, 0, 'nothing to log when there is no profile to check');
   });
 
-  test('LOG-ONLY mode (the default): a confirmed role-mismatch is recorded but never blocks shipping', async () => {
+  test('LOG-ONLY mode (opt-out via DESIGN_INTEGRITY_ENFORCE=false): a confirmed role-mismatch is recorded but never blocks shipping', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'false';
     const site = { id: 2, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:1' });
 
@@ -1763,14 +1764,14 @@ describe('checkDesignIntegrityGate', () => {
   });
 
   test('LOG-ONLY mode: a clean profile passes and is recorded as passing', async () => {
+    process.env.DESIGN_INTEGRITY_ENFORCE = 'false';
     const site = { id: 3, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
     assert.equal(gate.ok, true);
     assert.equal(recordedVerdicts[0].verdict.ok, true);
   });
 
-  test('ENFORCE mode: a confirmed role-mismatch blocks that draft, with the same evidence a human reviewer would have seen', async () => {
-    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+  test('ENFORCE mode (the default): a confirmed role-mismatch blocks that draft, with the same evidence a human reviewer would have seen', async () => {
     const site = { id: 4, url_file_map: { siteRoot: { designProfile: roleMismatchProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'faq', findingId: 'faq:2' });
 
@@ -1782,8 +1783,7 @@ describe('checkDesignIntegrityGate', () => {
     assert.equal(recordedVerdicts[0].enforced, true);
   });
 
-  test('ENFORCE mode: a clean profile still ships normally', async () => {
-    process.env.DESIGN_INTEGRITY_ENFORCE = 'true';
+  test('ENFORCE mode (the default): a clean profile still ships normally', async () => {
     const site = { id: 5, url_file_map: { siteRoot: { designProfile: cleanProfile } } };
     const gate = await checkDesignIntegrityGate(site, { actionType: 'qa-content' });
     assert.equal(gate.ok, true);
