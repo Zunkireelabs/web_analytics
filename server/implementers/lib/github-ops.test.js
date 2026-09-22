@@ -295,9 +295,10 @@ describe('getOrInitBatchBranch — post-sync marker corruption check', () => {
 
 // Regression coverage for the actual Action Center batching feature:
 // up to 60 recommendations in one run used to mean up to 60 separate GitHub
-// pushes (each its own Vercel preview build) on the same branch/PR.
-// beginBatchPush/endBatchPush defer every commit's ref-move to ONE call at
-// the end of the run.
+// pushes (each its own Vercel preview build) AND 60 separate commits on the
+// same branch/PR. beginBatchPush/endBatchPush stage every item's files/
+// message in memory and build exactly ONE commit + ONE ref move at the end
+// of the run.
 describe('beginBatchPush / endBatchPush', () => {
   const batchBranch = 'action-center/batch-1-2026-08-30';
 
@@ -324,7 +325,7 @@ describe('beginBatchPush / endBatchPush', () => {
     defaults.getFileContent = async () => null;
   }
 
-  test('two pushes in one batch chain locally and never move the ref until endBatchPush', async () => {
+  test('two pushes in one batch stage locally, create no commit, and move the ref exactly once at endBatchPush', async () => {
     const { commits, refUpdates } = stubCommitAndRef();
     try {
       beginBatchPush(site, batchBranch);
@@ -334,13 +335,17 @@ describe('beginBatchPush / endBatchPush', () => {
       assert.equal(r1.ok, true);
       assert.equal(r2.ok, true);
       assert.equal(refUpdates.length, 0, 'no ref move must happen until endBatchPush');
-      assert.equal(commits.length, 2);
-      assert.equal(commits[0].parentSha, 'main-tip-sha', 'first commit chains off the real branch tip');
-      assert.equal(commits[1].parentSha, 'commit-sha-1', 'second commit chains off the first, not the (unmoved) real tip again');
+      assert.equal(commits.length, 0, 'no commit must be created until endBatchPush builds the single batch commit');
 
       const finalized = await endBatchPush(site, batchBranch);
       assert.deepEqual(finalized, { ok: true, pushed: 2 });
-      assert.deepEqual(refUpdates, [{ branch: batchBranch, sha: 'commit-sha-2' }], 'exactly ONE ref move, pointing at the last commit in the chain');
+      assert.equal(commits.length, 1, 'exactly ONE commit for the whole batch');
+      assert.equal(commits[0].parentSha, 'main-tip-sha', 'the single commit chains off the real branch tip');
+      assert.deepEqual(commits[0].files.map((f) => f.path).sort(), ['a.njk', 'b.njk'], 'both drafts\' files land in the one commit');
+      assert.match(commits[0].message, /draft #1/, 'the single commit subject still references draft #1');
+      assert.match(commits[0].message, /draft #2/, 'the single commit subject still references draft #2');
+      assert.doesNotMatch(commits[0].message, /\n/, 'the subject must stay one line — batch-pr-recovery matches against the first line only');
+      assert.deepEqual(refUpdates, [{ branch: batchBranch, sha: 'commit-sha-1' }], 'exactly ONE ref move, pointing at the one batch commit');
     } finally {
       resetDefaults();
     }
@@ -400,7 +405,7 @@ describe('beginBatchPush / endBatchPush', () => {
     }
   });
 
-  test('beginBatchPush is idempotent — a re-entrant call does not reset an in-progress chain', async () => {
+  test('beginBatchPush is idempotent — a re-entrant call does not reset an in-progress batch', async () => {
     const { commits, refUpdates } = stubCommitAndRef();
     try {
       beginBatchPush(site, batchBranch);
@@ -408,10 +413,10 @@ describe('beginBatchPush / endBatchPush', () => {
       beginBatchPush(site, batchBranch); // re-entrant — must be a no-op
       await pushDraftBranch(site, { ...draft, id: 2 }, [{ path: 'b.njk', content: 'y' }], { branchName: batchBranch, exists: true });
 
-      assert.equal(commits[1].parentSha, 'commit-sha-1', 'the second re-entrant begin did not reset headSha back to the branch tip');
-
       const finalized = await endBatchPush(site, batchBranch);
       assert.equal(finalized.pushed, 2);
+      assert.equal(commits.length, 1, 'the re-entrant begin did not split the batch into two commits');
+      assert.equal(commits[0].parentSha, 'main-tip-sha', 'the re-entrant begin did not reset the base sha away from the real branch tip');
       assert.equal(refUpdates.length, 1);
     } finally {
       resetDefaults();
