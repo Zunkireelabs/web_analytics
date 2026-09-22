@@ -10,6 +10,7 @@ export const meta = {
   description: 'Surfaces the search queries driving (or dragging) organic performance.',
   category: 'seo',
   version: 3,
+  requiresCapabilities: ['gsc'],
 };
 
 // A branded query (the site's own name) legitimately shows many of the

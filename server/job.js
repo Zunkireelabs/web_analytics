@@ -394,11 +394,15 @@ export async function runExecutiveIfDue(site) {
   return r;
 }
 
-// Sites with GSC/GA4 actually connected. Automation skips a site that
-// doesn't have both configured yet (e.g. a newly onboarded client whose
-// GSC/GA4 hasn't been wired up) rather than attempting and failing every
-// cycle — it will start receiving automation automatically the moment both
-// are set on its `sites` row.
+// Sites eligible for automation at all. A 'website' site still needs GSC/GA4
+// actually connected — automation skips it (e.g. a newly onboarded client
+// whose GSC/GA4 hasn't been wired up) rather than attempting and failing
+// every cycle, and it starts receiving automation automatically the moment
+// both are set on its `sites` row. A 'product' site (Universal Product
+// Growth mode) is eligible without GSC/GA4 at all — it just won't get the
+// GSC/GA4-only agents, which runner.js skips per-agent via
+// meta.requiresCapabilities (see server/lib/site-capabilities.js). This is
+// list-level eligibility only, not per-agent scheduling.
 //
 // status === 'active' (PLATFORM-ADMIN-DESIGN.md §D, §K Phase 3): a
 // suspended or soft-deleted tenant stops consuming GSC/GA4 quota and
@@ -408,7 +412,11 @@ export async function runExecutiveIfDue(site) {
 // the gsc_property/ga4_property_id filter above.
 export async function listConnectedSites() {
   const sites = await listSites();
-  return sites.filter((s) => s.gsc_property && s.ga4_property_id && s.status === 'active');
+  return sites.filter((s) => {
+    if (s.status !== 'active') return false;
+    if (s.property_type === 'product') return true;
+    return Boolean(s.gsc_property && s.ga4_property_id);
+  });
 }
 
 // Run the full daily pipeline independently for every connected site. A
