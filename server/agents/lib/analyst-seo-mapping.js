@@ -16,6 +16,7 @@ import { getSiteById } from '../../store/read.js';
 import { createRecommendationGates } from './recommendation-gates.js';
 import { callLLMForJson } from '../../llm.js';
 import { PACED_GENERATORS } from './ship-pacing.js';
+import { gapActionResolver } from './gap-action-resolver.js';
 // generateDraft is the exact same shared Generate -> Quality-Gate-Validate
 // -> auto-fix -> Validate-again pipeline every other Action Center entry
 // point already uses (manual "Generate" click, the MCP tool, seoDraftEligibility
@@ -424,6 +425,14 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
     const params = { topic: gap.topic, context: reason };
     const page = recommendationPageKey({ generatorId, params });
     const existing = await findOpenRecommendation(siteId, page, generatorId);
+    // Only annotated on first creation, never on a re-detection of an
+    // already-open recommendation — a decision-engine call every time this
+    // gap is re-seen would pay LLM cost for the same already-blocked card
+    // over and over with nothing new to say.
+    const decision = existing ? null : await decisionEngineAnnotation(gap, siteId);
+    const blockedReason = decision
+      ? `${eligibility.note} Cross-domain evidence review: ${decision.rationale}`
+      : eligibility.note;
     const recommendationId = existing
       ? existing.id
       : (await insertRecommendation(siteId, {
@@ -436,14 +445,14 @@ export async function createActionCenterRecommendationForGap(siteId, gap, { defe
           detectingAgent: 'analyst-keyword-gaps',
           priority: gap.priority,
           riskTier: 'manual',
-          blockedReason: eligibility.note,
+          blockedReason,
           // label only, value left null — see the comment on the main insert
           // below for why a real number is not invented here.
           expectedImpact: { label: impactFromPriority(gap.priority), basis: 'estimate', value: null },
         })).id;
     return {
       eligible: true, created: !existing, recommendationId, draftId: null,
-      blockedReason: eligibility.note, requiresFutureInfrastructure: true,
+      blockedReason, requiresFutureInfrastructure: true,
     };
   }
 
@@ -912,6 +921,31 @@ export function isoWeekStart(d = new Date()) {
 // cap below rather than inheriting that one's.
 const GAP_DRAFT_SOURCE = 'analyst-keyword-gap';
 
+// Phase 7 of the "one intelligence" consolidation plan (fix/system) — the
+// one call site where decision-engine actually gets invoked from the real
+// ship cycle, and ONLY for the two cases gap-action-resolver.js itself
+// already restricts to (requiresFutureInfrastructure, landing-page MANUAL
+// tier). Explicitly opt-in and OFF by default: with this unset, neither
+// branch below changes at all — same eligibility, same blockedReason, same
+// routing, zero decision-engine calls, zero added cost or latency to the
+// Monday ship cycle. This is annotation only, never routing: it enriches
+// what a human sees on an already-blocked/already-manual recommendation,
+// it never ships anything gapDraftEligibility didn't already decide to
+// create, and a decision-engine failure here is swallowed (try/catch) so a
+// down LLM provider can never break gap shipping.
+const DECISION_ENGINE_GAP_ANNOTATIONS = process.env.DECISION_ENGINE_GAP_ANNOTATIONS === 'true';
+
+async function decisionEngineAnnotation(gap, siteId) {
+  if (!DECISION_ENGINE_GAP_ANNOTATIONS) return null;
+  try {
+    const { decision } = await gapActionResolver.resolveGapAction(gap, siteId);
+    return decision;
+  } catch (err) {
+    console.warn(`[analyst-seo-mapping] decision-engine annotation failed for gap ${gap.id}: ${err.message}`);
+    return null;
+  }
+}
+
 // Daily ceiling for THIS pipeline. It had none at all until now, and that was
 // a real hole in the platform's shipping limits rather than a deliberate
 // exemption: auto-remediation.js caps itself by counting drafts with
@@ -1077,7 +1111,16 @@ export async function qualifyAndShipContentGaps(siteId, site, { dryRun = false, 
     // else about the candidate's evidence changes; only landing-page's
     // routing is held back.
     if (eligibility.generatorId === 'landing-page') {
-      results.push({ gapId: gap.id, topic: gap.topic, qualified: false, reason: 'landing-page-needs-human-approval', generatorId: eligibility.generatorId });
+      // Annotation only, same as the requiresFutureInfrastructure branch
+      // above — logged on this run's result for whoever reviews the ship
+      // cycle output; does not change riskTier, does not change the
+      // pending_review status, does not let a landing page through without
+      // the human click-through described in the comment above.
+      const decision = await decisionEngineAnnotation(gap, siteId);
+      results.push({
+        gapId: gap.id, topic: gap.topic, qualified: false, reason: 'landing-page-needs-human-approval',
+        generatorId: eligibility.generatorId, ...(decision ? { decisionEngineContext: decision } : {}),
+      });
       continue;
     }
 
