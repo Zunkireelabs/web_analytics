@@ -26,6 +26,7 @@ import { computeAltTextMerge, pushAltTextBranch, previewLiveAltText } from './li
 import { computeBlogImageMerge, pushBlogImageBranch, previewLiveBlogImage } from './lib/blog-image-inject.js';
 import { computeSitemapExcludeMerge, pushSitemapExcludeBranch, previewLiveSitemapExclude } from './lib/sitemap-frontmatter-exclude-inject.js';
 import { findRootObjectBounds, findObjectFieldRange, findArrayFieldRange, findScalarFieldRange, removeArrayItemByField, spliceScalarField, assertValidContent } from './adapters/lib/js-data-splice.js';
+import { ownDomains, hostnameOf } from '../agents/lib/site-domain.js';
 
 
 export const meta = {
@@ -807,19 +808,54 @@ export function stripGlobalJsonLink(content, href) {
   return `${JSON.stringify(data, null, 2)}\n`;
 }
 
+// Real incident, confirmed 2026-09-22 (Zunkiree Labs, draft 3011): a
+// sourcePages entry can point at the site's OWN staging/dev subdomain
+// (dev-web.zunkireelabs.com) rather than its real production domain — the
+// crawler-side version of this was already fixed (crawlSite scoping to
+// ownDomains(site), per project history), but a draft carrying a stale/
+// foreign sourcePages entry could still reach this far. Layer 1 in
+// computeBrokenLinkFixMerge correctly finds no file mapping for a host
+// nothing in url_file_map.hosts covers, but previously that just meant
+// EVERY sourcePages entry (staging included) fell through to Layer 2's
+// repo-wide search, which has no host awareness of its own — searching the
+// real production repo's tree for a staging page's dead link is never
+// going to find anything, and in this same incident that search hung
+// rather than failing fast. Filtered here, before Layer 1 even runs, so a
+// staging-only draft never reaches either layer.
+//
+// A pure, separately-exported function (rather than inlined) specifically
+// so it's directly unit-testable: computeBrokenLinkFixMerge's own test
+// coverage is blocked by the same node:test module-mocking limitation
+// job.js's own comments document (backend.js's import graph reaches
+// openai's formdata-node dependency, which fails to load under
+// --experimental-test-module-mocks) — this stays testable with zero
+// mocking regardless.
+export function partitionSourcePagesByOwnDomain(site, sourcePages) {
+  const domains = ownDomains(site);
+  if (!domains) return { ownPages: sourcePages, foreignPages: [] }; // no website_domain configured yet — same "pass through unfiltered" convention ownDomains/filterOwnDomainPages already use
+  const ownPages = [];
+  const foreignPages = [];
+  for (const page of sourcePages) {
+    (domains.includes(hostnameOf(page)) ? ownPages : foreignPages).push(page);
+  }
+  return { ownPages, foreignPages };
+}
+
 export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   const href = draft.content.href;
   // Back-compat: a draft persisted before this change has no sourcePages
   // key at all — fall back to the single `page` field, same effective
   // behavior as today for those drafts.
-  const sourcePages = [...new Set(
+  const rawSourcePages = [...new Set(
     Array.isArray(draft.content.sourcePages) && draft.content.sourcePages.length
       ? draft.content.sourcePages
       : [draft.content.page].filter(Boolean)
   )];
 
+  const { ownPages: sourcePages, foreignPages } = partitionSourcePagesByOwnDomain(site, rawSourcePages);
+
   const files = [];
-  const attempted = [];
+  const attempted = foreignPages.map((page) => ({ page, matchedVia: 'source-page', reason: 'foreign-host-not-own-domain' }));
   const seenPaths = new Set();
   // dataFile -> { oldContent, content, matchedFrom } — accumulates edits
   // across sourcePages so two matches in the SAME shared data file compose
@@ -914,6 +950,18 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
   }
 
   if (files.length) return { ok: true, files, attempted };
+
+  // Every source page for this recommendation was foreign to this site's
+  // own real domain(s) (staging/dev, or an unrelated subdomain) — the
+  // finding itself has nothing to do with this site's actual production
+  // content, so there is nothing real for Layer 2's repo-wide search to be
+  // searching FOR. Terminal, not a "try again later": this is what closed
+  // draft 3011's indefinite hang (a staging-only sourcePages list still
+  // fell through to a full-repo tarball search below with no host
+  // awareness of its own).
+  if (rawSourcePages.length && !sourcePages.length) {
+    return { ok: false, reason: 'foreign-host-not-own-domain', error: `Every source page for this link is on a host outside this site's own domain(s) (${rawSourcePages.map(hostnameOf).join(', ')}) — not a real production page, nothing to fix here.`, attempted };
+  }
 
   // Layer 2: only when Layer 1 found ZERO matches anywhere — last resort,
   // never speculative.
