@@ -10,22 +10,34 @@ function neutralDeps(overrides = {}) {
     findRelevantMemoryFn: async () => [],
     fetchInvestigationEvidenceFn: async () => [],
     listFindingsFn: async () => [],
+    listDecisionsForSiteFn: async () => [],
     ...overrides,
   };
 }
 
 describe('gatherCorrelatedEvidence — source selection', () => {
-  test('queries all four sources for a keyword_opportunity situation', async () => {
-    const calls = { recs: 0, memory: 0, investigations: 0, siteUnderstanding: 0 };
+  test('queries all five sources for a keyword_opportunity situation', async () => {
+    const calls = { recs: 0, memory: 0, investigations: 0, siteUnderstanding: 0, pastDecisions: 0 };
     const gatherer = createEvidenceGatherer(neutralDeps({
       listOpenRecommendationsFn: async () => { calls.recs++; return []; },
       findRelevantMemoryFn: async () => { calls.memory++; return []; },
       fetchInvestigationEvidenceFn: async () => { calls.investigations++; return []; },
       listFindingsFn: async () => { calls.siteUnderstanding++; return []; },
+      listDecisionsForSiteFn: async () => { calls.pastDecisions++; return []; },
     }));
 
     await gatherer.gatherCorrelatedEvidence('keyword_opportunity', 1);
-    assert.deepEqual(calls, { recs: 1, memory: 1, investigations: 1, siteUnderstanding: 1 });
+    assert.deepEqual(calls, { recs: 1, memory: 1, investigations: 1, siteUnderstanding: 1, pastDecisions: 1 });
+  });
+
+  test('technical_issue still queries pastDecisions even without siteUnderstanding', async () => {
+    const calls = { siteUnderstanding: 0, pastDecisions: 0 };
+    const gatherer = createEvidenceGatherer(neutralDeps({
+      listFindingsFn: async () => { calls.siteUnderstanding++; return []; },
+      listDecisionsForSiteFn: async () => { calls.pastDecisions++; return []; },
+    }));
+    await gatherer.gatherCorrelatedEvidence('technical_issue', 1);
+    assert.deepEqual(calls, { siteUnderstanding: 0, pastDecisions: 1 });
   });
 
   test('technical_issue does not query siteUnderstanding', async () => {
@@ -98,6 +110,20 @@ describe('gatherCorrelatedEvidence — mapping and isolation', () => {
     assert.equal(siteEvidence.length, 1);
     assert.equal(siteEvidence[0].ref, 'site_understanding:1');
     assert.match(siteEvidence[0].summary, /comparison-page/);
+  });
+
+  test('maps past decisions into Evidence shape, excluding ones with no known outcome yet', async () => {
+    const gatherer = createEvidenceGatherer(neutralDeps({
+      listDecisionsForSiteFn: async () => [
+        { id: 1, situation: 'gap X', action: 'improve_page', status: 'verified', rationale: 'existing page fit', confidence: 0.8, outcome_ref: 'fix-impact:1' },
+        { id: 2, situation: 'gap Y', action: 'new_page', status: 'decided', rationale: 'no page found', confidence: 0.6, outcome_ref: null },
+      ],
+    }));
+    const evidence = await gatherer.gatherCorrelatedEvidence('generic', 1);
+    const decisionEvidence = evidence.filter((e) => e.source === 'past-decision');
+    assert.equal(decisionEvidence.length, 1);
+    assert.equal(decisionEvidence[0].ref, 'decision:1');
+    assert.match(decisionEvidence[0].summary, /improve_page/);
   });
 });
 

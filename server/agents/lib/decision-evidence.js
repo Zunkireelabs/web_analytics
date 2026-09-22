@@ -2,6 +2,7 @@ import { listOpenRecommendations } from '../../store/recommendations.js';
 import { findRelevantMemory } from '../../agent-memory.js';
 import { fetchInvestigationEvidence } from './investigation-evidence.js';
 import { listFindings } from '../../store/site-understanding.js';
+import { listDecisionsForSite } from '../../store/decisions.js';
 
 // Phase 2 of the "one intelligence" consolidation plan (fix/system) —
 // proactive cross-domain evidence gathering for decision-engine.js. This is
@@ -42,10 +43,16 @@ const SOURCES_BY_SITUATION = {
   // "does a relevant existing page/template already exist" reasoning.
   // Left out of technical_issue/traffic_decline: those situations are
   // about what's currently WRONG, not what the site's structure IS.
-  keyword_opportunity: ['recommendations', 'memory', 'investigations', 'siteUnderstanding'],
-  traffic_decline: ['investigations', 'recommendations', 'memory'],
-  technical_issue: ['recommendations', 'memory'],
-  generic: ['recommendations', 'memory', 'investigations', 'siteUnderstanding'],
+  //
+  // 'pastDecisions' (Phase 10's learning-loop connection) is included for
+  // every situation type — a prior decision WITH A KNOWN OUTCOME on this
+  // same site is always relevant context ("we tried improve_page for a
+  // similar gap before and it failed to move the needle" applies whether
+  // the current situation is a keyword opportunity or a technical issue).
+  keyword_opportunity: ['recommendations', 'memory', 'investigations', 'siteUnderstanding', 'pastDecisions'],
+  traffic_decline: ['investigations', 'recommendations', 'memory', 'pastDecisions'],
+  technical_issue: ['recommendations', 'memory', 'pastDecisions'],
+  generic: ['recommendations', 'memory', 'investigations', 'siteUnderstanding', 'pastDecisions'],
 };
 
 function recommendationsToEvidence(rows) {
@@ -90,6 +97,25 @@ function siteUnderstandingToEvidence(rows) {
     }));
 }
 
+// A decision with no recorded outcome yet (status still 'decided' or
+// 'executing') is not learning — it's an open question, same reasoning as
+// SITE_UNDERSTANDING_USABLE_STATUSES above. Only a decision that actually
+// shipped, was verified, or was verified to have failed is real evidence
+// about what works on this site — the whole point of Phase 10's "future
+// decisions must be able to use these outcomes", not just past decisions.
+const DECISION_OUTCOME_KNOWN_STATUSES = new Set(['shipped', 'verified', 'failed']);
+
+function pastDecisionsToEvidence(rows) {
+  return rows
+    .filter((d) => DECISION_OUTCOME_KNOWN_STATUSES.has(d.status))
+    .map((d) => ({
+      source: 'past-decision',
+      summary: `Past decision — ${d.situation}: chose "${d.action}" (${d.status}). ${d.rationale}`,
+      ref: `decision:${d.id}`,
+      meta: { action: d.action, status: d.status, confidence: Number(d.confidence), outcomeRef: d.outcome_ref },
+    }));
+}
+
 // `deps` is injectable (same createX(deps) shape as recommendation-gates.js
 // and decision-engine.js) so this is unit-testable without a real DB or a
 // real Data Analyst call.
@@ -98,6 +124,7 @@ export function createEvidenceGatherer({
   findRelevantMemoryFn = findRelevantMemory,
   fetchInvestigationEvidenceFn = fetchInvestigationEvidence,
   listFindingsFn = listFindings,
+  listDecisionsForSiteFn = listDecisionsForSite,
 } = {}) {
   async function gatherCorrelatedEvidence(situationType, siteId, { symptoms = null, problemSignature = null } = {}) {
     const sources = SOURCES_BY_SITUATION[situationType] || SOURCES_BY_SITUATION.generic;
@@ -143,6 +170,15 @@ export function createEvidenceGatherer({
         evidence.push(...siteUnderstandingToEvidence(rows));
       } catch (err) {
         console.warn(`[decision-evidence] site-understanding source failed for site ${siteId}: ${err.message}`);
+      }
+    }
+
+    if (sources.includes('pastDecisions')) {
+      try {
+        const rows = await listDecisionsForSiteFn(siteId, { limit: 20 });
+        evidence.push(...pastDecisionsToEvidence(rows));
+      } catch (err) {
+        console.warn(`[decision-evidence] past-decisions source failed for site ${siteId}: ${err.message}`);
       }
     }
 
