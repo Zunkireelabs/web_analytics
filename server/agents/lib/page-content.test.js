@@ -533,6 +533,35 @@ describe('analyzePage — imagesMissingAlt (alt-text.js grounding)', () => {
     assert.equal(images[0].src, '');
     assert.ok(images[0].originalTag.includes('srcset='));
   });
+
+  // Regression, real production bug (Zunkiree Labs, drafts 1608/2387/2422/
+  // 2950, confirmed 2026-09-22): a purely decorative image with alt="" AND
+  // aria-hidden="true" is NOT missing alt text — that pairing is the
+  // correct, complete accessibility treatment (assistive tech already skips
+  // it). alt-text.js kept drafting real captions for a decorative hero image
+  // shared across multiple service pages, and the apply-time safety check
+  // correctly refused every one (it wasn't the page's own registered hero)
+  // — the real fix is never treating an aria-hidden image as needing a
+  // caption in the first place.
+  test('a decorative image (alt="" + aria-hidden="true") is excluded, not flagged as missing alt text', () => {
+    const html = '<html><body><img src="/decor.webp" alt="" aria-hidden="true" class="absolute inset-0"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.imagesMissingAlt, []);
+    assert.equal(a.imagesWithoutAlt, 0);
+  });
+
+  test('aria-hidden alone (with alt already present) is unaffected — still excluded from missing, same as before', () => {
+    const html = '<html><body><img src="/decor.webp" alt="Decorative background" aria-hidden="true"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.deepEqual(a.imagesMissingAlt, []);
+  });
+
+  test('aria-hidden="false" (explicitly not hidden) still gets flagged if alt is missing', () => {
+    const html = '<html><body><img src="/real.jpg" aria-hidden="false"></body></html>';
+    const a = analyzePage(html, PAGE_URL);
+    assert.equal(a.imagesMissingAlt.length, 1);
+    assert.equal(a.imagesWithoutAlt, 1);
+  });
 });
 
 // Regression coverage: page-content.js used to only COUNT malformed JSON-LD
