@@ -105,7 +105,10 @@ describe('design-integrity-guard — runQualityGate integration', () => {
     // test above), which would also report zero issues either way. This
     // test documents the wiring/shape contract at the quality-gate level;
     // the enforcement behavior itself is covered directly above.
-    const result = await runQualityGate({ title: 'x', sections: [] }, 'blog-outline', null);
+    // featuredImage included so this test isolates the design-integrity
+    // check it documents — blog-image-guard.js's own missing-image check is
+    // covered separately in blog-image-guard.test.js.
+    const result = await runQualityGate({ title: 'x', sections: [], featuredImage: { url: 'https://images.pexels.com/photos/1/x.jpeg' } }, 'blog-outline', null);
     assert.equal(result.clean, true);
   });
 });
