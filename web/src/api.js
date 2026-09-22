@@ -76,6 +76,11 @@ export const api = {
     req('/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   verifyPassword: (password) => req('/verify-password', { method: 'POST', body: JSON.stringify({ password }) }),
   sites: () => req('/sites'),
+  demand: {
+    prospects: () => req('/demand/prospects'),
+    approve: (id) => req(`/demand/prospects/${id}/approve`, { method: 'POST' }),
+    trialSignups: () => req('/demand/trial-signups'),
+  },
   agents: () => req('/agents'),
   agentsStatus: () => req('/agents/status'),
   agentsActivity: (limit = 12) => req(`/agents/activity?limit=${limit}`),
@@ -160,6 +165,12 @@ export const api = {
     setVisibleFaqCap: (id, visibleFaqCap) => req(`/internal/clients/${id}/visible-faq-cap`, { method: 'POST', body: JSON.stringify({ visibleFaqCap }) }),
     setAutoRemediation: (id, enabled, dailyLimit) => req(`/internal/clients/${id}/auto-remediation`, { method: 'POST', body: JSON.stringify({ enabled, dailyLimit }) }),
     setAnalyticsIds: (id, ga4MeasurementId, facebookPixelId) => req(`/internal/clients/${id}/analytics-ids`, { method: 'POST', body: JSON.stringify({ ga4MeasurementId, facebookPixelId }) }),
+    productGrowthConfig: {
+      get: (id) => req(`/internal/clients/${id}/product-growth-config`),
+      save: (id, body) => req(`/internal/clients/${id}/product-growth-config`, { method: 'POST', body: JSON.stringify(body) }),
+      setProspectDiscovery: (id, enabled) => req(`/internal/clients/${id}/prospect-discovery`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+      issueCrmWebhookToken: (id) => req(`/internal/clients/${id}/crm-webhook-token`, { method: 'POST' }),
+    },
     // Design-integrity gate: what the design agent found on this site's real
     // pages and what it would write, plus the current sign-off state
     // (server/agents/lib/design-review.js's buildDesignReviewReport).

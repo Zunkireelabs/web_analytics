@@ -95,11 +95,16 @@ export async function getOrCreateSite() {
 // cron/job/ingest pipeline for the one site configured in this instance's
 // .env — this is for provisioning additional clients (see
 // server/scripts/create-client.js).
-export async function createClientSite({ name, websiteDomain, timezone }) {
+// propertyType: 'website' (default) or 'product' — see
+// 167_product_growth_config.sql and the Universal Product Growth mode plan.
+// A 'product' site is schedulable by job.js's listConnectedSites() without
+// GSC/GA4; per-agent eligibility is still enforced by runner.js's
+// requiresCapabilities gate regardless of which property_type this is.
+export async function createClientSite({ name, websiteDomain, timezone, propertyType }) {
   const inserted = await query(
-    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number)
-     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq')) RETURNING *`,
-    [name, timezone || 'Asia/Kolkata', websiteDomain || null]
+    `INSERT INTO sites (name, gsc_property, ga4_property_id, timezone, website_domain, client_number, property_type)
+     VALUES ($1, NULL, NULL, $2, $3, nextval('sites_client_number_seq'), $4) RETURNING *`,
+    [name, timezone || 'Asia/Kolkata', websiteDomain || null, propertyType === 'product' ? 'product' : 'website']
   );
   return inserted.rows[0];
 }

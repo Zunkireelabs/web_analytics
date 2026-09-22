@@ -592,6 +592,14 @@ const aiRecommendationCadence = () => (process.env.AI_RECOMMENDATION_CADENCE ===
 export const runAiRecommendationIfDue = (site) => runAgentIfDue(site, 'ai-recommendation', { cadence: aiRecommendationCadence() });
 export const runAiRecommendationIfDueForAllSites = () => runAgentIfDueForAllSites('ai-recommendation', { cadence: aiRecommendationCadence() });
 
+// Prospect Discovery — real DataForSEO SERP calls, same monthly-cadence cost
+// discipline as authority/competitor-intelligence above. The agent's own
+// opt-in check (product_growth_config.prospect_discovery_enabled) means this
+// honestly no-ops via insufficient-data for every site that hasn't turned it
+// on, same as authority already does for missing DataForSEO credentials.
+export const runProspectDiscoveryIfDue = (site) => runAgentIfDue(site, 'prospect-discovery');
+export const runProspectDiscoveryIfDueForAllSites = () => runAgentIfDueForAllSites('prospect-discovery');
+
 // Growth Query Discovery — real GSC query movement and page coverage don't
 // meaningfully shift day to day, and its own LLM/page-fetch cost multiplies
 // with frequency the same way competitor/authority checks do, so weekly

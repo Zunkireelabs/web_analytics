@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
+import { runDailyJobForAllSites, runWeeklyIfDueForAllSites, runExecutiveIfDueForAllSites, runMonthlyIfDueForAllSites, runCompetitorCheckIfDueForAllSites, runCompetitorIntelligenceIfDueForAllSites, runAuthorityIfDueForAllSites, runAiRecommendationIfDueForAllSites, runProspectDiscoveryIfDueForAllSites, runKeywordDemandCheckIfDueForAllSites, runHourlyCatchupForAllSites, runSiteDiscoveryIfDueForAllSites, runFixVerificationsForAllSites, runPrStatusPollForAllSites, runGeoAuditIfDueForAllSites, runGrowthQueryDiscoveryIfDueForAllSites, runAnalystFusionForAllSites, runAnalystSyncForAllSites, runGrowthOpportunitiesSyncForAllSites, runKeywordGapDiscoveryRefreshForAllSites, runKeywordGapShipCycleForAllSites, runFixImpactMeasurementsForAllSites, runAnalystOutcomeSweepForAllSites, runFaqOnboardingCoverageForAllSites, runAutoRemediationForAllSites, runAutoRemediationCatchupForAllSites, queueDesignAgentDerivationsForAllSites, queueDesignProfileRescanForAllSites, queueConsistencyScanForAllSites, runTemplateCapabilityRepairForAllSites, refreshBlockedRecommendationsForAllSites, refreshContentGapRecommendationsForAllSites, runDesignProfileRoleCorrectionForAllSites, runContentRepairForAllSites } from './job.js';
 import { SHIP_HOUR_LOCAL } from './lib/ship-window.js';
 import { runKeywordNarrativeForAllSites } from './agents/keyword-narrative.js';
 import { snapshotCapabilityVisibilityForAllSites } from './agents/lib/analyst-seo-mapping.js';
@@ -277,6 +277,20 @@ export function startCron() {
           console.log(`[cron] AI recommendation check finished — ${analyzed.length} site(s) analyzed`);
         } catch (err) {
           console.error('[cron] AI recommendation check error:', err.message);
+        }
+
+        // Prospect Discovery — also checked weekly, real work only once a
+        // month (see job.js's runProspectDiscoveryIfDue). Honestly no-ops
+        // per site via the agent's own insufficient-data path when the site
+        // hasn't opted in (product_growth_config.prospect_discovery_enabled)
+        // or has no SERP provider/industries/ICP signals configured.
+        console.log(`[cron] prospect discovery check started ${new Date().toISOString()}`);
+        try {
+          const results = await runProspectDiscoveryIfDueForAllSites();
+          const analyzed = results.filter(Boolean);
+          console.log(`[cron] prospect discovery check finished — ${analyzed.length} site(s) analyzed`);
+        } catch (err) {
+          console.error('[cron] prospect discovery check error:', err.message);
         }
 
         // font-consistency and visual-quality used to run here, on the weekly

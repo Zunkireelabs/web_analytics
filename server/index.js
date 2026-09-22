@@ -27,6 +27,8 @@ import commoncrawlBacklinksRouter from './routes/commoncrawl-backlinks.js';
 import mcpTokensRouter from './routes/mcp-tokens.js';
 import { apiBridgeRouter, rootBridgeRouter } from './routes/mcp-bridge.js';
 import webhooksRouter from './routes/webhooks.js';
+import crmWebhookRouter from './routes/crm-webhook.js';
+import trialSignupRouter from './routes/trial-signup.js';
 import oauthConsentRouter from './routes/oauth-consent.js';
 import usersRouter from './routes/users.js';
 import userInvitationsRouter from './routes/user-invitations.js';
@@ -35,6 +37,7 @@ import systemHealthRouter from './routes/system-health.js';
 import auditLogRouter from './routes/audit-log.js';
 import opsCenterRouter from './routes/ops-center.js';
 import dataAgentRouter from './routes/data-agent.js';
+import demandRouter from './routes/demand.js';
 import { startCron } from './cron.js';
 import { runStartupCatchup, reconcileBlockedRecommendationsOnStartup } from './job.js';
 import { reapStaleAuditRuns, countAuditRunsByTrigger } from './store/audit-runs.js';
@@ -114,6 +117,11 @@ app.use('/api', apiBridgeRouter);
 // every blanket-requireAuth router below, or requireAuth 401s the webhook
 // before this router's own route is ever checked.
 app.use('/api', webhooksRouter);
+// Public, per-site-bearer-token-authenticated (Universal Product Growth
+// mode's CRM boundary) — same mount-order hazard as webhooksRouter above.
+app.use('/api', crmWebhookRouter);
+// Same token/boundary shape, for "see it live" trial-signup reporting.
+app.use('/api', trialSignupRouter);
 app.use(rootBridgeRouter);
 // Reverse-proxies data-analyst-agent/ under this app's own domain — /data-agent
 // is a root path, not under /api (see routes/data-agent.js), and must be
@@ -122,6 +130,7 @@ app.use(rootBridgeRouter);
 // first and serve index.html instead of proxying it.
 app.use(dataAgentRouter);
 app.use('/api', metricsRouter);
+app.use('/api', demandRouter);
 app.use('/api', agentsRouter);
 app.use('/api', actionCenterRouter);
 app.use('/api', reportsRouter);

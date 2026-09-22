@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, timeAgo } from '../api.js';
 import {
@@ -785,6 +785,188 @@ function AdvancedTab({ client, onReload, onClose }) {
   );
 }
 
+// ── Product Growth tab ───────────────────────────────────────────────────
+// Configures server/store/product-growth-config.js — markets/industries/ICP
+// signals are free-text lists (comma-separated in the UI, stored as JSON
+// arrays), and conversionEvent is a plain string so a future product with a
+// different funnel (trial, signup, purchase...) isn't forced into
+// "booked_demo". None of this reads or writes anything Zenly-specific.
+function csvToList(s) {
+  return s.split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+function ProductGrowthTab({ client }) {
+  const [config, setConfig] = useState(null); // null = loading
+  const [conversionEvent, setConversionEvent] = useState('');
+  const [markets, setMarkets] = useState('');
+  const [industries, setIndustries] = useState('');
+  const [icpSignals, setIcpSignals] = useState('');
+  const [competitorSignals, setCompetitorSignals] = useState('');
+  const [outreachEnabled, setOutreachEnabled] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const [prospectDiscoveryEnabled, setProspectDiscoveryEnabled] = useState(false);
+  const [discoveryToggling, setDiscoveryToggling] = useState(false);
+  const [crmToken, setCrmToken] = useState(null);
+  const [issuingToken, setIssuingToken] = useState(false);
+
+  const reload = () => api.clients.productGrowthConfig.get(client.id).then((c) => {
+    setConfig(c);
+    setConversionEvent(c.conversionEvent || '');
+    setMarkets((c.markets || []).join(', '));
+    setIndustries((c.industries || []).join(', '));
+    setIcpSignals((c.icpSignals || []).join(', '));
+    setCompetitorSignals((c.competitor_signals || []).join(', '));
+    setOutreachEnabled(!!c.outreachEnabled);
+    setProspectDiscoveryEnabled(!!c.prospect_discovery_enabled);
+    setCrmToken(c.crm_webhook_token || null);
+  }).catch(() => setConfig({}));
+
+  useEffect(() => { reload(); }, [client.id]);
+
+  const toggleProspectDiscovery = async (next) => {
+    setDiscoveryToggling(true);
+    setProspectDiscoveryEnabled(next);
+    try {
+      await api.clients.productGrowthConfig.setProspectDiscovery(client.id, next);
+    } catch {
+      setProspectDiscoveryEnabled(!next);
+    } finally {
+      setDiscoveryToggling(false);
+    }
+  };
+
+  const issueCrmToken = async () => {
+    setIssuingToken(true);
+    try {
+      const { crmWebhookToken } = await api.clients.productGrowthConfig.issueCrmWebhookToken(client.id);
+      setCrmToken(crmWebhookToken);
+    } finally {
+      setIssuingToken(false);
+    }
+  };
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await api.clients.productGrowthConfig.save(client.id, {
+        conversionEvent: conversionEvent.trim() || null,
+        markets: csvToList(markets),
+        industries: csvToList(industries),
+        icpSignals: csvToList(icpSignals),
+        competitorSignals: csvToList(competitorSignals),
+        outreachEnabled,
+      });
+      setConfig(updated);
+    } catch (err) {
+      setError(err.message || 'Could not save.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (config === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+
+  return (
+    <form onSubmit={save} className="space-y-4">
+      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+        This property runs the visibility + demand-generation agent set instead of the traffic-history agents (see
+        Universal Product Growth mode). Nothing here is required for those agents to start finding real issues —
+        it only configures the demand-generation layer: which conversion event counts as success, and which
+        prospects are worth surfacing.
+      </p>
+
+      <label className="block">
+        <span className={labelCls}>Primary conversion event</span>
+        <input className={inputCls} value={conversionEvent} onChange={(e) => setConversionEvent(e.target.value)}
+          placeholder="e.g. booked_demo, trial, signup, purchase" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Target markets</span>
+        <input className={inputCls} value={markets} onChange={(e) => setMarkets(e.target.value)} placeholder="Comma-separated, e.g. US, UK, South Asia" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Target industries</span>
+        <input className={inputCls} value={industries} onChange={(e) => setIndustries(e.target.value)} placeholder="Comma-separated, e.g. Salons, Dental clinics" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>ICP qualification signals</span>
+        <input className={inputCls} value={icpSignals} onChange={(e) => setIcpSignals(e.target.value)} placeholder="Comma-separated, e.g. 2+ locations, 5+ staff" />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+          Configurable per product — never a hardcoded rule. Used only to qualify prospects with real evidence; a
+          prospect the platform can't back with evidence is reported as insufficient-data, never guessed.
+        </span>
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Competitor signal phrases</span>
+        <input className={inputCls} value={competitorSignals} onChange={(e) => setCompetitorSignals(e.target.value)} placeholder="Comma-separated, e.g. booking software, salon management platform" />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+          Language a same-category seller would use about itself. When a "see it live" trial signup's own real
+          homepage contains one of these — or matches an already-tracked real competitor's domain — it's flagged as
+          a competitor suspect on the Demand page, never auto-blocked.
+        </span>
+      </label>
+
+      <label className="flex items-center gap-2.5 cursor-pointer">
+        <input type="checkbox" checked={outreachEnabled} onChange={(e) => setOutreachEnabled(e.target.checked)}
+          className="w-4 h-4 rounded border-slate-300 text-[#6C63FF] focus:ring-[#6C63FF]/20" />
+        <span className="text-xs font-bold text-slate-700">Outreach handoff enabled</span>
+      </label>
+      <p className="text-[9.5px] font-semibold text-slate-400 -mt-2.5 ml-6">
+        Qualified prospects are sent to the external CRM for a human to review — this platform never sends outreach
+        itself.
+      </p>
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      <div className="border-t border-slate-100 pt-4 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <span className="text-xs font-bold text-slate-700 block">Prospect discovery</span>
+            <span className="text-[9.5px] font-semibold text-slate-400">Own opt-in — real SERP-backed, evidence-gated, cron-only. Never gated on other DataForSEO features being present.</span>
+          </div>
+          <button type="button" onClick={() => toggleProspectDiscovery(!prospectDiscoveryEnabled)} disabled={discoveryToggling}
+            className={`shrink-0 text-[9.5px] font-black uppercase tracking-wider px-3 py-2 rounded-lg transition disabled:opacity-60 ${
+              prospectDiscoveryEnabled ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-slate-50 text-slate-500 border border-slate-200'
+            }`}>
+            {prospectDiscoveryEnabled ? 'Enabled' : 'Disabled'}
+          </button>
+        </div>
+
+        <div>
+          <span className={labelCls}>CRM webhook token</span>
+          {crmToken ? (
+            <div className={`${inputMonoCls} select-all`}>{crmToken}</div>
+          ) : (
+            <button type="button" onClick={issueCrmToken} disabled={issuingToken}
+              className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition disabled:opacity-60">
+              {issuingToken ? 'Generating…' : 'Generate CRM Token'}
+            </button>
+          )}
+          <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">
+            Give this to the external CRM: <code>GET /api/crm/export</code> to pull staff-approved prospects,
+            <code> POST /api/crm/webhook</code> to report real outcome status back, both authenticated with
+            <code> Authorization: Bearer &lt;token&gt;</code>.
+          </span>
+        </div>
+      </div>
+
+      <button type="submit" disabled={saving}
+        className="text-[10px] font-black uppercase tracking-wider px-5 py-3 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
+        style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+        {saving ? 'Saving…' : 'Save Product Growth Config'}
+      </button>
+    </form>
+  );
+}
+
 const TABS = [
   { value: 'general', label: 'General' },
   { value: 'integrations', label: 'Integrations' },
@@ -792,6 +974,11 @@ const TABS = [
   { value: 'repository', label: 'Repository' },
   { value: 'advanced', label: 'Advanced' },
 ];
+
+// Only shown for a 'product' property (see PROPERTY_TYPES in
+// ClientOnboarding.jsx) — a 'website' client never sees this tab, and
+// nothing in it assumes any specific product.
+const PRODUCT_GROWTH_TAB = { value: 'product-growth', label: 'Product Growth' };
 
 export default function ClientDrawer({ client, owner, isOpen, onClose, onReload, initialTab = 'general' }) {
   const [tab, setTab] = useState(initialTab);
@@ -805,14 +992,17 @@ export default function ClientDrawer({ client, owner, isOpen, onClose, onReload,
 
   if (!client) return null;
 
+  const tabs = client.propertyType === 'product' ? [...TABS, PRODUCT_GROWTH_TAB] : TABS;
+
   return (
     <Drawer isOpen={isOpen} onClose={onClose} title={client.name} subtitle={client.websiteDomain || 'no domain configured'} icon={Building} maxWidth="max-w-2xl">
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
       {tab === 'general' && <GeneralTab client={client} owner={owner} />}
       {tab === 'integrations' && <IntegrationsTab client={client} onReload={onReload} />}
       {tab === 'ai' && <AiConfigTab client={client} onReload={onReload} />}
       {tab === 'repository' && <RepositoryTab client={client} onReload={onReload} />}
       {tab === 'advanced' && <AdvancedTab client={client} onReload={onReload} onClose={onClose} />}
+      {tab === 'product-growth' && <ProductGrowthTab client={client} />}
     </Drawer>
   );
 }
