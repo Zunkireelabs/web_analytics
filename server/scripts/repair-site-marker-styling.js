@@ -85,6 +85,28 @@ function buildHandlers(templates, proseStyle = {}) {
         const answer = unwrapSlot($, $(d).children().not('summary'));
         if (question && answer) items.push({ question, answer });
       });
+      // Fallback: a plain <h3>/text shape with no <details> at all —
+      // confirmed live (2026-09-24), the bare-heading PROSE_TEMPLATES.QACONTENT
+      // shape a run of THIS script itself could produce before the "always
+      // ground the heading, always wrap the answer" fix landed. Without this,
+      // a page already mangled into that shape by an earlier run could never
+      // be healed by a later one, even after the template producing it was
+      // corrected — the exact "fixed going forward, but not what already
+      // shipped" trap this whole script exists to close.
+      //
+      // rawContentUntilNextHeading, not nextUntil('h3'): the answer here is
+      // an unwrapped, bare TEXT NODE (no <p>/<div> around it at all — the
+      // exact other half of this same incident) — .nextUntil() only ever
+      // matches ELEMENT siblings, so it silently returned an empty selection
+      // for plain text and every item was dropped. Walking the parent's real
+      // .contents() (text nodes included) is what actually finds it.
+      if (!items.length) {
+        $('h3').each((i, h) => {
+          const question = $(h).text().trim();
+          const answer = rawContentUntilNextHeading($, $(h));
+          if (question && answer) items.push({ question, answer });
+        });
+      }
       return items.length ? items : null;
     },
     render: (items, tpl) => renderSlots(items, tpl, (it) => ({
@@ -130,13 +152,34 @@ function buildHandlers(templates, proseStyle = {}) {
         const body = unwrapSlot($, $(h).nextUntil('h1, h2, h3'));
         if (heading && body) items.push({ heading, body });
       });
+      // Still returns items even if every one of them is about to be
+      // dropped by the author-byline retirement below — this only decides
+      // whether the region PARSES at all, not what survives to render.
       return items.length ? items : null;
     },
-    render: (items, tpl) => renderSlots(items, tpl, (it) => ({
-      HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseProse(normaliseTables(it.body), proseStyle), tpl.row, 'BODY'),
-    }), (it) => blockSafeRow(tpl.row, normaliseProse(normaliseTables(it.body), proseStyle), 'BODY')),
+    render: (items, tpl) => renderSlots(
+      items.filter((it) => !isRetiredAuthorByline(it.heading)),
+      tpl,
+      (it) => ({ HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseProse(normaliseTables(it.body), proseStyle), tpl.row, 'BODY') }),
+      (it) => blockSafeRow(tpl.row, normaliseProse(normaliseTables(it.body), proseStyle), 'BODY'),
+    ),
   },
   };
+}
+
+// Explicit owner decision (2026-09-24): a visible "About the Author" section
+// is retired platform-wide (see generators/expand-content.js's author-byline
+// focus, which now refuses to draft one at all) — but that only stops NEW
+// drafts. Every already-published page still has its old one sitting in a
+// live EXPANDEDCONTENT region, often bundled alongside other items
+// (References, Last Updated) in the SAME region, so it can't just be left
+// for the generator-side fix to eventually cover. Filtered out here,
+// unconditionally, on every repair run — matched on the heading text alone
+// (never the body), so this can never accidentally drop a real, human-
+// relevant section that just happens to mention an author in passing.
+const RETIRED_HEADINGS = new Set(['about the author']);
+function isRetiredAuthorByline(heading) {
+  return RETIRED_HEADINGS.has(String(heading || '').trim().toLowerCase());
 }
 
 // Deliberately NOT marker-merge's renderFaqHtml / renderQaHtml /
@@ -217,6 +260,24 @@ function unwrapSlot($, elements) {
     if (only.prop('tagName') === 'DIV') return (only.html() || '').trim();
   }
   return elements.map((i, el) => $.html(el)).get().join('').trim();
+}
+
+// Everything between one heading and the next, INCLUDING bare text nodes —
+// unlike .nextUntil(), which only ever matches element siblings and silently
+// returns nothing for plain unwrapped text (the QACONTENT bare-<h3> fallback
+// above needs exactly that: its "answer" is often nothing but a text node,
+// with no <p>/<div> around it at all).
+function rawContentUntilNextHeading($, heading) {
+  const node = heading.get(0);
+  const siblings = $(node).parent().contents().toArray();
+  const startIndex = siblings.indexOf(node);
+  const collected = [];
+  for (let i = startIndex + 1; i < siblings.length; i++) {
+    const sib = siblings[i];
+    if (sib.type === 'tag' && /^h[123]$/.test(sib.tagName)) break;
+    collected.push($.html(sib));
+  }
+  return collected.join('').trim();
 }
 
 function walk(dir, out = []) {

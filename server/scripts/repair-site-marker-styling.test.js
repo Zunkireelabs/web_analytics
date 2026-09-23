@@ -283,7 +283,7 @@ describe('repairSiteMarkerStyling — EXPANDEDCONTENT re-run is idempotent (regr
     '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">First section body.</p>',
     '<h2>Last Updated</h2>',
     '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Second section body.</p>',
-    '<h2>About the Author</h2>',
+    '<h2>Security Considerations</h2>',
     '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Third section body.</p>',
     '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
   ].join('\n');
@@ -309,6 +309,118 @@ describe('repairSiteMarkerStyling — EXPANDEDCONTENT re-run is idempotent (regr
       assert.equal((afterSecond.match(/<h2>/g) || []).length, 3);
       assert.equal((afterSecond.match(/First section body\./g) || []).length, 1);
       assert.equal((afterSecond.match(/Third section body\./g) || []).length, 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Confirmed live (2026-09-24): src/pages/resources/ai-search-stack-guide.njk's
+// QACONTENT region had already been mangled into bare <h3>/unwrapped-text by
+// an earlier run of this script (before the "always ground the heading,
+// always wrap the answer" fix). Its parser only ever recognized <details>
+// elements, so once a page was in that shape, no later run — even with a
+// corrected template — could ever heal it; it silently skipped every time
+// ("unrecognised shape, left as-is"). The fallback below lets a page already
+// in that shape be healed the next time this script runs.
+describe('repairSiteMarkerStyling — QACONTENT self-heals a page already mangled into bare <h3>/text (no <details>)', () => {
+  const qaTemplates = {
+    qaContent: {
+      wrapper: '<div class="container-custom py-12 md:py-20">\n{{ROWS}}\n</div>',
+      row: '  <details class="gap-2">\n    <summary><h3 class="text-2xl md:text-3xl font-normal text-gray-900">{{QUESTION}}</h3></summary>\n    <div class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">{{ANSWER}}</div>\n  </details>',
+    },
+  };
+  const alreadyBareRegion = [
+    '<!-- SEOAI:QACONTENT:START --><div>',
+    '<h3>What are the key benefits?</h3>',
+    'AI-powered search enhances customer experience.',
+    '<h3>What does the architecture blueprint include?</h3>',
+    'A comprehensive design for enterprises.',
+    '</div><!-- SEOAI:QACONTENT:END -->',
+  ].join('\n');
+
+  test('a page already mangled into bare <h3>/text is recognised and healed, not skipped', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-selfheal-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'resources', 'ai-search-stack-guide.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /resources/ai-search-stack-guide/\n---\n\n${alreadyBareRegion}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, qaTemplates, { write: true, designProfile: {
+        typography: { body: 'text-lg text-gray-600', heading: { item: 'text-2xl md:text-3xl font-normal text-gray-900' } },
+      } });
+      assert.equal(result.skipped, 0);
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.match(out, /<h3 class="text-2xl font-normal text-gray-900">What are the key benefits\?<\/h3>/);
+      assert.match(out, /<p class="text-lg text-gray-600">AI-powered search enhances customer experience\.<\/p>/);
+      assert.match(out, /<h3 class="text-2xl font-normal text-gray-900">What does the architecture blueprint include\?<\/h3>/);
+      assert.match(out, /<p class="text-lg text-gray-600">A comprehensive design for enterprises\.<\/p>/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Explicit owner decision (2026-09-24): a visible "About the Author" section
+// is retired platform-wide. generators/expand-content.js's author-byline
+// focus stops NEW drafts, but every already-published page still has its old
+// one sitting in a live EXPANDEDCONTENT region — often bundled alongside
+// OTHER real items (References, Last Updated) in the SAME region, confirmed
+// live on /about/. This repair now strips it unconditionally on every run.
+describe('repairSiteMarkerStyling — retroactively removes "About the Author" from an already-published page', () => {
+  const expandTemplates = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+
+  test('an "About the Author" item is dropped; other real items in the same region survive', async () => {
+    const region = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START --><div class="container-custom py-12 md:py-20">',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">References</h2>',
+      '<p>Some real reference content.</p>',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">About the Author</h2>',
+      '<p>By the Zunkiree Labs Team</p>',
+      '<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">Last Updated</h2>',
+      '<p>This page was last updated on 2026-09-17.</p>',
+      '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-retireauthor-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'about.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /about/\n---\n\n${region}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.doesNotMatch(out, /About the Author/);
+      assert.doesNotMatch(out, /By the Zunkiree Labs Team/);
+      assert.match(out, /<h2>References<\/h2>/);
+      assert.match(out, /Some real reference content\./);
+      assert.match(out, /<h2>Last Updated<\/h2>/);
+      assert.match(out, /This page was last updated on 2026-09-17\./);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a region that is ONLY "About the Author" is emptied out, not skipped', async () => {
+    const region = [
+      '<!-- SEOAI:EXPANDEDCONTENT:START --><div>',
+      '<h2>About the Author</h2>',
+      '<p>By the Zunkiree Labs Team</p>',
+      '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+    ].join('\n');
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-retireauthor-only-'));
+    try {
+      const abs = path.join(dir, 'src', 'blog', 'post.md');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `# Post\n\n${region}\n`);
+
+      const result = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      assert.equal(result.changedRegions, 1);
+      const out = await readFile(abs, 'utf8');
+      assert.doesNotMatch(out, /About the Author/);
+      assert.doesNotMatch(out, /By the Zunkiree Labs Team/);
+      assert.match(out, /SEOAI:EXPANDEDCONTENT:START/); // marker stays, ready for future content
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
