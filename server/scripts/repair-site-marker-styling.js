@@ -112,9 +112,22 @@ function buildHandlers(templates, proseStyle = {}) {
       // such region unrecognised ("unrecognised shape, left as-is") forever,
       // even after the template that produced it was fixed and the daily
       // repair cron (repair-site-content-live.js) ran again.
+      //
+      // nextUntil('h1, h2, h3'), not nextAll(): confirmed live (2026-09-24) —
+      // re-running this repair against its OWN prior output (a flat sequence
+      // of sibling <h2>/<p> pairs, no per-item wrapper left after the first
+      // pass) made nextAll() grab EVERY later heading and body as part of
+      // the FIRST item's own body too, and the second item's body as part of
+      // a THIRD pass, cascading into tripled, nested duplicate content on a
+      // second run. nextAll() happened to work on the very first run only
+      // because the original captured markup still had each item in its own
+      // wrapper <div>/<section>, so "everything after this heading" and
+      // "everything after this heading up to the next one" were
+      // accidentally the same set. This script's own output broke that
+      // assumption, which means it was never actually safe to re-run.
       $('h1, h2, h3').each((i, h) => {
         const heading = $(h).text().trim();
-        const body = unwrapSlot($, $(h).nextAll());
+        const body = unwrapSlot($, $(h).nextUntil('h1, h2, h3'));
         if (heading && body) items.push({ heading, body });
       });
       return items.length ? items : null;

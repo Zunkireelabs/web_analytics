@@ -265,3 +265,52 @@ describe('repairSiteMarkerStyling — EXPANDEDCONTENT shipped with a bare <h1> h
     }
   });
 });
+
+// Confirmed live (2026-09-24): running this script a SECOND time against its
+// own prior output on a real page (src/pages/resources/ai-search-stack-
+// guide.njk, 3 EXPANDEDCONTENT items) tripled the content — each item's body
+// swallowed every later item's heading and body too, cascading across a
+// second pass. Root cause: the EXPANDEDCONTENT parser used
+// $(h).nextAll() — "everything after this heading" — which only happened to
+// equal "everything up to the NEXT heading" on the very first run, when each
+// item still sat in its own captured wrapper <div>/<section>. This script's
+// own first-pass output flattens that into plain sibling <h2>/<p> pairs, so
+// a second run's nextAll() reached straight through into later items.
+describe('repairSiteMarkerStyling — EXPANDEDCONTENT re-run is idempotent (regression: nextAll() cascading duplication)', () => {
+  const threeItemFlatRegion = [
+    '<!-- SEOAI:EXPANDEDCONTENT:START --><div>',
+    '<h2>Comparison of AI Search Solutions</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">First section body.</p>',
+    '<h2>Last Updated</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Second section body.</p>',
+    '<h2>About the Author</h2>',
+    '<p class="text-lg md:text-xl text-gray-600 leading-relaxed max-w-2xl">Third section body.</p>',
+    '</div><!-- SEOAI:EXPANDEDCONTENT:END -->',
+  ].join('\n');
+  const expandTemplates = { expandContent: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' } };
+
+  test('a second run over the same (already-flat) content produces byte-identical output, not duplication', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'marker-repair-idempotent-'));
+    try {
+      const abs = path.join(dir, 'src', 'pages', 'resources', 'guide.njk');
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, `---\npermalink: /resources/guide/\n---\n\n${threeItemFlatRegion}\n`);
+
+      await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      const afterFirst = await readFile(abs, 'utf8');
+      // First-run content stays flat — exactly 3 headings, no duplication.
+      assert.equal((afterFirst.match(/<h2>/g) || []).length, 3);
+      assert.equal((afterFirst.match(/First section body\./g) || []).length, 1);
+
+      const second = await repairSiteMarkerStyling(dir, expandTemplates, { write: true });
+      const afterSecond = await readFile(abs, 'utf8');
+      assert.equal(second.changedRegions, 0, 'a second run over already-correct content must be a no-op');
+      assert.equal(afterSecond, afterFirst, 'byte-identical — never cascading duplication');
+      assert.equal((afterSecond.match(/<h2>/g) || []).length, 3);
+      assert.equal((afterSecond.match(/First section body\./g) || []).length, 1);
+      assert.equal((afterSecond.match(/Third section body\./g) || []).length, 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
