@@ -2,7 +2,7 @@ import { resolveFile, resolveNewContentTarget, resolveNewContentTargetConfig, re
 import { deriveNewContentContract, deriveContractFromSourceFile } from './lib/newcontent-contract.js';
 import { getFileContent } from '../github/client.js';
 import { pushDraftBranch, openPrForBranch, getOrInitBatchBranch, baseBranch, batchBranchConflictError } from './lib/github-ops.js';
-import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderDirectAnswerBody, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
+import { renderLandingPageBody, renderBlogOutlineBody, renderBlogOutlineBodyTsx, renderTranslationBody, renderTranslationBodyTsx, renderDirectAnswerBody, renderDirectAnswerBodyTsx, renderCompliancePageBody, renderMissingPageBody, extractPreservedFrontMatter } from './lib/newpage-render.js';
 import { siteHasUsableDesignProfile, checkDesignIntegrityGate } from './lib/design-drift.js';
 import { findRootArrayBounds, spliceMarkedArray, assertValidContent } from './adapters/lib/js-data-splice.js';
 
@@ -167,11 +167,25 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: 'No url_file_map.newContentTargets["direct-answer"] configured — add e.g. {"dir":"src/answers","extension":".md"} via `npm run connect-repo` before this can be applied.' };
     }
     const permalink = resolveNewContentUrl(site, 'direct-answer', title);
+
+    // Same directory-per-page signal as blog-outline: a `filename` on the
+    // target config means this site routes by directory (Next.js App
+    // Router), so the real page must be JSX, not Markdown+front-matter.
+    const directAnswerTargetConfig = resolveNewContentTargetConfig(site, 'direct-answer');
+    if (directAnswerTargetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderDirectAnswerBodyTsx(content, site, { canonicalUrl: permalink }),
+        contentFormat: 'jsx',
+      };
+    }
+
     // Same sibling-derived contract as blog-outline: on this platform's own
     // first client both types write into the very same src/blog directory, so
     // a layout that is wrong for one is wrong for the other.
     const contract = await deriveNewContentContract(site, {
-      ...resolveNewContentTargetConfig(site, 'direct-answer'),
+      ...directAnswerTargetConfig,
     }, repoDeps);
     const layout = contract.unknown ? resolveNewContentLayout(site, 'direct-answer') : contract.layout;
     return { ok: true, filePath, body: renderDirectAnswerBody(content, site, { permalink, layout, fieldNames: contract.fieldNames }), contentFormat: 'markdown' };
@@ -188,6 +202,18 @@ export async function resolveTargetAndBody(site, draft, repoDeps = {}) {
       return { ok: false, reason: 'no-file-mapping', error: `No url_file_map entry matches the source page "${content.page || '(none)'}" — add one via \`npm run connect-repo\` before this can be applied.` };
     }
     const filePath = resolveTranslationTarget(sourcePath, content.targetLanguage);
+
+    // Same directory-per-page signal as blog-outline/direct-answer above.
+    const translationTargetConfig = resolveNewContentTargetConfig(site, 'translation');
+    if (translationTargetConfig.filename) {
+      return {
+        ok: true,
+        filePath,
+        body: renderTranslationBodyTsx(content, site),
+        contentFormat: 'jsx',
+      };
+    }
+
     // No permalink (see above), but a translated page is still a brand-new
     // file that needs the site's real chrome around it — and unlike every
     // other type here, this one already knows the exact file it must look

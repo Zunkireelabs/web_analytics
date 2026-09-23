@@ -2,8 +2,35 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isPageMapped, resolveFile, resolveHostScope, resolveNewContentTarget, resolveNewContentUrl, resolveNewContentLayout,
-  resolveMarkers,
+  resolveMarkers, resolveTranslationTarget,
 } from './url-file-map.js';
+
+describe('resolveTranslationTarget', () => {
+  test('a normal file gets a language-code suffix sibling, same as any other framework', () => {
+    assert.equal(resolveTranslationTarget('src/pages/about.njk', 'Spanish'), 'src/pages/about.es.njk');
+  });
+
+  test('null source path -> null, no guessing', () => {
+    assert.equal(resolveTranslationTarget(null, 'Spanish'), null);
+  });
+
+  // Next.js App Router reserves the literal filename `page.tsx` as its route
+  // marker — `page.fr.tsx` is not a recognized route at all, so a naive
+  // suffix (correct for every other framework above) would silently never
+  // be served. This must produce a sibling DIRECTORY instead.
+  test('Next.js App Router: page.tsx gets a language-suffixed sibling DIRECTORY, not a suffixed file', () => {
+    assert.equal(resolveTranslationTarget('src/app/about/page.tsx', 'French'), 'src/app/about-fr/page.tsx');
+  });
+
+  test('Next.js App Router: nested route segments are handled the same way', () => {
+    assert.equal(resolveTranslationTarget('src/app/study-in-canada/page.tsx', 'Spanish'), 'src/app/study-in-canada-es/page.tsx');
+  });
+
+  test('Next.js App Router: also covers page.jsx and page.js, not just page.tsx', () => {
+    assert.equal(resolveTranslationTarget('src/app/about/page.jsx', 'French'), 'src/app/about-fr/page.jsx');
+    assert.equal(resolveTranslationTarget('src/app/about/page.js', 'French'), 'src/app/about-fr/page.js');
+  });
+});
 
 // Regression coverage for a real report: zunkireelabs-web's `/compare/:slug`
 // pattern configures `adapters` for faq/meta-title only (no `file`, no

@@ -602,5 +602,17 @@ function languageCode(targetLanguage) {
 export function resolveTranslationTarget(sourcePath, targetLanguage) {
   if (!sourcePath) return null;
   const code = languageCode(targetLanguage);
+  // Next.js App Router reserves the literal filename `page.(t|j)sx`/`page.js`
+  // as its route-segment marker — a sibling FILE renamed `page.fr.tsx` is not
+  // a recognized route at all (silently never served, not a build error),
+  // unlike every other framework this function resolves for. The equivalent
+  // "same page, another language" target there is a sibling DIRECTORY
+  // suffixed with the language code, which keeps the reserved `page.tsx`
+  // filename intact and gets Next.js its own real route (e.g. /about-fr).
+  const appRouterMatch = sourcePath.match(/^(.*)\/(page\.(?:tsx|jsx|js))$/);
+  if (appRouterMatch) {
+    const [, dir, filename] = appRouterMatch;
+    return `${dir}-${code}/${filename}`;
+  }
   return sourcePath.replace(/(\.[^./]+)$/, `.${code}$1`);
 }
