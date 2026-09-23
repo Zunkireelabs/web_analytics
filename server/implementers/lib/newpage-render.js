@@ -1,7 +1,7 @@
 import { projectPageWrapper, projectCta, projectCard } from '../../design-agent/lib/design-profile.js';
 import { projectMarkdownTablesInBody } from '../../generators/lib/markdown-table-render.js';
 import { projectMarkdownProseInBody } from '../../generators/lib/markdown-prose-render.js';
-import { stripFixedHeightClass } from './marker-merge.js';
+import { stripFixedHeightClass, isInlineContentPage } from './marker-merge.js';
 import { slugifyTitle } from './url-file-map.js';
 // Real body-generation for the three net-new-content types (landing-page,
 // blog-outline, translation). Unlike marker-merge.js's splice (which never
@@ -97,7 +97,7 @@ export function renderLandingPageBody(content, site, { permalink = null, layout 
   }
   const cta = renderCta(content.cta, site);
   if (cta) parts.push(cta);
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
 }
 
 export function renderBlogOutlineBody(content, site, { permalink = null, layout = null, fieldNames = {} } = {}) {
@@ -159,7 +159,7 @@ export function renderBlogOutlineBody(content, site, { permalink = null, layout 
   // markdown rendered HERE, at apply time. Scaffolding introduced during
   // rendering is invisible to every guard by construction — so it has to not be
   // introduced.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
 }
 
 // Next.js App Router variant of renderBlogOutlineBody, for a
@@ -243,7 +243,7 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
   // Same editorial-scaffolding removal as renderBlogOutlineBody above, for the
   // same reason — see the long comment there. Both fields remain on the draft;
   // they just never reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
 }
 
 // The page a dead internal link already pointed at (generators/
@@ -269,7 +269,7 @@ export function renderMissingPageBody(content, site, { permalink = null, layout 
   // justified creating this and which one it was modelled on) — same reason
   // renderBlogOutlineBody withholds its editorial fields, they must never
   // reach a reader.
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, permalink)}\n`;
 }
 
 // Deliberately NOT a structural clone of the source page (draft.content only
@@ -284,7 +284,7 @@ export function renderTranslationBody(content, site, { permalink = null, layout 
     ['title', content.translatedTitle || content.sourceTitle],
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
-  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
+  return `${front}\n${wrapInSiteProse(content.translatedContent || '', site, permalink)}\n`;
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's
@@ -346,7 +346,7 @@ function fillContentWrapper(wrapper, body) {
 // real PR. Unchanged fallback: a site with no contentWrapper configured gets
 // the plain markdown body exactly as before, so nothing regresses for a site
 // that hasn't been through the Design Agent yet.
-function wrapInSiteProse(body, site) {
+function wrapInSiteProse(body, site, permalink = null) {
   // Any real markdown table in the generated body goes through the same
   // projectTable() call content-integrity-repair.js already uses to rebuild
   // a broken/raw-text table on an EXISTING page — one table pipeline for
@@ -361,7 +361,26 @@ function wrapInSiteProse(body, site) {
   // unstyled <h2>/<p> inside a correctly-padded container is precisely the
   // "generated pages look flat next to the real ones" symptom. Runs after the
   // table pass so already-projected table markup is left alone.
-  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile);
+  //
+  // `inline` (same classifier marker-merge.js's splice path already uses):
+  // a blog post's or legal page's own "## Subheading" is an in-article
+  // subheading, not a real page section — confirmed live (2026-09-24), a
+  // generated blog post's own body headings rendered at hero/section scale
+  // (text-3xl md:text-4xl lg:text-5xl), visibly larger than the site's own
+  // human-written reference post's item-scale (text-2xl) headings for the
+  // exact same markdown. Without a real permalink (some callers, e.g. a
+  // translation of an unclassifiable page) this is simply false, same as
+  // today's behavior.
+  // `permalink` here is a bare path ("/blog/some-post/"), not a full URL —
+  // classifyPageType (via isInlineContentPage) needs one to parse a
+  // pathname from, so a placeholder origin stands in; only the path is ever
+  // read. Malformed/absent permalinks fall through to inline=false, same as
+  // today's behavior for a caller with no permalink at all.
+  let inline = false;
+  if (permalink) {
+    try { inline = isInlineContentPage(new URL(permalink, 'https://placeholder.invalid').href); } catch { /* inline stays false */ }
+  }
+  const proseProjected = projectMarkdownProseInBody(tableProjected, site?.url_file_map?.siteRoot?.designProfile, { inline });
 
   // Configured template first, then a projection from the site's design
   // profile, then bare markdown. That middle step is the change: net-new
@@ -424,5 +443,5 @@ export function renderCompliancePageBody(content, preserved = {}, site, { permal
   for (const s of content.sections || []) {
     if (s?.heading) parts.push(`## ${s.heading}\n\n${s.body || ''}`);
   }
-  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
+  return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site, preserved.permalink || permalink)}\n`;
 }

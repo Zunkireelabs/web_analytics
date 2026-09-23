@@ -84,3 +84,27 @@ describe('inline Markdown inside projected blocks', () => {
     assert.match(out, /<h2 [^>]*>Why <strong>we<\/strong> win<\/h2>/);
   });
 });
+
+// Confirmed live (2026-09-24): a generated blog post's own "## Subheading"
+// rendered at typography.heading.section (hero scale) — correct for a
+// landing page's real section headings, visibly larger than the site's own
+// human-written reference post's item-scale headings for the same markdown
+// shape. `inline` grounds h1/h2 in item scale too, matching that reference.
+describe('projectMarkdownProseInBody — inline (blog/legal) pages never get section-scale headings', () => {
+  test('h1/h2 use item scale, not section scale, when inline', () => {
+    const out = projectMarkdownProseInBody('# Title\n\n## Subheading\n\nBody text.', profile, { inline: true });
+    assert.match(out, /<h1 class="text-2xl md:text-3xl font-normal text-gray-900">Title<\/h1>/);
+    assert.match(out, /<h2 class="text-2xl md:text-3xl font-normal text-gray-900">Subheading<\/h2>/);
+    assert.doesNotMatch(out, /text-3xl md:text-4xl lg:text-5xl/);
+  });
+
+  test('h3 and deeper are unaffected by inline — already item scale either way', () => {
+    const out = projectMarkdownProseInBody('### A detail', profile, { inline: true });
+    assert.match(out, /<h3 class="text-2xl md:text-3xl font-normal text-gray-900">A detail<\/h3>/);
+  });
+
+  test('a landing page (inline: false, the default) is unchanged — still section scale for h1/h2', () => {
+    const out = projectMarkdownProseInBody('## Subheading', profile);
+    assert.match(out, /<h2 class="text-3xl md:text-4xl lg:text-5xl font-normal text-gray-900">Subheading<\/h2>/);
+  });
+});

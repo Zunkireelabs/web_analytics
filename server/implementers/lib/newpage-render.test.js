@@ -392,6 +392,34 @@ describe('net-new pages consume the site design profile', () => {
     assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/, 'heading still gets site typography');
     assert.doesNotMatch(out, /rounded-lg border/);
   });
+
+  // Confirmed live (2026-09-24): a generated blog post's own "## Subheading"
+  // rendered at typography.heading.section (hero scale) — a landing page's
+  // real section headings correctly use that scale, but a blog post's own
+  // in-article subheading is a different role and reads far larger than the
+  // site's own human-written reference post for the exact same markdown.
+  test('a blog post (real permalink) gets item-scale headings, not the landing-page section scale', () => {
+    const out = renderBlogOutlineBody(
+      { title: 'T', sections: [{ heading: 'A subheading', body: 'Body text.' }] },
+      siteWithProfile,
+      { permalink: '/blog/some-post/' },
+    );
+    assert.match(out, /<h2 class="text-lg font-medium">A subheading<\/h2>/);
+    assert.doesNotMatch(out, /<h2 class="text-2xl">/);
+  });
+
+  test('the same content with no permalink at all is unchanged — still section scale (today\'s default)', () => {
+    const out = renderBlogOutlineBody(
+      { title: 'T', sections: [{ heading: 'A subheading', body: 'Body text.' }] },
+      siteWithProfile,
+    );
+    assert.match(out, /<h2 class="text-2xl">A subheading<\/h2>/);
+  });
+
+  test('a landing page keeps section-scale headings even when given a permalink', () => {
+    const out = renderLandingPageBody(landing, siteWithProfile, { permalink: '/some-landing-page/' });
+    assert.match(out, /<h2 class="text-2xl">Why us<\/h2>/);
+  });
 });
 
 // Regression guard for a bug that shipped editorial instructions into published
