@@ -1,8 +1,7 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate, meta, sanitizeTable, mergeCitationSections } from './expand-content.js';
 import { runQualityGate } from './lib/quality-gate.js';
-import { query, pool } from '../db.js';
 import { _resetQuotaForTests } from '../ingest/search-grounding-providers/tavily.js';
 
 // Only exercises the input-validation path, which throws before ever
@@ -134,56 +133,27 @@ describe('expand-content generator — thin-extraction guard', () => {
   });
 });
 
-// Real incident (2026-08-10): a site with no configured author profile
-// (sites.author_name unset — most clients, by default) hit this focus, the
-// old code asked the LLM to write "By [Author Name], [Role]", and
-// content-scaffolding-guard.js's author-placeholder pattern (deliberately
-// built to reject exactly that bracket text) rejected it on every single
-// attempt — a permanent, deterministic failure surfaced to the user as a
-// generic "try again shortly" error. Fixed by auto-filling an Organization-
-// level byline from the site's own real name (organizationByline) instead
-// of an LLM-invented placeholder — fully automatic, zero manual step, never
-// a fabricated person. Uses a real, throwaway site row (this repo's own
-// real-DB convention — see strategy-registry.test.js) since
-// hasAuthorProfile()/organizationByline() read real site columns, not a mock.
-describe('expand-content generator — author-byline with no configured author profile', () => {
-  let site;
-
-  before(async () => {
-    const { rows } = await query(
-      `INSERT INTO sites (name, gsc_property, ga4_property_id)
-       VALUES ('Expand Content Author Byline Test Site', 'sc-domain:expand-content-author-test.example', 'test-ga4')
-       RETURNING *`
-    );
-    site = rows[0];
-  });
-
-  after(async () => {
-    await query('DELETE FROM sites WHERE id = $1', [site.id]);
-    await pool.end();
-  });
-
-  test('auto-fills an Organization byline from the site\'s real name and passes the Quality Gate, without calling the LLM', async () => {
+// Retired platform-wide (2026-09-24, explicit owner decision): a visible
+// "About the Author" section is never drafted for any site anymore, whether
+// from a real configured individual author or the organization-name
+// fallback. Previously the organization fallback bypassed
+// require_visible_byline entirely, so a site whose own policy said "no
+// visible byline" (the column's default) still got an unwanted section on
+// every run — this replaces both paths (and the earlier
+// organization-byline auto-fill covered by this describe block) with a
+// single, unconditional, honest refusal. No DB site row needed: this no
+// longer reads any site column at all.
+describe('expand-content generator — author-byline is retired', () => {
+  test('refuses honestly, no LLM call, regardless of site or its author configuration', async () => {
     const original = globalThis.fetch;
-    let llmWasCalled = false;
-    globalThis.fetch = async (url) => {
-      if (String(url).includes('anthropic') || String(url).includes('openai')) llmWasCalled = true;
-      return {
-        ok: true,
-        headers: { get: () => 'text/html; charset=utf-8' },
-        text: async () => '<html><head><title>Real Page</title></head><body><main><p>'
-          + 'Real, substantial page body content about a product. '.repeat(10)
-          + '</p></main></body></html>',
-        url,
-      };
-    };
+    let fetchWasCalled = false;
+    globalThis.fetch = async () => { fetchWasCalled = true; throw new Error('should never be called'); };
     try {
-      const { content } = await generate({ siteId: site.id, params: { page: 'https://example.com/real-page', focus: 'author-byline' } });
-      assert.equal(llmWasCalled, false);
-      assert.equal(content.sections[0].body, 'By the Expand Content Author Byline Test Site Team');
-      const gate = await runQualityGate(content, meta.id);
-      assert.deepEqual(gate.issues, []);
-      assert.equal(gate.clean, true);
+      await assert.rejects(
+        () => generate({ siteId: 1, params: { page: 'https://example.com/real-page', focus: 'author-byline' } }),
+        /retired platform-wide/i,
+      );
+      assert.equal(fetchWasCalled, false, 'refuses before ever fetching the page or configuring an author');
     } finally { globalThis.fetch = original; }
   });
 });
