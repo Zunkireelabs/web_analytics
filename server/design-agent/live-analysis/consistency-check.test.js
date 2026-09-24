@@ -180,6 +180,69 @@ describe('compareSectionsToProfile — h1 resolved per hero/standard context', (
   });
 });
 
+describe('compareSectionsToProfile — h3/h4 resolved per page type (pageTypePatterns)', () => {
+  // Reproduces the exact admizzeducation.com contradiction: a country-landing
+  // page's small icon-card caption h4 ("Fall Intake") and a blog-article's
+  // in-article subheading h4 ("What Is the COMPEX Scholarship?") are each
+  // the dominant, internally-consistent style for their OWN page type. The
+  // flat sitewide `heading.item` can only hold one of them, so each page
+  // type's own real heading got flagged as drift against the OTHER page
+  // type's convention — a self-contradictory pair, not real drift.
+  const PROFILE_WITH_PAGE_TYPE_PATTERNS = {
+    ...BASE_PROFILE,
+    pageTypePatterns: {
+      location: { textHierarchy: [{ role: 'subheading', classes: 'font-bold text-navy text-sm' }] },
+      'blog-article': { textHierarchy: [{ role: 'subheading', classes: 'text-lg md:text-xl font-bold text-navy mt-6 mb-3' }] },
+    },
+  };
+
+  test('a page type\'s own h4 style is never flagged against its own page type\'s convention', () => {
+    const locationPage = page({
+      pageType: 'location',
+      sections: [section({
+        textHierarchy: [{ role: 'subheading', text: 'Fall Intake', tag: 'h4', style: null, classes: 'font-bold text-navy text-sm' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_TYPE_PATTERNS, [locationPage]);
+    assert.equal(findings.filter((f) => f.id === 'typography-drift').length, 0);
+  });
+
+  test('the OTHER page type\'s equally-legitimate h4 style is also never flagged — no more self-contradiction', () => {
+    const blogPage = page({
+      pageType: 'blog-article',
+      sections: [section({
+        textHierarchy: [{ role: 'subheading', text: 'What Is the COMPEX Scholarship?', tag: 'h4', style: null, classes: 'text-lg md:text-xl font-bold text-navy mt-6 mb-3' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_TYPE_PATTERNS, [blogPage]);
+    assert.equal(findings.filter((f) => f.id === 'typography-drift').length, 0);
+  });
+
+  test('an h4 that drifts from its OWN page type\'s real convention is still flagged', () => {
+    const locationPage = page({
+      pageType: 'location',
+      sections: [section({
+        textHierarchy: [{ role: 'subheading', text: 'Fall Intake', tag: 'h4', style: null, classes: 'totally-unrelated-classes' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_TYPE_PATTERNS, [locationPage]);
+    const drift = findings.find((f) => f.id === 'typography-drift');
+    assert.ok(drift);
+    assert.equal(drift.evidence.siteConvention, 'font-bold text-navy text-sm');
+  });
+
+  test('with no pageTypePatterns evidence for this page type, falls back to the flat item/section convention (pre-existing behavior)', () => {
+    const p = page({
+      pageType: 'unmapped-type',
+      sections: [section({
+        textHierarchy: [{ role: 'subheading', text: 'x', tag: 'h4', style: null, classes: 'text-xl font-semibold' }],
+      })],
+    });
+    const findings = compareSectionsToProfile(PROFILE_WITH_PAGE_TYPE_PATTERNS, [p]);
+    assert.equal(findings.filter((f) => f.id === 'typography-drift').length, 0);
+  });
+});
+
 describe('compareSectionsToProfile — a fully-consistent site produces zero findings', () => {
   test('nothing is flagged when every real section matches the site\'s own real conventions', () => {
     const p = page({
