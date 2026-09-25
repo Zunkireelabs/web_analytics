@@ -3,20 +3,23 @@
 -- Zenly, a market, or an industry; those all live in product_growth_config's
 -- JSON columns (167) or on individual prospect rows as real evidence.
 
--- Per-site opt-in for prospect discovery (never gated on DataForSEO creds
+-- Per-product opt-in for prospect discovery (never gated on DataForSEO creds
 -- merely being present — see the Universal Product Growth mode plan) and
--- the per-site secret an external CRM uses to call back into
+-- the per-product secret an external CRM uses to call back into
 -- server/routes/crm-webhook.js. NULL crm_webhook_token means the CRM
--- handoff isn't wired up yet for this site.
+-- handoff isn't wired up yet for this product.
 ALTER TABLE product_growth_config
   ADD COLUMN IF NOT EXISTS prospect_discovery_enabled BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS crm_webhook_token TEXT UNIQUE;
 
--- One row per discovered prospect. evidence_json is the real signal that
--- justified surfacing this prospect (e.g. which query it was found under,
--- which real page text matched a configured ICP signal) — never fabricated,
--- and a discovery run that can't back a candidate with evidence emits no row
--- at all rather than a low-confidence guess.
+-- One row per discovered prospect, keyed on products.id (167_products_table)
+-- rather than sites.id — a prospect belongs to the product's own
+-- growth-mode identity, not to the website/auth row backing it.
+-- evidence_json is the real signal that justified surfacing this prospect
+-- (e.g. which query it was found under, which real page text matched a
+-- configured ICP signal) — never fabricated, and a discovery run that can't
+-- back a candidate with evidence emits no row at all rather than a
+-- low-confidence guess.
 --
 -- status is the configurable CRM lifecycle from the Product Growth spec
 -- (prospect -> contacted -> interested -> demo_requested -> demo_booked ->
@@ -27,7 +30,7 @@ ALTER TABLE product_growth_config
 -- (approved_for_crm) or a real CRM webhook call (crm_synced_at/status).
 CREATE TABLE IF NOT EXISTS prospects (
   id                  SERIAL PRIMARY KEY,
-  site_id             INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  product_id          INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   company_name        TEXT,
   market              TEXT,
   industry            TEXT,
@@ -49,7 +52,7 @@ CREATE TABLE IF NOT EXISTS prospects (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_prospects_site ON prospects (site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prospects_product ON prospects (product_id, created_at DESC);
 -- A prospect discovery run's own de-dup key: never surface the same
--- evidence-backed company twice for one site.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_prospects_site_company ON prospects (site_id, company_name) WHERE company_name IS NOT NULL;
+-- evidence-backed company twice for one product.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prospects_product_company ON prospects (product_id, company_name) WHERE company_name IS NOT NULL;

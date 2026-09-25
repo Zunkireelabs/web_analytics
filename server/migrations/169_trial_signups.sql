@@ -16,20 +16,23 @@ ALTER TABLE product_growth_config
   -- instead of a guess from the company name alone.
   ADD COLUMN IF NOT EXISTS competitor_signals_json JSONB;
 
+-- Keyed on products.id (167_products_table), same reasoning as prospects
+-- (168): a trial signup belongs to the product's own identity, not to the
+-- website/auth row backing it.
 CREATE TABLE IF NOT EXISTS trial_signups (
   id                     SERIAL PRIMARY KEY,
-  site_id                INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  product_id             INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   email                  TEXT,
   company_name           TEXT,
   company_domain         TEXT,
   -- Free text, e.g. 'zenly-trial' — whichever external product reported
-  -- this signup, since one analytics site could in principle receive
-  -- signups from more than one of its own product surfaces.
+  -- this signup, since one product could in principle receive signups from
+  -- more than one of its own surfaces.
   source                 TEXT,
   -- 'unclassified' until the webhook's own real evidence check runs;
   -- 'prospect' (no competitor signal found), 'competitor_suspect' (real
   -- evidence the signup's own domain sells something similar) — never a
-  -- third silently-invented value, see classify() in trial-signups.js.
+  -- third silently-invented value, see classify() in trial-signup.js.
   classification         TEXT NOT NULL DEFAULT 'unclassified',
   -- The real evidence the classification was based on (matched competitor
   -- domain, matched phrase + source URL) — never fabricated, and absent
@@ -39,4 +42,4 @@ CREATE TABLE IF NOT EXISTS trial_signups (
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_trial_signups_site ON trial_signups (site_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trial_signups_product ON trial_signups (product_id, created_at DESC);
