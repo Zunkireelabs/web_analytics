@@ -14,6 +14,7 @@ export const meta = {
   description: 'Analyzes the site\'s own ranking pages for on-page completeness gaps, cross-references real tracked-competitor structural signals, and suggests possibly-missing entities.',
   category: 'content',
   version: 5,
+  requiresCapabilities: ['gsc'],
   // True topical/SERP-based gap detection (a specific topic a competitor
   // ranks for that this site has no page for at all) still has no real data
   // source — that's a different, still-unbuilt question from what's below.

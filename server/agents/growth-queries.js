@@ -37,6 +37,11 @@ export const meta = {
   // runs happening the whole time.
   version: 1,
   description: 'Discovers the real range of search/AI-assistant queries this site\'s category gets asked, checks whether the site\'s own content directly answers each one, and tracks whether newly-covered gaps actually start showing up in Google or AI assistants over time.',
+  // GSC query data is this agent's primary discovery signal today (see
+  // gsc-query-data below) — until it can seed candidates from a GSC-free
+  // source too, gate it the same as the other GSC-dependent agents rather
+  // than run it against a product site with nothing to discover from.
+  requiresCapabilities: ['gsc'],
   dataSources: [
     { id: 'gsc-query-data', status: 'connected', description: 'Real Google Search Console query/impression/position data for this site — the primary discovery signal.' },
     { id: 'llm-category-expansion', status: 'connected', description: 'LLM-reasoned expansion into broad category, niche, comparison, and question-style queries, grounded only in this site\'s own real services/pages/queries — never invented.' },

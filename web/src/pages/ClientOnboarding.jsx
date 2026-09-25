@@ -28,12 +28,23 @@ function Field({ label, hint, icon: Icon, ...props }) {
   );
 }
 
+// Universal Product Growth mode: an onboarded property is either a
+// content/traffic 'website' or a zero-traffic 'product' (see
+// server/lib/site-capabilities.js) — generic across any product tenant,
+// never a Zenly-specific choice. Defaults to 'website' so every existing
+// onboarding flow is unaffected unless staff explicitly pick Product.
+const PROPERTY_TYPES = [
+  { value: 'website', label: 'Website', hint: 'Has organic traffic — full search-analytics + site-improvement agents.' },
+  { value: 'product', label: 'Product', hint: 'Zero/low-traffic SaaS or product site — visibility + demand-generation agents only, no GSC/GA4 required.' },
+];
+
 function NewClientForm({ onCreated }) {
   const [name, setName] = useState('');
   const [websiteDomain, setWebsiteDomain] = useState('');
   const [timezone, setTimezone] = useState('Asia/Kolkata');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [propertyType, setPropertyType] = useState('website');
   const [state, setState] = useState('idle');
   const [error, setError] = useState(null);
 
@@ -42,9 +53,9 @@ function NewClientForm({ onCreated }) {
     setState('running');
     setError(null);
     try {
-      const site = await api.clients.create({ name, websiteDomain, timezone, email, password });
+      const site = await api.clients.create({ name, websiteDomain, timezone, email, password, propertyType });
       setState('idle');
-      setName(''); setWebsiteDomain(''); setEmail(''); setPassword('');
+      setName(''); setWebsiteDomain(''); setEmail(''); setPassword(''); setPropertyType('website');
       onCreated(site);
     } catch (err) {
       setError(err.message || 'Could not create client.');
@@ -54,6 +65,22 @@ function NewClientForm({ onCreated }) {
 
   return (
     <form onSubmit={submit} className="space-y-4">
+      <div>
+        <span className={labelCls}>Property Type</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 mt-1.5">
+          {PROPERTY_TYPES.map((t) => (
+            <button key={t.value} type="button" onClick={() => setPropertyType(t.value)}
+              className={`text-left rounded-xl border px-3.5 py-2.5 transition ${
+                propertyType === t.value
+                  ? 'border-[#6C63FF] bg-[#6C63FF]/5 ring-2 ring-[#6C63FF]/10'
+                  : 'border-slate-200/80 bg-slate-50/50 hover:bg-slate-100/60'
+              }`}>
+              <span className="block text-xs font-black text-slate-800">{t.label}</span>
+              <span className="block text-[9.5px] font-semibold text-slate-400 mt-0.5">{t.hint}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Field label="Client Corporate Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Corp" required icon={Building} />
         <Field label="Website Domain" value={websiteDomain} onChange={(e) => setWebsiteDomain(e.target.value)} placeholder="acme.com" icon={Globe} />
@@ -351,7 +378,12 @@ export default function ClientOnboarding() {
                     <tr key={c.id} onClick={() => openDrawer(c)}
                       className="border-b border-slate-50 last:border-b-0 hover:bg-slate-50/70 transition cursor-pointer" style={{ height: '60px' }}>
                       <td className="px-4 py-2">
-                        <p className="text-xs font-bold text-slate-800 truncate">{c.name}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-bold text-slate-800 truncate">{c.name}</p>
+                          {c.propertyType === 'product' && (
+                            <span className="text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border border-indigo-100 text-indigo-600 bg-indigo-50 shrink-0">Product</span>
+                          )}
+                        </div>
                         <p className="text-[10px] font-mono text-slate-400 truncate">{c.websiteDomain || 'no domain configured'}</p>
                       </td>
                       <td className="px-4 py-2">

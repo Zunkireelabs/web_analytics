@@ -59,6 +59,7 @@ export const meta = {
   description: 'Synthesizes keyword gaps, content clusters, and AI-visibility scores into one narrative on where keyword growth is available and what to do about it this week.',
   category: 'seo',
   version: 1,
+  requiresCapabilities: ['gsc'],
 };
 
 // Gathers only real, already-persisted data — no LLM, no fabrication. Shared

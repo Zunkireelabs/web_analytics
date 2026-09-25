@@ -2,6 +2,8 @@ import { getAgent } from './registry.js';
 import { saveAgentRun } from '../store/agent-runs.js';
 import { emitAgentStart, emitAgentDone } from './lib/activity-bus.js';
 import { safeMessage } from '../lib/errors.js';
+import { getSiteById } from '../store/read.js';
+import { hasRequiredCapabilities } from '../lib/site-capabilities.js';
 
 // The one place that invokes an agent, times it, and persists the result —
 // agents themselves never touch agent_runs. Set persist:false for in-process
@@ -20,6 +22,25 @@ export async function runAgent(id, input, { persist = true } = {}) {
     const err = new Error(`Unknown agent "${id}"`);
     err.status = 404;
     throw err;
+  }
+
+  // Capability gate: an agent whose meta.requiresCapabilities aren't met by
+  // this site is not scheduled at all — never run-then-insufficient-data
+  // (see the Universal Product Growth mode plan). No agent_runs row is
+  // written and no activity event fires, so a capability-ineligible agent
+  // stays silent rather than noisy in the Command Center.
+  if (agent.meta.requiresCapabilities?.length) {
+    const site = await getSiteById(input.siteId);
+    if (!hasRequiredCapabilities(site, agent.meta.requiresCapabilities)) {
+      return {
+        status: 'skipped',
+        facts: null,
+        narrative: null,
+        message: `Skipped — this site doesn't have: ${agent.meta.requiresCapabilities.join(', ')}`,
+        generatedAt: new Date().toISOString(),
+        tookMs: 0,
+      };
+    }
   }
 
   const startedAt = Date.now();
