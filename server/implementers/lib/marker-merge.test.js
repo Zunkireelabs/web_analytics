@@ -1179,6 +1179,22 @@ describe('buildMergeValues — captured template with unsafe classes never ships
     assert.equal(linksResult.ok, true);
     assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
   });
+
+  // Reported 2026-09-25: zunkireelabs.com's real internal-links row carries a
+  // `w-4 h-4` arrow icon next to each link. The fixed-height strip above
+  // (correctly aimed at a wrapper/heading holding arbitrary-length body
+  // copy) doesn't distinguish an <svg> icon from those — it stripped h-4
+  // right along with h-[70px]/h-12, leaving the icon at its browser-default
+  // intrinsic height instead of its real square size.
+  test('a fixed height on an <svg> icon survives the strip, unlike a text-flow element', () => {
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+      wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
+      row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}<svg class="w-4 h-4"></svg></a></li>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(linksResult.ok, true);
+    assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+    assert.match(linksResult.values.links, /<svg class="w-4 h-4">/);
+  });
 });
 
 describe('JSX marker convention (.jsx/.tsx bootstrap-created markers)', () => {

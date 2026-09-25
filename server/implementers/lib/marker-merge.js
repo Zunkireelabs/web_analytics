@@ -793,8 +793,21 @@ function stripClassesMatching(html, predicate) {
 // container-sizing strip below never applies to it (a page's own top-level
 // layout container is correct there by definition); only a fixed height
 // is unconditionally wrong on any element holding arbitrary-length body copy.
+//
+// Skips <svg> elements: an icon's fixed h-N (paired with w-N, e.g. an arrow
+// glyph next to a link) is a completely different case from a fixed height
+// on a text-flow wrapper — an SVG scales its own fixed viewBox, it never
+// holds arbitrary-length body copy that a height could clip or overlap.
+// Confirmed live: zunkireelabs.com's related-resources link row carries a
+// `w-4 h-4` arrow icon, and stripping only the h-4 (leaving w-4) rendered the
+// icon at browser-default intrinsic height instead of its real square size.
 export function stripFixedHeightClass(html) {
-  return stripClassesMatching(html, isFixedHeightClass);
+  if (!html) return html;
+  return html.replace(/(<(svg|[a-zA-Z][\w-]*)\b[^>]*\sclass=")([^"]*)(")/g, (full, prefix, tag, list, suffix) => {
+    if (tag.toLowerCase() === 'svg') return full;
+    const kept = list.split(/\s+/).filter((c) => c && !isFixedHeightClass(c));
+    return kept.length ? `${prefix}${kept.join(' ')}${suffix}` : `${prefix}${suffix}`;
+  });
 }
 
 // Applied to every captured template right before render — DEFAULT_* templates
