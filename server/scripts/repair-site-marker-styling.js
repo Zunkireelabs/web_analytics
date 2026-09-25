@@ -32,7 +32,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
-import { fillTemplate, renderFromTemplate, escapeHtml, proseStyleFor } from '../implementers/lib/marker-merge.js';
+import { fillTemplate, renderFromTemplate, escapeHtml, proseStyleFor, isInlineContentPage } from '../implementers/lib/marker-merge.js';
+import { isSectionScaleTextClass } from '../lib/text-scale.js';
 
 // Marker name -> how to parse its content back out, and how to re-render it.
 // Parsers return null when the region is not in a shape they recognise, which
@@ -85,6 +86,28 @@ function buildHandlers(templates, proseStyle = {}) {
         const answer = unwrapSlot($, $(d).children().not('summary'));
         if (question && answer) items.push({ question, answer });
       });
+      // Fallback: a plain <h3>/text shape with no <details> at all —
+      // confirmed live (2026-09-24), the bare-heading PROSE_TEMPLATES.QACONTENT
+      // shape a run of THIS script itself could produce before the "always
+      // ground the heading, always wrap the answer" fix landed. Without this,
+      // a page already mangled into that shape by an earlier run could never
+      // be healed by a later one, even after the template producing it was
+      // corrected — the exact "fixed going forward, but not what already
+      // shipped" trap this whole script exists to close.
+      //
+      // rawContentUntilNextHeading, not nextUntil('h3'): the answer here is
+      // an unwrapped, bare TEXT NODE (no <p>/<div> around it at all — the
+      // exact other half of this same incident) — .nextUntil() only ever
+      // matches ELEMENT siblings, so it silently returned an empty selection
+      // for plain text and every item was dropped. Walking the parent's real
+      // .contents() (text nodes included) is what actually finds it.
+      if (!items.length) {
+        $('h3').each((i, h) => {
+          const question = $(h).text().trim();
+          const answer = rawContentUntilNextHeading($, $(h));
+          if (question && answer) items.push({ question, answer });
+        });
+      }
       return items.length ? items : null;
     },
     render: (items, tpl) => renderSlots(items, tpl, (it) => ({
@@ -112,18 +135,52 @@ function buildHandlers(templates, proseStyle = {}) {
       // such region unrecognised ("unrecognised shape, left as-is") forever,
       // even after the template that produced it was fixed and the daily
       // repair cron (repair-site-content-live.js) ran again.
+      //
+      // nextUntil('h1, h2, h3'), not nextAll(): confirmed live (2026-09-24) —
+      // re-running this repair against its OWN prior output (a flat sequence
+      // of sibling <h2>/<p> pairs, no per-item wrapper left after the first
+      // pass) made nextAll() grab EVERY later heading and body as part of
+      // the FIRST item's own body too, and the second item's body as part of
+      // a THIRD pass, cascading into tripled, nested duplicate content on a
+      // second run. nextAll() happened to work on the very first run only
+      // because the original captured markup still had each item in its own
+      // wrapper <div>/<section>, so "everything after this heading" and
+      // "everything after this heading up to the next one" were
+      // accidentally the same set. This script's own output broke that
+      // assumption, which means it was never actually safe to re-run.
       $('h1, h2, h3').each((i, h) => {
         const heading = $(h).text().trim();
-        const body = unwrapSlot($, $(h).nextAll());
+        const body = unwrapSlot($, $(h).nextUntil('h1, h2, h3'));
         if (heading && body) items.push({ heading, body });
       });
+      // Still returns items even if every one of them is about to be
+      // dropped by the author-byline retirement below — this only decides
+      // whether the region PARSES at all, not what survives to render.
       return items.length ? items : null;
     },
-    render: (items, tpl) => renderSlots(items, tpl, (it) => ({
-      HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseProse(normaliseTables(it.body), proseStyle), tpl.row, 'BODY'),
-    }), (it) => blockSafeRow(tpl.row, normaliseProse(normaliseTables(it.body), proseStyle), 'BODY')),
+    render: (items, tpl) => renderSlots(
+      items.filter((it) => !isRetiredAuthorByline(it.heading)),
+      tpl,
+      (it) => ({ HEADING: escapeHtml(it.heading), BODY: dropOuterParagraph(normaliseProse(normaliseTables(it.body), proseStyle), tpl.row, 'BODY') }),
+      (it) => blockSafeRow(tpl.row, normaliseProse(normaliseTables(it.body), proseStyle), 'BODY'),
+    ),
   },
   };
+}
+
+// Explicit owner decision (2026-09-24): a visible "About the Author" section
+// is retired platform-wide (see generators/expand-content.js's author-byline
+// focus, which now refuses to draft one at all) — but that only stops NEW
+// drafts. Every already-published page still has its old one sitting in a
+// live EXPANDEDCONTENT region, often bundled alongside other items
+// (References, Last Updated) in the SAME region, so it can't just be left
+// for the generator-side fix to eventually cover. Filtered out here,
+// unconditionally, on every repair run — matched on the heading text alone
+// (never the body), so this can never accidentally drop a real, human-
+// relevant section that just happens to mention an author in passing.
+const RETIRED_HEADINGS = new Set(['about the author']);
+function isRetiredAuthorByline(heading) {
+  return RETIRED_HEADINGS.has(String(heading || '').trim().toLowerCase());
 }
 
 // Deliberately NOT marker-merge's renderFaqHtml / renderQaHtml /
@@ -206,6 +263,24 @@ function unwrapSlot($, elements) {
   return elements.map((i, el) => $.html(el)).get().join('').trim();
 }
 
+// Everything between one heading and the next, INCLUDING bare text nodes —
+// unlike .nextUntil(), which only ever matches element siblings and silently
+// returns nothing for plain unwrapped text (the QACONTENT bare-<h3> fallback
+// above needs exactly that: its "answer" is often nothing but a text node,
+// with no <p>/<div> around it at all).
+function rawContentUntilNextHeading($, heading) {
+  const node = heading.get(0);
+  const siblings = $(node).parent().contents().toArray();
+  const startIndex = siblings.indexOf(node);
+  const collected = [];
+  for (let i = startIndex + 1; i < siblings.length; i++) {
+    const sib = siblings[i];
+    if (sib.type === 'tag' && /^h[123]$/.test(sib.tagName)) break;
+    collected.push($.html(sib));
+  }
+  return collected.join('').trim();
+}
+
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
     if (entry === 'node_modules' || entry === '.git') continue;
@@ -237,22 +312,57 @@ const DATA_FIELD = /(\bexpandedContent\s*:\s*)("(?:[^"\\]|\\.)*")/g;
 // being visibly larger than the human-written ones around it.
 //
 // Bare tags inherit prose exactly, which makes injected sections
-// indistinguishable from the post's own. This is not a different design, it is
-// the ABSENCE of a competing one, and it only applies inside a prose host.
+// indistinguishable from the post's own — but ONLY on a page that genuinely
+// has that ambient `.prose` wrapper. Confirmed broken (2026-09-24) on
+// src/pages/resources/ai-search-stack-guide.njk, a real full page template
+// with NO .prose wrapper at all: Tailwind's own preflight reset sets every
+// heading's font-size/font-weight to `inherit`, so a bare <h2>/<h3> there
+// renders as indistinguishable plain body text, not a reasonably-sized
+// default heading the way a markdown blog post's bare heading would.
+// "Bare tags inherit prose exactly" was never a site-wide-safe fallback — it
+// only held for the one page type (a markdown blog post) this was first
+// written against. groundedProseTemplates() grounds the heading in the
+// site's own real typography.heading.item instead (stripped of any
+// section-scale token, same discipline marker-merge.js's own inline-page
+// guard uses) whenever a real designProfile is available — real evidence,
+// never invented — and only falls back to a genuinely bare tag when no
+// profile was passed in at all (still correct on an actual .prose-host page).
+//
+// The SAME incident also caught QACONTENT's {{ANSWER}} shipping with no
+// wrapping element whatsoever — not even a classless <p> — because the
+// parser (unwrapSlot) had, for this specific page, extracted the answer from
+// a single captured <div class="..."> and correctly unwrapped it down to
+// plain text. Bare text has no element for even an ambient `.prose`
+// selector (`.prose p`) to match, so this was never safe on ANY host, prose
+// or not — now always wrapped in a real <p>, with a grounded class when one
+// is available.
+//
 // FAQ was missing here (2026-09-09): a blog post's FAQ marker fell through
 // to `handler.template` below — the site's real captured template, built for
 // a full-bleed page SECTION (e.g. `container-custom py-12 md:py-20`) — and
 // carried that section's own width/padding straight into the post's already-
 // constrained prose column, the same "carries its own sizing classes into a
-// prose host" defect this whole PROSE_TEMPLATES table exists to prevent for
+// prose host" defect this whole table exists to prevent for
 // EXPANDEDCONTENT/QACONTENT. <dt>/<dd> is DEFAULT_FAQ_TEMPLATE's own bare
 // shape (marker-merge.js) — same "zero sizing classes, let prose style it"
 // contract as the other two rows here.
-const PROSE_TEMPLATES = {
-  EXPANDEDCONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h2>{{HEADING}}</h2>\n{{BODY}}' },
-  QACONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: '<h3>{{QUESTION}}</h3>\n{{ANSWER}}' },
-  FAQ: { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: '<dt>{{QUESTION}}</dt>\n<dd>{{ANSWER}}</dd>' },
-};
+function groundedHeadingAttr(designProfile) {
+  const raw = designProfile?.typography?.heading?.item;
+  if (!raw) return '';
+  const kept = String(raw).split(/\s+/).filter((c) => c && !isSectionScaleTextClass(c));
+  return kept.length ? ` class="${kept.join(' ')}"` : '';
+}
+
+function groundedProseTemplates(designProfile) {
+  const headingAttr = groundedHeadingAttr(designProfile);
+  const body = designProfile?.typography?.body || '';
+  const bodyAttr = body ? ` class="${body}"` : '';
+  return {
+    EXPANDEDCONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: `<h2${headingAttr}>{{HEADING}}</h2>\n{{BODY}}` },
+    QACONTENT: { wrapper: '<div>\n{{ROWS}}\n</div>', row: `<h3${headingAttr}>{{QUESTION}}</h3>\n<p${bodyAttr}>{{ANSWER}}</p>` },
+    FAQ: { wrapper: '<dl>\n{{ROWS}}\n</dl>', row: `<dt${headingAttr}>{{QUESTION}}</dt>\n<dd${bodyAttr}>{{ANSWER}}</dd>` },
+  };
+}
 
 // hostIsProse (below) used to be file.endsWith('.md') alone — a proxy for
 // "is this page a blog-article, the one page type PROSE_TEMPLATES was built
@@ -271,6 +381,26 @@ const PROSE_TEMPLATES = {
 // a URL path here, since this script repairs a materialized file tree, not
 // live pages with known URLs.
 const LEGAL_FILE_RE = /\b(terms|privacy|cookies?|legal)\b/i;
+
+// The real signal, when it's available: every real page file on this site
+// (.md and .njk alike) declares its own live URL as `permalink:` in its front
+// matter — the same value Eleventy itself routes on. Reusing marker-merge.js's
+// own isInlineContentPage/classifyPageType against THAT is strictly better
+// than guessing "prose" from a file extension or basename keyword: a tenant
+// can (and does — site 1's /resources/<slug>/ pages) host genuine inline
+// article content on a non-.md, non-legal-named template. Confirmed live:
+// src/pages/resources/ai-search-stack-guide.njk is a blog-article-shaped page
+// rendered from a .njk template — the file.endsWith('.md')/LEGAL_FILE_RE
+// checks above never classify it as a prose host at all, so its QACONTENT/
+// EXPANDEDCONTENT regions kept getting re-stamped with the full section-scale
+// component template on every repair run, forever. Falls back to the existing
+// filename heuristics only when a file has no permalink to read.
+const PERMALINK_RE = /^permalink:\s*"?([^"\n]+)"?\s*$/m;
+function isProseHost(file, text) {
+  const permalink = PERMALINK_RE.exec(text)?.[1]?.trim();
+  if (permalink) return isInlineContentPage(new URL(permalink, 'https://placeholder.invalid').href);
+  return file.endsWith('.md') || LEGAL_FILE_RE.test(path.basename(file));
+}
 
 // The site's own comparison-table convention (src/pages/agentic-as-a-service.njk).
 // Generated tables shipped as a bare <table> with no classes at all, or with a
@@ -371,6 +501,7 @@ async function repairDataFile(file, handlers, write) {
  */
 export async function repairSiteMarkerStyling(repoDir, templates, { write = false, designProfile = null } = {}) {
   const handlers = buildHandlers(templates, proseStyleFor(designProfile));
+  const proseTemplates = groundedProseTemplates(designProfile);
   const files = walk(path.join(repoDir, 'src'));
   let changedFiles = 0;
   let changedRegions = 0;
@@ -387,6 +518,7 @@ export async function repairSiteMarkerStyling(repoDir, templates, { write = fals
 
     let updated = text;
     const regionNotes = [];
+    const hostIsProse = isProseHost(file, text);
 
     for (const [name, handler] of Object.entries(handlers)) {
       if (!handler.template) continue;
@@ -403,11 +535,7 @@ export async function repairSiteMarkerStyling(repoDir, templates, { write = fals
           return whole;
         }
 
-        // A markdown post (or a legal page — see LEGAL_FILE_RE above) is
-        // hosted inside the layout's prose wrapper; any other .njk page
-        // template is not, and needs the full standalone component.
-        const hostIsProse = file.endsWith('.md') || LEGAL_FILE_RE.test(path.basename(file));
-        const template = (hostIsProse && PROSE_TEMPLATES[name]) || handler.template;
+        const template = (hostIsProse && proseTemplates[name]) || handler.template;
         const rendered = `${handler.render(items, template)}${scripts.join('')}`;
         if (rendered.trim() === inner) return whole;
 

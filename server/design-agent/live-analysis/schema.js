@@ -34,12 +34,29 @@ export const PAGE_TYPES = Object.freeze([
 // URL-shape heuristics only — there is no pageType concept anywhere else in
 // this repo (url_file_map, discover-content-target.js) to defer to. Ordered
 // most-specific first; falls through to 'other' rather than guessing.
+//
+// 'resources'/'guides'/'insights'/'learn' are grouped with blog/articles/news
+// rather than left to fall through to 'other': these are the same long-form,
+// single-column prose page as a blog post, just filed under a different
+// content-hub segment a given tenant happens to use (confirmed live on site 1
+// — zunkireelabs.com publishes long-form articles under /resources/<slug>/).
+// 'other' deliberately still means "assume a real full-bleed section page"
+// (marker-merge.js's isInlineContentPage) — About/Team/Contact-style pages —
+// so a genuine content-hub prefix has to be named here, not lumped into
+// 'other' by omission, or its articles ship with unstripped section-scale
+// markup exactly like a homepage/landing section would (the 2026-09-23 defect
+// this comment documents: an expand-content/qa-content block spliced into
+// /resources/ai-search-stack-guide/ rendered with full section-headline-scale
+// heading classes and no card structure because this page type wasn't
+// recognized as inline prose).
+const BLOG_LISTING_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/?$/;
+const BLOG_ARTICLE_RE = /\/(blog|articles?|news|resources?|guides?|insights?|learn)\/.+/;
 export function classifyPageType(url) {
   let path = '/';
   try { path = new URL(url).pathname.toLowerCase(); } catch { return 'other'; }
   if (path === '/' || path === '') return 'homepage';
-  if (/\/(blog|articles?|news)\/?$/.test(path)) return 'blog-listing';
-  if (/\/(blog|articles?|news)\/.+/.test(path)) return 'blog-article';
+  if (BLOG_LISTING_RE.test(path)) return 'blog-listing';
+  if (BLOG_ARTICLE_RE.test(path)) return 'blog-article';
   if (/\/(faq|faqs|help|support)\b/.test(path)) return 'faq';
   if (/\/(terms|privacy|cookies?|legal)\b/.test(path)) return 'legal';
   if (/\/(services?|solutions?|products?)\b/.test(path)) return 'service';

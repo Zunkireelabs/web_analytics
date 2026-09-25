@@ -22,14 +22,18 @@ export const meta = {
 // external per-page quota to respect.
 const MAX_PAGES = 40;
 
+// A "missing author signal" rule used to live here, routing to
+// expand-content's author-byline focus. Retired platform-wide (2026-09-24,
+// explicit owner decision): that focus no longer drafts a visible "About
+// the Author" section for any site (see expand-content.js), so routing a
+// recommendation there would only ever produce a dead-end, permanently-
+// failing draft. Schema-level author attribution (rel="author",
+// itemprop="author", Article schema's author field) is unaffected — still
+// surfaced separately as an informational gap by
+// page-content.js's summarizeContentGaps, and still fixable via the
+// 'schema' action type — this only removes the visible-section
+// recommendation.
 const GEO_SIGNAL_RULES = [
-  {
-    test: (analysis) => !analysis.hasAuthorSignal,
-    label: 'Add author/byline markup (schema author field or visible byline) so AI engines attribute the content.',
-    generatorId: 'expand-content',
-    params: (page, query, schemaTypes) => ({ page, query, focus: 'author-byline' }),
-    effort: 'Low',
-  },
   {
     // Routed to 'schema' (datePublished/dateModified JSON-LD), NOT
     // expand-content's 'freshness-date' focus — that focus drafts a VISIBLE
