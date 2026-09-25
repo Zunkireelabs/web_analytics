@@ -246,6 +246,51 @@ export function renderDirectAnswerBody(content, site, { permalink = null, layout
   return `${front}\n${wrapInSiteProse(parts.join('\n\n'), site)}\n`;
 }
 
+// Next.js App Router variant of renderDirectAnswerBody, for a
+// newContentTargets["direct-answer"] configured with `filename` — same
+// directory-per-page framework and same reason as renderBlogOutlineBodyTsx
+// above: this repo's page.tsx files are TypeScript source, not Markdown, so
+// generated text is handed to a shared, human-authored component as a
+// JSON.stringify'd prop object rather than interpolated into JSX (a heading
+// or answer containing a brace/quote/backtick would otherwise break the
+// file or be silently misparsed as a JSX expression). The component name
+// (`GeneratedDirectAnswer`) mirrors GeneratedBlogPost's: written once per
+// site, in the client's own repo, and can be restyled without regenerating
+// any existing answer page.
+export function renderDirectAnswerBodyTsx(content, site, { canonicalUrl = null } = {}) {
+  const heading = content.title || content.heading || content.query || 'Untitled';
+  const props = {
+    heading,
+    directAnswer: content.directAnswer || '',
+    supportingSections: (content.supportingSections || [])
+      .filter((s) => s?.heading)
+      .map((s) => ({ heading: s.heading, body: s.body || '' })),
+    featuredImage: content.featuredImage?.url
+      ? { url: content.featuredImage.url, alt: content.featuredImage.alt || null }
+      : null,
+  };
+  const metaTitle = content.title || content.heading || content.query || 'Untitled';
+  const metaDescription = content.directAnswer?.slice(0, 155) || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedDirectAnswer from "@/components/GeneratedDirectAnswer";',
+    '',
+    `export const answer = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    ...(canonicalUrl ? [`  alternates: { canonical: ${JSON.stringify(canonicalUrl)} },`] : []),
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedDirectAnswer {...answer} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
+}
+
 // The page a dead internal link already pointed at (generators/
 // missing-page-create.js). The permalink is the dead URL's own path rather
 // than a urlPattern-derived one — every other net-new renderer here is
@@ -285,6 +330,44 @@ export function renderTranslationBody(content, site, { permalink = null, layout 
     ['description', content.translatedMetaDescription || content.sourceMetaDescription],
   ], site);
   return `${front}\n${wrapInSiteProse(content.translatedContent || '', site)}\n`;
+}
+
+// Next.js App Router variant of renderTranslationBody, for a
+// newContentTargets["translation"] configured with `filename`. Same
+// JSON.stringify-as-props approach as the other TSX renderers above, and
+// same reason. No `alternates.canonical` is emitted — deliberately, matching
+// renderTranslationBody's own permalink-less contract (see the long comment
+// on the `actionType === 'translation'` branch in frontend.js: a translation
+// targets a language-suffixed sibling of the source file, with no
+// newContentTargets urlPattern to resolve a canonical URL against, so "the
+// build decides" here too). `content.translatedContent` is a single opaque
+// string (no section splitting exists for translation today), so it is
+// passed through as one `content` field rather than a `sections[]` array.
+export function renderTranslationBodyTsx(content, site) {
+  const title = content.translatedTitle || content.sourceTitle || 'Untitled';
+  const props = {
+    title,
+    content: content.translatedContent || '',
+  };
+  const metaTitle = title;
+  const metaDescription = content.translatedMetaDescription || content.sourceMetaDescription || '';
+  const lines = [
+    'import type { Metadata } from "next";',
+    'import GeneratedTranslation from "@/components/GeneratedTranslation";',
+    '',
+    `export const translation = ${JSON.stringify(props, null, 2)};`,
+    '',
+    'export const metadata: Metadata = {',
+    `  title: ${JSON.stringify(metaTitle)},`,
+    `  description: ${JSON.stringify(metaDescription)},`,
+    '};',
+    '',
+    'export default function Page() {',
+    '  return <GeneratedTranslation {...translation} />;',
+    '}',
+    '',
+  ];
+  return lines.join('\n');
 }
 
 // Only a tiny, deliberately narrow parse of the two fields this codebase's

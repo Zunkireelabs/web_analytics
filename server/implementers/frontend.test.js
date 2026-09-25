@@ -209,6 +209,56 @@ describe('computeGeneratedPostsManifestUpdate — blog-outline generated-posts m
   });
 });
 
+// A Next.js App Router site (Admizz's shape): `filename` on a newContentTargets
+// entry means "route by directory," same signal blog-outline already forks on.
+const APP_ROUTER_SITE = {
+  id: 2,
+  repo_owner: 'Zunkireelabs',
+  repo_name: 'admizz-web-dev',
+  repo_default_branch: 'main',
+  url_file_map: {
+    pages: { '/about': { file: 'src/app/about/page.tsx' } },
+    newContentTargets: {
+      'direct-answer': { dir: 'src/app/answers', extension: '.tsx', filename: 'page.tsx', urlPattern: '/answers/{slug}' },
+      translation: { dir: 'src/app', extension: '.tsx', filename: 'page.tsx' },
+    },
+  },
+};
+
+describe('resolveTargetAndBody — direct-answer/translation fork to the TSX (App Router) renderer', () => {
+  test('direct-answer with `filename` configured returns JSX, importing GeneratedDirectAnswer', async () => {
+    const draft = {
+      action_type: 'direct-answer',
+      content: { query: 'What GPA do I need to study in Canada?', directAnswer: 'A minimum GPA of 2.5 for most colleges.' },
+    };
+    const result = await resolveTargetAndBody(APP_ROUTER_SITE, draft);
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'jsx');
+    assert.match(result.body, /import GeneratedDirectAnswer from "@\/components\/GeneratedDirectAnswer";/);
+    assert.match(result.body, /alternates: \{ canonical: "\/answers\/what-gpa-do-i-need-to-study-in-canada" \}/);
+  });
+
+  test('direct-answer with no `filename` configured still returns markdown, unaffected', async () => {
+    const site = { url_file_map: { newContentTargets: { 'direct-answer': { dir: 'src/answers', extension: '.md' } } } };
+    const draft = { action_type: 'direct-answer', content: { query: 'What GPA?', directAnswer: 'A minimum GPA of 2.5.' } };
+    const result = await resolveTargetAndBody(site, draft);
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'markdown');
+  });
+
+  test('translation with `filename` configured returns JSX, importing GeneratedTranslation, no canonical', async () => {
+    const draft = {
+      action_type: 'translation',
+      content: { page: 'https://example.com/about', targetLanguage: 'French', translatedTitle: 'À propos', translatedContent: 'Bonjour' },
+    };
+    const result = await resolveTargetAndBody(APP_ROUTER_SITE, draft, repoDeps({ 'src/app/about/page.tsx': 'export default function Page() { return null; }' }));
+    assert.equal(result.ok, true);
+    assert.equal(result.contentFormat, 'jsx');
+    assert.match(result.body, /import GeneratedTranslation from "@\/components\/GeneratedTranslation";/);
+    assert.doesNotMatch(result.body, /alternates:/);
+  });
+});
+
 describe('FRONTEND_ACTION_TYPES / COMPLIANCE_ACTION_TYPES', () => {
   test('FRONTEND_ACTION_TYPES matches meta.handles exactly', async () => {
     const { meta } = await import('./frontend.js');
