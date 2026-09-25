@@ -168,7 +168,10 @@ export function compareSectionsToProfile(profile, segmentedPages, { responsive =
           let conventionClasses = null;
           let convention = null;
           if (item.role === 'heading' || item.role === 'subheading') {
-            conventionClasses = resolveHeadingClasses(profile, { tag: item.tag, sectionRole: section.role });
+            conventionClasses = resolveHeadingClasses(profile, {
+              tag: item.tag, sectionRole: section.role,
+              pageType: page.pageType, pageTypePatterns: profile?.pageTypePatterns,
+            });
             convention = conventionClasses ? classTokens(conventionClasses) : null;
           } else if (item.role === 'body') {
             conventionClasses = profile.typography.body || null;

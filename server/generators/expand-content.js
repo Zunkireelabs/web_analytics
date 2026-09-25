@@ -2,8 +2,6 @@ import { analyzePageUrl, requireGroundedContent } from '../agents/lib/page-conte
 import { callLLMForJson } from '../llm.js';
 import { groundingProviderConfigured, searchGroundedSources } from '../ingest/search-grounding-providers/index.js';
 import { safeMessage } from '../lib/errors.js';
-import { getSiteById } from '../store/read.js';
-import { hasAuthorProfile, authorByline, organizationByline } from './lib/author-profile.js';
 import { filterCompetitorCandidates } from '../agents/lib/competitor-policy.js';
 import { attributionNote } from '../agents/lib/zunkireelabs-growth-policy.js';
 import { checkExpandContentStructuralFit } from './lib/expand-content-structural-fit.js';
@@ -27,8 +25,8 @@ const CITATION_FETCH_COUNT = 8;
 export const meta = {
   id: 'expand-content',
   name: 'Content Expansion Generator',
-  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: author-byline, comparison-content, external-citations. (freshness-date is retired — see the schema generator instead.)',
-  recommendationTags: ['author-byline', 'comparison-content', 'external-citations'],
+  description: 'Drafts additional body sections for an existing page, grounded in its real content. Supports focused expansions for GEO signals: comparison-content, external-citations. (author-byline and freshness-date are both retired — see the schema generator instead.)',
+  recommendationTags: ['comparison-content', 'external-citations'],
 };
 
 const SYSTEM_GENERAL = 'You are a content strategist. Given a page\'s real body text and (if available) its target query, draft ' +
@@ -143,49 +141,31 @@ export async function generate({ siteId, params }) {
   const { page, query, focus } = params || {};
   if (!page) throw Object.assign(new Error('page is required'), { status: 400, userFacing: true });
 
+  // Retired platform-wide (2026-09-24, explicit owner decision): an
+  // "About the Author" section — whether a real configured individual
+  // (authorByline) or the organization-name fallback (organizationByline)
+  // — is no longer drafted for ANY site, regardless of require_visible_byline.
+  // Previously the organization fallback bypassed require_visible_byline
+  // entirely (see git history), so a site whose own policy said "no visible
+  // byline" (require_visible_byline: false — the column's default, true for
+  // every site that hasn't explicitly opted in) still got an unwanted
+  // "About the Author: By the [Site Name] Team" section on every
+  // expand-content run. Author EEAT signals still ship via schema.js's
+  // Article-type author markup (Person or Organization) — this only retires
+  // the VISIBLE section, same as before for a site with
+  // require_visible_byline off. Checked before the page fetch below (unlike
+  // every other focus): this refusal needs no page content at all, so there
+  // is nothing to gain from fetching first.
+  if (focus === 'author-byline') {
+    throw Object.assign(
+      new Error('Visible "About the Author" sections are retired platform-wide — author EEAT signals are handled by schema markup (schema.js) instead. Refusing to draft a visible byline section.'),
+      { status: 400, userFacing: true },
+    );
+  }
+
   const fetched = await analyzePageUrl(page);
   if (!fetched.ok) throw Object.assign(new Error(`Could not fetch page: ${fetched.error}`), { status: 400, userFacing: true });
   requireGroundedContent(fetched.analysis, { generatorId: meta.id });
-
-  // EEAT — a site with a real configured author (sites.author_name,
-  // migration 090) never needs the LLM to draft a "[Author Name]"
-  // placeholder byline: the real name is already known, so this is a
-  // deterministic transform, not a generation. Only drafted when the site's
-  // own policy actually wants a VISIBLE byline (require_visible_byline) —
-  // a site that wants author EEAT via schema only (schema.js already
-  // handles that for Article-like types) gets a clear refusal instead of an
-  // unwanted visible section, same "fail honestly instead of drafting
-  // filler" principle external-citations already uses below.
-  if (focus === 'author-byline') {
-    const site = await getSiteById(siteId);
-    if (hasAuthorProfile(site)) {
-      if (!site.require_visible_byline) {
-        throw Object.assign(
-          new Error('This site\'s author profile is configured for schema-only attribution (require_visible_byline is off) — refusing to add an unwanted visible byline section. Schema author markup is already handled by the schema generator.'),
-          { status: 400, userFacing: true },
-        );
-      }
-      const byline = authorByline(site);
-      const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
-      return { content, summary: `Author byline for ${page}: "${byline}"` };
-    }
-    // No individual author configured: fall back to the site's own real
-    // organization name (organizationByline — schema.org's `author` accepts
-    // an Organization as validly as a Person), not an LLM call. This used
-    // to ask the LLM to write "By [Author Name], [Role]" — a fake persona
-    // on a real business's page, which is worse for EEAT than no byline,
-    // not better — and content-scaffolding-guard.js's author-placeholder
-    // pattern exists specifically to reject exactly that bracket text, so
-    // this focus failed the Quality Gate on EVERY attempt, for EVERY site
-    // with no individual author configured — a guaranteed, permanent
-    // failure surfaced as a generic "try again shortly" error, not the
-    // flaky case that message implies. A site can still configure a real
-    // named individual (Settings) later to get authorByline() above
-    // instead; this is fully automatic in the meantime, zero manual step.
-    const byline = organizationByline(site);
-    const content = { page, sections: [{ heading: 'About the Author', body: byline }], focus };
-    return { content, summary: `Author byline for ${page}: "${byline}"` };
-  }
 
   if (focus === 'freshness-date') {
     // RETIRED 2026-09-20. This used to draft a VISIBLE "Last Updated"

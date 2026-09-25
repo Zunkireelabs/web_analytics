@@ -13,6 +13,7 @@ export const meta = {
   description: 'Analyzes countries, cities, and languages to surface growing/declining markets and localization opportunities.',
   category: 'geo',
   version: 2,
+  requiresCapabilities: ['gsc', 'ga4'],
 };
 
 const TOP_LIMIT = 10;

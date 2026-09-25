@@ -621,6 +621,41 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.match(result.values.expandedContent, /site-heading/);
   });
 
+  test('a comparison table with no captured componentTemplates.table gets a neutral inline layout, not a bare zero-CSS <table>', () => {
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'Chayce Properties vs. Alternative Relocation Services',
+        body: 'Here is how it compares.',
+        table: [
+          { feature: 'Personal Coordination', alternative: 'Distributed', 'this-option': 'One dedicated coordinator' },
+          { feature: 'Team Consistency', alternative: 'Outsourced', 'this-option': 'In-house team' },
+        ],
+      }],
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table style="width:100%;border-collapse:collapse">/);
+    assert.match(result.values.expandedContent, /<th style="[^"]+">Feature<\/th>/);
+    assert.doesNotMatch(result.values.expandedContent, /<table><thead>/);
+  });
+
+  test('a comparison table uses the site\'s own captured table classes when present, never the neutral fallback', () => {
+    const componentTemplates = {
+      table: { table: 'site-table', th: 'site-th', td: 'site-td', tdFirst: 'site-td-first' },
+    };
+    const result = buildMergeValues('expand-content', {
+      sections: [{
+        heading: 'H1',
+        body: 'Body',
+        table: [{ feature: 'A', value: 'B' }, { feature: 'C', value: 'D' }],
+      }],
+    }, 'visible', componentTemplates);
+    assert.equal(result.ok, true);
+    assert.match(result.values.expandedContent, /<table class="site-table">/);
+    assert.match(result.values.expandedContent, /<th class="site-th">/);
+    assert.match(result.values.expandedContent, /<td class="site-td-first">/);
+    assert.doesNotMatch(result.values.expandedContent, / style="/);
+  });
+
   test('expand-content fails honestly with no sections', () => {
     const result = buildMergeValues('expand-content', { sections: [] });
     assert.equal(result.ok, false);
@@ -760,9 +795,9 @@ describe('buildMergeValues — canonical/open-graph/expand-content', () => {
     assert.equal(result.ok, true);
     const html = result.values.expandedContent;
     assert.match(html, /<p>Below is a comparison table outlining the key differences\.<\/p>/);
-    assert.match(html, /<table><thead><tr><th>Feature<\/th><th>Competitor<\/th><th>Zunkiree Labs<\/th><\/tr><\/thead>/);
-    assert.match(html, /<tr><td>Custom AI Solutions<\/td><td>No<\/td><td>Yes<\/td><\/tr>/);
-    assert.match(html, /<td>Yes \(eSewa and Khalti integration\)<\/td><\/tr><\/tbody><\/table>/);
+    assert.match(html, /<table[^>]*><thead><tr><th[^>]*>Feature<\/th><th[^>]*>Competitor<\/th><th[^>]*>Zunkiree Labs<\/th><\/tr><\/thead>/);
+    assert.match(html, /<tr><td[^>]*>Custom AI Solutions<\/td><td[^>]*>No<\/td><td[^>]*>Yes<\/td><\/tr>/);
+    assert.match(html, /<td[^>]*>Yes \(eSewa and Khalti integration\)<\/td><\/tr><\/tbody><\/table>/);
     assert.doesNotMatch(html, /<p>[^<]*<table>/, 'the table must never be nested inside the body <p>');
   });
 
@@ -1143,6 +1178,22 @@ describe('buildMergeValues — captured template with unsafe classes never ships
     } }, null, { page: 'https://example.com/blog/some-post/' });
     assert.equal(linksResult.ok, true);
     assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+  });
+
+  // Reported 2026-09-25: zunkireelabs.com's real internal-links row carries a
+  // `w-4 h-4` arrow icon next to each link. The fixed-height strip above
+  // (correctly aimed at a wrapper/heading holding arbitrary-length body
+  // copy) doesn't distinguish an <svg> icon from those — it stripped h-4
+  // right along with h-[70px]/h-12, leaving the icon at its browser-default
+  // intrinsic height instead of its real square size.
+  test('a fixed height on an <svg> icon survives the strip, unlike a text-flow element', () => {
+    const linksResult = buildMergeValues('internal-links', { suggestions: [{ url: '/a/', anchorText: 'A' }] }, 'visible', { internalLinks: {
+      wrapper: '<ul class="max-w-7xl mx-auto h-[70px]">{{ROWS}}</ul>',
+      row: '<li><a href="{{URL}}">{{ANCHOR_TEXT}}<svg class="w-4 h-4"></svg></a></li>',
+    } }, null, { page: 'https://example.com/blog/some-post/' });
+    assert.equal(linksResult.ok, true);
+    assert.doesNotMatch(linksResult.values.links, /h-\[70px\]|max-w-7xl|mx-auto/);
+    assert.match(linksResult.values.links, /<svg class="w-4 h-4">/);
   });
 });
 

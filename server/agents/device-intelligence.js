@@ -11,6 +11,7 @@ export const meta = {
   description: 'Analyzes device-split search and traffic performance to surface low-CTR devices and usage shifts.',
   category: 'seo',
   version: 1,
+  requiresCapabilities: ['gsc', 'ga4'],
 };
 
 export async function run({ siteId, start, end }) {

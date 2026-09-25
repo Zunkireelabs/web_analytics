@@ -13,6 +13,7 @@ export const meta = {
   description: 'Finds striking-distance queries and pages worth optimizing.',
   category: 'seo',
   version: 3,
+  requiresCapabilities: ['gsc'],
 };
 
 // "Striking distance" = ranking just off page 1, close enough that a push

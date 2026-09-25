@@ -793,8 +793,21 @@ function stripClassesMatching(html, predicate) {
 // container-sizing strip below never applies to it (a page's own top-level
 // layout container is correct there by definition); only a fixed height
 // is unconditionally wrong on any element holding arbitrary-length body copy.
+//
+// Skips <svg> elements: an icon's fixed h-N (paired with w-N, e.g. an arrow
+// glyph next to a link) is a completely different case from a fixed height
+// on a text-flow wrapper — an SVG scales its own fixed viewBox, it never
+// holds arbitrary-length body copy that a height could clip or overlap.
+// Confirmed live: zunkireelabs.com's related-resources link row carries a
+// `w-4 h-4` arrow icon, and stripping only the h-4 (leaving w-4) rendered the
+// icon at browser-default intrinsic height instead of its real square size.
 export function stripFixedHeightClass(html) {
-  return stripClassesMatching(html, isFixedHeightClass);
+  if (!html) return html;
+  return html.replace(/(<(svg|[a-zA-Z][\w-]*)\b[^>]*\sclass=")([^"]*)(")/g, (full, prefix, tag, list, suffix) => {
+    if (tag.toLowerCase() === 'svg') return full;
+    const kept = list.split(/\s+/).filter((c) => c && !isFixedHeightClass(c));
+    return kept.length ? `${prefix}${kept.join(' ')}${suffix}` : `${prefix}${suffix}`;
+  });
 }
 
 // Applied to every captured template right before render — DEFAULT_* templates
@@ -1126,18 +1139,46 @@ function attrIf(cls) {
   return cls ? ` class="${cls}"` : '';
 }
 
+function styleAttrIf(inline) {
+  return inline ? ` style="${inline}"` : '';
+}
+
+// A tenant with no captured componentTemplates.table (and no captured card
+// style to project one from — confirmed live on Chayce Properties, which has
+// neither) previously fell straight through to a completely bare <table>:
+// no width, no padding, no borders, no header contrast. A bare <table> is
+// NOT "reasonably styled" by default the way DEFAULT_QA_TEMPLATE's native
+// <details> is — browsers give it no sensible layout at all, so it shrinks
+// to its content width and sits in the page next to a large dead gap where
+// the rest of the row should be (the reported Chayce Properties defect: a
+// comparison table only filling half its row). Deliberately inline CSS, not
+// a class, and deliberately colorless (currentColor / a neutral gray-alpha
+// border) rather than any brand choice — the same "never borrow another
+// tenant's look" rule the class-based styling above already follows, just
+// extended to cover the case where there's no captured class-based style to
+// fall back to either.
+const DEFAULT_TABLE_STYLE = {
+  table: 'width:100%;border-collapse:collapse',
+  th: 'text-align:left;padding:0.5em 0.75em;border-bottom:2px solid currentColor;opacity:0.85',
+  td: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25)',
+  tdFirst: 'padding:0.5em 0.75em;border-bottom:1px solid rgba(128,128,128,0.25);font-weight:600',
+};
+
 function renderComparisonTable(table, style = {}) {
   if (!Array.isArray(table) || !table.length) return '';
   const columns = Object.keys(table[0]);
   if (!columns.length) return '';
-  const th = columns.map((c) => `<th${attrIf(style.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
-  const body = table.map((row) => `<tr${attrIf(style.tr)}>${columns.map((c, i) => (
+  const hasCapturedStyle = Boolean(style.table || style.th || style.td || style.tdFirst || style.thead || style.tbody);
+  const resolved = hasCapturedStyle ? style : DEFAULT_TABLE_STYLE;
+  const attr = hasCapturedStyle ? attrIf : styleAttrIf;
+  const th = columns.map((c) => `<th${attr(resolved.th)}>${escapeHtml(toTitleCase(c))}</th>`).join('');
+  const body = table.map((row) => `<tr${attr(resolved.tr)}>${columns.map((c, i) => (
     // The first column is the row label on every comparison table this renders,
     // and the site's own tables give it more weight than the values beside it.
-    `<td${attrIf(i === 0 ? (style.tdFirst || style.td) : style.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
+    `<td${attr(i === 0 ? (resolved.tdFirst || resolved.td) : resolved.td)}>${escapeHtml(String(row?.[c] ?? ''))}</td>`
   )).join('')}</tr>`).join('');
-  const html = `<table${attrIf(style.table)}><thead${attrIf(style.thead)}><tr>${th}</tr></thead>`
-    + `<tbody${attrIf(style.tbody)}>${body}</tbody></table>`;
+  const html = `<table${attr(resolved.table)}><thead${attr(resolved.thead)}><tr>${th}</tr></thead>`
+    + `<tbody${attr(resolved.tbody)}>${body}</tbody></table>`;
   // The wrapper carries the border/rounding on the sites that use one, and
   // keeps a wide table scrollable instead of overflowing its column.
   return style.wrapper ? `<div class="${style.wrapper}">${html}</div>` : html;

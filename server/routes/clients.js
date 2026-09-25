@@ -18,6 +18,7 @@ import { PERMISSION_LEVELS } from '../../mcp-server/permissions.js';
 import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
+import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
@@ -62,6 +63,7 @@ router.get('/internal/clients', async (req, res, next) => {
     const sites = (await listSites()).filter((s) => !TEST_FIXTURE_SITE_NAMES.has(s.name));
     res.json(sites.map((s) => ({
       id: s.id, name: s.name, websiteDomain: s.website_domain, timezone: s.timezone,
+      propertyType: s.property_type,
       connected: !!(s.gsc_property && s.ga4_property_id),
       baselined: !!s.onboarded_at,
       repoConnected: !!(s.repo_owner && s.repo_name),
@@ -110,16 +112,19 @@ router.get('/internal/clients/growth-summary', async (req, res, next) => {
 // which doesn't happen at the same moment as deciding to onboard them.
 router.post('/internal/clients', async (req, res, next) => {
   try {
-    const { name, websiteDomain, timezone, email, password } = req.body || {};
+    const { name, websiteDomain, timezone, email, password, propertyType } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required.' });
     if (!email || !password) return res.status(400).json({ error: 'email and password are required for the client\'s first login.' });
     if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    if (propertyType !== undefined && propertyType !== 'website' && propertyType !== 'product') {
+      return res.status(400).json({ error: 'propertyType must be "website" or "product".' });
+    }
 
     const normalizedEmail = String(email).trim().toLowerCase();
     const existing = await getUserByEmail(normalizedEmail);
     if (existing) return res.status(409).json({ error: `A user with email "${normalizedEmail}" already exists.` });
 
-    const site = await createClientSite({ name: String(name).trim(), websiteDomain, timezone });
+    const site = await createClientSite({ name: String(name).trim(), websiteDomain, timezone, propertyType });
     try {
       const passwordHash = await bcrypt.hash(password, 10);
       await createUser({ siteId: site.id, email: normalizedEmail, passwordHash });
@@ -140,7 +145,7 @@ router.post('/internal/clients', async (req, res, next) => {
       success: true,
     });
 
-    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, propertyType: site.property_type, connected: false });
   } catch (e) { next(e); }
 });
 
@@ -208,7 +213,7 @@ router.post('/internal/signup-requests/:id/approve', async (req, res, next) => {
       success: true,
     });
 
-    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, connected: false });
+    res.status(201).json({ id: site.id, clientNumber: site.client_number, name: site.name, websiteDomain: site.website_domain, timezone: site.timezone, propertyType: site.property_type, connected: false });
   } catch (e) { next(e); }
 });
 
@@ -631,6 +636,101 @@ router.post('/internal/clients/:id/visible-faq-cap', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Universal Product Growth mode config (167_product_growth_config.sql) —
+// only meaningful for a 'product' site, but readable/writable regardless
+// (a 'website' site just never has anything read it). Generic across any
+// product tenant: conversionEvent is free text (not hardcoded to
+// booked_demo), markets/industries/icpSignals are arrays the site owner
+// configures, crmConfig is opaque JSON for whichever external CRM is wired
+// up. GET returns null fields when no row exists yet — same "absence means
+// nothing configured, not an error" convention as site_seo_policy.
+router.get('/internal/clients/:id/product-growth-config', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const config = await getProductGrowthConfig(siteId);
+    res.json(config || {
+      conversionEvent: null, markets: [], industries: [], icpSignals: [], crmConfig: {}, outreachEnabled: false,
+    });
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/clients/:id/product-growth-config', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { conversionEvent, markets, industries, icpSignals, crmConfig, outreachEnabled } = req.body || {};
+    await saveProductGrowthConfig(siteId, { conversionEvent, markets, industries, icpSignals, crmConfig, outreachEnabled });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.product_growth_config_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { conversionEvent, outreachEnabled: !!outreachEnabled },
+      success: true,
+    });
+
+    res.json(await getProductGrowthConfig(siteId));
+  } catch (e) { next(e); }
+});
+
+// Own opt-in flag for prospect-discovery.js (Phase 3) — deliberately a
+// separate route from the general config save above so it's never bundled
+// into the same form submit as free-text fields, same "explicit opt-in,
+// never inferred" discipline the Product Growth spec requires.
+router.post('/internal/clients/:id/prospect-discovery', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { enabled } = req.body || {};
+    await setProspectDiscoveryEnabled(siteId, !!enabled);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.prospect_discovery_toggled',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { enabled: !!enabled },
+      success: true,
+    });
+
+    res.json(await getProductGrowthConfig(siteId));
+  } catch (e) { next(e); }
+});
+
+// Generates (or returns the existing) per-site bearer token an external CRM
+// presents to server/routes/crm-webhook.js — platform_admin only, inherited
+// from this router's own requirePlatformRole gate, since this is a real
+// secret with real access to this tenant's prospect data.
+router.post('/internal/clients/:id/crm-webhook-token', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const token = await ensureCrmWebhookToken(siteId);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.crm_webhook_token_issued',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      success: true,
+    });
+
+    res.json({ crmWebhookToken: token });
+  } catch (e) { next(e); }
+});
 
 // Consent for cross-client learned repair (migration 099): may this site be
 // fixed automatically using a repair whose evidence comes from a DIFFERENT
