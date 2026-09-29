@@ -967,12 +967,288 @@ function ProductGrowthTab({ client }) {
   );
 }
 
+// ── Business Goals tab ───────────────────────────────────────────────────
+// Stage 2 of the goal-driven-prioritization plan (Stage 1: server/routes/
+// clients.js goals routes + server/agents/lib/goal-alignment.js). Every
+// field here maps 1:1 to server/store/site-goals.js's shapeGoal output —
+// no client-side transform beyond the comma-separated page-patterns list,
+// same csvToList convention ProductGrowthTab already uses above.
+const GOAL_TYPES = [
+  'generate_leads', 'increase_organic_traffic', 'increase_conversions',
+  'reduce_bounce_rate', 'increase_organic_visibility', 'increase_qualified_traffic',
+  'grow_bookings', 'grow_sales', 'custom',
+];
+
+const EMPTY_GOAL_FORM = {
+  goalType: GOAL_TYPES[0],
+  objective: '',
+  targetBusinessArea: '',
+  targetPagePatterns: '',
+  primaryMetric: '',
+  description: '',
+  importance: 1,
+};
+
+function goalToForm(g) {
+  return {
+    goalType: g.goalType,
+    objective: g.objective || '',
+    targetBusinessArea: g.targetBusinessArea || '',
+    targetPagePatterns: (g.targetPagePatterns || []).join(', '),
+    primaryMetric: g.primaryMetric || '',
+    description: g.description || '',
+    importance: g.importance ?? 1,
+  };
+}
+
+function GoalForm({ clientId, initial, onCancel, onSubmit, submitLabel }) {
+  const [form, setForm] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Stage 2b: custom-goal AI structure preview. This only ever fills the
+  // fields below — it never calls onSubmit itself, so the existing Save
+  // button below is still the one explicit confirm step before anything is
+  // persisted, per the brief's "never auto-save an AI-structured goal" rule.
+  const [customDescription, setCustomDescription] = useState('');
+  const [proposing, setProposing] = useState(false);
+  const [proposeError, setProposeError] = useState(null);
+  const [proposed, setProposed] = useState(false);
+
+  const suggestStructure = async () => {
+    if (!customDescription.trim()) return setProposeError('Describe the goal first.');
+    setProposing(true);
+    setProposeError(null);
+    try {
+      const proposal = await api.clients.goals.structurePreview(clientId, customDescription.trim());
+      setForm((f) => ({
+        ...f,
+        objective: proposal.objective,
+        targetBusinessArea: proposal.targetBusinessArea || '',
+        targetPagePatterns: (proposal.targetPagePatterns || []).join(', '),
+        primaryMetric: proposal.primaryMetric || '',
+      }));
+      setProposed(true);
+    } catch (err) {
+      setProposeError(err.message || 'Could not suggest a structure.');
+    } finally {
+      setProposing(false);
+    }
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.objective.trim()) return setError('objective is required.');
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        goalType: form.goalType,
+        objective: form.objective.trim(),
+        targetBusinessArea: form.targetBusinessArea.trim() || null,
+        targetPagePatterns: csvToList(form.targetPagePatterns),
+        primaryMetric: form.primaryMetric.trim() || null,
+        description: form.description.trim() || null,
+        importance: Number(form.importance) || 1,
+      });
+    } catch (err) {
+      setError(err.message || 'Could not save.');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3 bg-slate-50/60 border border-slate-100 rounded-xl p-4">
+      <label className="block">
+        <span className={labelCls}>Goal type</span>
+        <select className={inputCls} value={form.goalType} onChange={set('goalType')}>
+          {GOAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </label>
+
+      {form.goalType === 'custom' && (
+        <div className="bg-white border border-indigo-100 rounded-xl p-3 space-y-2">
+          <span className={labelCls}>Describe the goal in your own words</span>
+          <textarea className={`${inputCls} min-h-16 resize-y`} value={customDescription}
+            onChange={(e) => setCustomDescription(e.target.value)}
+            placeholder="e.g. We want more small teams finding us for our new team-scheduling feature" />
+          {proposeError && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-1.5">{proposeError}</div>}
+          <button type="button" onClick={suggestStructure} disabled={proposing}
+            className="text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition disabled:opacity-60">
+            {proposing ? 'Suggesting…' : 'Suggest structure with AI'}
+          </button>
+          {proposed && (
+            <p className="text-[9.5px] font-semibold text-indigo-500">
+              AI-suggested below — review and edit before saving.
+            </p>
+          )}
+        </div>
+      )}
+
+      <label className="block">
+        <span className={labelCls}>Objective</span>
+        <input className={inputCls} value={form.objective} onChange={set('objective')}
+          placeholder="e.g. Grow qualified demo bookings from organic search 20% this quarter" />
+      </label>
+
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className={labelCls}>Target business area</span>
+          <input className={inputCls} value={form.targetBusinessArea} onChange={set('targetBusinessArea')} placeholder="e.g. Pricing, Onboarding" />
+        </label>
+        <label className="block">
+          <span className={labelCls}>Primary metric</span>
+          <input className={inputCls} value={form.primaryMetric} onChange={set('primaryMetric')} placeholder="e.g. booked_demo conversions" />
+        </label>
+      </div>
+
+      <label className="block">
+        <span className={labelCls}>Target page patterns</span>
+        <input className={inputCls} value={form.targetPagePatterns} onChange={set('targetPagePatterns')} placeholder="Comma-separated, e.g. /pricing, /blog/*" />
+      </label>
+
+      <label className="block">
+        <span className={labelCls}>Description</span>
+        <input className={inputCls} value={form.description} onChange={set('description')} placeholder="Optional context for how findings should be judged against this goal" />
+      </label>
+
+      <label className="block w-28">
+        <span className={labelCls}>Importance</span>
+        <input type="number" min="1" className={inputCls} value={form.importance} onChange={set('importance')} />
+        <span className="block text-[9.5px] font-semibold text-slate-400 mt-1">Lower number = higher priority on ties.</span>
+      </label>
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button type="submit" disabled={saving}
+          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl text-white transition hover:scale-[1.01] active:scale-[0.98] disabled:opacity-60 shadow-md shadow-indigo-500/10"
+          style={{ background: 'linear-gradient(135deg,#6C63FF,#8b5cf6)' }}>
+          {saving ? 'Saving…' : submitLabel}
+        </button>
+        <button type="button" onClick={onCancel} className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function GoalsTab({ client }) {
+  const [goals, setGoals] = useState(null); // null = loading
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState(null);
+
+  const reload = () => api.clients.goals.list(client.id).then(setGoals).catch(() => setGoals([]));
+  useEffect(() => { reload(); }, [client.id]);
+
+  const toggleStatus = async (goal) => {
+    const next = goal.status === 'active' ? 'paused' : 'active';
+    setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, status: next } : g)));
+    try {
+      await api.clients.goals.setStatus(client.id, goal.id, next);
+    } catch (err) {
+      setError(err.message || 'Could not update status.');
+      reload();
+    }
+  };
+
+  if (goals === null) return <p className="text-xs text-slate-400 font-semibold py-4">Loading…</p>;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[10.5px] font-semibold text-slate-400 leading-relaxed">
+        Business goals let the decision engine weigh findings against what this client actually cares about right
+        now, instead of treating every recommendation as equally important. A goal only affects prioritization — it
+        never blocks or forces a decision on its own.
+      </p>
+
+      {error && <div className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">{error}</div>}
+
+      {goals.length === 0 && !adding && (
+        <p className="text-xs text-slate-400 font-semibold py-2">No goals set yet.</p>
+      )}
+
+      <div className="space-y-2">
+        {goals.map((g) => (
+          <div key={g.id} className="border border-slate-100 rounded-xl p-3.5">
+            {editingId === g.id ? (
+              <GoalForm
+                clientId={client.id}
+                initial={goalToForm(g)}
+                submitLabel="Save Goal"
+                onCancel={() => setEditingId(null)}
+                onSubmit={async (body) => {
+                  const updated = await api.clients.goals.update(client.id, g.id, body);
+                  setGoals((gs) => gs.map((x) => (x.id === g.id ? updated : x)));
+                  setEditingId(null);
+                }}
+              />
+            ) : (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">{g.goalType}</span>
+                    <span className={`text-[9.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${g.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                      {g.status}
+                    </span>
+                    <span className="text-[9.5px] font-semibold text-slate-400">priority {g.importance}</span>
+                  </div>
+                  <p className="text-xs font-bold text-slate-700 mt-1.5">{g.objective}</p>
+                  {g.description && <p className="text-[10.5px] font-semibold text-slate-400 mt-1">{g.description}</p>}
+                  {(g.targetPagePatterns?.length > 0 || g.primaryMetric) && (
+                    <p className="text-[9.5px] font-semibold text-slate-400 mt-1">
+                      {g.primaryMetric && <>metric: {g.primaryMetric}</>}
+                      {g.primaryMetric && g.targetPagePatterns?.length > 0 && ' · '}
+                      {g.targetPagePatterns?.length > 0 && <>pages: {g.targetPagePatterns.join(', ')}</>}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  <button type="button" onClick={() => setEditingId(g.id)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
+                    Edit
+                  </button>
+                  <button type="button" onClick={() => toggleStatus(g)} className="text-[9.5px] font-black uppercase tracking-wider px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 transition">
+                    {g.status === 'active' ? 'Pause' : 'Activate'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {adding ? (
+        <GoalForm
+          clientId={client.id}
+          initial={EMPTY_GOAL_FORM}
+          submitLabel="Add Goal"
+          onCancel={() => setAdding(false)}
+          onSubmit={async (body) => {
+            const created = await api.clients.goals.create(client.id, body);
+            setGoals((gs) => [...gs, created]);
+            setAdding(false);
+          }}
+        />
+      ) : (
+        <button type="button" onClick={() => setAdding(true)}
+          className="text-[10px] font-black uppercase tracking-wider px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
+          + Add Goal
+        </button>
+      )}
+    </div>
+  );
+}
+
 const TABS = [
   { value: 'general', label: 'General' },
   { value: 'integrations', label: 'Integrations' },
   { value: 'ai', label: 'AI Configuration' },
   { value: 'repository', label: 'Repository' },
   { value: 'advanced', label: 'Advanced' },
+  { value: 'goals', label: 'Goals' },
 ];
 
 // Only shown for a 'product' property (see PROPERTY_TYPES in
@@ -1002,6 +1278,7 @@ export default function ClientDrawer({ client, owner, isOpen, onClose, onReload,
       {tab === 'ai' && <AiConfigTab client={client} onReload={onReload} />}
       {tab === 'repository' && <RepositoryTab client={client} onReload={onReload} />}
       {tab === 'advanced' && <AdvancedTab client={client} onReload={onReload} onClose={onClose} />}
+      {tab === 'goals' && <GoalsTab client={client} />}
       {tab === 'product-growth' && <ProductGrowthTab client={client} />}
     </Drawer>
   );

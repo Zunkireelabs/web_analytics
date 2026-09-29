@@ -1,5 +1,5 @@
 import {
-  getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef,
+  getBranchSha, createBranch, commitFilesAtomic, createCommitObject, updateRef, getCommitMessage,
   openPullRequest, listOpenPullRequestsForBranch, defaultBranchName, mergeBranchFromBase, getFileContent,
   beginFileOverlay, endFileOverlay, recordFileOverlayWrites, compareCommits,
 } from '../../github/client.js';
@@ -271,6 +271,46 @@ function buildBatchCommitMessage(entries) {
   return `Action Center: batch — ${entries.join('; ')}`;
 }
 
+// Standing rule this app ships every client-repo change under: a day's work
+// lands as ONE commit, never a trail of incremental fix-up commits.
+// beginBatchPush/endBatchPush already guarantee that WITHIN one run — this
+// closes the gap ACROSS separate same-day runs (the main autonomous pass,
+// its own catch-up guard recovering a different site, a human's own
+// "Execute Safe Fixes" or "bulk approve" click later the same day) — each an
+// independent beginBatchPush/endBatchPush cycle that would otherwise stack
+// its own commit on top of whatever the branch already had, per the ordinary
+// (non-squashed) path below.
+//
+// Only squashes while NO PR is open yet for this branch. Once a PR exists, a
+// human may already be reviewing it — force-rewriting the commit(s) they're
+// looking at would silently invalidate GitHub's own review state (review
+// comments are tied to a specific commit sha), which is a worse outcome than
+// a few extra, perfectly normal "new commits pushed" notifications on an
+// already-open PR. Before any PR exists, nobody has seen this branch at all,
+// so squashing is always safe.
+//
+// Only ever touches a commit whose message this app itself wrote
+// (buildBatchCommitMessage's own "Action Center: batch — " prefix) — refuses
+// to guess at squashing anything else, so a manually-pushed commit a human
+// added directly to the branch (rare, but possible) is never silently
+// absorbed or discarded.
+async function planBatchCommit(site, branchName, currentTipSha, newEntries) {
+  const defaultPlan = { parentSha: currentTipSha, message: buildBatchCommitMessage(newEntries), forced: false };
+
+  const trueBase = await getBranchSha(site, baseBranch(site)).catch(() => null);
+  if (!trueBase || currentTipSha === trueBase) return defaultPlan; // first commit of the day — nothing to squash
+
+  const openPrs = await listOpenPullRequestsForBranch(site, branchName).catch(() => null);
+  if (openPrs === null || openPrs.length > 0) return defaultPlan; // a PR is open, or we couldn't tell — never rewrite
+
+  const prefix = 'Action Center: batch — ';
+  const priorMessage = await getCommitMessage(site, currentTipSha).catch(() => null);
+  if (priorMessage == null || !priorMessage.startsWith(prefix)) return defaultPlan; // not our own commit — refuse to guess
+
+  const priorEntries = priorMessage.slice(prefix.length).split('; ').filter(Boolean);
+  return { parentSha: trueBase, message: buildBatchCommitMessage([...priorEntries, ...newEntries]), forced: true };
+}
+
 // Builds and pushes the ONE commit accumulated since beginBatchPush as ONE
 // ref update — the one real "push" for the whole run — and always clears
 // the batch state (staged files/entries AND file overlay) afterward, even
@@ -284,9 +324,13 @@ export async function endBatchPush(site, branchName) {
   if (!state || state.baseSha == null || state.files.size === 0) return { ok: true, pushed: 0 };
   try {
     const files = Array.from(state.files.values());
-    const message = buildBatchCommitMessage(state.entries);
-    const newSha = await createCommitObject(site, state.baseSha, files, message);
-    await updateRef(site, branchName, newSha);
+    const plan = await planBatchCommit(site, branchName, state.baseSha, state.entries);
+    // treeBaseSha is always the branch's real current tip (state.baseSha),
+    // regardless of squashing — the tree must include everything already on
+    // the branch plus this run's new files either way. Only the commit's
+    // PARENT link (plan.parentSha) and message change when squashing.
+    const newSha = await createCommitObject(site, plan.parentSha, files, plan.message, { treeBaseSha: state.baseSha });
+    await updateRef(site, branchName, newSha, { force: plan.forced });
     return { ok: true, pushed: state.entries.length };
   } catch (err) {
     return persistedFailure('github-ops.endBatchPush', err, 'This batch of changes could not be pushed to GitHub right now — our team has been notified.');

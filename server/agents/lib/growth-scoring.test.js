@@ -104,6 +104,82 @@ describe('confidenceScore — learned outcome history, neutral when absent', () 
   });
 });
 
+// 2026-09 lifecycle-gap audit finding #3: fix-impact.js's impactByGenerator
+// magnitude data (real measured clicks/impressions/position deltas) had zero
+// callers anywhere. Wired here as a purely informational factor — never a
+// score contribution, since folding an unbounded magnitude into this bounded
+// swing would need an invented normalization constant (the same reasoning
+// fix-impact.js's classifyImpact already refuses for these same numbers).
+describe('confidenceScore — impactMagnitude is informational only, never a score adjustment', () => {
+  test('present with real measured data: adds a visible factor, contributes zero to score', () => {
+    const withMagnitude = confidenceScore(rec(), {
+      confidence: 0.5, impactConfidence: 0.5,
+      impactMagnitude: { measured: 4, clicksDelta: 87, impressionsDelta: 1200, avgPositionDelta: 2.1 },
+    });
+    const withoutMagnitude = confidenceScore(rec(), { confidence: 0.5, impactConfidence: 0.5 });
+
+    assert.equal(withMagnitude.score, withoutMagnitude.score, 'identical score with or without magnitude data present');
+    assert.equal(withMagnitude.score, 0);
+    assert.ok(withMagnitude.factors.some((f) => f.includes('measured-impact-magnitude')));
+    assert.ok(withMagnitude.factors.some((f) => f.includes('clicks +87')));
+  });
+
+  test('a strongly negative magnitude still contributes zero score — direction is impactConfidence\'s job, not this', () => {
+    const negative = confidenceScore(rec(), {
+      confidence: 0.9, impactConfidence: 0.9,
+      impactMagnitude: { measured: 5, clicksDelta: -900, impressionsDelta: -12000, avgPositionDelta: -8 },
+    });
+    const noMagnitude = confidenceScore(rec(), { confidence: 0.9, impactConfidence: 0.9 });
+    assert.equal(negative.score, noMagnitude.score);
+  });
+
+  test('null impactMagnitude (generator has no measured fix_impact rows yet) adds no factor at all', () => {
+    const result = confidenceScore(rec(), { confidence: 0.5, impactConfidence: 0.5, impactMagnitude: null });
+    assert.equal(result.factors.some((f) => f.includes('measured-impact-magnitude')), false);
+  });
+
+  test('measured: 0 (present but empty) adds no factor either — nothing real to show yet', () => {
+    const result = confidenceScore(rec(), { impactMagnitude: { measured: 0, clicksDelta: 0, impressionsDelta: 0, avgPositionDelta: null } });
+    assert.equal(result.factors.some((f) => f.includes('measured-impact-magnitude')), false);
+  });
+});
+
+// 2026-09 Data Analyst audit finding #3: analyst-outcome.js already recorded
+// predicted-vs-observed accuracy per recommendation, but it never reached
+// this shared learning map. Same additive-only, zero-score treatment as
+// impactMagnitude directly above — the request explicitly ruled out letting
+// this override any safety/risk/deterministic gate.
+describe('confidenceScore — analystPredictionAccuracy is informational only, never a score adjustment', () => {
+  test('present with real measured data: adds a visible factor, contributes zero to score', () => {
+    const withAccuracy = confidenceScore(rec(), {
+      confidence: 0.5, impactConfidence: 0.5,
+      analystPredictionAccuracy: { measured: 4, confirmed: 3 },
+    });
+    const withoutAccuracy = confidenceScore(rec(), { confidence: 0.5, impactConfidence: 0.5 });
+
+    assert.equal(withAccuracy.score, withoutAccuracy.score, 'identical score with or without accuracy data present');
+    assert.equal(withAccuracy.score, 0);
+    assert.ok(withAccuracy.factors.some((f) => f.includes('analyst-prediction-accuracy: 3/4 confirmed')));
+  });
+
+  test('a poor accuracy record (0 of N confirmed) still contributes zero score', () => {
+    const poor = confidenceScore(rec(), { confidence: 0.9, analystPredictionAccuracy: { measured: 5, confirmed: 0 } });
+    const none = confidenceScore(rec(), { confidence: 0.9 });
+    assert.equal(poor.score, none.score);
+    assert.ok(poor.factors.some((f) => f.includes('0/5 confirmed')));
+  });
+
+  test('null analystPredictionAccuracy (generator never came from analyst-fusion.js) adds no factor at all', () => {
+    const result = confidenceScore(rec(), { confidence: 0.5, analystPredictionAccuracy: null });
+    assert.equal(result.factors.some((f) => f.includes('analyst-prediction-accuracy')), false);
+  });
+
+  test('measured: 0 (present but empty) adds no factor either — nothing real to show yet', () => {
+    const result = confidenceScore(rec(), { analystPredictionAccuracy: { measured: 0, confirmed: 0 } });
+    assert.equal(result.factors.some((f) => f.includes('analyst-prediction-accuracy')), false);
+  });
+});
+
 describe('buildPageMetrics — aggregates per-(query,page) rows into per-page metrics', () => {
   test('sums impressions/clicks and impression-weights position across queries on the same page', () => {
     const rows = [

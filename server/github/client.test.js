@@ -2,7 +2,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getFileContent, getFileSha, beginFileOverlay, endFileOverlay, recordFileOverlayWrites,
-  createCommitObject, updateRef, commitFilesAtomic,
+  createCommitObject, updateRef, commitFilesAtomic, getCommitMessage,
   getBranchSha, getLastKnownRateLimit, RATE_LIMIT_RESERVE, searchCodeForString,
 } from './client.js';
 import { clearInstallationTokenCache } from './app-auth.js';
@@ -172,6 +172,106 @@ describe('createCommitObject / updateRef split', () => {
       const result = await commitFilesAtomic(site, 'main', [{ path: 'a.txt', content: 'hi' }], 'msg');
       assert.deepEqual(result, { sha: 'commit-sha' });
       assert.deepEqual(methods, ['GET', 'GET', 'POST', 'POST', 'PATCH']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // github-ops.js's same-day squash (2026-09 lifecycle fix — one commit per
+  // day, guaranteed across separate same-day runs, not just within one):
+  // the new commit's TREE must come from wherever today's accumulated
+  // changes already are (treeBaseSha), while its PARENT link points further
+  // back, past today's earlier commit(s), to the real pre-today base.
+  test('createCommitObject reads its TREE from treeBaseSha when given, but still parents the commit on parentSha', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: opts?.method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (u.includes('/git/commits/branch-tip-sha')) return jsonResponse({ tree: { sha: 'cumulative-tree-sha' } });
+      if (u.includes('/git/trees')) return jsonResponse({ sha: 'new-tree-sha' });
+      if (u.endsWith('/git/commits')) return jsonResponse({ sha: 'squashed-commit-sha' });
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    try {
+      const sha = await createCommitObject(site, 'real-base-sha', [{ path: 'a.txt', content: 'hi' }], 'squashed message', { treeBaseSha: 'branch-tip-sha' });
+      assert.equal(sha, 'squashed-commit-sha');
+      // The tree read came from treeBaseSha, not parentSha.
+      assert.ok(calls.some((c) => c.url.includes('/git/commits/branch-tip-sha')));
+      assert.ok(!calls.some((c) => c.url.includes('/git/commits/real-base-sha')));
+      // But the new commit's own parent is parentSha, not treeBaseSha.
+      const commitCreateCall = calls.find((c) => c.method === 'POST' && c.url.endsWith('/git/commits'));
+      assert.deepEqual(commitCreateCall.body.parents, ['real-base-sha']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('createCommitObject with no treeBaseSha behaves exactly as before — tree and parent both come from parentSha', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: opts?.method, body: opts?.body ? JSON.parse(opts.body) : null });
+      if (u.includes('/git/commits/parent-sha')) return jsonResponse({ tree: { sha: 'base-tree-sha' } });
+      if (u.includes('/git/trees')) return jsonResponse({ sha: 'new-tree-sha' });
+      if (u.endsWith('/git/commits')) return jsonResponse({ sha: 'new-commit-sha' });
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    try {
+      await createCommitObject(site, 'parent-sha', [{ path: 'a.txt', content: 'hi' }], 'a commit');
+      const commitCreateCall = calls.find((c) => c.method === 'POST' && c.url.endsWith('/git/commits'));
+      assert.deepEqual(commitCreateCall.body.parents, ['parent-sha']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('updateRef with no force option omits it from the request body entirely — unchanged wire format for every existing caller', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ body: opts?.body ? JSON.parse(opts.body) : null });
+      return jsonResponse({});
+    };
+    try {
+      await updateRef(site, 'batch-branch', 'sha-1');
+      assert.deepEqual(calls[0].body, { sha: 'sha-1' });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('updateRef with force:true sends the non-fast-forward flag GitHub requires for a same-day squash', async () => {
+    const calls = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ body: opts?.body ? JSON.parse(opts.body) : null });
+      return jsonResponse({});
+    };
+    try {
+      await updateRef(site, 'batch-branch', 'sha-1', { force: true });
+      assert.deepEqual(calls[0].body, { sha: 'sha-1', force: true });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('getCommitMessage returns only the first line of the commit message', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => jsonResponse({ message: 'Action Center: batch — draft #1; draft #2' });
+    try {
+      assert.equal(await getCommitMessage(site, 'some-sha'), 'Action Center: batch — draft #1; draft #2');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test('getCommitMessage throws (never returns a fabricated value) on a real GitHub error', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response('not found', { status: 404 });
+    try {
+      await assert.rejects(() => getCommitMessage(site, 'missing-sha'));
     } finally {
       globalThis.fetch = original;
     }

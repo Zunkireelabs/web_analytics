@@ -19,6 +19,8 @@ import { getUserByEmail, createUser } from '../store/users.js';
 import { listPendingSignupRequests, getSignupRequestById, markSignupRequestReviewed, setSignupRequestCreatedSite } from '../store/signup-requests.js';
 import { getLatestAgentRuns } from '../store/agent-runs.js';
 import { getProductGrowthConfig, saveProductGrowthConfig, setProspectDiscoveryEnabled, ensureCrmWebhookToken } from '../store/product-growth-config.js';
+import { GOAL_TYPES, createGoal, listGoals, getGoal, updateGoal, setGoalStatus } from '../store/site-goals.js';
+import { callLLMForJson } from '../llm.js';
 import { setOnboardingBaseline } from '../store/upsert.js';
 import { safeMessage } from '../lib/errors.js';
 import { startFullSiteAudit } from '../agents/lib/bulk-audit.js';
@@ -704,6 +706,152 @@ router.post('/internal/clients/:id/prospect-discovery', async (req, res, next) =
     });
 
     res.json(await getProductGrowthConfig(siteId));
+  } catch (e) { next(e); }
+});
+
+// Business Goals API (Stage 1 of the goal-driven-prioritization plan — see
+// server/agents/lib/goal-alignment.js). Stage 2, the settings-drawer "Goals"
+// tab (web/src/components/ClientDrawer.jsx), calls this CRUD surface, which
+// follows the exact same shape as product-growth-config above (existence
+// check -> validate -> store call -> audit event) and the same per-site
+// scoping every store/site-goals.js function already enforces.
+router.get('/internal/clients/:id/goals', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    res.json(await listGoals(siteId));
+  } catch (e) { next(e); }
+});
+
+router.post('/internal/clients/:id/goals', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance } = req.body || {};
+    if (!GOAL_TYPES.includes(goalType)) return res.status(400).json({ error: `goalType must be one of: ${GOAL_TYPES.join(', ')}` });
+    if (!objective || !String(objective).trim()) return res.status(400).json({ error: 'objective is required.' });
+
+    const goal = await createGoal(siteId, { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_created',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId: goal.id, goalType, objective: goal.objective },
+      success: true,
+    });
+
+    res.status(201).json(goal);
+  } catch (e) { next(e); }
+});
+
+router.patch('/internal/clients/:id/goals/:goalId', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const goalId = Number(req.params.goalId);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    const existingGoal = await getGoal(siteId, goalId);
+    if (!existingGoal) return res.status(404).json({ error: `No goal ${goalId} found for site ${siteId}.` });
+
+    const { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance } = req.body || {};
+    if (goalType !== undefined && !GOAL_TYPES.includes(goalType)) return res.status(400).json({ error: `goalType must be one of: ${GOAL_TYPES.join(', ')}` });
+    if (objective !== undefined && !String(objective).trim()) return res.status(400).json({ error: 'objective cannot be blank.' });
+
+    const goal = await updateGoal(siteId, goalId, { goalType, objective, targetBusinessArea, targetPagePatterns, primaryMetric, description, importance });
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_updated',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId },
+      success: true,
+    });
+
+    res.json(goal);
+  } catch (e) { next(e); }
+});
+
+// Own dedicated toggle, same "explicit, single-purpose action" shape as
+// prospect-discovery above — a settings UI can pause/reactivate a goal
+// without resending its full form.
+router.post('/internal/clients/:id/goals/:goalId/status', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const goalId = Number(req.params.goalId);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+    const existingGoal = await getGoal(siteId, goalId);
+    if (!existingGoal) return res.status(404).json({ error: `No goal ${goalId} found for site ${siteId}.` });
+
+    const { status } = req.body || {};
+    if (status !== 'active' && status !== 'paused') return res.status(400).json({ error: "status must be 'active' or 'paused'." });
+
+    const goal = await setGoalStatus(siteId, goalId, status);
+
+    await recordAuditEvent(req, {
+      action: 'tenant.goal_status_changed',
+      targetType: 'site',
+      targetId: String(siteId),
+      tenantSiteId: siteId,
+      tenantName: existing.name,
+      metadata: { goalId, status },
+      success: true,
+    });
+
+    res.json(goal);
+  } catch (e) { next(e); }
+});
+
+// Stage 2b of the Business Goals plan: the custom-goal AI structure preview.
+// Free text in, a proposed structure out — deliberately NEVER writes to
+// site_goals. The brief is explicit an AI-structured goal must go through an
+// explicit user Confirm step (the real POST /goals above, with
+// goalType: 'custom') before it's saved; this endpoint only proposes.
+const GOAL_STRUCTURE_SYSTEM = 'You turn a business owner\'s free-text description of a goal into a structured SEO/growth ' +
+  'goal a recommendation-prioritization system can match findings against. Respond with ONLY a JSON object: ' +
+  '{"objective": string, "targetBusinessArea": string|null, "targetPagePatterns": string[], "primaryMetric": string|null}. ' +
+  '"objective" is a specific, one-sentence restatement of the goal (not the raw input verbatim). "targetBusinessArea" is a ' +
+  'short label for the part of the business this serves (e.g. "Booking software product line"), or null if the text gives ' +
+  'no real signal for one — never invent one. "targetPagePatterns" is 0-5 URL path patterns (bare paths like "/pricing" or ' +
+  'prefix globs like "/blog/*") ONLY if the text names or clearly implies specific pages or a site section — an empty array ' +
+  'is correct and expected when it does not, never guess a pattern. "primaryMetric" is a short label for what "success" ' +
+  'looks like (e.g. "Organic bookings"), or null if unclear.';
+
+export function validGoalStructureProposal(p) {
+  return !!p && typeof p.objective === 'string' && p.objective.trim().length > 0
+    && (p.targetBusinessArea === null || typeof p.targetBusinessArea === 'string')
+    && Array.isArray(p.targetPagePatterns) && p.targetPagePatterns.every((s) => typeof s === 'string')
+    && (p.primaryMetric === null || typeof p.primaryMetric === 'string');
+}
+
+router.post('/internal/clients/:id/goals/structure-preview', async (req, res, next) => {
+  try {
+    const siteId = Number(req.params.id);
+    const existing = await getSiteById(siteId);
+    if (!existing) return res.status(404).json({ error: `No site found with id ${siteId}.` });
+
+    const { description } = req.body || {};
+    if (!description || !String(description).trim()) return res.status(400).json({ error: 'description is required.' });
+
+    const proposal = await callLLMForJson(GOAL_STRUCTURE_SYSTEM, String(description).trim(), {
+      maxTokens: 300, generatorId: 'goal-structure-preview', siteId, validate: validGoalStructureProposal,
+    });
+
+    res.json({
+      objective: proposal.objective.trim(),
+      targetBusinessArea: proposal.targetBusinessArea?.trim() || null,
+      targetPagePatterns: proposal.targetPagePatterns.map((s) => s.trim()).filter(Boolean),
+      primaryMetric: proposal.primaryMetric?.trim() || null,
+    });
   } catch (e) { next(e); }
 });
 

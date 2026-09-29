@@ -88,6 +88,18 @@ test('a fine-grained PAT unable to use the merge-branch endpoint waits on a huma
   assert.equal(isAutoRetryable(retryPolicy), false);
 });
 
+test('the fine-grained-PAT block reason carries the already-known remediation, not just the diagnosis', () => {
+  // Messaging-only regression: the fix (classic PAT/App token, or a
+  // Git-Data-API-based sync) was already fully known when this rule was
+  // written — it must reach whoever reviews the block, not stay a comment
+  // only a future engineer reading the source would ever see.
+  const { summary } = classifyAbandonReason(
+    'Auto-ship failed: mergeBranchFromBase failed (403): {"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/branches/branches#merge-a-branch","status":"403"}',
+  );
+  assert.match(summary, /classic PAT/i);
+  assert.match(summary, /Git Data API/i);
+});
+
 test('missing markers wait on a human too', () => {
   // 10 + 9 live rows (Facebook Pixel and GA4).
   const { retryPolicy } = classifyAbandonReason(

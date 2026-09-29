@@ -36,6 +36,9 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('UPDATE recommendations SET')) {
     return { rows: rows || [] };
   }
+  if (sql.startsWith('INSERT INTO recommendations')) {
+    return { rows: [{ id: 1 }] };
+  }
   throw new Error(`recommendations.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -47,7 +50,7 @@ mock.module(resolve('../db.js'), {
 });
 const {
   closeStaleRecommendations, mergeIntoRecommendation, refreshRecommendationBlockState, listOpenSafeRecommendations,
-  classifyBlockedKind, markRecommendationsUnfixable,
+  classifyBlockedKind, markRecommendationsUnfixable, insertRecommendation, listOpenRecommendations,
 } = await import('./recommendations.js');
 
 beforeEach(() => { issued = []; rows = []; updated = null; });
@@ -372,5 +375,110 @@ describe('markRecommendationsUnfixable — direct evidence, not absence of it', 
     await markRecommendationsUnfixable(1, [{ generatorId: 'schema', page: 'https://x.com/x/' }]);
     const update = issued.find((q) => q.sql.includes("status = 'unfixable'"));
     assert.match(update.params[3], /cannot be resolved to a real source/);
+  });
+});
+
+describe('goal_id / goal_alignment — Stage 1 of the Business Goals plan', () => {
+  test('insertRecommendation writes goal_id/goal_alignment, defaulting to null when omitted', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.match(insert.sql, /goal_id, goal_alignment/);
+    assert.equal(insert.params[14], null);
+    assert.equal(insert.params[15], null);
+  });
+
+  test('insertRecommendation serializes a real goal alignment', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+      goalId: 42, goalAlignment: { level: 'strong', rationale: 'r' },
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.equal(insert.params[14], 42);
+    assert.equal(JSON.parse(insert.params[15]).level, 'strong');
+  });
+
+  test('mergeIntoRecommendation writes goal_id/goal_alignment unconditionally, not COALESCE — a paused goal must clear the prior alignment', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', goalId: null, goalAlignment: null });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.match(merge.sql, /goal_id = \$12/);
+    assert.match(merge.sql, /goal_alignment = \$13/);
+    assert.doesNotMatch(merge.sql, /goal_id = COALESCE/);
+    assert.doesNotMatch(merge.sql, /goal_alignment = COALESCE/);
+    assert.equal(merge.params[11], null);
+    assert.equal(merge.params[12], null);
+  });
+
+  test('mergeIntoRecommendation serializes a real goal alignment', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', goalId: 9, goalAlignment: { level: 'partial', rationale: 'r2' } });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.equal(merge.params[11], 9);
+    assert.equal(JSON.parse(merge.params[12]).level, 'partial');
+  });
+});
+
+describe('decision_id — scoped Decision Engine integration (DEFAULT bucket only)', () => {
+  test('insertRecommendation writes decision_id, defaulting to null when omitted', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.match(insert.sql, /decision_id/);
+    assert.equal(insert.params[16], null);
+  });
+
+  test('insertRecommendation writes a real decision_id', async () => {
+    await insertRecommendation(1, {
+      page: '/x', recommendationType: 'faq', issue: 'x', reason: 'x', params: {}, findingId: 'f1', detectingAgent: 'a', priority: 'medium',
+      decisionId: 77,
+    });
+    const insert = issued.find((q) => q.sql.startsWith('INSERT INTO recommendations'));
+    assert.equal(insert.params[16], 77);
+  });
+
+  // Deliberately the OPPOSITE semantics of goal_id/goal_alignment above: a
+  // decide() call is bounded/rare (default-bucket-decision.js's
+  // MAX_DECISION_ENGINE_CALLS_PER_RUN), so a finding whose decision didn't
+  // make this run's cap must keep whatever decision_id a prior run already
+  // recorded, not have it wiped back to NULL — see mergeIntoRecommendation's
+  // own comment.
+  test('mergeIntoRecommendation COALESCEs decision_id — omitting it never clears a prior decision', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe' });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.match(merge.sql, /decision_id = COALESCE\(\$14, decision_id\)/);
+    assert.equal(merge.params[13], null);
+  });
+
+  test('mergeIntoRecommendation writes a fresh decision_id when this run\'s batch produced one', async () => {
+    await mergeIntoRecommendation(7, { findingId: 'f1', agentId: 'a', riskTier: 'safe', decisionId: 55 });
+    const merge = issued.find((q) => q.sql.includes('finding_ids ='));
+    assert.equal(merge.params[13], 55);
+  });
+});
+
+describe('listOpenRecommendations — effective-priority ORDER BY', () => {
+  test('the SQL score matches goal-alignment.js\'s PRIORITY_TIER_SCORE/GOAL_ALIGNMENT_BOOST exactly', async () => {
+    // Golden-string lock: server/agents/lib/goal-alignment.js's exported
+    // constants (PRIORITY_TIER_SCORE: high 30/medium 20/low 10,
+    // GOAL_ALIGNMENT_BOOST: strong 12/partial 6/weak 2/none+insufficient 0)
+    // are duplicated here as literal SQL because this ORDER BY must stay
+    // pure SQL — this test is what catches the two drifting apart.
+    const { PRIORITY_TIER_SCORE, GOAL_ALIGNMENT_BOOST } = await import('../agents/lib/goal-alignment.js');
+    await listOpenRecommendations(1);
+    const select = issued.find((q) => q.sql.startsWith('SELECT * FROM recommendations WHERE site_id = $1 AND status'));
+    assert.match(select.sql, new RegExp(`WHEN 'high' THEN ${PRIORITY_TIER_SCORE.high}`));
+    assert.match(select.sql, new RegExp(`WHEN 'medium' THEN ${PRIORITY_TIER_SCORE.medium}`));
+    assert.match(select.sql, new RegExp(`WHEN 'low' THEN ${PRIORITY_TIER_SCORE.low}`));
+    assert.match(select.sql, new RegExp(`WHEN 'strong' THEN ${GOAL_ALIGNMENT_BOOST.strong}`));
+    assert.match(select.sql, new RegExp(`WHEN 'partial' THEN ${GOAL_ALIGNMENT_BOOST.partial}`));
+    assert.match(select.sql, new RegExp(`WHEN 'weak' THEN ${GOAL_ALIGNMENT_BOOST.weak}`));
+  });
+
+  test('orders by the combined score descending, never touching WHERE/eligibility', async () => {
+    await listOpenRecommendations(1);
+    const select = issued.find((q) => q.sql.startsWith('SELECT * FROM recommendations WHERE site_id = $1 AND status'));
+    assert.match(select.sql, /WHERE site_id = \$1 AND status = 'open' ORDER BY/, 'the WHERE clause is unchanged — goal alignment only affects ORDER BY');
+    assert.match(select.sql, /\) DESC,/, 'the combined score sorts descending — higher effective priority first');
   });
 });

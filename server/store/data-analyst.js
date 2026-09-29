@@ -475,14 +475,44 @@ export async function saveLayoutSuggestion(siteId, layoutJson, reason) {
 // (anomaly + forecast_risk + trend_shift together) to compute corroboration,
 // which is cheaper and simpler as one grouped query than three HTTP-shaped
 // filters over the same payload.
+//
+// LEFT JOINs the Python Root Cause Analysis Engine's own output (migration
+// 0018, root_cause_analysis_runs/nodes) — real output the Node side never
+// read before (2026-09 Data Analyst audit finding). Only anomaly/trend_shift
+// insights ever get a run at all (root_cause.py's TRIGGER_INSIGHT_TYPES), so
+// this is null for everything else, same honest "nothing to report" shape
+// every other insufficient-evidence path in this codebase already uses —
+// never fabricated. Picks the single highest `share_of_baseline_change_pct`
+// node from the MOST RECENT 'ok' run for that insight — root_cause.py's own
+// module doc is explicit these are "PARALLEL SIBLINGS... not expected to sum
+// to 100%", i.e. an independently-ranked contributor, never a claim of sole
+// causation — callers must preserve that distinction in any text they build
+// from it (see analyst-fusion.js's buildNarrative).
 export async function getRecentPageInsights(siteId, days = 21) {
   const { rows } = await query(
-    `SELECT id, metric_key, dimension_value AS page, insight_type, severity, evidence, generated_at, period_start
-       FROM insights
-      WHERE client_id = $1 AND dimension_type = 'page'
-        AND generated_at >= now() - ($2 * interval '1 day')
-      ORDER BY generated_at DESC`,
+    `SELECT i.id, i.metric_key, i.dimension_value AS page, i.insight_type, i.severity, i.evidence, i.generated_at, i.period_start,
+            rc.dimension_type AS root_cause_dimension_type, rc.dimension_value AS root_cause_dimension_value,
+            rc.share_of_baseline_change_pct AS root_cause_share_pct
+       FROM insights i
+       LEFT JOIN LATERAL (
+         SELECT n.dimension_type, n.dimension_value, n.share_of_baseline_change_pct
+           FROM root_cause_analysis_runs r
+           JOIN root_cause_analysis_nodes n ON n.run_id = r.id
+          WHERE r.insight_id = i.id AND r.status = 'ok' AND n.share_of_baseline_change_pct IS NOT NULL
+          ORDER BY r.generated_at DESC, n.share_of_baseline_change_pct DESC
+          LIMIT 1
+       ) rc ON true
+      WHERE i.client_id = $1 AND i.dimension_type = 'page'
+        AND i.generated_at >= now() - ($2 * interval '1 day')
+      ORDER BY i.generated_at DESC`,
     [siteId, days]
   );
-  return rows;
+  return rows.map((r) => ({
+    ...r,
+    topRootCause: r.root_cause_dimension_type == null ? null : {
+      dimensionType: r.root_cause_dimension_type,
+      dimensionValue: r.root_cause_dimension_value,
+      sharePct: r.root_cause_share_pct == null ? null : Number(r.root_cause_share_pct),
+    },
+  }));
 }

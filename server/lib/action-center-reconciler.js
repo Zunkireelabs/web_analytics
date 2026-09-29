@@ -69,10 +69,25 @@ import { MAX_RECOVERY_CYCLES, effectiveConvergenceCap, MAX_REFUSAL_RECOVERY_CYCL
 // its refreshEvidence option rather than duplicating re-detection logic. See
 // its own doc comment in recommendation-coordinator.js for why this, and not
 // a second live-content reader, is the right thing to call from here.
-import { recheckRecommendation } from '../agents/lib/recommendation-coordinator.js';
+import { recheckRecommendation, CAPABILITY_GAP_BLOCK_PREFIX } from '../agents/lib/recommendation-coordinator.js';
 import { verifyRecommendation, VERIFICATION_DECISION } from '../generators/lib/verification-layer.js';
 import { getGenerator } from '../generators/registry.js';
 import { recoverUnopenedBatchPrs } from './batch-pr-recovery.js';
+// capabilityGapDetector was previously exercised only via
+// scripts/shadow-test-capability-gap-recovery.js in shadow mode (a stubbed
+// decisionEngineFn that never writes to the `decisions` table). Calling the
+// real singleton here is what makes it a real, first production caller of
+// decision-engine.js's decide() too, not just this file's own pass.
+import { capabilityGapDetector } from '../agents/lib/capability-gap-detector.js';
+// setDecisionOutcome had zero callers anywhere in the codebase before this
+// (see store/decisions.js's own header comment) — decision-engine.js's
+// decide() was recording Situation->Evidence->Hypothesis->Decision->Action,
+// but nothing ever closed the loop with the actual outcome. surfaceCapabilityGaps
+// below is the first real call site: it already knows, synchronously, whether
+// the investigation's decision led anywhere (blocked N recommendations for a
+// human) or not, so it can record that outcome the same moment it acts,
+// without needing a new decision_id column anywhere to trace it later.
+import { setDecisionOutcome } from '../store/decisions.js';
 
 // How long a draft may sit without progress before its recommendation is
 // taken back. Long enough that nothing in flight is disturbed — a normal
@@ -326,6 +341,83 @@ async function classifyUnrecordedFailures(siteId, { apply, log }) {
         result.blocked += 1;
       }
     }
+  }
+  return result;
+}
+
+// Pass 3b — capability-gap clustering. Same-site ITEM_DEFECT failures that
+// share one generalized failure shape are a single broken/missing capability
+// on the generator itself, not N independent per-item defects — retrying
+// each one blindly (passes 1-3 above) never converges because the resolver
+// is what's broken, not the individual page. capability-gap-detector.js
+// (already built and validated against a real incident — see its own header
+// comment) does the clustering + investigation; this pass is what actually
+// ACTS on a detected gap for the first time, instead of leaving it as a
+// shadow-only report. It never repairs anything itself (no automated code
+// change is safe to make blind) — it blocks every open recommendation the
+// cluster touches ONCE, with the shared diagnosis, so a human sees "one
+// capability problem affecting N items" instead of N separate stuck cards,
+// and so driveAutonomousRecovery below (whose own guard is
+// `if (rec.blocked_reason) continue`) stops spending recovery cycles
+// re-detecting the same items against content that was never the real
+// problem.
+//
+// Runs after classifyUnrecordedFailures (which only ever blocks on
+// NEEDS_HUMAN, never on ITEM_DEFECT) and before driveAutonomousRecovery, so
+// the block lands before recovery would otherwise burn a cycle on it.
+async function surfaceCapabilityGaps(siteId, { apply, log }) {
+  const result = { gapsDetected: 0, recommendationsBlocked: 0, gaps: [] };
+  const gaps = await capabilityGapDetector.detectCapabilityGaps(siteId);
+  if (!gaps.length) return result;
+  result.gapsDetected = gaps.length;
+
+  for (const gap of gaps) {
+    result.gaps.push({ generatorId: gap.generatorId, summary: gap.summary, affectedCount: gap.affectedCount });
+    if (!apply) continue;
+
+    const { rows: findingRows } = await query(
+      `SELECT DISTINCT finding_id FROM drafts WHERE site_id = $1 AND id = ANY($2) AND finding_id IS NOT NULL`,
+      [siteId, gap.affectedIds],
+    );
+    // The investigation's own rationale is the best available diagnosis for
+    // the generic-fallback bucket (two genuinely distinct root causes can
+    // hide under one cluster — see capability-gap-detector.js); a cluster
+    // that already matched a real RULES entry has no investigation to quote,
+    // so its own summary already IS the diagnosis.
+    const diagnosis = gap.investigation?.rationale
+      || `${gap.affectedCount} attempt(s) on generator "${gap.generatorId}" all failed with the same underlying defect (${gap.summary}) — a shared capability gap, not ${gap.affectedCount} independent per-item problems.`;
+
+    const blockedRecIds = [];
+    for (const { finding_id: findingId } of findingRows) {
+      const rec = await findRecommendationForFinding(siteId, findingId);
+      if (!rec || rec.status !== 'open' || rec.blocked_reason) continue;
+      await blockRecommendation(
+        rec.id,
+        `${CAPABILITY_GAP_BLOCK_PREFIX}${gap.generatorId}" affecting ${gap.affectedCount} item(s): ${diagnosis}`,
+      );
+      result.recommendationsBlocked += 1;
+      blockedRecIds.push(rec.id);
+    }
+
+    // Close the experience-memory loop for gaps that were actually
+    // investigated (only the generic-fallback bucket ever calls
+    // decisionEngine.decide() — see capability-gap-detector.js). The
+    // decision's own action ('investigate_further', typically) did not
+    // resolve this autonomously — it was escalated to a human instead, with
+    // no execution ever attempted. That is not a verified failure, so the
+    // status stays 'decided' ("open question, not learning yet" — see
+    // decision-evidence.js's DECISION_OUTCOME_KNOWN_STATUSES, which
+    // correctly excludes 'decided' from past-decision evidence). Recording
+    // outcome_ref still links the decision to the blocked recommendations it
+    // produced, without misrepresenting "escalated" as "attempted and
+    // failed".
+    if (gap.investigation?.id && blockedRecIds.length > 0) {
+      await setDecisionOutcome(gap.investigation.id, {
+        status: 'decided',
+        outcomeRef: `recommendations:${blockedRecIds.join(',')}`,
+      });
+    }
+    log?.(`[reconciler] site ${siteId}: capability gap detected on "${gap.generatorId}" (${gap.summary}) — ${gap.affectedCount} affected draft(s), blocked ${result.recommendationsBlocked} open recommendation(s) so far`);
   }
   return result;
 }
@@ -629,9 +721,10 @@ export async function reconcileSite(siteId, { idleHours = IDLE_RECLAIM_HOURS, ap
   const itemDefects = await reconcileStuckApprovedDrafts(siteId, { apply, log });
   const stalled = await reclaimStalledDrafts(siteId, { idleHours, apply, log });
   const failures = await classifyUnrecordedFailures(siteId, { apply, log });
+  const capabilityGaps = await surfaceCapabilityGaps(siteId, { apply, log });
   const recovery = await driveAutonomousRecovery(siteId, { apply, log });
   const refusalRecovery = await driveAutonomousRefusalRecovery(siteId, { apply, log });
-  return { siteId, prRecovery, stalled, failures, itemDefects, recovery, refusalRecovery };
+  return { siteId, prRecovery, stalled, failures, itemDefects, capabilityGaps, recovery, refusalRecovery };
 }
 
 // Every site, one at a time. Sequential on purpose: this shares a connection
@@ -664,10 +757,11 @@ export async function reconcileAllSites({ idleHours = IDLE_RECLAIM_HOURS, apply 
     reclaimed: acc.reclaimed + r.stalled.reclaimed,
     reopened: acc.reopened + r.stalled.reopened,
     classified: acc.classified + r.failures.classified,
-    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked + r.refusalRecovery.blocked,
+    blocked: acc.blocked + r.failures.blocked + r.recovery.blocked + r.refusalRecovery.blocked + r.capabilityGaps.recommendationsBlocked,
     resolved: acc.resolved + r.failures.resolved + r.recovery.resolved + r.refusalRecovery.resolved,
     abandonedForRetry: acc.abandonedForRetry + r.itemDefects.abandoned,
     recovered: acc.recovered + r.recovery.recovered + r.refusalRecovery.recovered,
-  }), { reclaimed: 0, reopened: 0, classified: 0, blocked: 0, resolved: 0, abandonedForRetry: 0, recovered: 0 });
+    capabilityGapsDetected: acc.capabilityGapsDetected + r.capabilityGaps.gapsDetected,
+  }), { reclaimed: 0, reopened: 0, classified: 0, blocked: 0, resolved: 0, abandonedForRetry: 0, recovered: 0, capabilityGapsDetected: 0 });
   return { results, totals };
 }

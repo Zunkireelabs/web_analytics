@@ -1,6 +1,7 @@
 import { getSearchPerformanceRange, getSearchPerformanceForPages, getSiteById } from '../../store/read.js';
 import { listPageInventory } from '../../store/page-inventory.js';
 import { getCheckedAtForPages as getCheckedAtForPagesDefault, markPagesChecked } from '../../store/agent-page-rotation.js';
+import { getOpenRecommendationPages as getOpenRecommendationPagesDefault } from '../../store/recommendations.js';
 import { sortByRotation } from './rotation.js';
 import { knownDomain, filterOwnDomainPages } from './site-domain.js';
 import { isForeignPlatformSpamUrl } from './index-bloat.js';
@@ -248,6 +249,7 @@ export async function selectCandidatePages(siteId, agentId, {
   getCheckedAtForPages = getCheckedAtForPagesDefault,
   filterSoftNotFound = filterSoftNotFoundPages,
   markPagesCheckedFn = markPagesChecked,
+  getOpenRecommendationPagesFn = getOpenRecommendationPagesDefault,
 } = {}) {
   const [site, gscPagesRaw, inventoryRaw] = await Promise.all([
     getSiteById(siteId),
@@ -292,18 +294,39 @@ export async function selectCandidatePages(siteId, agentId, {
   const gscSorted = sortByRotation(gscUrls, checkedAt);
   const zeroTrafficSorted = sortByRotation(zeroTrafficUrls, checkedAt);
 
-  const zeroTrafficSlots = zeroTrafficSlotsFor(batchSize, gscSorted.length, zeroTrafficSorted.length);
-  let batch = [...gscSorted.slice(0, batchSize - zeroTrafficSlots), ...zeroTrafficSorted.slice(0, zeroTrafficSlots)];
+  // Pages already carrying an OPEN recommendation from THIS agent are
+  // re-verified ahead of ordinary "never checked" rotation, bounded to at
+  // most half the batch so a site with many open findings for this agent
+  // can't starve normal rotation/new-page discovery entirely. Real gap
+  // confirmed 2026-09-29: a shared template fix (base.njk gaining FAQ/schema
+  // markup for every product page) silently resolved several open
+  // ai-visibility recommendations at once, but nothing re-checked them —
+  // MAX_PAGES=20 rotation on a 100+ page site meant an affected page could
+  // sit unrotated, and its now-false finding just stayed open indefinitely.
+  // See getOpenRecommendationPages' own comment for the full story.
+  const RECHECK_SHARE_CAP = 0.5;
+  const maxRecheckSlots = Math.floor(batchSize * RECHECK_SHARE_CAP);
+  const openRecPages = await getOpenRecommendationPagesFn(siteId, agentId);
+  const recheckPages = openRecPages.slice(0, maxRecheckSlots);
+  const recheckSet = new Set(recheckPages);
+
+  const rotationBudget = batchSize - recheckPages.length;
+  const gscRotation = gscSorted.filter((p) => !recheckSet.has(p));
+  const zeroTrafficRotation = zeroTrafficSorted.filter((p) => !recheckSet.has(p));
+  const zeroTrafficSlots = zeroTrafficSlotsFor(rotationBudget, gscRotation.length, zeroTrafficRotation.length);
+  let rotationBatch = [...gscRotation.slice(0, rotationBudget - zeroTrafficSlots), ...zeroTrafficRotation.slice(0, zeroTrafficSlots)];
 
   // Either pool can be smaller than its reserved share (e.g. a brand-new
   // site with few GSC pages, or a site whose crawl hasn't found much yet)
   // — top up from whichever pool still has candidates left rather than
   // wasting the unused slots.
-  if (batch.length < batchSize) {
-    const used = new Set(batch);
+  if (rotationBatch.length < rotationBudget) {
+    const used = new Set([...recheckPages, ...rotationBatch]);
     const leftover = [...gscSorted, ...zeroTrafficSorted].filter((p) => !used.has(p));
-    batch = [...batch, ...leftover].slice(0, batchSize);
+    rotationBatch = [...rotationBatch, ...leftover].slice(0, rotationBudget);
   }
+
+  let batch = [...recheckPages, ...rotationBatch];
 
   // Drop candidates that are this site's catch-all "nothing here" response
   // before any agent analyzes them. Applied to the BATCH rather than the whole

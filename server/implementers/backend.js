@@ -992,6 +992,28 @@ export async function computeBrokenLinkFixMerge(site, draft, beforeRef) {
     const result = await searchRepoLocalForStrings(site, beforeRef, hrefVariants(href), { priorityDirs });
     candidates = new Set(result.matches.slice(0, CODE_SEARCH_MAX_CANDIDATES));
     coverageIncomplete = result.truncatedCoverage;
+
+    // Exactly one narrower, targeted retry before this escalates to
+    // NEEDS_HUMAN (attempt-classification.js's "bounded local search"
+    // case) — a repo with more real candidate files than
+    // MAX_LOCAL_SEARCH_FILES may have pushed the actual match out of the
+    // first pass's slice; the finding's own source-page directories
+    // (priorityDirs) are the one subset already known relevant, so a
+    // second search scoped to ONLY that subset can still find it within
+    // the same bound. Preserves the bound itself (repo-local-search.js's
+    // MAX_LOCAL_SEARCH_FILES is unchanged) and makes no second download —
+    // same cached checkout, just a different file selection. Only ever one
+    // retry: if this also finds nothing, coverageIncomplete stands and the
+    // finding genuinely escalates.
+    if (coverageIncomplete && candidates.size === 0 && priorityDirs.length) {
+      const narrower = await searchRepoLocalForStrings(site, beforeRef, hrefVariants(href), {
+        priorityDirs, restrictToPriorityDirs: true,
+      });
+      if (narrower.matches.length) {
+        candidates = new Set(narrower.matches.slice(0, CODE_SEARCH_MAX_CANDIDATES));
+        coverageIncomplete = narrower.truncatedCoverage;
+      }
+    }
   } catch (err) {
     // A missing credential (client.js's authHeaders) is a permanent
     // site-wide config gap, not a transient outage — using a generic

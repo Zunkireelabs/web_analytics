@@ -222,3 +222,45 @@ describe('searchRepoLocalForStrings — external GitHub search limitation (why t
     assert.equal(result.truncatedCoverage, true, 'over the bound, a negative is still only a bounded negative');
   });
 });
+
+describe('searchRepoLocalForStrings — restrictToPriorityDirs (the one-narrower-retry option)', () => {
+  // The scenario the retry exists for: a repo bigger than MAX_LOCAL_SEARCH_FILES,
+  // where the real match lives under a known-relevant directory but the
+  // unrestricted pass's slice was consumed by unrelated files first.
+  test('a narrower search scoped to priorityDirs can find a match the bounded full scan missed', async () => {
+    repoFiles = {};
+    for (let i = 0; i < MAX_LOCAL_SEARCH_FILES + 5; i++) repoFiles[`other/page-${i}.njk`] = 'irrelevant';
+    repoFiles['src/pages/target.njk'] = '<a href="/the-link">x</a>';
+    const unrestricted = await searchRepoLocalForStrings(site, 'main', ['/the-link']);
+    assert.deepEqual(unrestricted.matches, [], 'the unrelated files fill the whole bounded slice first');
+    assert.equal(unrestricted.truncatedCoverage, true);
+
+    const narrower = await searchRepoLocalForStrings(site, 'main', ['/the-link'], {
+      priorityDirs: ['src/pages/'], restrictToPriorityDirs: true,
+    });
+    assert.deepEqual(narrower.matches, ['src/pages/target.njk']);
+  });
+
+  // The bound itself must not change — restrictToPriorityDirs changes WHICH
+  // files are selected, never MAX_LOCAL_SEARCH_FILES.
+  test('restrictToPriorityDirs never scans more than MAX_LOCAL_SEARCH_FILES either', async () => {
+    repoFiles = {};
+    for (let i = 0; i < MAX_LOCAL_SEARCH_FILES + 5; i++) repoFiles[`src/pages/page-${i}.njk`] = 'irrelevant';
+    const result = await searchRepoLocalForStrings(site, 'main', ['/nowhere'], {
+      priorityDirs: ['src/pages/'], restrictToPriorityDirs: true,
+    });
+    assert.equal(result.scanned, MAX_LOCAL_SEARCH_FILES);
+  });
+
+  // A narrower search that still finds nothing must still honestly report
+  // truncatedCoverage when its own scope was itself incomplete — it is not
+  // allowed to claim a confirmed negative it didn't actually establish.
+  test('a narrower search that still finds nothing reports its own coverage honestly', async () => {
+    repoFiles = { 'src/pages/other.njk': 'nothing relevant' };
+    const result = await searchRepoLocalForStrings(site, 'main', ['/nowhere'], {
+      priorityDirs: ['src/pages/'], restrictToPriorityDirs: true,
+    });
+    assert.deepEqual(result.matches, []);
+    assert.equal(result.truncatedCoverage, false, 'this narrow scope really was scanned completely');
+  });
+});

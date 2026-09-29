@@ -388,6 +388,107 @@ describe('data-array-content isDataReady — pre-flight check mirrors computeCha
   });
 });
 
+// itemsParentField — web-zenly's Feature pages, where the FAQ-like content
+// ("objections") sits at a FIXED key one level under each matched entry
+// (objections.items), unlike solutions.json's own faq array which is
+// already top-level. Distinct from nestedField above: there is only ONE id
+// here (the feature slug from the URL's last segment) — objections is not
+// derived from a second URL segment, it's the same fixed key on every entry.
+const tenantWithNestedObjections = {
+  id: 5,
+  url_file_map: {
+    patterns: [
+      {
+        match: '^/features/([^/]+)/?$',
+        adapters: {
+          faq: { id: 'data-array-content', format: 'json-array', dataFile: 'src/_data/features.json', idField: 'slug', itemsParentField: 'objections', itemsField: 'items' },
+        },
+      },
+    ],
+  },
+};
+const featuresFixture = JSON.stringify([
+  {
+    slug: 'booking',
+    name: 'Booking',
+    metaDescription: 'Existing description, untouched.',
+    objections: { headline: 'Things we get asked.', items: [{ question: 'Existing objection?', answer: 'Existing answer.' }] },
+  },
+  { slug: 'reports', name: 'Reports', objections: { headline: 'Questions.' } },
+  { slug: 'payment-tracking', name: 'Payment Tracking' },
+]);
+const fetchFeatures = async () => ({ content: featuresFixture });
+
+describe('data-array-content computeChange — itemsParentField (Feature-page objections.items)', () => {
+  test('appends into the real nested objections.items array, existing item and sibling fields untouched', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/booking/', items: [{ question: 'What booking software fits a multi-branch spa?', answer: 'Zennly.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    const booking = parsed.find((f) => f.slug === 'booking');
+    assert.equal(booking.objections.items.length, 2);
+    assert.ok(booking.objections.items.some((i) => i.question === 'Existing objection?'));
+    assert.ok(booking.objections.items.some((i) => i.question === 'What booking software fits a multi-branch spa?'));
+    // sibling top-level fields on the same entry, and other entries entirely, untouched
+    assert.equal(booking.metaDescription, 'Existing description, untouched.');
+    assert.equal(booking.objections.headline, 'Things we get asked.');
+    assert.equal(parsed.find((f) => f.slug === 'reports').objections.headline, 'Questions.');
+  });
+
+  test('creates a brand-new items array when objections exists but items does not', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/reports/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, true);
+    const parsed = JSON.parse(r.newContent);
+    const reports = parsed.find((f) => f.slug === 'reports');
+    assert.equal(reports.objections.items.length, 1);
+    assert.equal(reports.objections.headline, 'Questions.'); // sibling field on the same nested object untouched
+  });
+
+  test('an entry with no objections object at all -> honest no-insertion-marker, not a guess', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/payment-tracking/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+    assert.match(r.error, /objections/);
+  });
+
+  test('a slug that does not exist in the data file at all -> honest no-insertion-marker', async () => {
+    const r = await computeChange(tenantWithNestedObjections, {
+      action_type: 'faq',
+      content: { page: 'https://zennly.example.com/features/not-a-real-feature/', items: [{ question: 'Q?', answer: 'A.' }] },
+    }, fetchFeatures);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no-insertion-marker');
+  });
+});
+
+describe('data-array-content isDataReady — itemsParentField mirrors computeChange exactly', () => {
+  const config = tenantWithNestedObjections.url_file_map.patterns[0].adapters.faq;
+
+  test('a real feature with objections.items already present -> ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/booking/', config, fetchFeatures), true);
+  });
+
+  test('a real feature with objections but no items yet -> still ready (objections object exists)', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/reports/', config, fetchFeatures), true);
+  });
+
+  test('a real feature with no objections object at all -> not ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/payment-tracking/', config, fetchFeatures), false);
+  });
+
+  test('a slug that does not exist at all -> not ready', async () => {
+    assert.equal(await isDataReady(tenantWithNestedObjections, 'https://zennly.example.com/features/not-a-real-feature/', config, fetchFeatures), false);
+  });
+});
+
 // 'location-service-bootstrap' is the SAFE_RECOVERY write path
 // (agents/lib/location-service-gap.js decides WHETHER to authorize it;
 // this only tests what actually gets written once authorized) — it creates

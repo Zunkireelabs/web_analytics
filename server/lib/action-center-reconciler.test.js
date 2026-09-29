@@ -35,6 +35,7 @@ let recorded;
 let recheckImpl;
 let passOrder;
 let refusalOutcomes; // raw generator_outcomes rows: { recommendation_id, detail }
+let decisionOutcomes; // setDecisionOutcome calls: { id, status, outcomeRef }
 
 // Delegates to the real classifier rather than hand-copying its rules here —
 // store/drafts.js's countFailedAttemptsByFinding used to carry its own
@@ -173,6 +174,20 @@ function fakeQuery(text, params = []) {
   if (sql.startsWith('INSERT INTO internal_errors')) {
     return { rows: [] };
   }
+  // surfaceCapabilityGaps (pass 3b) — maps a gap's affected draft ids back to
+  // the finding ids their recommendations are found by.
+  if (sql.startsWith('SELECT DISTINCT finding_id FROM drafts')) {
+    const ids = params[1];
+    const findingIds = [...new Set(drafts.filter((d) => ids.includes(d.id) && d.finding_id).map((d) => d.finding_id))];
+    return { rows: findingIds.map((finding_id) => ({ finding_id })) };
+  }
+  // setDecisionOutcome (store/decisions.js) — surfaceCapabilityGaps' new call
+  // site closing the decision-engine experience-memory loop.
+  if (sql.startsWith('UPDATE decisions SET status')) {
+    const [id, status, outcomeRef] = params;
+    decisionOutcomes.push({ id, status, outcomeRef });
+    return { rows: [{ id, status, outcome_ref: outcomeRef }] };
+  }
   throw new Error(`action-center-reconciler.test.js fake query: unhandled SQL shape: ${sql}`);
 }
 
@@ -182,7 +197,14 @@ mock.module(resolve('../db.js'), {
   namedExports: { query: (text, params) => fakeQuery(text, params) },
 });
 mock.module(resolve('../agents/lib/recommendation-coordinator.js'), {
-  namedExports: { recheckRecommendation: async (siteId, id, opts) => recheckImpl(siteId, id, opts) },
+  namedExports: {
+    recheckRecommendation: async (siteId, id, opts) => recheckImpl(siteId, id, opts),
+    // Real value, not a stub — surfaceCapabilityGaps builds its
+    // blocked_reason text with this exact prefix (see the test at line ~627
+    // asserting on that text), so the mock must carry the real constant
+    // rather than an arbitrary one that would silently desync from it.
+    CAPABILITY_GAP_BLOCK_PREFIX: 'Part of a shared capability gap on "',
+  },
 });
 // Pass 0 is mocked wholesale for the same reason recheckRecommendation is:
 // its own behavior has its own test file (batch-pr-recovery.test.js). What
@@ -211,6 +233,13 @@ mock.module(resolve('../implementers/backend.js'), {
 mock.module(resolve('../implementers/lib/github-ops.js'), {
   namedExports: { baseBranch: () => 'main' },
 });
+// capabilityGapDetector — defaults to "no gaps" so every pre-existing test in
+// this file (none of which is about capability-gap clustering) is unaffected
+// by pass 3b's addition. Tests for the pass itself override gapsImpl.
+let gapsImpl;
+mock.module(resolve('../agents/lib/capability-gap-detector.js'), {
+  namedExports: { capabilityGapDetector: { detectCapabilityGaps: async (siteId) => gapsImpl(siteId) } },
+});
 const { reconcileSite } = await import('./action-center-reconciler.js');
 const { MAX_RECOVERY_CYCLES, MAX_FAILED_ATTEMPTS, MAX_REFUSALS, MAX_REFUSAL_RECOVERY_CYCLES } = await import('../agents/lib/ship-pacing.js');
 const { NO_FILE_MAPPING_FRAGMENT } = await import('./draft-failure-phrases.js');
@@ -238,6 +267,8 @@ beforeEach(() => {
   siteFixture = { id: SITE_ID, repo_owner: 'acme', repo_name: 'site' };
   mergeImpl = async () => { throw new Error('computeBrokenLinkFixMerge must not be called for this test'); };
   recheckImpl = async () => { throw new Error('recheckRecommendation must not be called for this test'); };
+  gapsImpl = async () => [];
+  decisionOutcomes = [];
 });
 
 describe('pass 4 (driveAutonomousRecovery) — below the cap: untouched, no re-detection at all', () => {
@@ -572,6 +603,132 @@ describe('pass 3 (classifyUnrecordedFailures) — ITEM_DEFECT is recorded but no
     assert.equal(result.failures.blocked, 1);
     assert.equal(recs[0].status, 'open');
     assert.ok(recs[0].blocked_reason);
+  });
+});
+
+describe('pass 3b (surfaceCapabilityGaps) — clustering acts on a detected gap instead of leaving it shadow-only', () => {
+  test('blocks every open recommendation whose finding is affected by a detected gap, with the shared diagnosis', async () => {
+    drafts = [
+      { id: 1, site_id: SITE_ID, finding_id: 'k1', status: 'abandoned' },
+      { id: 2, site_id: SITE_ID, finding_id: 'k2', status: 'abandoned' },
+      { id: 3, site_id: SITE_ID, finding_id: 'k3', status: 'abandoned' },
+    ];
+    recs = [
+      { id: 900, finding_id: 'k1', status: 'open', blocked_reason: null },
+      { id: 901, finding_id: 'k2', status: 'open', blocked_reason: null },
+      { id: 902, finding_id: 'k3', status: 'open', blocked_reason: null },
+    ];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'Unsupported JSX structure',
+      affectedIds: [1, 2, 3],
+      affectedCount: 3,
+      status: 'detected',
+    }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.capabilityGaps.gapsDetected, 1);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 3);
+    for (const rec of recs) {
+      assert.match(rec.blocked_reason, /shared capability gap on "expand-content"/);
+      assert.match(rec.blocked_reason, /Unsupported JSX structure/);
+    }
+  });
+
+  test('prefers the investigation rationale as the diagnosis when one was run', async () => {
+    drafts = [{ id: 4, site_id: SITE_ID, finding_id: 'k4', status: 'abandoned' }];
+    recs = [{ id: 903, finding_id: 'k4', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'This fix could not be applied automatically.',
+      affectedIds: [4],
+      affectedCount: 1,
+      status: 'detected',
+      investigation: { action: 'investigate_further', rationale: 'Two distinct root causes underneath one generic bucket.' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.match(recs[0].blocked_reason, /Two distinct root causes underneath one generic bucket\./);
+  });
+
+  test('never re-blocks a recommendation already blocked for another reason', async () => {
+    drafts = [{ id: 5, site_id: SITE_ID, finding_id: 'k5', status: 'abandoned' }];
+    recs = [{ id: 904, finding_id: 'k5', status: 'open', blocked_reason: 'already blocked for something else' }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 's', affectedIds: [5], affectedCount: 1, status: 'detected' }];
+
+    const result = await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+    assert.equal(recs[0].blocked_reason, 'already blocked for something else');
+  });
+
+  test('dry run reports the detected gap but blocks nothing', async () => {
+    drafts = [{ id: 6, site_id: SITE_ID, finding_id: 'k6', status: 'abandoned' }];
+    recs = [{ id: 905, finding_id: 'k6', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 's', affectedIds: [6], affectedCount: 1, status: 'detected' }];
+
+    const result = await reconcileSite(SITE_ID, { apply: false });
+
+    assert.equal(result.capabilityGaps.gapsDetected, 1);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+    assert.equal(recs[0].blocked_reason, null);
+  });
+
+  test('no gaps detected is a no-op', async () => {
+    gapsImpl = async () => [];
+    const result = await reconcileSite(SITE_ID, { apply: true });
+    assert.equal(result.capabilityGaps.gapsDetected, 0);
+    assert.equal(result.capabilityGaps.recommendationsBlocked, 0);
+  });
+
+  test('closes the decision-engine loop (setDecisionOutcome) when an investigated gap actually blocked something', async () => {
+    drafts = [{ id: 7, site_id: SITE_ID, finding_id: 'k7', status: 'abandoned' }];
+    recs = [{ id: 906, finding_id: 'k7', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{
+      generatorId: 'expand-content',
+      summary: 'This fix could not be applied automatically.',
+      affectedIds: [7],
+      affectedCount: 1,
+      status: 'detected',
+      investigation: { id: 555, action: 'investigate_further', rationale: 'Root cause X.' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 1);
+    assert.equal(decisionOutcomes[0].id, 555);
+    // 'decided', not 'failed' — nothing was actually attempted here, it was
+    // escalated to a human. decision-evidence.js's DECISION_OUTCOME_KNOWN_STATUSES
+    // deliberately excludes 'decided' so this never gets surfaced to a future
+    // decision as a known (mis-recorded) failure.
+    assert.equal(decisionOutcomes[0].status, 'decided');
+    assert.match(decisionOutcomes[0].outcomeRef, /906/);
+  });
+
+  test('does not touch setDecisionOutcome for a known-RULES gap with no investigation', async () => {
+    drafts = [{ id: 8, site_id: SITE_ID, finding_id: 'k8', status: 'abandoned' }];
+    recs = [{ id: 907, finding_id: 'k8', status: 'open', blocked_reason: null }];
+    gapsImpl = async () => [{ generatorId: 'x', summary: 'a real rule match', affectedIds: [8], affectedCount: 1, status: 'detected' }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 0);
+  });
+
+  test('does not call setDecisionOutcome when nothing was actually blocked (e.g. already blocked elsewhere)', async () => {
+    drafts = [{ id: 9, site_id: SITE_ID, finding_id: 'k9', status: 'abandoned' }];
+    recs = [{ id: 908, finding_id: 'k9', status: 'open', blocked_reason: 'already blocked' }];
+    gapsImpl = async () => [{
+      generatorId: 'x', summary: 'This fix could not be applied automatically.',
+      affectedIds: [9], affectedCount: 1, status: 'detected',
+      investigation: { id: 556, action: 'investigate_further', rationale: 'r' },
+    }];
+
+    await reconcileSite(SITE_ID, { apply: true });
+
+    assert.equal(decisionOutcomes.length, 0);
   });
 });
 

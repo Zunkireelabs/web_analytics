@@ -1,23 +1,49 @@
 import { getLatestFindings } from './fresh-runs.js';
-import { getQueriesForPage, getSiteById } from '../../store/read.js';
+import { getQueriesForPage, getDataRange, getSiteById } from '../../store/read.js';
 import { getDraftedFindingIds } from '../../store/drafts.js';
 import { RECOMMENDATION_AGENT_IDS } from './insights.js';
 import { categoryByAgentId } from './command-center.js';
 import { classify } from './recommendation-taxonomy.js';
 import { recommendationPageKey } from './recommendation-coordinator.js';
 import { createRecommendationGates } from './recommendation-gates.js';
+import { listActiveGoals } from '../../store/site-goals.js';
+import { pickBestGoalAlignment } from './goal-alignment.js';
+import { isDefaultBucketClassification, buildDefaultBucketSituation, applyDefaultBucketDecisions } from './default-bucket-decision.js';
 
 // Real top query for a page, looked up on demand and cached per call — only
 // needed when a finding's recommendedAction wants a query param but the
 // source agent's facts don't already carry one (e.g. ai-visibility), so a
 // meta-title/faq draft is never generated ungrounded.
-function makeQueryLookup(siteId) {
+//
+// Item 7 of the "one intelligence" plan's investigation/curiosity
+// requirement, applied at its most concrete real call site: before this
+// existed, an empty result from the agent's own run window meant an
+// immediate give-up (see the `continue` right after this is called below) —
+// a page with real query traffic outside that particular window (agents
+// rotate/limit their own batches, e.g. growth-queries.js's BATCH_SIZE) was
+// indistinguishable from a page with no traffic at all, and both produced
+// the exact same "Not enough real data yet" dead end shown to the user. This
+// widens to the page's FULL available GSC history — still real ingested
+// data, never invented — before accepting that there is genuinely nothing to
+// ground on. getDataRange is fetched at most once per buildRecommendations()
+// call (site-wide bounds), not once per page, so a site with no ungrounded
+// lookups pays nothing extra.
+export function makeQueryLookup(siteId, { getQueriesForPageFn = getQueriesForPage, getDataRangeFn = getDataRange } = {}) {
   const cache = new Map();
+  let widestRangePromise;
   return async (start, end, page) => {
     const key = `${start}|${end}|${page}`;
     if (cache.has(key)) return cache.get(key);
-    const rows = await getQueriesForPage(siteId, start, end, page, 1);
-    const q = rows[0]?.query || '';
+    const rows = await getQueriesForPageFn(siteId, start, end, page, 1);
+    let q = rows[0]?.query || '';
+    if (!q) {
+      widestRangePromise ??= getDataRangeFn(siteId);
+      const widest = await widestRangePromise;
+      if (widest.earliest && widest.freshest && (widest.earliest !== start || widest.freshest !== end)) {
+        const widerRows = await getQueriesForPageFn(siteId, widest.earliest, widest.freshest, page, 1);
+        q = widerRows[0]?.query || '';
+      }
+    }
     cache.set(key, q);
     return q;
   };
@@ -46,11 +72,16 @@ function makeQueryLookup(siteId) {
 // Center (agents/lib/command-center.js) — one read+ground implementation,
 // not two.
 export async function buildRecommendations(siteId) {
-  const [runs, draftedFindingIds, catByAgent, loadedSite] = await Promise.all([
+  const [runs, draftedFindingIds, catByAgent, loadedSite, activeGoals] = await Promise.all([
     getLatestFindings(siteId, RECOMMENDATION_AGENT_IDS),
     getDraftedFindingIds(siteId),
     categoryByAgentId(),
     getSiteById(siteId),
+    // Fetched once per run, not per finding — a site with no active goals
+    // (the common case today) pays one empty-result query and every item
+    // below gets goalId/goalAlignment: null, unchanged from before this
+    // feature existed. See goal-alignment.js's pickBestGoalAlignment.
+    listActiveGoals(siteId),
   ]);
   // Every gate that decides whether a candidate is real, and whether it may
   // enter the unattended chain, now lives in recommendation-gates.js — shared
@@ -98,6 +129,12 @@ export async function buildRecommendations(siteId) {
   // close it — the mechanism that kept 6 /docs/* rows open on site 1
   // indefinitely.
   const droppedRecommendations = [];
+  // Candidates for the scoped Decision Engine integration (default-bucket-
+  // decision.js) — only ever populated for the actionable (generatorId)
+  // push path below, classified DEFAULT_CLASSIFICATION. Applied once, after
+  // this loop, not inline per-finding — see applyDefaultBucketDecisions'
+  // own doc comment for the batching/cap reasoning.
+  const defaultBucketCandidates = [];
   // Findings that carried neither a generatorId nor a reportOnly declaration.
   // Returned (and summarized in one log line below) so "this agent detects
   // things that reach nobody" is visible in the run itself rather than only
@@ -157,6 +194,7 @@ export async function buildRecommendations(siteId) {
         // be "already drafted" — and checking would be a silent no-op that
         // reads as intentional.
         const { bucket, category } = classify({ source: run.agentId, generatorId: ro.kind });
+        const goalAlignment = pickBestGoalAlignment(activeGoals, { page, reason: f.whyItMatters, tag: ro.label, category });
         items.push({
           id: f.id, source: run.agentId,
           agentName: catByAgent.get(run.agentId)?.name || run.agentId,
@@ -170,6 +208,8 @@ export async function buildRecommendations(siteId) {
           // recommendations_blocked_is_manual CHECK, which requires exactly
           // that pairing.
           blockedReason: ro.whyBlocked,
+          goalId: goalAlignment?.goalId ?? null,
+          goalAlignment: goalAlignment ? { level: goalAlignment.level, rationale: goalAlignment.rationale } : null,
         });
         continue;
       }
@@ -205,15 +245,26 @@ export async function buildRecommendations(siteId) {
         params.query = await lookupQuery(run.start, run.end, params.page);
         if (!params.query) continue; // never generate title/FAQ drafts without a real grounding query
       }
-      const { bucket, category } = classify({ source: run.agentId, generatorId: action.generatorId });
-      items.push({
+      const classification = classify({ source: run.agentId, generatorId: action.generatorId });
+      const { bucket, category } = classification;
+      const goalAlignment = pickBestGoalAlignment(activeGoals, { page: params.page, reason: f.whyItMatters, tag: action.label, category });
+      const item = {
         id: f.id, source: run.agentId,
         agentName: run.agentId === 'geo-audit' ? 'GEO Audit' : (catByAgent.get(run.agentId)?.name || run.agentId),
         tag: action.label, generatorId: action.generatorId,
         reason: f.whyItMatters, params, priority: f.priority, expectedImpact: f.expectedImpact,
         bucket, category,
         blockedReason,
-      });
+        goalId: goalAlignment?.goalId ?? null,
+        goalAlignment: goalAlignment ? { level: goalAlignment.level, rationale: goalAlignment.rationale } : null,
+      };
+      items.push(item);
+      if (isDefaultBucketClassification(classification)) {
+        const { situation, evidence } = buildDefaultBucketSituation({
+          agentId: run.agentId, generatorId: action.generatorId, whyItMatters: f.whyItMatters, label: action.label,
+        });
+        defaultBucketCandidates.push({ item, situation, evidence });
+      }
     }
   }
   if (evidenceOnlyFindings.length) {
@@ -221,5 +272,10 @@ export async function buildRecommendations(siteId) {
     console.info(`[recommendations] site ${siteId}: ${evidenceOnlyFindings.length} evidence-only findings not surfaced as recommendations —`,
       Object.entries(byAgent).map(([a, n]) => `${a}:${n}`).join(' '));
   }
-  return { items, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings };
+  // Feature-flagged (site.decision_engine_default_bucket_enabled, default
+  // OFF) and a no-op whenever there are no DEFAULT-bucket candidates — see
+  // default-bucket-decision.js. With the flag off this returns `items`
+  // unchanged, same array reference, zero decide() calls.
+  const finalItems = await applyDefaultBucketDecisions(siteId, items, defaultBucketCandidates, { site: loadedSite });
+  return { items: finalItems, lastAnalyzedAt, detectedKeys, agentCheckedKeys, linkCrawlCheckedKeys, batchRotatedAgentIds, droppedRecommendations, evidenceOnlyFindings };
 }
