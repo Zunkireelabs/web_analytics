@@ -160,10 +160,31 @@ const RETRY_STATUSES = new Set([403, 429, 503]);
 // site's own real pages (not links discovered on a page), but needs the
 // exact same manual-redirect-plus-per-hop-SSRF-guard walk, and the same
 // bot-protection-aware retry, rather than a second copy of this logic.
+// A brief pause before the retry — separate concern from the UA/timeout
+// swap above. Confirmed live 2026-09-30: a gov.np-hosted PDF citation on
+// zunkireelabs-web failed both the normal attempt AND an immediate
+// browser-UA retry with 'network error', then answered 200 on three
+// back-to-back manual checks a few minutes later — a brief outage/rate-limit
+// window on the target's side, not a dead link or a bot-blocking pattern.
+// Retrying instantly can't catch that; a few seconds of separation can.
+const RETRY_BACKOFF_MS = 4000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// If a real browser UA retry STILL lands on one of RETRY_STATUSES, that is
+// not evidence the link is broken — it's evidence the target uses
+// fingerprint-based bot protection (TLS/JA3, JS challenge, cookies) that no
+// bare fetch() can pass regardless of UA string, confirmed live against
+// issuu.com returning 403 to every automated check here while a human
+// browser gets 200. Tagging it `unverifiable` lets callers abstain instead
+// of asserting a false "broken" — same abstain-on-unprovable pattern
+// site-trackers.js uses for tag-manager-only analytics installs.
 export async function followRedirectsWithRetry(startUrl, maxHops = MAX_REDIRECT_HOPS) {
   const first = await followRedirects(startUrl, maxHops);
   if (!first.error && !RETRY_STATUSES.has(first.finalStatus)) return first;
-  return followRedirects(startUrl, maxHops, BROWSER_RETRY_UA_HEADER, RETRY_TIMEOUT_MS);
+  await sleep(RETRY_BACKOFF_MS);
+  const retried = await followRedirects(startUrl, maxHops, BROWSER_RETRY_UA_HEADER, RETRY_TIMEOUT_MS);
+  const unverifiable = RETRY_STATUSES.has(retried.finalStatus);
+  return { ...retried, unverifiable };
 }
 
 function normalizeBody(text) {
@@ -266,7 +287,7 @@ export async function crawlInternalLinks(pageResults, maxChecks = MAX_LINK_CHECK
   }
   const finalResults = unreliable ? results.map((r) => ({ ...r, softNotFound: false })) : results;
 
-  const broken = finalResults.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400) || r.softNotFound);
+  const broken = finalResults.filter((r) => !r.unverifiable && (r.error || (r.finalStatus != null && r.finalStatus >= 400) || r.softNotFound));
   const redirectChains = finalResults.filter((r) => !r.error && r.hops >= LONG_CHAIN_HOP_THRESHOLD);
   // Every source page that had at least one outbound link actually checked
   // this run — as opposed to every page in the batch, most of which never
@@ -305,7 +326,7 @@ export async function crawlExternalCitations(pageResults, maxChecks = MAX_LINK_C
     return { href, sourcePages: [...sourcesByHref.get(href)], ...r };
   }));
 
-  const broken = results.filter((r) => r.error || (r.finalStatus != null && r.finalStatus >= 400));
+  const broken = results.filter((r) => !r.unverifiable && (r.error || (r.finalStatus != null && r.finalStatus >= 400)));
   const checkedPages = new Set();
   for (const r of results) for (const p of r.sourcePages) checkedPages.add(p);
   return { checked: results.length, broken, checkedPages: [...checkedPages] };
@@ -326,6 +347,6 @@ export async function recheckLink(href) {
   ]);
   const eligible = !redirectResult.error && redirectResult.finalStatus != null && redirectResult.finalStatus >= 200 && redirectResult.finalStatus < 300;
   const softNotFound = eligible && await isSoftNotFound(href, fingerprint);
-  const broken = !!redirectResult.error || (redirectResult.finalStatus != null && redirectResult.finalStatus >= 400) || softNotFound;
-  return { broken, finalStatus: redirectResult.finalStatus, error: redirectResult.error, softNotFound };
+  const broken = !redirectResult.unverifiable && (!!redirectResult.error || (redirectResult.finalStatus != null && redirectResult.finalStatus >= 400) || softNotFound);
+  return { broken, finalStatus: redirectResult.finalStatus, error: redirectResult.error, softNotFound, unverifiable: !!redirectResult.unverifiable };
 }

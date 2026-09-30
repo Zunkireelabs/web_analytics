@@ -515,8 +515,18 @@ export function analyzePage(html, pageUrl) {
   // never fixed at its actual source until now. Was previously misdiagnosed
   // as an upstream "finder/generator pairing bug" (see that file's own
   // now-stale 2026-09-11 comment on draft #1608) without ever finding this.
+  // Confirmed live on zunkireelabs-web (2026-09-30): a decorative carousel
+  // background image with alt="" but no aria-hidden, and mega-menu icon
+  // thumbnails with alt="" where the adjacent link text already names the
+  // destination, both got flagged "missing alt text." An `alt` attribute
+  // that EXISTS but is empty is the standard, WCAG-correct decorative
+  // treatment on its own — aria-hidden is not required alongside it (a
+  // screen reader already skips alt=""). Only an image with no alt
+  // attribute AT ALL is actually missing one; hasAlt below distinguishes
+  // "attribute absent" (undefined) from "attribute present, empty string."
   const isDecorative = (el) => ($(el).attr('aria-hidden') || '').trim().toLowerCase() === 'true';
-  const imagesWithoutAlt = images.filter((_, el) => !isDecorative(el) && !($(el).attr('alt') || '').trim()).length;
+  const hasAlt = (el) => $(el).attr('alt') !== undefined;
+  const imagesWithoutAlt = images.filter((_, el) => !isDecorative(el) && !hasAlt(el)).length;
   // Real grounding for alt-text.js — the filename alone is often enough to
   // draft an honest, generic caption ("Blue running shoes" from
   // "blue-running-shoes.jpg"), but nearby real page text (a figcaption, or
@@ -527,7 +537,7 @@ export function analyzePage(html, pageUrl) {
   // draft; alt-text.js can be re-run for the rest.
   const MAX_IMAGES_MISSING_ALT = 15;
   const imagesMissingAlt = images
-    .filter((_, el) => !isDecorative(el) && !($(el).attr('alt') || '').trim())
+    .filter((_, el) => !isDecorative(el) && !hasAlt(el))
     .slice(0, MAX_IMAGES_MISSING_ALT)
     .map((_, el) => {
       const $el = $(el);

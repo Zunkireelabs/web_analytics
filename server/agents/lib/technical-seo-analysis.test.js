@@ -78,12 +78,20 @@ describe('crawlExternalCitations', () => {
     } finally { globalThis.fetch = original; }
   });
 
-  test('a citation that 403s under BOTH UAs is still reported broken', async () => {
-    const restore = stubFetchStatus({ 'https://really.example/gone': 403 });
+  // Regression: issuu.com returned 403 to every automated check here
+  // (bot UA and a real browser UA string) while a human browser got a real
+  // 200 — fingerprint-based bot protection (TLS/JA3, JS challenge, cookies)
+  // that no bare fetch() retry can pass regardless of UA. Asserting "broken"
+  // here shipped a real PR deleting a live citation. A 403 that survives the
+  // retry is unverifiable, not confirmed dead, so it must be excluded from
+  // both `broken` and the checked total's implied "confirmed live" set —
+  // never asserted either way.
+  test('a citation that 403s under BOTH UAs is unverifiable, not reported broken', async () => {
+    const restore = stubFetchStatus({ 'https://really.example/blocked': 403 });
     try {
-      const pageResults = [{ page: 'https://mysite.com/blog/post', analysis: { externalCitationLinks: ['https://really.example/gone'] } }];
+      const pageResults = [{ page: 'https://mysite.com/blog/post', analysis: { externalCitationLinks: ['https://really.example/blocked'] } }];
       const result = await crawlExternalCitations(pageResults);
-      assert.equal(result.broken.length, 1, 'a genuine 403 that survives the retry is still reported broken');
+      assert.equal(result.broken.length, 0, 'a 403 that survives the retry cannot be distinguished from bot-protection, so it must not be asserted broken');
     } finally { restore(); }
   });
 
