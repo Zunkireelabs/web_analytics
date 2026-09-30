@@ -430,8 +430,18 @@ export async function run({ siteId, start, end, pageCache, params }) {
   // shared template gap, a mismatch is usually a specific redirect/param
   // issue — each reported as its own "N of M checked pages" finding.
   const missingCanonicalCandidates = pageResults.filter((r) => r.technicalAudit.ok && !r.technicalAudit.hasCanonical);
+  // `indexStatus.userCanonical` is GSC's OWN last-crawl snapshot, not current
+  // live state — confirmed live on zunkireelabs-web (2026-09-30): a
+  // www->non-www redirect and self-referencing canonical were both already
+  // correct, but GSC hadn't recrawled since, so its stale userCanonical still
+  // disagreed with googleCanonical and produced a false mismatch. Re-verify
+  // against our own fresh fetch's canonicalUrl (technicalAudit, this same
+  // run) instead of trusting GSC's cached userCanonical — only report a
+  // mismatch Google's data AND the page's current live tag still agree is
+  // real.
   const canonicalMismatchCandidates = pageResults.filter((r) =>
-    r.indexStatus.ok && r.indexStatus.googleCanonical && r.indexStatus.userCanonical && r.indexStatus.googleCanonical !== r.indexStatus.userCanonical);
+    r.indexStatus.ok && r.indexStatus.googleCanonical && r.technicalAudit.ok && r.technicalAudit.canonicalUrl
+    && r.technicalAudit.canonicalUrl !== r.indexStatus.googleCanonical);
   const canonicalFindings = [
     aggregateSystemicFinding({
       id: 'technical-seo:site:missing-canonical',
@@ -448,7 +458,7 @@ export async function run({ siteId, start, end, pageCache, params }) {
       checkedCount: pageResults.filter((r) => r.indexStatus.ok).length,
       getPage: (r) => r.page,
       getImpressions: (r) => r.impressions,
-      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.indexStatus.userCanonical })) }),
+      extraEvidence: (affected) => ({ samples: affected.slice(0, 5).map((r) => ({ page: r.page, googleCanonical: r.indexStatus.googleCanonical, userCanonical: r.technicalAudit.canonicalUrl })) }),
       whyItMatters: (n, c) => `Google's chosen canonical disagrees with the page's own declared canonical on ${n} of ${c} checked pages.`,
       recommendedAction: null,
     }),
